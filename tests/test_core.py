@@ -19,6 +19,7 @@ from tradutor_pgn.database import (
     initialize_database,
     load_translation_cache,
     save_translation,
+    set_exact_translation_matches_verified,
     set_translation_verified_by_id,
     update_translation_by_id,
 )
@@ -510,6 +511,60 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(history[0][1], "restore")
             self.assertEqual(history[0][2], "trans revisada")
             self.assertEqual(history[0][3], "trans")
+            conn.close()
+
+    def test_exact_translation_matches_can_be_verified_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            conn = initialize_database(str(db_path))
+            cursor = conn.cursor()
+
+            save_translation(cursor, "orig 1", "mesma traducao", "pt")
+            save_translation(cursor, "orig 2", "mesma traducao", "pt")
+            save_translation(cursor, "orig 3", "outra traducao", "pt")
+            save_translation(cursor, "orig 4", "mesma traducao", "en")
+            save_translation(cursor, "orig 5", "", "pt")
+            conn.commit()
+
+            source_id = cursor.execute(
+                "SELECT id FROM comments WHERE original_comment = ?",
+                ("orig 1",),
+            ).fetchone()[0]
+            self.assertEqual(
+                update_translation_by_id(cursor, source_id, "mesma traducao", True),
+                1,
+            )
+            self.assertEqual(set_exact_translation_matches_verified(cursor, source_id), 1)
+            conn.commit()
+
+            rows = cursor.execute(
+                """
+                SELECT original_comment, verified
+                FROM comments
+                ORDER BY original_comment
+                """
+            ).fetchall()
+            self.assertEqual(
+                rows,
+                [
+                    ("orig 1", 1),
+                    ("orig 2", 1),
+                    ("orig 3", 0),
+                    ("orig 4", 0),
+                    ("orig 5", 0),
+                ],
+            )
+
+            propagated_id = cursor.execute(
+                "SELECT id FROM comments WHERE original_comment = ?",
+                ("orig 2",),
+            ).fetchone()[0]
+            history = fetch_comment_history(cursor, propagated_id)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0][1], "verify_exact_match")
+            self.assertEqual(history[0][4], 0)
+            self.assertEqual(history[0][5], 1)
+            self.assertEqual(set_exact_translation_matches_verified(cursor, source_id), 0)
             conn.close()
 
     def test_save_translation_works_with_legacy_table_without_unique_constraint(self):

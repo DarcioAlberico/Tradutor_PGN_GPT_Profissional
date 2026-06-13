@@ -521,3 +521,60 @@ def set_translation_verified_by_id(cursor, comment_id, verified=True):
             new_verified,
         )
     return changed_rows
+
+
+def set_exact_translation_matches_verified(cursor, comment_id):
+    existing = cursor.execute(
+        """
+        SELECT translated_comment, target_language
+        FROM comments
+        WHERE id = ?
+        """,
+        (comment_id,),
+    ).fetchone()
+    if existing is None:
+        return 0
+
+    translation, target_language = existing
+    if not translation:
+        return 0
+
+    rows = cursor.execute(
+        """
+        SELECT id, verified
+        FROM comments
+        WHERE target_language = ?
+          AND translated_comment = ?
+          AND verified <> 1
+        ORDER BY id
+        """,
+        (target_language, translation),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    changed_rows = 0
+    for matching_id, previous_verified in rows:
+        previous_verified = 1 if previous_verified == 1 else 0
+        cursor.execute(
+            """
+            UPDATE comments
+            SET verified = 1,
+                updated_at = CURRENT_TIMESTAMP,
+                verified_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (matching_id,),
+        )
+        if cursor.rowcount:
+            changed_rows += 1
+            record_comment_history(
+                cursor,
+                matching_id,
+                "verify_exact_match",
+                translation,
+                translation,
+                previous_verified,
+                1,
+            )
+    return changed_rows

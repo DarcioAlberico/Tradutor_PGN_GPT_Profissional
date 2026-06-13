@@ -17,6 +17,7 @@ from .database import (
     get_review_row_offset,
     get_review_status_counts,
     initialize_database,
+    set_exact_translation_matches_verified,
     set_translation_verified_by_id,
     update_translation_by_id,
 )
@@ -1204,9 +1205,12 @@ def open_translation_editor(app):
         new_trans = trans_text.get("1.0", tk.END).rstrip("\n")
 
         updated_row = None
+        propagated_rows = 0
         with closing(initialize_database(app.output_db)) as conn:
             cur = conn.cursor()
             update_translation_by_id(cur, current["id"], new_trans, mark_verified)
+            if mark_verified:
+                propagated_rows = set_exact_translation_matches_verified(cur, current["id"])
             updated_row = fetch_translation_by_id(cur, current["id"])
             conn.commit()
 
@@ -1220,6 +1224,24 @@ def open_translation_editor(app):
         except tk.TclError:
             pass
         set_dirty(False)
+        if mark_verified and propagated_rows:
+            idx = get_index()
+            reload_rows()
+            if rows:
+                next_index = 0 if idx is None else min(idx, len(rows) - 1)
+                for row_index, row in enumerate(rows):
+                    if row[0] == current["id"]:
+                        next_index = row_index
+                        break
+                select_index(next_index)
+            else:
+                clear_current()
+            if not silent:
+                show_message(
+                    f"Tradução salva e verificada; {propagated_rows} iguais também verificadas"
+                )
+            return
+
         index = get_index()
         old_warning = False
         new_warning = False
@@ -1527,6 +1549,7 @@ def open_translation_editor(app):
             "edit": "Edicao",
             "edit_verify": "Edicao + verificacao",
             "verify": "Verificacao",
+            "verify_exact_match": "Verificacao por traducao igual",
             "mark_pending": "Voltou para pendente",
             "fill_empty": "Preenchimento inicial",
             "restore": "Restauracao",
