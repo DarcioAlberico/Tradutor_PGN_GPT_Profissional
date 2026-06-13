@@ -170,6 +170,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     selected = {"index": None}
     page_index = {"value": 0}
     dirty = {"value": False, "loading": False}
+    form_baseline = {"orig": "", "new": ""}
 
     search_text = tk.StringVar(master=win, value="")
     test_text_var = tk.StringVar(master=win, value="")
@@ -396,9 +397,21 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     def set_text(widget, value):
         widget.delete("1.0", tk.END)
         widget.insert("1.0", value or "")
+        try:
+            widget.edit_modified(False)
+        except tk.TclError:
+            pass
 
     def current_pair():
         return text_value(orig_text), text_value(new_text)
+
+    def set_form_baseline(orig="", new=""):
+        form_baseline["orig"] = orig or ""
+        form_baseline["new"] = new or ""
+
+    def form_changed():
+        orig, new = current_pair()
+        return orig != form_baseline["orig"] or new != form_baseline["new"]
 
     def set_dirty(value):
         dirty["value"] = value
@@ -410,7 +423,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
 
     def mark_dirty(_event=None):
         if not dirty["loading"]:
-            set_dirty(True)
+            set_dirty(form_changed())
 
     def refresh_preview():
         orig, new = current_pair()
@@ -549,6 +562,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         orig, new = entries[index]
         set_text(orig_text, orig)
         set_text(new_text, new)
+        set_form_baseline(orig, new)
         dirty["loading"] = False
         set_dirty(False)
         render_rows()
@@ -559,6 +573,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         dirty["loading"] = True
         set_text(orig_text, "")
         set_text(new_text, "")
+        set_form_baseline()
         dirty["loading"] = False
         set_dirty(False)
         render_rows()
@@ -572,6 +587,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         dirty["loading"] = True
         set_text(orig_text, (original or "").strip())
         set_text(new_text, (replacement or "").strip())
+        set_form_baseline()
         dirty["loading"] = False
         set_dirty(True)
         apply_filter()
@@ -638,6 +654,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
             messagebox.showerror("Erro", f"Erro ao salvar glossário:\n{exc}", parent=win)
             return
 
+        set_form_baseline(orig, new)
         set_dirty(False)
         update_app_glossary()
         apply_filter()
@@ -665,6 +682,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         else:
             selected["index"] = len(entries) - 1
             show_message("Nova entrada salva")
+        set_form_baseline(orig, new)
         set_dirty(False)
         update_app_glossary()
         apply_filter()
