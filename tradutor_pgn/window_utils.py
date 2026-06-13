@@ -1,10 +1,4 @@
 def bring_window_to_front(window, parent=None, maximize=False):
-    if parent is not None:
-        try:
-            window.transient(parent)
-        except Exception:
-            pass
-
     def maximize_window():
         try:
             window.state("zoomed")
@@ -27,6 +21,12 @@ def bring_window_to_front(window, parent=None, maximize=False):
 
     def raise_window():
         try:
+            window.overrideredirect(False)
+            window.resizable(True, True)
+            try:
+                window.attributes("-toolwindow", False)
+            except Exception:
+                pass
             window.deiconify()
             if maximize:
                 maximize_window()

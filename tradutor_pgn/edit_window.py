@@ -1584,7 +1584,7 @@ def open_translation_editor(app):
         history_win.title(f"Historico da traducao {current['id']}")
         history_win.geometry("980x560")
         history_win.minsize(820, 430)
-        history_win.transient(win)
+        bring_window_to_front(history_win, win, maximize=True)
         history_win.columnconfigure(1, weight=1)
         history_win.rowconfigure(1, weight=1)
 
@@ -1986,7 +1986,7 @@ def open_translation_editor(app):
         pop = ctk.CTkToplevel(win)
         pop.title("Pré-visualizar substituições")
         pop.geometry("980x560")
-        pop.transient(win)
+        bring_window_to_front(pop, win, maximize=True)
 
         ctk.CTkLabel(pop, text="Antes").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 2))
         ctk.CTkLabel(pop, text="Depois").grid(row=0, column=1, sticky="w", padx=10, pady=(10, 2))
@@ -2067,7 +2067,7 @@ def open_translation_editor(app):
         pop = ctk.CTkToplevel(win)
         pop.title("Adicionar ao glossário")
         pop.geometry("380x190")
-        pop.transient(win)
+        bring_window_to_front(pop, win, maximize=True)
 
         ctk.CTkLabel(pop, text="Texto original:").pack(anchor="w", padx=12, pady=(12, 2))
         original_entry = ctk.CTkEntry(pop, width=350)

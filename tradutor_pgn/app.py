@@ -7,6 +7,7 @@ import tkinter as tk
 from . import app_actions
 from .glossario import load_substitutions
 from .main_window import setup_main_ui
+from .window_utils import bring_window_to_front
 
 
 class PGNTranslatorApp:
@@ -15,6 +16,7 @@ class PGNTranslatorApp:
         self.root.title("PGN Tradutor Pro")
         self.root.geometry("900x650")
         self.root.minsize(900, 600)
+        bring_window_to_front(self.root, maximize=True)
 
         # Variáveis principais
         self.source_path = tk.StringVar()
