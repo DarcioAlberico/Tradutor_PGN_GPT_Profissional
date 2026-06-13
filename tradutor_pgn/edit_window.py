@@ -123,7 +123,7 @@ def open_translation_editor(app):
     win.title(f"Editar traduções ({lang})")
     win.geometry("1280x760")
     win.minsize(1120, 680)
-    bring_window_to_front(win, app.root)
+    bring_window_to_front(win, app.root, maximize=True)
 
     settings = load_settings()
     editor_settings = settings.get("editor", {})

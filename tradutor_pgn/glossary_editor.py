@@ -149,7 +149,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     win.title("Editor de Glossário")
     win.geometry("1120x700")
     win.minsize(1040, 640)
-    bring_window_to_front(win, app.root)
+    bring_window_to_front(win, app.root, maximize=True)
 
     settings = load_settings()
     editor_settings = settings.get("glossary_editor", {})
