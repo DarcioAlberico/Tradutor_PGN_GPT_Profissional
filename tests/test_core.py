@@ -24,6 +24,9 @@ from tradutor_pgn.database import (
     update_translation_by_id,
 )
 from tradutor_pgn.glossario import (
+    GLOSSARY_RULE_AUTOMATIC,
+    GLOSSARY_RULE_CLEANUP,
+    GLOSSARY_RULE_SUGGESTION,
     add_glossary_entry,
     add_to_glossary,
     analyze_glossary_csv_import,
@@ -37,6 +40,8 @@ from tradutor_pgn.glossario import (
     find_glossary_matches,
     find_glossary_suggestions,
     load_glossary_entries,
+    load_glossary_entry_details,
+    load_glossary_entry_details_from_db,
     load_glossary_entries_from_db,
     load_substitutions,
     rebuild_glossary_database,
@@ -1036,6 +1041,78 @@ class GlossaryTests(unittest.TestCase):
 
             unchanged_stats = add_glossary_entry("zugzwang", "zugzwang", str(glossary))
             self.assertEqual(unchanged_stats["status"], "unchanged")
+
+    def test_glossary_rule_types_are_persisted_without_breaking_pair_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            glossary_db = tmp_path / "glossario.db"
+            csv_path = tmp_path / "glossario.csv"
+
+            save_glossary_entries(
+                [
+                    ("mate threat", "ameaca de mate"),
+                    ("== EndSquare ==", "", GLOSSARY_RULE_CLEANUP),
+                    ("rainha", "dama", GLOSSARY_RULE_AUTOMATIC),
+                ],
+                str(glossary),
+                create_backup=False,
+                db_path=str(glossary_db),
+            )
+
+            self.assertEqual(
+                load_glossary_entries(str(glossary), db_path=str(glossary_db)),
+                [
+                    ("mate threat", "ameaca de mate"),
+                    ("== EndSquare ==", ""),
+                    ("rainha", "dama"),
+                ],
+            )
+            self.assertEqual(
+                load_glossary_entry_details(str(glossary), db_path=str(glossary_db)),
+                [
+                    ("mate threat", "ameaca de mate", GLOSSARY_RULE_SUGGESTION),
+                    ("== EndSquare ==", "", GLOSSARY_RULE_CLEANUP),
+                    ("rainha", "dama", GLOSSARY_RULE_AUTOMATIC),
+                ],
+            )
+            self.assertEqual(
+                load_glossary_entry_details_from_db(str(glossary_db)),
+                [
+                    ("mate threat", "ameaca de mate", GLOSSARY_RULE_SUGGESTION),
+                    ("== EndSquare ==", "", GLOSSARY_RULE_CLEANUP),
+                    ("rainha", "dama", GLOSSARY_RULE_AUTOMATIC),
+                ],
+            )
+
+            add_glossary_entry(
+                "queen",
+                "dama",
+                str(glossary),
+                rule_type="automatica",
+            )
+            update_glossary_entry(
+                0,
+                "mate threat",
+                "ameaca de mate",
+                str(glossary),
+                rule_type=GLOSSARY_RULE_CLEANUP,
+            )
+            self.assertEqual(
+                load_glossary_entry_details(str(glossary), prefer_db=False),
+                [
+                    ("mate threat", "ameaca de mate", GLOSSARY_RULE_CLEANUP),
+                    ("== EndSquare ==", "", GLOSSARY_RULE_CLEANUP),
+                    ("rainha", "dama", GLOSSARY_RULE_AUTOMATIC),
+                    ("queen", "dama", GLOSSARY_RULE_AUTOMATIC),
+                ],
+            )
+
+            export_glossary_csv(str(csv_path), path=str(glossary))
+            self.assertIn(
+                "original,replacement,type",
+                csv_path.read_text(encoding="utf-8-sig"),
+            )
 
     def test_glossary_validation_and_deduplication(self):
         entries = [

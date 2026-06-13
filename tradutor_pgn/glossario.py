@@ -11,7 +11,15 @@ import sys
 
 
 SUBSTITUTION_VARIABLES = {"substituições", "substituicoes"}
-GLOSSARY_CSV_HEADERS = ["original", "replacement"]
+GLOSSARY_RULE_SUGGESTION = "suggestion"
+GLOSSARY_RULE_CLEANUP = "cleanup"
+GLOSSARY_RULE_AUTOMATIC = "automatic"
+GLOSSARY_RULE_TYPES = (
+    GLOSSARY_RULE_SUGGESTION,
+    GLOSSARY_RULE_CLEANUP,
+    GLOSSARY_RULE_AUTOMATIC,
+)
+GLOSSARY_CSV_HEADERS = ["original", "replacement", "type"]
 GLOSSARY_DB_FILENAME = "glossario.db"
 
 
@@ -47,19 +55,73 @@ def _read_substitution_assignment(code, path):
     raise ValueError("Variável 'substituições' ou 'substituicoes' não encontrada.")
 
 
+def _normalize_rule_type(rule_type):
+    value = "" if rule_type is None else str(rule_type).strip()
+    aliases = {
+        "sugestao": GLOSSARY_RULE_SUGGESTION,
+        "sugestão": GLOSSARY_RULE_SUGGESTION,
+        "suggestion": GLOSSARY_RULE_SUGGESTION,
+        "limpeza": GLOSSARY_RULE_CLEANUP,
+        "cleanup": GLOSSARY_RULE_CLEANUP,
+        "automatica": GLOSSARY_RULE_AUTOMATIC,
+        "automática": GLOSSARY_RULE_AUTOMATIC,
+        "automatic": GLOSSARY_RULE_AUTOMATIC,
+    }
+    normalized = aliases.get(value.casefold(), value)
+    return normalized if normalized in GLOSSARY_RULE_TYPES else GLOSSARY_RULE_SUGGESTION
+
+
+def _entry_pair(item):
+    if isinstance(item, dict):
+        return str(item.get("original", "")), str(item.get("replacement", ""))
+    if isinstance(item, (list, tuple)) and len(item) >= 2:
+        return str(item[0]), str(item[1])
+    return None
+
+
+def _entry_rule_type(item):
+    if isinstance(item, dict):
+        return _normalize_rule_type(item.get("type") or item.get("rule_type"))
+    if isinstance(item, (list, tuple)) and len(item) >= 3:
+        return _normalize_rule_type(item[2])
+    return GLOSSARY_RULE_SUGGESTION
+
+
 def _normalize_entries(entries):
     normalized = []
     for item in entries:
-        if isinstance(item, (list, tuple)) and len(item) == 2:
-            orig, new = item
+        pair = _entry_pair(item)
+        if pair is not None:
+            orig, new = pair
             normalized.append((str(orig), str(new)))
     return normalized
 
 
+def _normalize_detailed_entries(entries):
+    normalized = []
+    for item in entries:
+        pair = _entry_pair(item)
+        if pair is not None:
+            orig, new = pair
+            normalized.append((str(orig), str(new), _entry_rule_type(item)))
+    return normalized
+
+
+def glossary_entry_pair(entry):
+    return _entry_pair(entry) or ("", "")
+
+
+def glossary_entry_type(entry):
+    return _entry_rule_type(entry)
+
+
 def _serialize_entries(entries):
     lines = ["substituicoes = [\n"]
-    for orig, new in _normalize_entries(entries):
-        lines.append(f"    ({orig!r}, {new!r}),\n")
+    for orig, new, rule_type in _normalize_detailed_entries(entries):
+        if rule_type == GLOSSARY_RULE_SUGGESTION:
+            lines.append(f"    ({orig!r}, {new!r}),\n")
+        else:
+            lines.append(f"    ({orig!r}, {new!r}, {rule_type!r}),\n")
     lines.append("]\n")
     return "".join(lines)
 
@@ -111,6 +173,20 @@ def _load_glossary_entries_from_file(path, deduplicate=True):
     return entries
 
 
+def _load_glossary_entry_details_from_file(path, deduplicate=True):
+    if not os.path.exists(path):
+        return []
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw_items = _read_substitution_assignment(f.read(), path)
+
+    entries = _normalize_detailed_entries(raw_items)
+    if deduplicate:
+        entries = _deduplicate_entries(entries)
+
+    return entries
+
+
 def initialize_glossary_database(db_path=None):
     """Inicializa o banco SQLite exclusivo do glossário."""
     if db_path is None:
@@ -124,12 +200,24 @@ def initialize_glossary_database(db_path=None):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             original_text TEXT NOT NULL,
             replacement_text TEXT NOT NULL,
+            rule_type TEXT NOT NULL DEFAULT 'suggestion',
             position INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(glossary_entries)").fetchall()
+    }
+    if "rule_type" not in cols:
+        conn.execute(
+            """
+            ALTER TABLE glossary_entries
+            ADD COLUMN rule_type TEXT NOT NULL DEFAULT 'suggestion'
+            """
+        )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS glossary_metadata (
@@ -178,7 +266,7 @@ def sync_glossary_database(entries, db_path=None, source_path=None):
     if db_path is None:
         db_path = _default_glossary_db_path()
 
-    entries = _normalize_entries(entries)
+    entries = _normalize_detailed_entries(entries)
     conn = initialize_glossary_database(db_path)
     try:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -188,15 +276,16 @@ def sync_glossary_database(entries, db_path=None, source_path=None):
             INSERT INTO glossary_entries (
                 original_text,
                 replacement_text,
+                rule_type,
                 position,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             [
-                (orig, new, index, now, now)
-                for index, (orig, new) in enumerate(entries)
+                (orig, new, rule_type, index, now, now)
+                for index, (orig, new, rule_type) in enumerate(entries)
             ],
         )
         _set_glossary_metadata(conn, "entry_count", len(entries))
@@ -237,6 +326,35 @@ def load_glossary_entries_from_db(db_path=None, deduplicate=True):
     return entries
 
 
+def load_glossary_entry_details_from_db(db_path=None, deduplicate=True):
+    """Carrega entradas detalhadas do glossario.db, incluindo o tipo da regra."""
+    if db_path is None:
+        db_path = _default_glossary_db_path()
+
+    if not os.path.exists(db_path):
+        return []
+
+    conn = initialize_glossary_database(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT original_text, replacement_text, rule_type
+            FROM glossary_entries
+            ORDER BY position, id
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    entries = [
+        (row[0], row[1], _normalize_rule_type(row[2]))
+        for row in rows
+    ]
+    if deduplicate:
+        entries = _deduplicate_entries(entries)
+    return entries
+
+
 def _glossary_database_needs_sync(path, db_path):
     if not os.path.exists(db_path):
         return True
@@ -265,7 +383,7 @@ def rebuild_glossary_database(path=None, db_path=None):
     if db_path is None:
         db_path = _default_glossary_db_path()
 
-    entries = _load_glossary_entries_from_file(path, deduplicate=False)
+    entries = _load_glossary_entry_details_from_file(path, deduplicate=False)
     return sync_glossary_database(entries, db_path=db_path, source_path=path)
 
 
@@ -289,6 +407,28 @@ def load_glossary_entries(path=None, deduplicate=True, prefer_db=True, db_path=N
             print(f"[GLOSSÁRIO] Erro ao usar glossario.db: {exc}")
 
     return _load_glossary_entries_from_file(path, deduplicate=deduplicate)
+
+
+def load_glossary_entry_details(path=None, deduplicate=True, prefer_db=True, db_path=None):
+    """Carrega entradas do glossário incluindo o tipo da regra."""
+    if path is None:
+        path = _default_substitutions_path()
+
+    use_db = prefer_db and _is_default_substitutions_path(path)
+    if db_path is not None:
+        use_db = True
+    elif use_db:
+        db_path = _default_glossary_db_path()
+
+    if use_db:
+        try:
+            if _glossary_database_needs_sync(path, db_path):
+                rebuild_glossary_database(path, db_path)
+            return load_glossary_entry_details_from_db(db_path, deduplicate=deduplicate)
+        except Exception as exc:
+            print(f"[GLOSSÁRIO] Erro ao usar glossario.db: {exc}")
+
+    return _load_glossary_entry_details_from_file(path, deduplicate=deduplicate)
 
 
 def create_glossary_backup(path=None, backup_dir=None, timestamp=None):
@@ -342,7 +482,7 @@ def save_glossary_entries(
         sync_glossary_database(entries, db_path=db_path, source_path=path)
 
     return {
-        "saved": len(_normalize_entries(entries)),
+        "saved": len(_normalize_detailed_entries(entries)),
         "backup_path": backup_path,
     }
 
@@ -381,21 +521,26 @@ def deduplicate_glossary_entries(entries):
     """Remove duplicatas exatas preservando a primeira ocorrência."""
     seen = set()
     result = []
-    for entry in _normalize_entries(entries):
-        if entry in seen:
+    keep_details = any(
+        isinstance(entry, dict) or (isinstance(entry, (list, tuple)) and len(entry) >= 3)
+        for entry in entries
+    )
+    for entry in _normalize_detailed_entries(entries):
+        pair = glossary_entry_pair(entry)
+        if pair in seen:
             continue
-        seen.add(entry)
-        result.append(entry)
+        seen.add(pair)
+        result.append(entry if keep_details else pair)
     return result
 
 
-def add_glossary_entry(orig, new, path=None, backup_dir=None, timestamp=None):
-    entries = load_glossary_entries(path, deduplicate=False)
-    pair = (str(orig), str(new))
-    if pair in entries:
+def add_glossary_entry(orig, new, path=None, backup_dir=None, timestamp=None, rule_type=None):
+    entries = load_glossary_entry_details(path, deduplicate=False)
+    entry = (str(orig), str(new), _normalize_rule_type(rule_type))
+    if entry in entries:
         return {"status": "unchanged", "backup_path": None, "entries": len(entries)}
 
-    entries.append(pair)
+    entries.append(entry)
     result = save_glossary_entries(
         entries,
         path,
@@ -405,13 +550,14 @@ def add_glossary_entry(orig, new, path=None, backup_dir=None, timestamp=None):
     return {"status": "inserted", **result}
 
 
-def update_glossary_entry(index, orig, new, path=None, backup_dir=None, timestamp=None):
-    entries = load_glossary_entries(path, deduplicate=False)
+def update_glossary_entry(index, orig, new, path=None, backup_dir=None, timestamp=None, rule_type=None):
+    entries = load_glossary_entry_details(path, deduplicate=False)
     index = int(index)
     if not (0 <= index < len(entries)):
         raise IndexError("Índice do glossário fora do intervalo.")
 
-    entries[index] = (str(orig), str(new))
+    current_type = glossary_entry_type(entries[index])
+    entries[index] = (str(orig), str(new), _normalize_rule_type(rule_type or current_type))
     result = save_glossary_entries(
         entries,
         path,
@@ -422,7 +568,7 @@ def update_glossary_entry(index, orig, new, path=None, backup_dir=None, timestam
 
 
 def delete_glossary_entry(index, path=None, backup_dir=None, timestamp=None):
-    entries = load_glossary_entries(path, deduplicate=False)
+    entries = load_glossary_entry_details(path, deduplicate=False)
     index = int(index)
     if not (0 <= index < len(entries)):
         raise IndexError("Índice do glossário fora do intervalo.")
@@ -434,21 +580,26 @@ def delete_glossary_entry(index, path=None, backup_dir=None, timestamp=None):
         backup_dir=backup_dir,
         timestamp=timestamp,
     )
-    return {"status": "deleted", "removed": removed, **result}
+    return {
+        "status": "deleted",
+        "removed": glossary_entry_pair(removed),
+        "removed_entry": removed,
+        **result,
+    }
 
 
 def export_glossary_csv(csv_path, entries=None, path=None):
     """Exporta o glossário para CSV UTF-8 com BOM."""
     if entries is None:
-        entries = load_glossary_entries(path, deduplicate=False)
+        entries = load_glossary_entry_details(path, deduplicate=False)
 
     _ensure_parent_dir(csv_path)
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow(GLOSSARY_CSV_HEADERS)
-        writer.writerows(_normalize_entries(entries))
+        writer.writerows(_normalize_detailed_entries(entries))
 
-    return {"exported": len(_normalize_entries(entries)), "csv_path": csv_path}
+    return {"exported": len(_normalize_detailed_entries(entries)), "csv_path": csv_path}
 
 
 def read_glossary_csv(csv_path):
@@ -474,6 +625,11 @@ def read_glossary_csv(csv_path):
             or normalized_fields.get("substituição")
             or normalized_fields.get("substituir por")
         )
+        type_field = (
+            normalized_fields.get("type")
+            or normalized_fields.get("rule_type")
+            or normalized_fields.get("tipo")
+        )
         if not original_field or not replacement_field:
             raise ValueError("CSV precisa conter colunas original e replacement.")
 
@@ -483,6 +639,7 @@ def read_glossary_csv(csv_path):
                 (
                     (row.get(original_field) or "").strip(),
                     (row.get(replacement_field) or "").strip(),
+                    _normalize_rule_type(row.get(type_field) if type_field else None),
                 )
             )
         return rows
@@ -490,10 +647,10 @@ def read_glossary_csv(csv_path):
 
 def analyze_glossary_csv_import(path, csv_path, allow_conflicts=False):
     """Analisa um CSV antes de importar para o glossário persistente."""
-    existing = load_glossary_entries(path, deduplicate=False)
-    existing_pairs = set(existing)
+    existing = load_glossary_entry_details(path, deduplicate=False)
+    existing_pairs = set(_normalize_entries(existing))
     replacements_by_original = {}
-    for orig, new in existing:
+    for orig, new in _normalize_entries(existing):
         replacements_by_original.setdefault(orig, set()).add(new)
 
     stats = {
@@ -506,7 +663,9 @@ def analyze_glossary_csv_import(path, csv_path, allow_conflicts=False):
     }
     to_insert = []
 
-    for orig, new in read_glossary_csv(csv_path):
+    for row_entry in read_glossary_csv(csv_path):
+        orig, new = glossary_entry_pair(row_entry)
+        rule_type = glossary_entry_type(row_entry)
         stats["total_rows"] += 1
         if not orig or not new:
             stats["invalid"] += 1
@@ -514,7 +673,7 @@ def analyze_glossary_csv_import(path, csv_path, allow_conflicts=False):
             continue
 
         pair = (orig, new)
-        if pair in existing_pairs or pair in to_insert:
+        if pair in existing_pairs or pair in _normalize_entries(to_insert):
             stats["duplicates"] += 1
             stats["skipped"] += 1
             continue
@@ -526,7 +685,7 @@ def analyze_glossary_csv_import(path, csv_path, allow_conflicts=False):
                 stats["skipped"] += 1
                 continue
 
-        to_insert.append(pair)
+        to_insert.append((orig, new, rule_type))
         replacements_by_original.setdefault(orig, set()).add(new)
         stats["inserted"] += 1
 
@@ -547,7 +706,7 @@ def import_glossary_csv(
         stats["backup_path"] = None
         return stats
 
-    existing = load_glossary_entries(path, deduplicate=False)
+    existing = load_glossary_entry_details(path, deduplicate=False)
     result = save_glossary_entries(
         existing + stats["entries"],
         path,

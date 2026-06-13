@@ -6,6 +6,10 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from .glossario import (
+    GLOSSARY_RULE_AUTOMATIC,
+    GLOSSARY_RULE_CLEANUP,
+    GLOSSARY_RULE_SUGGESTION,
+    GLOSSARY_RULE_TYPES,
     add_glossary_entry,
     analyze_glossary_csv_import,
     create_glossary_backup,
@@ -15,6 +19,9 @@ from .glossario import (
     apply_all_substitutions,
     apply_substitution,
     import_glossary_csv,
+    glossary_entry_pair,
+    glossary_entry_type,
+    load_glossary_entry_details,
     load_glossary_entries,
     load_substitutions,
     restore_glossary_from_backup,
@@ -36,6 +43,24 @@ OK_COLOR = "#16a34a"
 ERROR_COLOR = "#dc2626"
 PAGE_SIZE = 150
 GEOMETRY_RE = re.compile(r"^(\d+)x(\d+)([+-])(-?\d+)([+-])(-?\d+)$")
+RULE_TYPE_LABELS = {
+    GLOSSARY_RULE_SUGGESTION: "Sugestão",
+    GLOSSARY_RULE_CLEANUP: "Limpeza",
+    GLOSSARY_RULE_AUTOMATIC: "Automática",
+}
+RULE_TYPE_BY_LABEL = {label: value for value, label in RULE_TYPE_LABELS.items()}
+
+
+def rule_type_label(rule_type):
+    return RULE_TYPE_LABELS.get(rule_type, RULE_TYPE_LABELS[GLOSSARY_RULE_SUGGESTION])
+
+
+def rule_type_value(label):
+    return RULE_TYPE_BY_LABEL.get(label, GLOSSARY_RULE_SUGGESTION)
+
+
+def entry_pairs(entries):
+    return [glossary_entry_pair(entry) for entry in entries]
 
 
 def preview(text, limit=68):
@@ -71,12 +96,12 @@ def safe_geometry(win, geometry):
 def build_glossary_diagnostics(entries):
     pair_counts = {}
     replacements_by_original = {}
-    for orig, new in entries:
+    for orig, new in entry_pairs(entries):
         pair_counts[(orig, new)] = pair_counts.get((orig, new), 0) + 1
         replacements_by_original.setdefault(orig, set()).add(new)
 
     diagnostics = []
-    for orig, new in entries:
+    for orig, new in entry_pairs(entries):
         warnings = validate_glossary_entry(orig, new)
         if pair_counts.get((orig, new), 0) > 1:
             warnings.append("Entrada duplicada.")
@@ -89,7 +114,7 @@ def build_glossary_diagnostics(entries):
 def glossary_entry_warnings(entries, index, diagnostics=None):
     if diagnostics is not None and 0 <= index < len(diagnostics):
         return diagnostics[index]
-    orig, new = entries[index]
+    orig, new = glossary_entry_pair(entries[index])
     return validate_glossary_entry(orig, new, entries, current_index=index)
 
 
@@ -97,8 +122,10 @@ def glossary_filter_indices(entries, search_text="", filter_name="Todas", diagno
     query = (search_text or "").strip().lower()
     result = []
 
-    for index, (orig, new) in enumerate(entries):
-        if query and query not in orig.lower() and query not in new.lower():
+    for index, entry in enumerate(entries):
+        orig, new = glossary_entry_pair(entry)
+        label = rule_type_label(glossary_entry_type(entry))
+        if query and query not in orig.lower() and query not in new.lower() and query not in label.lower():
             continue
 
         warnings = glossary_entry_warnings(entries, index, diagnostics)
@@ -116,11 +143,11 @@ def glossary_filter_indices(entries, search_text="", filter_name="Todas", diagno
 
 def sort_glossary_indices(entries, indices, sort_name="Ordem do arquivo"):
     if sort_name == "Original A-Z":
-        return sorted(indices, key=lambda index: (entries[index][0].casefold(), index))
+        return sorted(indices, key=lambda index: (glossary_entry_pair(entries[index])[0].casefold(), index))
     if sort_name == "Substituição A-Z":
-        return sorted(indices, key=lambda index: (entries[index][1].casefold(), index))
+        return sorted(indices, key=lambda index: (glossary_entry_pair(entries[index])[1].casefold(), index))
     if sort_name == "Maior original":
-        return sorted(indices, key=lambda index: (-len(entries[index][0]), index))
+        return sorted(indices, key=lambda index: (-len(glossary_entry_pair(entries[index])[0]), index))
     return list(indices)
 
 
@@ -138,10 +165,12 @@ def glossary_counts(entries, diagnostics=None):
 
 
 def row_label(entries, index, diagnostics=None):
-    orig, new = entries[index]
+    entry = entries[index]
+    orig, new = glossary_entry_pair(entry)
+    type_label = rule_type_label(glossary_entry_type(entry))
     warnings = glossary_entry_warnings(entries, index, diagnostics)
     status = "AVISO" if warnings else "OK"
-    return f"{status}  #{index + 1}\nDe: {preview(orig)}\nPara: {preview(new)}"
+    return f"{status}  #{index + 1}  -  {type_label}\nDe: {preview(orig)}\nPara: {preview(new)}"
 
 
 def open_glossary_editor(app, on_change=None, initial_original=None, initial_replacement=None):
@@ -170,11 +199,12 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     selected = {"index": None}
     page_index = {"value": 0}
     dirty = {"value": False, "loading": False}
-    form_baseline = {"orig": "", "new": ""}
+    form_baseline = {"orig": "", "new": "", "type": GLOSSARY_RULE_SUGGESTION}
 
     search_text = tk.StringVar(master=win, value="")
     test_text_var = tk.StringVar(master=win, value="")
     sort_text = tk.StringVar(master=win, value=editor_settings.get("sort", "Ordem do arquivo"))
+    rule_type_text = tk.StringVar(master=win, value=rule_type_label(GLOSSARY_RULE_SUGGESTION))
 
     win.columnconfigure(0, weight=1)
     win.rowconfigure(0, weight=1)
@@ -264,7 +294,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     detail_frame.columnconfigure(0, weight=1)
     detail_frame.rowconfigure(1, weight=1)
     detail_frame.rowconfigure(3, weight=1)
-    detail_frame.rowconfigure(7, weight=1)
+    detail_frame.rowconfigure(8, weight=1)
 
     ctk.CTkLabel(detail_frame, text="Texto encontrado:").grid(
         row=0,
@@ -286,6 +316,18 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     new_text = ctk.CTkTextbox(detail_frame, height=120, wrap=tk.WORD)
     new_text.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 8))
 
+    type_bar = ctk.CTkFrame(detail_frame, fg_color="transparent")
+    type_bar.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 8))
+    type_bar.columnconfigure(1, weight=1)
+    ctk.CTkLabel(type_bar, text="Tipo:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+    type_menu = ctk.CTkOptionMenu(
+        type_bar,
+        variable=rule_type_text,
+        values=[rule_type_label(rule_type) for rule_type in GLOSSARY_RULE_TYPES],
+        width=160,
+    )
+    type_menu.grid(row=0, column=1, sticky="w")
+
     validation_label = ctk.CTkLabel(
         detail_frame,
         text="",
@@ -293,10 +335,10 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         justify=tk.LEFT,
         text_color=OK_COLOR,
     )
-    validation_label.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 8))
+    validation_label.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 8))
 
     test_header = ctk.CTkFrame(detail_frame, fg_color="transparent")
-    test_header.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 2))
+    test_header.grid(row=6, column=0, sticky="ew", padx=10, pady=(0, 2))
     test_header.columnconfigure(1, weight=1)
     ctk.CTkLabel(test_header, text="Teste rápido:").grid(row=0, column=0, sticky="w")
     btn_apply_preview = ctk.CTkButton(test_header, text="Aplicar selecionada", width=140)
@@ -309,10 +351,10 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         textvariable=test_text_var,
         placeholder_text="Digite ou cole uma frase para testar a substituição selecionada",
     )
-    test_input.grid(row=6, column=0, sticky="ew", padx=10, pady=(0, 6))
+    test_input.grid(row=7, column=0, sticky="ew", padx=10, pady=(0, 6))
 
     preview_text = ctk.CTkTextbox(detail_frame, height=90, wrap=tk.WORD)
-    preview_text.grid(row=7, column=0, sticky="nsew", padx=10, pady=(0, 10))
+    preview_text.grid(row=8, column=0, sticky="nsew", padx=10, pady=(0, 10))
     preview_text.configure(state="disabled")
 
     footer = ctk.CTkFrame(win, corner_radius=8)
@@ -405,13 +447,24 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     def current_pair():
         return text_value(orig_text), text_value(new_text)
 
-    def set_form_baseline(orig="", new=""):
+    def current_rule_type():
+        return rule_type_value(rule_type_text.get())
+
+    def set_rule_type(rule_type):
+        rule_type_text.set(rule_type_label(glossary_entry_type((None, None, rule_type))))
+
+    def set_form_baseline(orig="", new="", rule_type=None):
         form_baseline["orig"] = orig or ""
         form_baseline["new"] = new or ""
+        form_baseline["type"] = rule_type or GLOSSARY_RULE_SUGGESTION
 
     def form_changed():
         orig, new = current_pair()
-        return orig != form_baseline["orig"] or new != form_baseline["new"]
+        return (
+            orig != form_baseline["orig"]
+            or new != form_baseline["new"]
+            or current_rule_type() != form_baseline["type"]
+        )
 
     def set_dirty(value):
         dirty["value"] = value
@@ -432,7 +485,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         set_preview_text(result)
 
     def apply_all_to_preview():
-        set_preview_text(apply_all_substitutions(test_text_var.get(), entries))
+        set_preview_text(apply_all_substitutions(test_text_var.get(), entry_pairs(entries)))
 
     def set_preview_text(value):
         preview_text.configure(state="normal")
@@ -463,7 +516,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     def load_rows_from_file():
         nonlocal entries, diagnostics
         try:
-            entries = load_glossary_entries(deduplicate=False)
+            entries = load_glossary_entry_details(deduplicate=False)
             diagnostics = build_glossary_diagnostics(entries)
         except Exception as exc:
             entries = []
@@ -559,10 +612,13 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
             return
         selected["index"] = index
         dirty["loading"] = True
-        orig, new = entries[index]
+        entry = entries[index]
+        orig, new = glossary_entry_pair(entry)
+        rule_type = glossary_entry_type(entry)
         set_text(orig_text, orig)
         set_text(new_text, new)
-        set_form_baseline(orig, new)
+        set_rule_type(rule_type)
+        set_form_baseline(orig, new, rule_type)
         dirty["loading"] = False
         set_dirty(False)
         render_rows()
@@ -573,6 +629,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         dirty["loading"] = True
         set_text(orig_text, "")
         set_text(new_text, "")
+        set_rule_type(GLOSSARY_RULE_SUGGESTION)
         set_form_baseline()
         dirty["loading"] = False
         set_dirty(False)
@@ -587,6 +644,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         dirty["loading"] = True
         set_text(orig_text, (original or "").strip())
         set_text(new_text, (replacement or "").strip())
+        set_rule_type(GLOSSARY_RULE_SUGGESTION)
         set_form_baseline()
         dirty["loading"] = False
         set_dirty(True)
@@ -624,6 +682,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
 
     def save_current():
         orig, new = current_pair()
+        rule_type = current_rule_type()
         warnings = validate_glossary_entry(orig, new, entries, selected["index"])
         blocking = [
             warning
@@ -636,10 +695,10 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
 
         try:
             if selected["index"] is None:
-                result = add_glossary_entry(orig, new)
+                result = add_glossary_entry(orig, new, rule_type=rule_type)
                 load_rows_from_file()
-                pair = (orig, new)
-                selected["index"] = entries.index(pair) if pair in entries else len(entries) - 1
+                entry = (orig, new, rule_type)
+                selected["index"] = entries.index(entry) if entry in entries else len(entries) - 1
                 show_message(
                     "Entrada adicionada"
                     if result["status"] == "inserted"
@@ -647,14 +706,14 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
                     OK_COLOR if result["status"] == "inserted" else WARNING_COLOR,
                 )
             else:
-                update_glossary_entry(selected["index"], orig, new)
+                update_glossary_entry(selected["index"], orig, new, rule_type=rule_type)
                 load_rows_from_file()
                 show_message("Entrada salva")
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao salvar glossário:\n{exc}", parent=win)
             return
 
-        set_form_baseline(orig, new)
+        set_form_baseline(orig, new, rule_type)
         set_dirty(False)
         update_app_glossary()
         apply_filter()
@@ -663,13 +722,14 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
 
     def save_as_new():
         orig, new = current_pair()
+        rule_type = current_rule_type()
         warnings = validate_glossary_entry(orig, new, entries)
         if "Texto original vazio." in warnings or "Texto de substituição vazio." in warnings:
             show_message("Corrija os campos obrigatórios", ERROR_COLOR)
             return
 
         try:
-            result = add_glossary_entry(orig, new)
+            result = add_glossary_entry(orig, new, rule_type=rule_type)
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao salvar nova entrada:\n{exc}", parent=win)
             return
@@ -677,12 +737,12 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         load_rows_from_file()
         if result["status"] == "unchanged":
             show_message("Entrada já existia", WARNING_COLOR)
-            pair = (orig, new)
-            selected["index"] = entries.index(pair) if pair in entries else None
+            entry = (orig, new, rule_type)
+            selected["index"] = entries.index(entry) if entry in entries else None
         else:
             selected["index"] = len(entries) - 1
             show_message("Nova entrada salva")
-        set_form_baseline(orig, new)
+        set_form_baseline(orig, new, rule_type)
         set_dirty(False)
         update_app_glossary()
         apply_filter()
@@ -914,6 +974,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     btn_apply_all_preview.configure(command=apply_all_to_preview)
     sort_menu.configure(command=lambda _value: (page_index.update({"value": 0}), apply_filter()))
     filter_segment.configure(command=lambda _value: (page_index.update({"value": 0}), apply_filter()))
+    type_menu.configure(command=lambda _value: mark_dirty())
     search_entry.bind("<Return>", lambda _event: apply_search())
     test_input.bind("<KeyRelease>", lambda _event: refresh_preview())
     orig_text.bind("<<Modified>>", lambda event: (orig_text.edit_modified(False), mark_dirty())[1])
