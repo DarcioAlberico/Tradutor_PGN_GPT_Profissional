@@ -24,8 +24,6 @@ from .database import (
 from .editor_text import find_text_ranges, replace_all_text
 from .glossario import (
     add_to_glossary,
-    apply_all_substitutions,
-    apply_substitution,
     find_glossary_matches,
     find_glossary_suggestions,
     load_substitutions,
@@ -881,7 +879,13 @@ def open_translation_editor(app):
         refresh_find_matches(keep_current=False)
         show_message(f"{count} ocorrencia(s) substituida(s)")
 
-    def set_translation_text(text, mark_dirty=False, autosave_draft=True):
+    def set_translation_text(
+        text,
+        mark_dirty=False,
+        autosave_draft=True,
+        insert_offset=None,
+        focus_editor=False,
+    ):
         dirty["loading"] = True
         trans_text.delete("1.0", tk.END)
         trans_text.insert("1.0", text or "")
@@ -895,6 +899,13 @@ def open_translation_editor(app):
         refresh_suggestions()
         update_quality_warnings()
         refresh_find_matches(keep_current=False)
+        if insert_offset is not None:
+            insert_index = text_index_for_offset(insert_offset)
+            trans_text.mark_set(tk.INSERT, insert_index)
+            trans_text.see(insert_index)
+            trans_text.tag_remove(tk.SEL, "1.0", tk.END)
+        if focus_editor:
+            trans_text.focus_set()
 
     def on_translation_modified(_event=None):
         try:
@@ -1909,23 +1920,65 @@ def open_translation_editor(app):
             btn.pack(fill=tk.X, padx=2, pady=2)
             suggestion_buttons.append(btn)
 
+    def apply_glossary_pair_with_cursor(text, orig, new, count=0):
+        matches = find_glossary_matches(text, orig)
+        if count > 0:
+            matches = matches[:count]
+        if not matches:
+            return text, None
+
+        parts = []
+        last = 0
+        cursor_offset = 0
+        insert_offset = None
+        for start, end in matches:
+            before = text[last:start]
+            parts.append(before)
+            cursor_offset += len(before)
+            parts.append(new)
+            cursor_offset += len(new)
+            insert_offset = cursor_offset
+            last = end
+        parts.append(text[last:])
+        return "".join(parts), insert_offset
+
+    def apply_suggestions_with_cursor(text, suggestions):
+        insert_offset = None
+        for orig, new in suggestions:
+            text, pair_offset = apply_glossary_pair_with_cursor(text, orig, new)
+            if pair_offset is not None:
+                insert_offset = pair_offset
+        return text, insert_offset
+
     def apply_one():
         index = selected_suggestion["value"]
         if index is None or not (0 <= index < len(current_suggestions)):
             return
 
         orig, new = current_suggestions[index]
-        text = trans_text.get("1.0", tk.END)
-        trans_text.delete("1.0", tk.END)
-        trans_text.insert("1.0", apply_substitution(text, orig, new))
-        set_dirty(True)
-        refresh_suggestions()
-        update_quality_warnings()
-        refresh_find_matches()
+        text = draft_text()
+        updated_text, insert_offset = apply_glossary_pair_with_cursor(
+            text,
+            orig,
+            new,
+            count=1,
+        )
+        if insert_offset is None:
+            show_message("Sugestão não encontrada no texto")
+            return
+        set_translation_text(
+            updated_text,
+            mark_dirty=True,
+            insert_offset=insert_offset,
+            focus_editor=True,
+        )
 
     def apply_all():
-        text = trans_text.get("1.0", tk.END)
-        preview_text = apply_all_substitutions(text, current_suggestions)
+        text = draft_text()
+        preview_text, preview_offset = apply_suggestions_with_cursor(
+            text,
+            current_suggestions,
+        )
         if preview_text == text:
             show_message("Nenhuma alteração sugerida")
             return
@@ -1951,12 +2004,12 @@ def open_translation_editor(app):
         actions.grid(row=2, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
 
         def confirm():
-            trans_text.delete("1.0", tk.END)
-            trans_text.insert("1.0", preview_text)
-            set_dirty(True)
-            refresh_suggestions()
-            update_quality_warnings()
-            refresh_find_matches()
+            set_translation_text(
+                preview_text,
+                mark_dirty=True,
+                insert_offset=preview_offset,
+                focus_editor=True,
+            )
             pop.destroy()
 
         ctk.CTkButton(actions, text="Cancelar", width=100, command=pop.destroy).pack(
