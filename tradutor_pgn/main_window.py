@@ -123,7 +123,7 @@ def setup_main_ui(app):
     )
     app.cancel_button.pack(side=tk.LEFT, padx=6)
 
-    tools_section, tools_frame = create_section(main_frame, "Ferramentas do Banco de Dados")
+    tools_section, tools_frame = create_section(main_frame, "Ferramentas")
     tools_section.pack(fill=tk.X, pady=(0, 8))
 
     grid_button_row(
@@ -135,8 +135,9 @@ def setup_main_ui(app):
             {"text": "Backup BD", "command": app.backup_database},
             {"text": "Restaurar BD", "command": app.restore_database},
             {"text": "Editar Traduções", "command": app.open_edit_window},
+            {"text": "Editar Glossário", "command": app.open_glossary_window},
         ],
-        columns=3,
+        columns=4,
     )
 
     log_section, log_frame = create_section(main_frame, "Log de Processamento")

@@ -38,10 +38,12 @@ uv run python -m unittest discover -s .\tests
 - `tradutor_pgn/database.py`: inicializacao, conexao e cache do SQLite.
 - `tradutor_pgn/db_tools.py`: estatisticas e exportacao CSV.
 - `tradutor_pgn/edit_window.py`: janela de revisao e edicao de traducoes.
+- `tradutor_pgn/glossary_editor.py`: janela dedicada para manter o glossario persistente.
 - `tradutor_pgn/main_window.py`: montagem da janela principal.
 - `tradutor_pgn/pgn_utils.py`: leitura, escrita, encoding e manipulacao de arquivos PGN.
 - `tradutor_pgn/translation_api.py`: chamadas de traducao e divisao de comentarios longos.
 - `tradutor_pgn/translation_worker.py`: orquestracao do processamento em segundo plano.
 - `tradutor_pgn/glossario.py`: leitura e aplicacao do glossario.
 - `Substituicoes.txt`: pares de substituicao usados na revisao.
+- `glossario.db`: indice SQLite local do glossario, recriado/sincronizado a partir de `Substituicoes.txt`.
 - `traducoes.db`: cache local de traducoes.

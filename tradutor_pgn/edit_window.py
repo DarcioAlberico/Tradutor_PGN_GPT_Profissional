@@ -25,8 +25,11 @@ from .glossario import (
     add_to_glossary,
     apply_all_substitutions,
     apply_substitution,
+    find_glossary_matches,
     find_glossary_suggestions,
+    load_substitutions,
 )
+from .glossary_editor import open_glossary_editor
 from .review_quality import (
     QUALITY_REPORT_HEADERS,
     build_quality_report_rows,
@@ -44,11 +47,15 @@ from .settings import (
 )
 
 
-ROW_COLOR = ("gray86", "gray22")
+ROW_COLOR = ("#f8fafc", "#1f2937")
+ROW_TEXT_COLOR = ("#111827", "#e5e7eb")
 VERIFIED_ROW_COLOR = ("#d1fae5", "#14532d")
-ROW_HOVER_COLOR = ("gray78", "gray30")
+VERIFIED_ROW_TEXT_COLOR = ("#065f46", "#d1fae5")
+ROW_HOVER_COLOR = ("#e2e8f0", "#374151")
 SELECTED_ROW_COLOR = ("#3b82f6", "#1f6aa5")
-SUGGESTION_COLOR = ("gray88", "gray24")
+SELECTED_ROW_TEXT_COLOR = "#ffffff"
+SUGGESTION_COLOR = ("#f8fafc", "#1f2937")
+SUGGESTION_TEXT_COLOR = ("#111827", "#e5e7eb")
 SUGGESTION_SELECTED_COLOR = ("#2563eb", "#1d4ed8")
 PAGE_SIZE = 100
 GEOMETRY_RE = re.compile(r"^(\d+)x(\d+)([+-])(-?\d+)([+-])(-?\d+)$")
@@ -71,8 +78,8 @@ def safe_geometry(win, geometry):
     screen_width = win.winfo_screenwidth()
     screen_height = win.winfo_screenheight()
 
-    width = min(max(width, 980), screen_width)
-    height = min(max(height, 620), screen_height)
+    width = min(max(width, 1120), screen_width)
+    height = min(max(height, 680), screen_height)
     max_x = max(0, screen_width - width)
     max_y = max(0, screen_height - height)
     x = min(max(0, x), max_x)
@@ -90,7 +97,11 @@ def preview(text, limit=120):
 
 def row_label(row):
     status = "OK" if len(row) > 3 and row[3] == 1 else "PEND"
-    return f"{status}  |  {row[0]}  |  {preview(row[1], 105)}  |  {preview(row[2], 105)}"
+    return (
+        f"{status}  #{row[0]}\n"
+        f"O: {preview(row[1], 54)}\n"
+        f"T: {preview(row[2], 54)}"
+    )
 
 
 def row_color(row):
@@ -99,13 +110,19 @@ def row_color(row):
     return ROW_COLOR
 
 
+def row_text_color(row):
+    if len(row) > 3 and row[3] == 1:
+        return VERIFIED_ROW_TEXT_COLOR
+    return ROW_TEXT_COLOR
+
+
 def open_translation_editor(app):
     lang = app.target_language.get()
 
     win = ctk.CTkToplevel(app.root)
     win.title(f"Editar traduções ({lang})")
-    win.geometry("1180x720")
-    win.minsize(980, 620)
+    win.geometry("1280x760")
+    win.minsize(1120, 680)
 
     settings = load_settings()
     editor_settings = settings.get("editor", {})
@@ -154,8 +171,11 @@ def open_translation_editor(app):
     font_size = {"value": max(9, min(24, saved_font_size))}
     body_font = tkfont.Font(family="Segoe UI", size=font_size["value"])
     body_bold_font = tkfont.Font(family="Segoe UI", size=font_size["value"], weight="bold")
-    row_font = ctk.CTkFont(family="Consolas", size=11)
+    row_font = ctk.CTkFont(family="Segoe UI", size=11)
     suggestion_font = ctk.CTkFont(size=11)
+
+    if not hasattr(app, "glossary_change_callbacks"):
+        app.glossary_change_callbacks = []
 
     win.columnconfigure(0, weight=1)
     win.rowconfigure(0, weight=1)
@@ -163,72 +183,77 @@ def open_translation_editor(app):
     pane_bg = "#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#d1d5db"
     main_pane = tk.PanedWindow(
         win,
-        orient=tk.VERTICAL,
+        orient=tk.HORIZONTAL,
         sashwidth=8,
         sashrelief=tk.FLAT,
         bd=0,
         bg=pane_bg,
     )
-    main_pane.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 5))
+    main_pane.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 6))
 
-    list_frame = ctk.CTkFrame(main_pane, corner_radius=8)
-    main_pane.add(list_frame, minsize=130)
+    list_frame = ctk.CTkFrame(main_pane, corner_radius=8, width=400)
+    main_pane.add(list_frame, minsize=320)
+    list_frame.columnconfigure(0, weight=1)
+    list_frame.rowconfigure(5, weight=1)
 
     header = ctk.CTkFrame(list_frame, fg_color="transparent")
-    header.pack(fill=tk.X, padx=10, pady=(10, 4))
-    ctk.CTkLabel(header, text="Traduções", font=ctk.CTkFont(weight="bold")).pack(
-        side=tk.LEFT
+    header.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
+    header.columnconfigure(1, weight=1)
+    ctk.CTkLabel(header, text="Traduções", font=ctk.CTkFont(weight="bold")).grid(
+        row=0, column=0, sticky="w"
     )
-    btn_page_next = ctk.CTkButton(header, text="Página >", width=100)
-    btn_page_next.pack(side=tk.RIGHT, padx=(6, 0))
-    page_label = ctk.CTkLabel(header, text="")
-    page_label.pack(side=tk.RIGHT, padx=6)
-    btn_page_prev = ctk.CTkButton(header, text="< Página", width=100)
-    btn_page_prev.pack(side=tk.RIGHT)
-    font_controls = ctk.CTkFrame(header, fg_color="transparent")
-    font_controls.pack(side=tk.RIGHT, padx=(0, 12))
-    btn_font_down = ctk.CTkButton(font_controls, text="A-", width=42)
-    btn_font_down.pack(side=tk.LEFT, padx=(0, 4))
-    font_label = ctk.CTkLabel(font_controls, text=f"{font_size['value']} pt", width=46)
-    font_label.pack(side=tk.LEFT)
-    btn_font_up = ctk.CTkButton(font_controls, text="A+", width=42)
-    btn_font_up.pack(side=tk.LEFT, padx=4)
-    btn_bold = ctk.CTkButton(
-        font_controls,
-        text="B",
-        width=42,
-        font=ctk.CTkFont(weight="bold"),
-    )
-    btn_bold.pack(side=tk.LEFT, padx=(4, 0))
+    page_label = ctk.CTkLabel(header, text="", anchor="e")
+    page_label.grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+    page_nav = ctk.CTkFrame(list_frame, fg_color="transparent")
+    page_nav.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 6))
+    page_nav.columnconfigure(1, weight=1)
+    btn_page_prev = ctk.CTkButton(page_nav, text="< Página", width=92)
+    btn_page_prev.grid(row=0, column=0, sticky="w", padx=(0, 6))
+    btn_page_next = ctk.CTkButton(page_nav, text="Página >", width=92)
+    btn_page_next.grid(row=0, column=2, sticky="e", padx=(6, 0))
 
     search_bar = ctk.CTkFrame(list_frame, fg_color="transparent")
-    search_bar.pack(fill=tk.X, padx=10, pady=(0, 6))
+    search_bar.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 6))
+    search_bar.columnconfigure(0, weight=1)
     search_entry = ctk.CTkEntry(
         search_bar,
         textvariable=search_text,
         placeholder_text="Buscar no original ou tradução",
     )
-    search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-    btn_search = ctk.CTkButton(search_bar, text="Buscar", width=90)
-    btn_search.pack(side=tk.LEFT, padx=(0, 6))
-    btn_clear_search = ctk.CTkButton(search_bar, text="Limpar", width=80)
-    btn_clear_search.pack(side=tk.LEFT)
+    search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    btn_search = ctk.CTkButton(search_bar, text="Buscar", width=82)
+    btn_search.grid(row=0, column=1, padx=(0, 6))
+    btn_clear_search = ctk.CTkButton(search_bar, text="Limpar", width=74)
+    btn_clear_search.grid(row=0, column=2)
 
     jump_bar = ctk.CTkFrame(list_frame, fg_color="transparent")
-    jump_bar.pack(fill=tk.X, padx=10, pady=(0, 6))
-    ctk.CTkLabel(jump_bar, text="Página:").pack(side=tk.LEFT)
-    page_entry = ctk.CTkEntry(jump_bar, textvariable=go_page_text, width=72)
-    page_entry.pack(side=tk.LEFT, padx=(6, 4))
-    btn_go_page = ctk.CTkButton(jump_bar, text="Ir", width=48)
-    btn_go_page.pack(side=tk.LEFT, padx=(0, 12))
-    ctk.CTkLabel(jump_bar, text="ID:").pack(side=tk.LEFT)
-    id_entry = ctk.CTkEntry(jump_bar, textvariable=go_id_text, width=90)
-    id_entry.pack(side=tk.LEFT, padx=(6, 4))
-    btn_go_id = ctk.CTkButton(jump_bar, text="Ir para ID", width=88)
-    btn_go_id.pack(side=tk.LEFT)
+    jump_bar.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 8))
+    jump_bar.columnconfigure(1, weight=1)
+    jump_bar.columnconfigure(4, weight=1)
+    ctk.CTkLabel(jump_bar, text="Página").grid(row=0, column=0, sticky="w")
+    page_entry = ctk.CTkEntry(jump_bar, textvariable=go_page_text, width=64)
+    page_entry.grid(row=0, column=1, sticky="ew", padx=(6, 4))
+    btn_go_page = ctk.CTkButton(jump_bar, text="Ir", width=46)
+    btn_go_page.grid(row=0, column=2, padx=(0, 10))
+    ctk.CTkLabel(jump_bar, text="ID").grid(row=0, column=3, sticky="w")
+    id_entry = ctk.CTkEntry(jump_bar, textvariable=go_id_text, width=82)
+    id_entry.grid(row=0, column=4, sticky="ew", padx=(6, 4))
+    btn_go_id = ctk.CTkButton(jump_bar, text="Ir", width=46)
+    btn_go_id.grid(row=0, column=5)
 
-    rows_frame = ctk.CTkScrollableFrame(list_frame, height=210)
-    rows_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+    status_segment = ctk.CTkSegmentedButton(
+        list_frame,
+        values=["Todas", "Pendentes", "Verificadas", "Avisos QA"],
+    )
+    saved_status = editor_settings.get("status_filter", "Todas")
+    if saved_status not in {"Todas", "Pendentes", "Verificadas", "Avisos QA"}:
+        saved_status = "Todas"
+    status_segment.set(saved_status)
+    status_segment.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 6))
+
+    rows_frame = ctk.CTkScrollableFrame(list_frame, height=420)
+    rows_frame.grid(row=5, column=0, sticky="nsew", padx=10, pady=(0, 10))
 
     bottom_pane = tk.PanedWindow(
         main_pane,
@@ -238,13 +263,13 @@ def open_translation_editor(app):
         bd=0,
         bg=pane_bg,
     )
-    main_pane.add(bottom_pane, minsize=260)
+    main_pane.add(bottom_pane, minsize=620)
 
     text_frame = ctk.CTkFrame(bottom_pane, corner_radius=8)
     bottom_pane.add(text_frame, minsize=520)
     text_frame.columnconfigure(0, weight=1)
-    text_frame.rowconfigure(1, weight=1)
-    text_frame.rowconfigure(3, weight=1)
+    text_frame.rowconfigure(1, weight=1, minsize=120)
+    text_frame.rowconfigure(3, weight=3, minsize=180)
 
     text_bg = "#111827" if ctk.get_appearance_mode() == "Dark" else "#f9fafb"
     text_fg = "#e5e7eb" if ctk.get_appearance_mode() == "Dark" else "#111827"
@@ -280,6 +305,7 @@ def open_translation_editor(app):
             selectforeground="#ffffff",
             padx=8,
             pady=6,
+            height=6 if readonly else 12,
         )
         scrollbar = tk.Scrollbar(container, orient=tk.VERTICAL, command=text.yview)
         text.configure(yscrollcommand=scrollbar.set)
@@ -313,6 +339,21 @@ def open_translation_editor(app):
     translation_header = ctk.CTkFrame(text_frame, fg_color="transparent")
     translation_header.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 2))
     ctk.CTkLabel(translation_header, text="Tradução:").pack(side=tk.LEFT)
+    font_controls = ctk.CTkFrame(translation_header, fg_color="transparent")
+    font_controls.pack(side=tk.RIGHT)
+    btn_font_down = ctk.CTkButton(font_controls, text="A-", width=42)
+    btn_font_down.pack(side=tk.LEFT, padx=(0, 4))
+    font_label = ctk.CTkLabel(font_controls, text=f"{font_size['value']} pt", width=46)
+    font_label.pack(side=tk.LEFT)
+    btn_font_up = ctk.CTkButton(font_controls, text="A+", width=42)
+    btn_font_up.pack(side=tk.LEFT, padx=4)
+    btn_bold = ctk.CTkButton(
+        font_controls,
+        text="B",
+        width=42,
+        font=ctk.CTkFont(weight="bold"),
+    )
+    btn_bold.pack(side=tk.LEFT, padx=(4, 0))
     trans_text = create_text_editor(text_frame, 3, bottom_pad=4)
 
     find_bar = ctk.CTkFrame(text_frame, fg_color="transparent")
@@ -390,60 +431,22 @@ def open_translation_editor(app):
     btn_apply_one = ctk.CTkButton(sugg_frame, text="Aplicar selecionada")
     btn_apply_all = ctk.CTkButton(sugg_frame, text="Aplicar todas")
     btn_add_gloss = ctk.CTkButton(sugg_frame, text="Adicionar ao glossário")
+    btn_reload_gloss = ctk.CTkButton(sugg_frame, text="Atualizar glossário")
+    btn_open_gloss = ctk.CTkButton(sugg_frame, text="Editar glossário")
 
     btn_refresh.grid(row=2, column=0, sticky="ew", padx=(10, 4), pady=4)
     btn_apply_one.grid(row=2, column=1, sticky="ew", padx=(4, 10), pady=4)
-    btn_apply_all.grid(row=3, column=0, sticky="ew", padx=(10, 4), pady=(0, 10))
-    btn_add_gloss.grid(row=3, column=1, sticky="ew", padx=(4, 10), pady=(0, 10))
+    btn_apply_all.grid(row=3, column=0, sticky="ew", padx=(10, 4), pady=4)
+    btn_add_gloss.grid(row=3, column=1, sticky="ew", padx=(4, 10), pady=4)
+    btn_reload_gloss.grid(row=4, column=0, sticky="ew", padx=(10, 4), pady=(0, 10))
+    btn_open_gloss.grid(row=4, column=1, sticky="ew", padx=(4, 10), pady=(0, 10))
 
-    nav = ctk.CTkFrame(win, fg_color="transparent")
-    nav.grid(row=1, column=0, sticky="ew", padx=10, pady=(4, 2))
-    nav.columnconfigure(0, weight=1)
-
-    nav_actions = ctk.CTkFrame(nav, fg_color="transparent")
-    nav_actions.grid(row=0, column=0, sticky="w")
-
-    btn_prev = ctk.CTkButton(nav_actions, text="< Anterior", width=110)
-    btn_next = ctk.CTkButton(nav_actions, text="Próxima >", width=110)
-    btn_mark = ctk.CTkButton(nav_actions, text="Marcar como verificada", width=180)
-    btn_pending = ctk.CTkButton(nav_actions, text="Marcar como pendente", width=170)
-    btn_history = ctk.CTkButton(nav_actions, text="Hist\u00f3rico", width=100)
-    btn_next_qa = ctk.CTkButton(nav_actions, text="Próximo aviso QA", width=150)
-    btn_export_qa = ctk.CTkButton(nav_actions, text="Exportar QA", width=110)
-
-    nav_buttons = [
-        btn_prev,
-        btn_next,
-        btn_mark,
-        btn_pending,
-        btn_next_qa,
-        btn_export_qa,
-        btn_history,
-    ]
-    for index, button in enumerate(nav_buttons):
-        button.grid(
-            row=index // 3,
-            column=index % 3,
-            sticky="ew",
-            padx=(0, 6),
-            pady=3,
-        )
-
-    status_segment = ctk.CTkSegmentedButton(
-        nav,
-        values=["Todas", "Pendentes", "Verificadas", "Avisos QA"],
-    )
-    saved_status = editor_settings.get("status_filter", "Todas")
-    if saved_status not in {"Todas", "Pendentes", "Verificadas", "Avisos QA"}:
-        saved_status = "Todas"
-    status_segment.set(saved_status)
-    status_segment.grid(row=1, column=0, sticky="w", pady=(4, 0))
-
-    status_frame = ctk.CTkFrame(win, fg_color="transparent")
-    status_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
+    status_frame = ctk.CTkFrame(win, corner_radius=8)
+    status_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+    status_frame.columnconfigure(0, weight=1)
 
     status_info = ctk.CTkFrame(status_frame, fg_color="transparent")
-    status_info.pack(fill=tk.X)
+    status_info.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 2))
 
     msg_label = ctk.CTkLabel(status_info, text="", text_color="#16a34a")
     msg_label.pack(side=tk.LEFT)
@@ -463,15 +466,58 @@ def open_translation_editor(app):
     )
     counts_label.pack(side=tk.LEFT, padx=(12, 0))
 
-    edit_actions = ctk.CTkFrame(status_frame, fg_color="transparent")
-    edit_actions.pack(fill=tk.X, pady=(4, 0))
+    primary_actions = ctk.CTkFrame(status_frame, fg_color="transparent")
+    primary_actions.grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 4))
+    secondary_actions = ctk.CTkFrame(status_frame, fg_color="transparent")
+    secondary_actions.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 8))
 
-    btn_copy_original = ctk.CTkButton(edit_actions, text="Copiar original", width=120)
-    btn_restore = ctk.CTkButton(edit_actions, text="Restaurar", width=90)
-    btn_undo = ctk.CTkButton(edit_actions, text="Desfazer", width=86)
-    btn_redo = ctk.CTkButton(edit_actions, text="Refazer", width=78)
-    btn_save_plain = ctk.CTkButton(edit_actions, text="Salvar", width=78)
-    btn_save_verify = ctk.CTkButton(edit_actions, text="Salvar e verificar", width=150)
+    btn_save_verify = ctk.CTkButton(
+        primary_actions,
+        text="Salvar e verificar",
+        width=150,
+    )
+    btn_save_plain = ctk.CTkButton(primary_actions, text="Salvar", width=90)
+    btn_mark = ctk.CTkButton(
+        primary_actions,
+        text="Marcar como verificada",
+        width=170,
+    )
+    btn_pending = ctk.CTkButton(
+        primary_actions,
+        text="Marcar como pendente",
+        width=165,
+    )
+    btn_prev = ctk.CTkButton(primary_actions, text="< Anterior", width=110)
+    btn_next = ctk.CTkButton(primary_actions, text="Próxima >", width=110)
+
+    for index, button in enumerate(
+        [
+            btn_save_verify,
+            btn_save_plain,
+            btn_mark,
+            btn_pending,
+            btn_prev,
+            btn_next,
+        ]
+    ):
+        button.grid(row=0, column=index, sticky="ew", padx=(0, 6), pady=2)
+        primary_actions.columnconfigure(index, weight=1)
+
+    btn_copy_original = ctk.CTkButton(
+        secondary_actions,
+        text="Copiar original",
+        width=120,
+    )
+    btn_restore = ctk.CTkButton(secondary_actions, text="Restaurar", width=90)
+    btn_undo = ctk.CTkButton(secondary_actions, text="Desfazer", width=86)
+    btn_redo = ctk.CTkButton(secondary_actions, text="Refazer", width=78)
+    btn_next_qa = ctk.CTkButton(
+        secondary_actions,
+        text="Próximo aviso QA",
+        width=150,
+    )
+    btn_export_qa = ctk.CTkButton(secondary_actions, text="Exportar QA", width=110)
+    btn_history = ctk.CTkButton(secondary_actions, text="Hist\u00f3rico", width=100)
 
     for index, button in enumerate(
         [
@@ -479,12 +525,13 @@ def open_translation_editor(app):
             btn_restore,
             btn_undo,
             btn_redo,
-            btn_save_plain,
-            btn_save_verify,
+            btn_next_qa,
+            btn_export_qa,
+            btn_history,
         ]
     ):
         button.grid(row=0, column=index, sticky="ew", padx=(0, 6), pady=2)
-        edit_actions.columnconfigure(index, weight=1)
+        secondary_actions.columnconfigure(index, weight=1)
 
     def show_message(text):
         msg_label.configure(text=text)
@@ -501,7 +548,7 @@ def open_translation_editor(app):
         editor["geometry"] = win.geometry()
 
         try:
-            editor["main_sash_y"] = main_pane.sash_coord(0)[1]
+            editor["main_sash_y"] = main_pane.sash_coord(0)[0]
         except tk.TclError:
             pass
 
@@ -521,13 +568,15 @@ def open_translation_editor(app):
 
         try:
             if isinstance(main_sash_y, int) and main_sash_y > 0:
-                main_pane.sash_place(0, 0, main_sash_y)
+                sidebar_width = max(360, min(520, main_sash_y))
+                main_pane.sash_place(0, sidebar_width, 0)
         except tk.TclError:
             pass
 
         try:
             if isinstance(bottom_sash_x, int) and bottom_sash_x > 0:
-                bottom_pane.sash_place(0, bottom_sash_x, 0)
+                editor_width = max(520, bottom_sash_x)
+                bottom_pane.sash_place(0, editor_width, 0)
         except tk.TclError:
             pass
 
@@ -887,16 +936,13 @@ def open_translation_editor(app):
     def highlight_glossary_hits():
         trans_text.tag_remove("glossary_hit", "1.0", tk.END)
         for orig, _new in current_suggestions:
-            if not orig:
-                continue
-            start = "1.0"
-            while True:
-                pos = trans_text.search(orig, start, stopindex=tk.END)
-                if not pos:
-                    break
-                end = f"{pos}+{len(orig)}c"
-                trans_text.tag_add("glossary_hit", pos, end)
-                start = end
+            text = trans_text.get("1.0", tk.END)
+            for start, end in find_glossary_matches(text, orig):
+                trans_text.tag_add(
+                    "glossary_hit",
+                    text_index_for_offset(start),
+                    text_index_for_offset(end),
+                )
 
     def clear_current():
         orig_text.configure(state="normal")
@@ -994,7 +1040,9 @@ def open_translation_editor(app):
                 rows_frame,
                 text=row_label(row),
                 anchor="w",
+                height=64,
                 fg_color=row_color(row),
+                text_color=row_text_color(row),
                 hover_color=ROW_HOVER_COLOR,
                 font=row_font,
                 command=lambda i=index: select_index(i, save_previous=True),
@@ -1052,11 +1100,17 @@ def open_translation_editor(app):
     def update_row_selection(new_index):
         old_index = selected_index["value"]
         if old_index is not None and 0 <= old_index < len(row_buttons):
-            row_buttons[old_index].configure(fg_color=row_color(rows[old_index]))
+            row_buttons[old_index].configure(
+                fg_color=row_color(rows[old_index]),
+                text_color=row_text_color(rows[old_index]),
+            )
 
         selected_index["value"] = new_index
         if new_index is not None and 0 <= new_index < len(row_buttons):
-            row_buttons[new_index].configure(fg_color=SELECTED_ROW_COLOR)
+            row_buttons[new_index].configure(
+                fg_color=SELECTED_ROW_COLOR,
+                text_color=SELECTED_ROW_TEXT_COLOR,
+            )
         update_selection_label()
 
     def select_index(index, save_previous=False):
@@ -1133,9 +1187,15 @@ def open_translation_editor(app):
         )
         row_buttons[index].configure(text=row_label(rows[index]))
         if selected_index["value"] == index:
-            row_buttons[index].configure(fg_color=SELECTED_ROW_COLOR)
+            row_buttons[index].configure(
+                fg_color=SELECTED_ROW_COLOR,
+                text_color=SELECTED_ROW_TEXT_COLOR,
+            )
         else:
-            row_buttons[index].configure(fg_color=row_color(rows[index]))
+            row_buttons[index].configure(
+                fg_color=row_color(rows[index]),
+                text_color=row_text_color(rows[index]),
+            )
 
     def save_changes(silent=True, mark_verified=False):
         if not current["id"]:
@@ -1608,11 +1668,17 @@ def open_translation_editor(app):
         def select_history(index):
             old = selected_history["value"]
             if old is not None and 0 <= old < len(history_buttons):
-                history_buttons[old].configure(fg_color=ROW_COLOR)
+                history_buttons[old].configure(
+                    fg_color=ROW_COLOR,
+                    text_color=ROW_TEXT_COLOR,
+                )
 
             selected_history["value"] = index
             if 0 <= index < len(history_buttons):
-                history_buttons[index].configure(fg_color=SELECTED_ROW_COLOR)
+                history_buttons[index].configure(
+                    fg_color=SELECTED_ROW_COLOR,
+                    text_color=SELECTED_ROW_TEXT_COLOR,
+                )
 
             row = selected_history_row()
             if row is None:
@@ -1679,6 +1745,7 @@ def open_translation_editor(app):
                     text=label,
                     anchor="w",
                     fg_color=ROW_COLOR,
+                    text_color=ROW_TEXT_COLOR,
                     hover_color=ROW_HOVER_COLOR,
                     command=lambda i=index: select_history(i),
                 )
@@ -1774,11 +1841,17 @@ def open_translation_editor(app):
     def select_suggestion(index):
         old = selected_suggestion["value"]
         if old is not None and 0 <= old < len(suggestion_buttons):
-            suggestion_buttons[old].configure(fg_color=SUGGESTION_COLOR)
+            suggestion_buttons[old].configure(
+                fg_color=SUGGESTION_COLOR,
+                text_color=SUGGESTION_TEXT_COLOR,
+            )
 
         selected_suggestion["value"] = index
         if 0 <= index < len(suggestion_buttons):
-            suggestion_buttons[index].configure(fg_color=SUGGESTION_SELECTED_COLOR)
+            suggestion_buttons[index].configure(
+                fg_color=SUGGESTION_SELECTED_COLOR,
+                text_color=SELECTED_ROW_TEXT_COLOR,
+            )
 
     def refresh_suggestions():
         nonlocal current_suggestions
@@ -1803,6 +1876,7 @@ def open_translation_editor(app):
                 text=f'"{preview(orig, 45)}" -> "{preview(new, 45)}"',
                 anchor="w",
                 fg_color=SUGGESTION_COLOR,
+                text_color=SUGGESTION_TEXT_COLOR,
                 hover_color=ROW_HOVER_COLOR,
                 font=suggestion_font,
                 command=lambda i=index: select_suggestion(i),
@@ -1869,11 +1943,48 @@ def open_translation_editor(app):
         pop.columnconfigure(1, weight=1)
         pop.rowconfigure(1, weight=1)
 
-    def add_gloss_popup():
+    def reload_glossary(show_feedback=True):
+        nonlocal glossary
+        glossary = load_substitutions()
+        app.glossary_substitutions = glossary
+        refresh_suggestions()
+        if show_feedback:
+            show_message(f"Glossário atualizado: {len(glossary)} entradas")
+
+    def on_glossary_editor_change(updated_entries):
+        nonlocal glossary
+        if not win.winfo_exists():
+            unregister_glossary_callback()
+            return
+        glossary = list(updated_entries)
+        app.glossary_substitutions = glossary
+        refresh_suggestions()
+        show_message(f"Glossário atualizado: {len(glossary)} entradas")
+
+    def selected_translation_text():
         try:
-            sel_text = trans_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+            return trans_text.get(tk.SEL_FIRST, tk.SEL_LAST).strip()
         except tk.TclError:
-            sel_text = ""
+            return ""
+
+    def open_integrated_glossary_editor():
+        selection = selected_translation_text()
+        if selection:
+            open_glossary_editor(app, initial_original=selection)
+            show_message("Selecao enviada ao editor de glossario")
+        else:
+            open_glossary_editor(app)
+            show_message("Selecione um trecho para pre-preencher o glossario")
+
+    def unregister_glossary_callback():
+        callbacks = getattr(app, "glossary_change_callbacks", [])
+        if on_glossary_editor_change in callbacks:
+            callbacks.remove(on_glossary_editor_change)
+
+    app.glossary_change_callbacks.append(on_glossary_editor_change)
+
+    def add_gloss_popup():
+        sel_text = selected_translation_text()
 
         pop = ctk.CTkToplevel(win)
         pop.title("Adicionar ao glossário")
@@ -1893,9 +2004,9 @@ def open_translation_editor(app):
             orig = original_entry.get().strip()
             new = replacement_entry.get().strip()
             if orig and new:
-                if add_to_glossary(orig, new) and (orig, new) not in glossary:
-                    glossary.append((orig, new))
-                    refresh_suggestions()
+                if add_to_glossary(orig, new):
+                    reload_glossary(show_feedback=False)
+                    show_message("Entrada adicionada ao glossário")
             pop.destroy()
 
         ctk.CTkButton(pop, text="Adicionar", command=confirm).pack(pady=14)
@@ -1928,6 +2039,7 @@ def open_translation_editor(app):
     def close_editor():
         save_changes()
         save_editor_settings()
+        unregister_glossary_callback()
         win.destroy()
 
     btn_copy_original.configure(command=copy_original_to_translation)
@@ -1957,6 +2069,8 @@ def open_translation_editor(app):
     btn_apply_one.configure(command=apply_one)
     btn_apply_all.configure(command=apply_all)
     btn_add_gloss.configure(command=add_gloss_popup)
+    btn_reload_gloss.configure(command=reload_glossary)
+    btn_open_gloss.configure(command=open_integrated_glossary_editor)
     btn_find_next.configure(command=find_next_in_translation)
     btn_replace_current.configure(command=replace_current_in_translation)
     btn_replace_all.configure(command=replace_all_in_translation)
@@ -1993,6 +2107,10 @@ def open_translation_editor(app):
     win.bind("<Alt-Right>", next_shortcut)
     win.bind("<F3>", find_next_in_translation)
     win.bind("<F7>", next_quality_warning_shortcut)
+    win.bind(
+        "<Destroy>",
+        lambda event: unregister_glossary_callback() if event.widget is win else None,
+    )
     win.protocol("WM_DELETE_WINDOW", close_editor)
 
     reload_rows()

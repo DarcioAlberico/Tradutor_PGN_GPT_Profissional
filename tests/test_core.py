@@ -22,7 +22,29 @@ from tradutor_pgn.database import (
     set_translation_verified_by_id,
     update_translation_by_id,
 )
-from tradutor_pgn.glossario import add_to_glossary, load_substitutions
+from tradutor_pgn.glossario import (
+    add_glossary_entry,
+    add_to_glossary,
+    analyze_glossary_csv_import,
+    apply_all_substitutions,
+    apply_substitution,
+    deduplicate_glossary_entries,
+    delete_glossary_entry,
+    export_glossary_csv,
+    import_glossary_csv,
+    initialize_glossary_database,
+    find_glossary_matches,
+    find_glossary_suggestions,
+    load_glossary_entries,
+    load_glossary_entries_from_db,
+    load_substitutions,
+    rebuild_glossary_database,
+    restore_glossary_from_backup,
+    save_glossary_entries,
+    sync_glossary_database,
+    update_glossary_entry,
+    validate_glossary_entry,
+)
 from tradutor_pgn.pgn_utils import (
     collect_pgn_files,
     create_comment_batches,
@@ -49,6 +71,12 @@ from tradutor_pgn.db_tools import (
 )
 from tradutor_pgn.editor_text import find_text_ranges, replace_all_text, replace_text_range
 from tradutor_pgn.edit_window import safe_geometry
+from tradutor_pgn.glossary_editor import (
+    build_glossary_diagnostics,
+    glossary_counts,
+    glossary_filter_indices,
+    sort_glossary_indices,
+)
 from tradutor_pgn.settings import (
     clear_editor_draft,
     get_editor_draft,
@@ -880,6 +908,318 @@ class GlossaryTests(unittest.TestCase):
             self.assertEqual(
                 call_quietly(load_substitutions, str(glossary)),
                 [("mate threat", "ameaça de mate")],
+            )
+
+    def test_save_glossary_entries_creates_backup_and_persists_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            backup_dir = tmp_path / "backups"
+            glossary.write_text(
+                "substituicoes = [\n"
+                "    ('old', 'entry'),\n"
+                "]\n",
+                encoding="utf-8",
+            )
+
+            result = save_glossary_entries(
+                [("mate threat", "ameaça de mate"), ("bad move", "lance ruim")],
+                str(glossary),
+                backup_dir=str(backup_dir),
+                timestamp="20260101-120000",
+            )
+
+            backup_path = Path(result["backup_path"])
+            self.assertTrue(backup_path.exists())
+            self.assertIn("('old', 'entry')", backup_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                load_glossary_entries(str(glossary)),
+                [("mate threat", "ameaça de mate"), ("bad move", "lance ruim")],
+            )
+
+    def test_glossary_crud_operations_update_persistent_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            glossary = Path(tmp) / "Substituicoes.txt"
+            save_glossary_entries(
+                [("foo", "bar"), ("bad move", "lance ruim")],
+                str(glossary),
+                create_backup=False,
+            )
+
+            update_stats = update_glossary_entry(
+                1,
+                "good move",
+                "bom lance",
+                str(glossary),
+                timestamp="20260101-120000",
+            )
+            self.assertEqual(update_stats["status"], "updated")
+            self.assertEqual(
+                load_glossary_entries(str(glossary)),
+                [("foo", "bar"), ("good move", "bom lance")],
+            )
+
+            delete_stats = delete_glossary_entry(
+                0,
+                str(glossary),
+                timestamp="20260101-120001",
+            )
+            self.assertEqual(delete_stats["removed"], ("foo", "bar"))
+            self.assertEqual(load_glossary_entries(str(glossary)), [("good move", "bom lance")])
+
+            add_stats = add_glossary_entry(
+                "zugzwang",
+                "zugzwang",
+                str(glossary),
+                timestamp="20260101-120002",
+            )
+            self.assertEqual(add_stats["status"], "inserted")
+            self.assertEqual(
+                load_glossary_entries(str(glossary)),
+                [("good move", "bom lance"), ("zugzwang", "zugzwang")],
+            )
+
+            unchanged_stats = add_glossary_entry("zugzwang", "zugzwang", str(glossary))
+            self.assertEqual(unchanged_stats["status"], "unchanged")
+
+    def test_glossary_validation_and_deduplication(self):
+        entries = [
+            ("mate threat", "ameaça de mate"),
+            ("mate threat", "ameaça de mate"),
+            ("mate threat", "ameaça direta"),
+        ]
+
+        self.assertEqual(
+            deduplicate_glossary_entries(entries),
+            [("mate threat", "ameaça de mate"), ("mate threat", "ameaça direta")],
+        )
+        self.assertIn(
+            "Entrada duplicada.",
+            validate_glossary_entry(
+                "mate threat",
+                "ameaça de mate",
+                entries,
+                current_index=2,
+            ),
+        )
+        self.assertIn(
+            "Mesmo original com substituição diferente.",
+            validate_glossary_entry("mate threat", "outra", entries),
+        )
+        self.assertIn("Texto original vazio.", validate_glossary_entry("", "x"))
+        self.assertIn(
+            "Entradas não podem conter quebras de linha.",
+            validate_glossary_entry("a\nb", "x"),
+        )
+
+    def test_glossary_suggestions_respect_word_boundaries(self):
+        substitutions = [
+            ("for", "para"),
+            ("branca", "brancas"),
+            ("brancas joga", "brancas jogam"),
+            (", as brancas joga", ", as brancas jogam"),
+        ]
+        text = "; as brancas jogaram de forma consistente."
+
+        self.assertEqual(find_glossary_matches(text, "for"), [])
+        self.assertEqual(find_glossary_matches(text, "branca"), [])
+        self.assertEqual(find_glossary_matches(text, "brancas joga"), [])
+        self.assertEqual(find_glossary_suggestions(text, substitutions), [])
+
+        text = "for branca brancas joga, as brancas joga"
+        self.assertEqual(
+            find_glossary_suggestions(text, substitutions),
+            [
+                ("for", "para"),
+                ("branca", "brancas"),
+                ("brancas joga", "brancas jogam"),
+                (", as brancas joga", ", as brancas jogam"),
+            ],
+        )
+        self.assertEqual(apply_substitution("forma for", "for", "para"), "forma para")
+        self.assertEqual(apply_substitution("forma", "for", "para"), "forma")
+        self.assertEqual(
+            apply_all_substitutions("forma for branca", [("for", "para"), ("branca", "brancas")]),
+            "forma para brancas",
+        )
+
+    def test_glossary_is_independent_from_translation_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            db_path = tmp_path / "traducoes.db"
+            glossary_db = tmp_path / "glossario.db"
+
+            save_glossary_entries(
+                [("knight fork", "garfo de cavalo")],
+                str(glossary),
+                create_backup=False,
+                db_path=str(glossary_db),
+            )
+            conn = initialize_database(str(db_path))
+            conn.close()
+            db_path.unlink()
+
+            self.assertFalse(db_path.exists())
+            self.assertTrue(glossary_db.exists())
+            self.assertEqual(
+                load_glossary_entries(str(glossary), db_path=str(glossary_db)),
+                [("knight fork", "garfo de cavalo")],
+            )
+            self.assertEqual(
+                load_glossary_entries_from_db(str(glossary_db)),
+                [("knight fork", "garfo de cavalo")],
+            )
+
+    def test_glossary_database_can_be_rebuilt_and_loaded_independently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            glossary_db = tmp_path / "glossario.db"
+
+            save_glossary_entries(
+                [("pin", "cravada"), ("fork", "garfo")],
+                str(glossary),
+                create_backup=False,
+                sync_db=False,
+            )
+            self.assertFalse(glossary_db.exists())
+
+            stats = rebuild_glossary_database(str(glossary), str(glossary_db))
+            self.assertEqual(stats["synced"], 2)
+            self.assertEqual(
+                load_glossary_entries_from_db(str(glossary_db)),
+                [("pin", "cravada"), ("fork", "garfo")],
+            )
+
+            sync_glossary_database(
+                [("skewer", "raio x")],
+                db_path=str(glossary_db),
+                source_path=str(glossary),
+            )
+            self.assertEqual(load_glossary_entries_from_db(str(glossary_db)), [("skewer", "raio x")])
+
+            conn = initialize_glossary_database(str(glossary_db))
+            try:
+                indexes = {
+                    row[1]
+                    for row in conn.execute("PRAGMA index_list(glossary_entries)").fetchall()
+                }
+            finally:
+                conn.close()
+            self.assertIn("idx_glossary_original", indexes)
+            self.assertIn("idx_glossary_replacement", indexes)
+
+    def test_glossary_editor_filters_and_counts_large_lists(self):
+        entries = [
+            ("mate threat", "ameaça de mate"),
+            ("mate threat", "ameaça de mate"),
+            ("mate threat", "ameaça direta"),
+            ("", "vazio"),
+            ("fork", "fork"),
+        ]
+        diagnostics = build_glossary_diagnostics(entries)
+
+        self.assertEqual(
+            glossary_counts(entries, diagnostics),
+            {"total": 5, "duplicates": 2, "conflicts": 3, "invalid": 5},
+        )
+        self.assertEqual(
+            glossary_filter_indices(entries, "mate", "Todas", diagnostics),
+            [0, 1, 2],
+        )
+        self.assertEqual(
+            glossary_filter_indices(entries, "", "Duplicadas", diagnostics),
+            [0, 1],
+        )
+        self.assertEqual(
+            glossary_filter_indices(entries, "", "Conflitos", diagnostics),
+            [0, 1, 2],
+        )
+        self.assertEqual(
+            glossary_filter_indices(entries, "fork", "Inválidas", diagnostics),
+            [4],
+        )
+        self.assertEqual(sort_glossary_indices(entries, [2, 0, 4], "Original A-Z"), [4, 0, 2])
+        self.assertEqual(
+            sort_glossary_indices(entries, [0, 2, 4], "Maior original"),
+            [0, 2, 4],
+        )
+
+    def test_glossary_csv_export_import_preview_and_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            csv_path = tmp_path / "glossario.csv"
+            backup_dir = tmp_path / "backups"
+
+            save_glossary_entries(
+                [("mate threat", "ameaça de mate"), ("fork", "garfo")],
+                str(glossary),
+                create_backup=False,
+            )
+
+            export_stats = export_glossary_csv(str(csv_path), path=str(glossary))
+            self.assertEqual(export_stats["exported"], 2)
+            self.assertIn("original,replacement", csv_path.read_text(encoding="utf-8-sig"))
+
+            csv_path.write_text(
+                "original,replacement\n"
+                "mate threat,ameaça de mate\n"
+                "fork,garfo duplo\n"
+                "pin,cravada\n"
+                ",sem original\n"
+                "skewer,\n",
+                encoding="utf-8-sig",
+            )
+
+            preview = analyze_glossary_csv_import(str(glossary), str(csv_path))
+            self.assertEqual(preview["total_rows"], 5)
+            self.assertEqual(preview["inserted"], 1)
+            self.assertEqual(preview["duplicates"], 1)
+            self.assertEqual(preview["conflicts"], 1)
+            self.assertEqual(preview["invalid"], 2)
+            self.assertEqual(preview["skipped"], 4)
+
+            stats = import_glossary_csv(
+                str(glossary),
+                str(csv_path),
+                backup_dir=str(backup_dir),
+                timestamp="20260101-120000",
+            )
+            self.assertEqual(stats["inserted"], 1)
+            self.assertTrue(Path(stats["backup_path"]).exists())
+            self.assertEqual(
+                load_glossary_entries(str(glossary)),
+                [
+                    ("mate threat", "ameaça de mate"),
+                    ("fork", "garfo"),
+                    ("pin", "cravada"),
+                ],
+            )
+
+    def test_restore_glossary_from_backup_replaces_file_and_keeps_safety_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            backup = tmp_path / "backup.txt"
+            safety_dir = tmp_path / "safety"
+
+            save_glossary_entries([("current", "atual")], str(glossary), create_backup=False)
+            save_glossary_entries([("backup", "copia")], str(backup), create_backup=False)
+
+            result = restore_glossary_from_backup(
+                str(glossary),
+                str(backup),
+                safety_backup_dir=str(safety_dir),
+                timestamp="20260101-120000",
+            )
+
+            self.assertTrue(Path(result["safety_backup_path"]).exists())
+            self.assertEqual(load_glossary_entries(str(glossary)), [("backup", "copia")])
+            self.assertEqual(
+                load_glossary_entries(result["safety_backup_path"]),
+                [("current", "atual")],
             )
 
 

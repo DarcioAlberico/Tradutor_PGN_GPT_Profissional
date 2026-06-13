@@ -111,3 +111,6 @@ class PGNTranslatorApp:
     # ============================
     def open_edit_window(self):
         app_actions.open_edit_window(self)
+
+    def open_glossary_window(self):
+        app_actions.open_glossary_window(self)

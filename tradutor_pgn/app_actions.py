@@ -10,6 +10,7 @@ from .db_tools import import_csv as import_translations_csv
 from .db_tools import restore_database as restore_database_file
 from .db_tools import show_db_stats as show_database_stats
 from .edit_window import open_translation_editor
+from .glossary_editor import open_glossary_editor
 from .translation_worker import run_translation
 
 
@@ -137,3 +138,7 @@ def restore_database(app):
 
 def open_edit_window(app):
     open_translation_editor(app)
+
+
+def open_glossary_window(app):
+    open_glossary_editor(app)
