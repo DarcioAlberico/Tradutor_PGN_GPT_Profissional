@@ -23,6 +23,7 @@ from .glossario import (
     validate_glossary_entry,
 )
 from .settings import load_settings, save_settings
+from .window_utils import bring_window_to_front
 
 
 ROW_COLOR = ("#f8fafc", "#1f2937")
@@ -148,6 +149,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     win.title("Editor de Glossário")
     win.geometry("1120x700")
     win.minsize(1040, 640)
+    bring_window_to_front(win, app.root)
 
     settings = load_settings()
     editor_settings = settings.get("glossary_editor", {})

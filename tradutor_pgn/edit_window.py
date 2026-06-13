@@ -46,6 +46,7 @@ from .settings import (
     save_settings,
     set_editor_draft,
 )
+from .window_utils import bring_window_to_front
 
 
 ROW_COLOR = ("#f8fafc", "#1f2937")
@@ -124,6 +125,7 @@ def open_translation_editor(app):
     win.title(f"Editar traduções ({lang})")
     win.geometry("1280x760")
     win.minsize(1120, 680)
+    bring_window_to_front(win, app.root)
 
     settings = load_settings()
     editor_settings = settings.get("editor", {})
