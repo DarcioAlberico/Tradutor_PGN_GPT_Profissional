@@ -1,0 +1,3 @@
+requests>=2.32
+chardet>=5.2
+customtkinter>=5.2

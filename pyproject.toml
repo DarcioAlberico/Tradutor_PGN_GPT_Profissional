@@ -1,0 +1,14 @@
+[project]
+name = "pgn-tradutor-pro"
+version = "0.1.0"
+description = "Aplicacao para traduzir comentarios PGN com cache SQLite e glossario."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "chardet>=5.2",
+    "customtkinter>=5.2",
+    "requests>=2.32",
+]
+
+[tool.uv]
+package = false
