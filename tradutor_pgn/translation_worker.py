@@ -78,6 +78,16 @@ def run_translation(app, source_path, target_language, process_subdirs):
             value = (processed_comments / total_comments) * 100 if total_comments > 0 else 0
             app.root.after(0, lambda v=value: app.progress.set(v / 100))
 
+        def wait_if_paused():
+            pause_started = None
+            while app.pause_flag.is_set() and not app.cancel_flag.is_set():
+                if pause_started is None:
+                    pause_started = time.perf_counter()
+                time.sleep(0.2)
+            if pause_started is None:
+                return 0.0
+            return time.perf_counter() - pause_started
+
         for pgn_index, pgn_file in enumerate(pgn_files, start=1):
             if app.cancel_flag.is_set():
                 canceled = True
@@ -99,8 +109,15 @@ def run_translation(app, source_path, target_language, process_subdirs):
             translated_map = {}
 
             for batch_idx, batch in enumerate(batches, start=1):
-                while app.pause_flag.is_set() and not app.cancel_flag.is_set():
-                    time.sleep(0.2)
+                batch_started = time.perf_counter()
+                batch_api_time = 0.0
+                batch_wait_time = 0.0
+                batch_pause_time = wait_if_paused()
+                batch_api_requests = 0
+                start_translated_count = translated_count
+                start_filled_empty_count = filled_empty_count
+                start_cache_count = cache_count
+                start_cleaned_empty_count = cleaned_empty_count
 
                 if app.cancel_flag.is_set():
                     canceled = True
@@ -109,8 +126,7 @@ def run_translation(app, source_path, target_language, process_subdirs):
                     return
 
                 for comment in batch:
-                    while app.pause_flag.is_set() and not app.cancel_flag.is_set():
-                        time.sleep(0.2)
+                    batch_pause_time += wait_if_paused()
 
                     if app.cancel_flag.is_set():
                         canceled = True
@@ -133,12 +149,15 @@ def run_translation(app, source_path, target_language, process_subdirs):
                             update_progress()
                             continue
 
+                        api_started = time.perf_counter()
                         translated = translate_text(
                             cleaned_comment,
                             target_language,
                             app.log_message,
                             app.cancel_flag
                         )
+                        batch_api_time += time.perf_counter() - api_started
+                        batch_api_requests += 1
                         if translated:
                             translated = apply_automatic_substitutions(
                                 translated,
@@ -159,15 +178,42 @@ def run_translation(app, source_path, target_language, process_subdirs):
                             elif save_status == "filled_empty":
                                 filled_empty_count += 1
 
-                        time.sleep(random.uniform(0.3, 0.9))
+                        wait_seconds = random.uniform(0.3, 0.9)
+                        time.sleep(wait_seconds)
+                        batch_wait_time += wait_seconds
 
                     processed_comments += 1
                     update_progress()
 
                 conn.commit()
+                batch_total_time = time.perf_counter() - batch_started
+                batch_local_time = max(
+                    0.0,
+                    batch_total_time - batch_api_time - batch_wait_time - batch_pause_time,
+                )
+                batch_new = translated_count - start_translated_count
+                batch_filled = filled_empty_count - start_filled_empty_count
+                batch_cache = cache_count - start_cache_count
+                batch_cleaned = cleaned_empty_count - start_cleaned_empty_count
+                average_api_time = (
+                    batch_api_time / batch_api_requests
+                    if batch_api_requests
+                    else 0.0
+                )
                 app.log_message(
                     f"  - Lote {batch_idx}/{len(batches)} concluido. "
-                    f"Novas: {translated_count} | Preenchidas: {filled_empty_count} | Cache: {cache_count}"
+                    f"Novas: {translated_count} (+{batch_new}) | "
+                    f"Preenchidas: {filled_empty_count} (+{batch_filled}) | "
+                    f"Cache: {cache_count} (+{batch_cache}) | "
+                    f"Limpeza: {cleaned_empty_count} (+{batch_cleaned})"
+                )
+                app.log_message(
+                    f"    Tempos do lote: total {batch_total_time:.1f}s | "
+                    f"API {batch_api_time:.1f}s ({batch_api_requests} req, "
+                    f"media {average_api_time:.1f}s) | "
+                    f"espera {batch_wait_time:.1f}s | "
+                    f"pausa {batch_pause_time:.1f}s | "
+                    f"local {batch_local_time:.1f}s"
                 )
 
             if translated_map:
