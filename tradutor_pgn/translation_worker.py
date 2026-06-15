@@ -23,7 +23,7 @@ from .pgn_utils import (
 from .translation_api import translate_text
 
 
-TRANSLATION_REQUEST_DELAY_SECONDS = (0.08, 0.22)
+TRANSLATION_REQUEST_DELAY_SECONDS = (0.04, 0.12)
 
 
 def run_translation(app, source_path, target_language, process_subdirs):
