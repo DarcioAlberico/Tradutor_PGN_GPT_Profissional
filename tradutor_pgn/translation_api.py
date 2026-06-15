@@ -1,4 +1,5 @@
 import re
+import random
 import time
 
 import requests
@@ -76,7 +77,7 @@ def translate_text_chunk(text: str, target_language: str, log_message=None):
             return None
 
         if attempt < 3:
-            time.sleep(1.5 * attempt)
+            time.sleep(random.uniform(0.6, 2.2))
 
     return None
 
