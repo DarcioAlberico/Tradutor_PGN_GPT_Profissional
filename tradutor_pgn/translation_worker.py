@@ -159,7 +159,7 @@ def run_translation(app, source_path, target_language, process_subdirs):
                             elif save_status == "filled_empty":
                                 filled_empty_count += 1
 
-                        time.sleep(random.uniform(0.7, 2.2))
+                        time.sleep(random.uniform(0.3, 0.9))
 
                     processed_comments += 1
                     update_progress()
