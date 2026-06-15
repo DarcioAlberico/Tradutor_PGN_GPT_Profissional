@@ -108,6 +108,9 @@ class PGNTranslatorApp:
     def restore_database(self):
         app_actions.restore_database(self)
 
+    def apply_automatic_rules(self):
+        app_actions.apply_automatic_rules(self)
+
     # ============================
     #   EDITAR TRADUÇÕES
     # ============================

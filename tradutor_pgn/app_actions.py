@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from .db_tools import backup_database as backup_database_file
+from .db_tools import apply_automatic_rules_to_database as apply_auto_rules_to_database
 from .db_tools import export_csv as export_translations_csv
 from .db_tools import import_csv as import_translations_csv
 from .db_tools import restore_database as restore_database_file
@@ -134,6 +135,10 @@ def backup_database(app):
 
 def restore_database(app):
     restore_database_file(app)
+
+
+def apply_automatic_rules(app):
+    apply_auto_rules_to_database(app, target_language=app.target_language.get())
 
 
 def open_edit_window(app):

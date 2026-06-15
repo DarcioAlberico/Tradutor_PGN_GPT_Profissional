@@ -134,6 +134,7 @@ def setup_main_ui(app):
             {"text": "Importar CSV", "command": app.import_csv},
             {"text": "Backup BD", "command": app.backup_database},
             {"text": "Restaurar BD", "command": app.restore_database},
+            {"text": "Aplicar Automaticas", "command": app.apply_automatic_rules},
             {"text": "Editar Traduções", "command": app.open_edit_window},
             {"text": "Editar Glossário", "command": app.open_glossary_window},
         ],

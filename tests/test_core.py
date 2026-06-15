@@ -73,7 +73,9 @@ from tradutor_pgn.review_quality import (
     summarize_quality_warnings,
 )
 from tradutor_pgn.db_tools import (
+    analyze_database_automatic_rules,
     analyze_translations_csv_import,
+    apply_database_automatic_rules,
     create_database_backup,
     format_quality_stats,
     import_translations_from_csv,
@@ -418,6 +420,80 @@ class DatabaseTests(unittest.TestCase):
                 self.assertEqual(rows, [("current orig", "current trans")])
             finally:
                 safety_conn.close()
+
+    def test_apply_database_automatic_rules_updates_existing_translations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            backup_dir = tmp_path / "backups"
+
+            conn = initialize_database(str(db_path))
+            cursor = conn.cursor()
+            save_translation(cursor, "orig 1", "A rainha venceu com mate", "pt")
+            save_translation(cursor, "orig 2", "As rainhas ficaram", "pt")
+            save_translation(cursor, "orig 3", "A rainha venceu", "en")
+            verified_id = cursor.execute(
+                """
+                SELECT id
+                FROM comments
+                WHERE original_comment = ?
+                """,
+                ("orig 1",),
+            ).fetchone()[0]
+            set_translation_verified_by_id(cursor, verified_id, True)
+            conn.commit()
+            conn.close()
+
+            preview = analyze_database_automatic_rules(
+                str(db_path),
+                target_language="pt",
+                automatic_rules=[
+                    ("rainha", "dama"),
+                    ("mate", "xeque-mate"),
+                ],
+            )
+            self.assertEqual(preview["rules"], 2)
+            self.assertEqual(preview["scanned"], 2)
+            self.assertEqual(preview["changed"], 1)
+
+            stats = apply_database_automatic_rules(
+                str(db_path),
+                target_language="pt",
+                automatic_rules=[
+                    ("rainha", "dama"),
+                    ("mate", "xeque-mate"),
+                ],
+                backup_dir=str(backup_dir),
+            )
+
+            self.assertEqual(stats["changed"], 1)
+            self.assertEqual(stats["unchanged"], 1)
+            self.assertTrue(Path(stats["backup_path"]).exists())
+
+            conn = initialize_database(str(db_path))
+            try:
+                rows = {
+                    row[0]: (row[1], row[2])
+                    for row in conn.execute(
+                        """
+                        SELECT original_comment, translated_comment, verified
+                        FROM comments
+                        ORDER BY original_comment
+                        """
+                    ).fetchall()
+                }
+                history = fetch_comment_history(cursor=conn.cursor(), comment_id=verified_id)
+            finally:
+                conn.close()
+
+            self.assertEqual(rows["orig 1"], ("A dama venceu com xeque-mate", 1))
+            self.assertEqual(rows["orig 2"], ("As rainhas ficaram", 0))
+            self.assertEqual(rows["orig 3"], ("A rainha venceu", 0))
+            self.assertEqual(history[0][1], "automatic_rules")
+            self.assertEqual(history[0][2], "A rainha venceu com mate")
+            self.assertEqual(history[0][3], "A dama venceu com xeque-mate")
+            self.assertEqual(history[0][4], 1)
+            self.assertEqual(history[0][5], 1)
 
     def test_save_translation_fills_existing_empty_row(self):
         with tempfile.TemporaryDirectory() as tmp:

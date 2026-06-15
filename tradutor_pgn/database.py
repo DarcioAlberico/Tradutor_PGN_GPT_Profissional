@@ -578,3 +578,119 @@ def set_exact_translation_matches_verified(cursor, comment_id):
                 1,
             )
     return changed_rows
+
+
+def analyze_automatic_translation_updates(
+    cursor,
+    automatic_rules,
+    apply_substitutions,
+    target_language=None,
+):
+    if not automatic_rules:
+        return {
+            "rules": 0,
+            "scanned": 0,
+            "changed": 0,
+            "unchanged": 0,
+            "target_language": target_language,
+        }
+
+    clauses = [
+        "translated_comment IS NOT NULL",
+        "translated_comment <> ''",
+    ]
+    params = []
+    if target_language:
+        clauses.append("target_language = ?")
+        params.append(target_language)
+
+    rows = cursor.execute(
+        f"""
+        SELECT id, translated_comment
+        FROM comments
+        WHERE {" AND ".join(clauses)}
+        ORDER BY id
+        """,
+        params,
+    ).fetchall()
+
+    changed = 0
+    for _comment_id, translation in rows:
+        updated_translation = apply_substitutions(translation, automatic_rules)
+        if updated_translation != translation:
+            changed += 1
+
+    return {
+        "rules": len(automatic_rules),
+        "scanned": len(rows),
+        "changed": changed,
+        "unchanged": len(rows) - changed,
+        "target_language": target_language,
+    }
+
+
+def apply_automatic_translation_updates(
+    cursor,
+    automatic_rules,
+    apply_substitutions,
+    target_language=None,
+):
+    stats = analyze_automatic_translation_updates(
+        cursor,
+        automatic_rules,
+        apply_substitutions,
+        target_language=target_language,
+    )
+    if stats["changed"] == 0:
+        return stats
+
+    clauses = [
+        "translated_comment IS NOT NULL",
+        "translated_comment <> ''",
+    ]
+    params = []
+    if target_language:
+        clauses.append("target_language = ?")
+        params.append(target_language)
+
+    rows = cursor.execute(
+        f"""
+        SELECT id, translated_comment, verified
+        FROM comments
+        WHERE {" AND ".join(clauses)}
+        ORDER BY id
+        """,
+        params,
+    ).fetchall()
+
+    changed = 0
+    for comment_id, previous_translation, previous_verified in rows:
+        previous_verified = 1 if previous_verified == 1 else 0
+        updated_translation = apply_substitutions(previous_translation, automatic_rules)
+        if updated_translation == previous_translation:
+            continue
+
+        cursor.execute(
+            """
+            UPDATE comments
+            SET translated_comment = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (updated_translation, comment_id),
+        )
+        if cursor.rowcount:
+            changed += 1
+            record_comment_history(
+                cursor,
+                comment_id,
+                "automatic_rules",
+                previous_translation,
+                updated_translation,
+                previous_verified,
+                previous_verified,
+            )
+
+    stats["changed"] = changed
+    stats["unchanged"] = stats["scanned"] - changed
+    return stats

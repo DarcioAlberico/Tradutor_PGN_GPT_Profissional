@@ -21,6 +21,7 @@ from .database import (
     set_translation_verified_by_id,
     update_translation_by_id,
 )
+from .db_tools import apply_automatic_rules_to_database
 from .editor_text import find_text_ranges, replace_all_text
 from .glossario import (
     add_to_glossary,
@@ -518,6 +519,11 @@ def open_translation_editor(app):
         width=150,
     )
     btn_export_qa = ctk.CTkButton(secondary_actions, text="Exportar QA", width=110)
+    btn_apply_auto = ctk.CTkButton(
+        secondary_actions,
+        text="Aplicar automaticas",
+        width=150,
+    )
     btn_history = ctk.CTkButton(secondary_actions, text="Hist\u00f3rico", width=100)
 
     for index, button in enumerate(
@@ -528,6 +534,7 @@ def open_translation_editor(app):
             btn_redo,
             btn_next_qa,
             btn_export_qa,
+            btn_apply_auto,
             btn_history,
         ]
     ):
@@ -1563,6 +1570,7 @@ def open_translation_editor(app):
             "edit_verify": "Edicao + verificacao",
             "verify": "Verificacao",
             "verify_exact_match": "Verificacao por traducao igual",
+            "automatic_rules": "Regras automaticas",
             "mark_pending": "Voltou para pendente",
             "fill_empty": "Preenchimento inicial",
             "restore": "Restauracao",
@@ -1874,6 +1882,31 @@ def open_translation_editor(app):
         else:
             clear_current()
 
+    def apply_automatic_rules_for_current_language():
+        save_changes()
+        previous_id = current["id"]
+        stats = apply_automatic_rules_to_database(
+            app,
+            target_language=lang,
+            parent=win,
+        )
+        if not stats or stats.get("changed", 0) == 0:
+            return
+
+        reload_rows()
+        if not rows:
+            clear_current()
+            return
+
+        next_index = 0
+        if previous_id is not None:
+            for row_index, row in enumerate(rows):
+                if row[0] == previous_id:
+                    next_index = row_index
+                    break
+        select_index(next_index)
+        show_message(f"{stats['changed']} traducao(oes) atualizada(s)")
+
     def select_suggestion(index):
         old = selected_suggestion["value"]
         if old is not None and 0 <= old < len(suggestion_buttons):
@@ -2141,6 +2174,7 @@ def open_translation_editor(app):
     btn_pending.configure(command=mark_pending)
     btn_next_qa.configure(command=go_to_next_quality_warning)
     btn_export_qa.configure(command=export_quality_report)
+    btn_apply_auto.configure(command=apply_automatic_rules_for_current_language)
     btn_history.configure(command=open_history_window)
     status_segment.configure(command=lambda _value: toggle_filter())
     btn_refresh.configure(command=refresh_suggestions)

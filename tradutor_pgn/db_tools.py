@@ -5,6 +5,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 from .database import (
+    analyze_automatic_translation_updates,
+    apply_automatic_translation_updates,
     fetch_export_rows,
     fetch_review_rows,
     get_database_stats,
@@ -12,6 +14,7 @@ from .database import (
     save_translation,
     set_translation_verified_by_id,
 )
+from .glossario import apply_automatic_substitutions, load_automatic_substitutions
 from .review_quality import summarize_quality_warnings
 
 
@@ -279,6 +282,134 @@ def import_translations_from_csv(
         conn.close()
 
     return stats
+
+
+def analyze_database_automatic_rules(db_path, target_language=None, automatic_rules=None):
+    if automatic_rules is None:
+        automatic_rules = load_automatic_substitutions()
+
+    conn = initialize_database(db_path)
+    try:
+        return analyze_automatic_translation_updates(
+            conn.cursor(),
+            automatic_rules,
+            apply_automatic_substitutions,
+            target_language=target_language,
+        )
+    finally:
+        conn.close()
+
+
+def apply_database_automatic_rules(
+    db_path,
+    target_language=None,
+    automatic_rules=None,
+    create_backup=True,
+    backup_dir=None,
+):
+    if automatic_rules is None:
+        automatic_rules = load_automatic_substitutions()
+
+    backup_path = None
+    if create_backup:
+        backup_path = create_database_backup(db_path, backup_dir=backup_dir)
+
+    conn = initialize_database(db_path)
+    try:
+        stats = apply_automatic_translation_updates(
+            conn.cursor(),
+            automatic_rules,
+            apply_automatic_substitutions,
+            target_language=target_language,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    stats["backup_path"] = backup_path
+    return stats
+
+
+def format_automatic_rules_scope(target_language):
+    return f"idioma atual ({target_language})" if target_language else "todos os idiomas"
+
+
+def apply_automatic_rules_to_database(app, target_language=None, parent=None):
+    try:
+        automatic_rules = load_automatic_substitutions()
+        if not automatic_rules:
+            messagebox.showinfo(
+                "Substituicoes automaticas",
+                "Nenhuma regra automatica cadastrada no glossario.",
+                parent=parent,
+            )
+            return None
+
+        preview = analyze_database_automatic_rules(
+            app.output_db,
+            target_language=target_language,
+            automatic_rules=automatic_rules,
+        )
+        if preview["changed"] == 0:
+            messagebox.showinfo(
+                "Substituicoes automaticas",
+                (
+                    "Nenhuma traducao existente precisa ser atualizada.\n\n"
+                    f"Escopo: {format_automatic_rules_scope(target_language)}\n"
+                    f"Regras automaticas: {preview['rules']}\n"
+                    f"Traducoes analisadas: {preview['scanned']}"
+                ),
+                parent=parent,
+            )
+            return preview
+
+        confirmed = messagebox.askyesno(
+            "Substituicoes automaticas",
+            (
+                "Aplicar regras automaticas nas traducoes existentes?\n\n"
+                f"Escopo: {format_automatic_rules_scope(target_language)}\n"
+                f"Regras automaticas: {preview['rules']}\n"
+                f"Traducoes analisadas: {preview['scanned']}\n"
+                f"Traducoes que serao alteradas: {preview['changed']}\n\n"
+                "Um backup do banco sera criado antes de alterar os dados."
+            ),
+            parent=parent,
+        )
+        if not confirmed:
+            return None
+
+        stats = apply_database_automatic_rules(
+            app.output_db,
+            target_language=target_language,
+            automatic_rules=automatic_rules,
+        )
+        if hasattr(app, "translation_cache"):
+            app.translation_cache.clear()
+
+        messagebox.showinfo(
+            "Substituicoes automaticas",
+            (
+                "Regras automaticas aplicadas com sucesso.\n\n"
+                f"Escopo: {format_automatic_rules_scope(target_language)}\n"
+                f"Regras automaticas: {stats['rules']}\n"
+                f"Traducoes analisadas: {stats['scanned']}\n"
+                f"Traducoes alteradas: {stats['changed']}\n"
+                f"Sem alteracao: {stats['unchanged']}\n\n"
+                f"Backup criado em:\n{stats['backup_path']}"
+            ),
+            parent=parent,
+        )
+        return stats
+    except Exception as e:
+        messagebox.showerror(
+            "Erro",
+            f"Erro ao aplicar substituicoes automaticas:\n{e}",
+            parent=parent,
+        )
+        return None
 
 
 def format_quality_stats(summary, indent=""):
