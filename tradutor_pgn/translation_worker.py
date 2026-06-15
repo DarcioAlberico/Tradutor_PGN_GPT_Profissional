@@ -1,4 +1,5 @@
 import os
+import random
 import time
 from tkinter import messagebox
 
@@ -158,7 +159,7 @@ def run_translation(app, source_path, target_language, process_subdirs):
                             elif save_status == "filled_empty":
                                 filled_empty_count += 1
 
-                        time.sleep(0.20)
+                        time.sleep(random.uniform(0.7, 2.2))
 
                     processed_comments += 1
                     update_progress()
