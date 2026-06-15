@@ -585,6 +585,7 @@ def analyze_automatic_translation_updates(
     automatic_rules,
     apply_substitutions,
     target_language=None,
+    sample_limit=10,
 ):
     if not automatic_rules:
         return {
@@ -593,6 +594,7 @@ def analyze_automatic_translation_updates(
             "changed": 0,
             "unchanged": 0,
             "target_language": target_language,
+            "examples": [],
         }
 
     clauses = [
@@ -606,7 +608,7 @@ def analyze_automatic_translation_updates(
 
     rows = cursor.execute(
         f"""
-        SELECT id, translated_comment
+        SELECT id, original_comment, translated_comment, target_language
         FROM comments
         WHERE {" AND ".join(clauses)}
         ORDER BY id
@@ -615,10 +617,21 @@ def analyze_automatic_translation_updates(
     ).fetchall()
 
     changed = 0
-    for _comment_id, translation in rows:
+    examples = []
+    for comment_id, original, translation, row_language in rows:
         updated_translation = apply_substitutions(translation, automatic_rules)
         if updated_translation != translation:
             changed += 1
+            if len(examples) < sample_limit:
+                examples.append(
+                    {
+                        "id": comment_id,
+                        "original_comment": original,
+                        "target_language": row_language,
+                        "previous_translation": translation,
+                        "new_translation": updated_translation,
+                    }
+                )
 
     return {
         "rules": len(automatic_rules),
@@ -626,6 +639,7 @@ def analyze_automatic_translation_updates(
         "changed": changed,
         "unchanged": len(rows) - changed,
         "target_language": target_language,
+        "examples": examples,
     }
 
 

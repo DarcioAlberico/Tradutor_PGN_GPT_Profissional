@@ -337,6 +337,33 @@ def format_automatic_rules_scope(target_language):
     return f"idioma atual ({target_language})" if target_language else "todos os idiomas"
 
 
+def _preview_line(value, limit=90):
+    text = " ".join((value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def format_automatic_rule_examples(examples, max_items=5):
+    if not examples:
+        return ""
+
+    lines = ["Exemplos:"]
+    for example in examples[:max_items]:
+        lines.extend(
+            [
+                f"  ID {example['id']} ({example['target_language']}):",
+                f"    Antes: {_preview_line(example['previous_translation'])}",
+                f"    Depois: {_preview_line(example['new_translation'])}",
+            ]
+        )
+
+    if len(examples) > max_items:
+        lines.append(f"  ... mais {len(examples) - max_items} exemplo(s) na pre-analise.")
+
+    return "\n".join(lines)
+
+
 def apply_automatic_rules_to_database(app, target_language=None, parent=None):
     try:
         automatic_rules = load_automatic_substitutions()
@@ -374,6 +401,7 @@ def apply_automatic_rules_to_database(app, target_language=None, parent=None):
                 f"Regras automaticas: {preview['rules']}\n"
                 f"Traducoes analisadas: {preview['scanned']}\n"
                 f"Traducoes que serao alteradas: {preview['changed']}\n\n"
+                f"{format_automatic_rule_examples(preview.get('examples', []))}\n\n"
                 "Um backup do banco sera criado antes de alterar os dados."
             ),
             parent=parent,

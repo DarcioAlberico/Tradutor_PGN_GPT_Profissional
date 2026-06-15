@@ -77,6 +77,7 @@ from tradutor_pgn.db_tools import (
     analyze_translations_csv_import,
     apply_database_automatic_rules,
     create_database_backup,
+    format_automatic_rule_examples,
     format_quality_stats,
     import_translations_from_csv,
     restore_database_from_backup,
@@ -455,6 +456,20 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(preview["rules"], 2)
             self.assertEqual(preview["scanned"], 2)
             self.assertEqual(preview["changed"], 1)
+            self.assertEqual(len(preview["examples"]), 1)
+            self.assertEqual(preview["examples"][0]["id"], verified_id)
+            self.assertEqual(
+                preview["examples"][0]["previous_translation"],
+                "A rainha venceu com mate",
+            )
+            self.assertEqual(
+                preview["examples"][0]["new_translation"],
+                "A dama venceu com xeque-mate",
+            )
+            self.assertIn(
+                "A dama venceu com xeque-mate",
+                format_automatic_rule_examples(preview["examples"]),
+            )
 
             stats = apply_database_automatic_rules(
                 str(db_path),
