@@ -487,15 +487,16 @@ def save_glossary_entries(
     }
 
 
-def validate_glossary_entry(orig, new, existing_entries=None, current_index=None):
+def validate_glossary_entry(orig, new, existing_entries=None, current_index=None, rule_type=None):
     """Retorna avisos de validação para uma entrada do glossário."""
     warnings = []
     orig = "" if orig is None else str(orig)
     new = "" if new is None else str(new)
+    rule_type = _normalize_rule_type(rule_type)
 
     if not orig.strip():
         warnings.append("Texto original vazio.")
-    if not new.strip():
+    if not new.strip() and rule_type != GLOSSARY_RULE_CLEANUP:
         warnings.append("Texto de substituição vazio.")
     if orig == new and orig:
         warnings.append("Texto original igual à substituição.")
@@ -753,7 +754,7 @@ def load_substitutions(path=None):
         return []
 
     try:
-        substitutions = load_glossary_entries(path)
+        substitutions = load_suggestion_substitutions(path)
 
         print(f"[GLOSSÁRIO] Carregadas {len(substitutions)} entradas do glossário.")
         return substitutions
@@ -832,6 +833,29 @@ def find_glossary_suggestions(text, substitutions, max_suggestions=80):
     return suggestions
 
 
+def filter_glossary_entries_by_type(entries, rule_type):
+    rule_type = _normalize_rule_type(rule_type)
+    return [
+        glossary_entry_pair(entry)
+        for entry in _normalize_detailed_entries(entries)
+        if glossary_entry_type(entry) == rule_type
+    ]
+
+
+def load_cleanup_substitutions(path=None):
+    return filter_glossary_entries_by_type(
+        load_glossary_entry_details(path),
+        GLOSSARY_RULE_CLEANUP,
+    )
+
+
+def load_suggestion_substitutions(path=None):
+    return filter_glossary_entries_by_type(
+        load_glossary_entry_details(path),
+        GLOSSARY_RULE_SUGGESTION,
+    )
+
+
 def apply_substitution(text, orig, new):
     """Aplica uma substituição, na primeira ocorrência encontrada."""
     return _replace_glossary_matches(text, orig, new, count=1)
@@ -842,6 +866,11 @@ def apply_all_substitutions(text, suggestions):
     for orig, new in suggestions:
         text = _replace_glossary_matches(text, orig, new)
     return text
+
+
+def clean_comment_for_translation(text, cleanup_rules):
+    cleaned = apply_all_substitutions(text or "", cleanup_rules)
+    return " ".join(cleaned.split())
 
 
 def add_to_glossary(orig, new, path=None):

@@ -32,6 +32,7 @@ from tradutor_pgn.glossario import (
     analyze_glossary_csv_import,
     apply_all_substitutions,
     apply_substitution,
+    clean_comment_for_translation,
     deduplicate_glossary_entries,
     delete_glossary_entry,
     export_glossary_csv,
@@ -43,6 +44,7 @@ from tradutor_pgn.glossario import (
     load_glossary_entry_details,
     load_glossary_entry_details_from_db,
     load_glossary_entries_from_db,
+    load_cleanup_substitutions,
     load_substitutions,
     rebuild_glossary_database,
     restore_glossary_from_backup,
@@ -939,6 +941,58 @@ class TranslationWorkerTests(unittest.TestCase):
             self.assertFalse(app.is_processing)
             self.assertTrue(app.reset_called)
 
+    def test_run_translation_applies_cleanup_rules_before_api_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n'
+                "1. e4 {== EndSquare ==} e5 {White == EndSquare == starts}\n",
+                encoding="utf-8",
+            )
+
+            app = FakeApp(db_path)
+            translated_inputs = []
+            original_translate_text = translation_worker.translate_text
+            original_showinfo = translation_worker.messagebox.showinfo
+            original_cleanup = translation_worker.load_cleanup_substitutions
+            try:
+                def fake_translate(text, *_args, **_kwargs):
+                    translated_inputs.append(text)
+                    return f"PT:{text}"
+
+                translation_worker.translate_text = fake_translate
+                translation_worker.messagebox.showinfo = lambda *_args, **_kwargs: None
+                translation_worker.load_cleanup_substitutions = lambda: [
+                    ("== EndSquare ==", ""),
+                ]
+
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+            finally:
+                translation_worker.translate_text = original_translate_text
+                translation_worker.messagebox.showinfo = original_showinfo
+                translation_worker.load_cleanup_substitutions = original_cleanup
+
+            self.assertEqual(translated_inputs, ["White starts"])
+            output = tmp_path / "game-BR.pgn"
+            output_text = output.read_text(encoding="utf-8")
+            self.assertIn("{}", output_text)
+            self.assertIn("{PT:White starts}", output_text)
+
+            conn = initialize_database(str(db_path))
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT original_comment, translated_comment
+                    FROM comments
+                    ORDER BY original_comment
+                    """
+                ).fetchall()
+            finally:
+                conn.close()
+            self.assertEqual(rows, [("White == EndSquare == starts", "PT:White starts")])
+
 
 class GlossaryTests(unittest.TestCase):
     def test_load_and_append_glossary_entry(self):
@@ -1112,6 +1166,47 @@ class GlossaryTests(unittest.TestCase):
             self.assertIn(
                 "original,replacement,type",
                 csv_path.read_text(encoding="utf-8-sig"),
+            )
+
+    def test_cleanup_rules_are_separate_from_suggestions_and_allow_empty_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            glossary = Path(tmp) / "Substituicoes.txt"
+            save_glossary_entries(
+                [
+                    ("rainha", "dama"),
+                    ("== EndSquare ==", "", GLOSSARY_RULE_CLEANUP),
+                    ("== StartSquare ==", "", GLOSSARY_RULE_CLEANUP),
+                ],
+                str(glossary),
+                create_backup=False,
+            )
+
+            self.assertEqual(load_substitutions(str(glossary)), [("rainha", "dama")])
+            self.assertEqual(
+                load_cleanup_substitutions(str(glossary)),
+                [("== EndSquare ==", ""), ("== StartSquare ==", "")],
+            )
+            self.assertNotIn(
+                "Texto de substituição vazio.",
+                validate_glossary_entry(
+                    "== EndSquare ==",
+                    "",
+                    rule_type=GLOSSARY_RULE_CLEANUP,
+                ),
+            )
+            self.assertEqual(
+                clean_comment_for_translation(
+                    "White plays == StartSquare == e4 == EndSquare ==",
+                    load_cleanup_substitutions(str(glossary)),
+                ),
+                "White plays e4",
+            )
+            self.assertEqual(
+                clean_comment_for_translation(
+                    "== StartSquare == == EndSquare ==",
+                    load_cleanup_substitutions(str(glossary)),
+                ),
+                "",
             )
 
     def test_glossary_validation_and_deduplication(self):

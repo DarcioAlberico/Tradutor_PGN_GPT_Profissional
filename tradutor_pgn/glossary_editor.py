@@ -101,8 +101,13 @@ def build_glossary_diagnostics(entries):
         replacements_by_original.setdefault(orig, set()).add(new)
 
     diagnostics = []
-    for orig, new in entry_pairs(entries):
-        warnings = validate_glossary_entry(orig, new)
+    for entry in entries:
+        orig, new = glossary_entry_pair(entry)
+        warnings = validate_glossary_entry(
+            orig,
+            new,
+            rule_type=glossary_entry_type(entry),
+        )
         if pair_counts.get((orig, new), 0) > 1:
             warnings.append("Entrada duplicada.")
         if orig and len(replacements_by_original.get(orig, set())) > 1:
@@ -115,7 +120,13 @@ def glossary_entry_warnings(entries, index, diagnostics=None):
     if diagnostics is not None and 0 <= index < len(diagnostics):
         return diagnostics[index]
     orig, new = glossary_entry_pair(entries[index])
-    return validate_glossary_entry(orig, new, entries, current_index=index)
+    return validate_glossary_entry(
+        orig,
+        new,
+        entries,
+        current_index=index,
+        rule_type=glossary_entry_type(entries[index]),
+    )
 
 
 def glossary_filter_indices(entries, search_text="", filter_name="Todas", diagnostics=None):
@@ -501,6 +512,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
             new,
             entries,
             current_index=current_index,
+            rule_type=current_rule_type(),
         )
         if warnings:
             validation_label.configure(
@@ -683,7 +695,13 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     def save_current():
         orig, new = current_pair()
         rule_type = current_rule_type()
-        warnings = validate_glossary_entry(orig, new, entries, selected["index"])
+        warnings = validate_glossary_entry(
+            orig,
+            new,
+            entries,
+            selected["index"],
+            rule_type=rule_type,
+        )
         blocking = [
             warning
             for warning in warnings
@@ -723,7 +741,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     def save_as_new():
         orig, new = current_pair()
         rule_type = current_rule_type()
-        warnings = validate_glossary_entry(orig, new, entries)
+        warnings = validate_glossary_entry(orig, new, entries, rule_type=rule_type)
         if "Texto original vazio." in warnings or "Texto de substituição vazio." in warnings:
             show_message("Corrija os campos obrigatórios", ERROR_COLOR)
             return

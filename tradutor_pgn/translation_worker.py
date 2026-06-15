@@ -3,6 +3,7 @@ import time
 from tkinter import messagebox
 
 from .database import initialize_database, load_translation_cache, save_translation
+from .glossario import clean_comment_for_translation, load_cleanup_substitutions
 from .pgn_utils import (
     available_output_path,
     collect_pgn_files,
@@ -26,6 +27,9 @@ def run_translation(app, source_path, target_language, process_subdirs):
         cursor = conn.cursor()
         app.translation_cache = load_translation_cache(cursor, target_language)
         app.log_message(f"Cache carregado: {len(app.translation_cache)} traducoes")
+        cleanup_rules = load_cleanup_substitutions()
+        if cleanup_rules:
+            app.log_message(f"Regras de limpeza carregadas: {len(cleanup_rules)}")
 
         pgn_files, skipped_generated = collect_pgn_files(source_path, process_subdirs)
         if skipped_generated:
@@ -58,6 +62,7 @@ def run_translation(app, source_path, target_language, process_subdirs):
         translated_count = 0
         filled_empty_count = 0
         cache_count = 0
+        cleaned_empty_count = 0
         generated_files = 0
 
         def update_progress():
@@ -108,8 +113,19 @@ def run_translation(app, source_path, target_language, process_subdirs):
                         translated_map[comment] = app.translation_cache[comment]
                         cache_count += 1
                     else:
-                        translated = translate_text(
+                        cleaned_comment = clean_comment_for_translation(
                             comment,
+                            cleanup_rules,
+                        )
+                        if not cleaned_comment:
+                            translated_map[comment] = ""
+                            cleaned_empty_count += 1
+                            processed_comments += 1
+                            update_progress()
+                            continue
+
+                        translated = translate_text(
+                            cleaned_comment,
                             target_language,
                             app.log_message,
                             app.cancel_flag
@@ -164,6 +180,7 @@ def run_translation(app, source_path, target_language, process_subdirs):
         app.log_message(f"Total de comentarios: {total_comments}")
         app.log_message(f"Comentarios novos traduzidos nesta execucao: {translated_count}")
         app.log_message(f"Traducoes vazias preenchidas: {filled_empty_count}")
+        app.log_message(f"Comentarios removidos por limpeza: {cleaned_empty_count}")
         app.log_message(f"Traducoes reutilizadas do cache: {cache_count}")
         app.log_message(f"Arquivos PGN traduzidos gerados: {generated_files}")
         app.log_message(f"Banco de dados: {app.output_db}")
@@ -177,6 +194,7 @@ def run_translation(app, source_path, target_language, process_subdirs):
                     f"Total de comentarios: {total_comments}\n"
                     f"Novas traducoes: {translated_count}\n"
                     f"Vazias preenchidas: {filled_empty_count}\n"
+                    f"Removidos por limpeza: {cleaned_empty_count}\n"
                     f"Reutilizados do cache: {cache_count}\n"
                     f"Arquivos gerados: {generated_files}"
                 )
