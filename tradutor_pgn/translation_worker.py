@@ -21,6 +21,9 @@ from .pgn_utils import (
 from .translation_api import translate_text
 
 
+TRANSLATION_REQUEST_DELAY_SECONDS = (0.08, 0.22)
+
+
 def run_translation(app, source_path, target_language, process_subdirs):
     conn = None
     canceled = False
@@ -178,7 +181,7 @@ def run_translation(app, source_path, target_language, process_subdirs):
                             elif save_status == "filled_empty":
                                 filled_empty_count += 1
 
-                        wait_seconds = random.uniform(0.3, 0.9)
+                        wait_seconds = random.uniform(*TRANSLATION_REQUEST_DELAY_SECONDS)
                         time.sleep(wait_seconds)
                         batch_wait_time += wait_seconds
 
