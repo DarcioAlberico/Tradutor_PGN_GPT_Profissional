@@ -3,7 +3,12 @@ import time
 from tkinter import messagebox
 
 from .database import initialize_database, load_translation_cache, save_translation
-from .glossario import clean_comment_for_translation, load_cleanup_substitutions
+from .glossario import (
+    apply_automatic_substitutions,
+    clean_comment_for_translation,
+    load_automatic_substitutions,
+    load_cleanup_substitutions,
+)
 from .pgn_utils import (
     available_output_path,
     collect_pgn_files,
@@ -30,6 +35,9 @@ def run_translation(app, source_path, target_language, process_subdirs):
         cleanup_rules = load_cleanup_substitutions()
         if cleanup_rules:
             app.log_message(f"Regras de limpeza carregadas: {len(cleanup_rules)}")
+        automatic_rules = load_automatic_substitutions()
+        if automatic_rules:
+            app.log_message(f"Regras automaticas carregadas: {len(automatic_rules)}")
 
         pgn_files, skipped_generated = collect_pgn_files(source_path, process_subdirs)
         if skipped_generated:
@@ -131,6 +139,10 @@ def run_translation(app, source_path, target_language, process_subdirs):
                             app.cancel_flag
                         )
                         if translated:
+                            translated = apply_automatic_substitutions(
+                                translated,
+                                automatic_rules,
+                            )
                             app.translation_cache[comment] = translated
                             translated_map[comment] = translated
 

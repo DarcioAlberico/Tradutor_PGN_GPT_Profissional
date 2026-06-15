@@ -856,6 +856,13 @@ def load_suggestion_substitutions(path=None):
     )
 
 
+def load_automatic_substitutions(path=None):
+    return filter_glossary_entries_by_type(
+        load_glossary_entry_details(path),
+        GLOSSARY_RULE_AUTOMATIC,
+    )
+
+
 def apply_substitution(text, orig, new):
     """Aplica uma substituição, na primeira ocorrência encontrada."""
     return _replace_glossary_matches(text, orig, new, count=1)
@@ -871,6 +878,10 @@ def apply_all_substitutions(text, suggestions):
 def clean_comment_for_translation(text, cleanup_rules):
     cleaned = apply_all_substitutions(text or "", cleanup_rules)
     return " ".join(cleaned.split())
+
+
+def apply_automatic_substitutions(text, automatic_rules):
+    return apply_all_substitutions(text or "", automatic_rules)
 
 
 def add_to_glossary(orig, new, path=None):

@@ -30,6 +30,7 @@ from tradutor_pgn.glossario import (
     add_glossary_entry,
     add_to_glossary,
     analyze_glossary_csv_import,
+    apply_automatic_substitutions,
     apply_all_substitutions,
     apply_substitution,
     clean_comment_for_translation,
@@ -45,6 +46,7 @@ from tradutor_pgn.glossario import (
     load_glossary_entry_details_from_db,
     load_glossary_entries_from_db,
     load_cleanup_substitutions,
+    load_automatic_substitutions,
     load_substitutions,
     rebuild_glossary_database,
     restore_glossary_from_backup,
@@ -993,6 +995,56 @@ class TranslationWorkerTests(unittest.TestCase):
                 conn.close()
             self.assertEqual(rows, [("White == EndSquare == starts", "PT:White starts")])
 
+    def test_run_translation_applies_automatic_rules_after_api_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n'
+                "1. e4 {White wins the queen}\n",
+                encoding="utf-8",
+            )
+
+            app = FakeApp(db_path)
+            original_translate_text = translation_worker.translate_text
+            original_showinfo = translation_worker.messagebox.showinfo
+            original_cleanup = translation_worker.load_cleanup_substitutions
+            original_automatic = translation_worker.load_automatic_substitutions
+            try:
+                translation_worker.translate_text = lambda *_args, **_kwargs: "As brancas ganham a rainha"
+                translation_worker.messagebox.showinfo = lambda *_args, **_kwargs: None
+                translation_worker.load_cleanup_substitutions = lambda: []
+                translation_worker.load_automatic_substitutions = lambda: [
+                    ("rainha", "dama"),
+                ]
+
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+            finally:
+                translation_worker.translate_text = original_translate_text
+                translation_worker.messagebox.showinfo = original_showinfo
+                translation_worker.load_cleanup_substitutions = original_cleanup
+                translation_worker.load_automatic_substitutions = original_automatic
+
+            output = tmp_path / "game-BR.pgn"
+            output_text = output.read_text(encoding="utf-8")
+            self.assertIn("{As brancas ganham a dama}", output_text)
+
+            conn = initialize_database(str(db_path))
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT original_comment, translated_comment
+                    FROM comments
+                    """
+                ).fetchall()
+            finally:
+                conn.close()
+            self.assertEqual(
+                rows,
+                [("White wins the queen", "As brancas ganham a dama")],
+            )
+
 
 class GlossaryTests(unittest.TestCase):
     def test_load_and_append_glossary_entry(self):
@@ -1182,6 +1234,7 @@ class GlossaryTests(unittest.TestCase):
             )
 
             self.assertEqual(load_substitutions(str(glossary)), [("rainha", "dama")])
+            self.assertEqual(load_automatic_substitutions(str(glossary)), [])
             self.assertEqual(
                 load_cleanup_substitutions(str(glossary)),
                 [("== EndSquare ==", ""), ("== StartSquare ==", "")],
@@ -1207,6 +1260,32 @@ class GlossaryTests(unittest.TestCase):
                     load_cleanup_substitutions(str(glossary)),
                 ),
                 "",
+            )
+
+    def test_automatic_rules_are_loaded_and_applied_separately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            glossary = Path(tmp) / "Substituicoes.txt"
+            save_glossary_entries(
+                [
+                    ("file", "coluna"),
+                    ("rainha", "dama", GLOSSARY_RULE_AUTOMATIC),
+                    ("mate", "xeque-mate", GLOSSARY_RULE_AUTOMATIC),
+                ],
+                str(glossary),
+                create_backup=False,
+            )
+
+            self.assertEqual(load_substitutions(str(glossary)), [("file", "coluna")])
+            self.assertEqual(
+                load_automatic_substitutions(str(glossary)),
+                [("rainha", "dama"), ("mate", "xeque-mate")],
+            )
+            self.assertEqual(
+                apply_automatic_substitutions(
+                    "A rainha ameaca mate, mas rainhas ficam.",
+                    load_automatic_substitutions(str(glossary)),
+                ),
+                "A dama ameaca xeque-mate, mas rainhas ficam.",
             )
 
     def test_glossary_validation_and_deduplication(self):
