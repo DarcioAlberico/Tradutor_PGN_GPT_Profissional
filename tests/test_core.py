@@ -63,6 +63,13 @@ from tradutor_pgn.pgn_utils import (
     is_generated_pgn,
     translated_output_path,
 )
+from tradutor_pgn.pgn_spellcheck import (
+    collect_spellcheck_pgn_files,
+    normalize_pgn_metadata_content,
+    normalize_pgn_metadata_file,
+    normalized_output_path,
+    parse_spelling_file,
+)
 from tradutor_pgn.review_quality import (
     QUALITY_REPORT_HEADERS,
     build_quality_report_rows,
@@ -202,6 +209,89 @@ class PgnUtilsTests(unittest.TestCase):
 
         self.assertTrue(chunks)
         self.assertTrue(all(len(chunk) <= 100 for chunk in chunks))
+
+    def test_spelling_file_normalizes_only_pgn_metadata_tags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spelling = Path(tmp) / "spelling.ssp"
+            spelling.write_text(
+                '@PLAYER "., -_*"\n'
+                '%Prefix "GM " ""\n'
+                'Speelman, Jonathan S #GM ENG [2600]\n'
+                '  = Speelman, J S\n'
+                'Aaberg, Anton #IM SWE [2323]\n'
+                '  = Aberg, Anton\n'
+                '@SITE "., -_()"\n'
+                'London\n'
+                '  = Londres\n'
+                '@EVENT ",. -_"\n'
+                'World Championship\n'
+                '  = WCh\n'
+                '@ROUND ""\n'
+                '1\n'
+                '  = 1.0\n',
+                encoding="utf-8",
+            )
+            spelling_data = parse_spelling_file(str(spelling))
+            content = (
+                '[Event "WCh"]\n'
+                '[Site "Londres"]\n'
+                '[Round "1.0"]\n'
+                '[White "GM Aberg, Anton"]\n'
+                '[Black "J. S. Speelman"]\n\n'
+                '1. e4 {GM Aberg, Anton should stay in comment} e5\n'
+            )
+
+            updated, changes = normalize_pgn_metadata_content(content, spelling_data)
+
+            self.assertIn('[Event "World Championship"]', updated)
+            self.assertIn('[Site "London"]', updated)
+            self.assertIn('[Round "1"]', updated)
+            self.assertIn('[White "Aaberg, Anton"]', updated)
+            self.assertIn('[Black "Speelman, Jonathan S"]', updated)
+            self.assertIn("{GM Aberg, Anton should stay in comment}", updated)
+            self.assertEqual(
+                [change["tag"] for change in changes],
+                ["Event", "Site", "Round", "White", "Black"],
+            )
+
+    def test_spelling_normalization_writes_norm_output_only_when_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[White "Aberg, Anton"]\n'
+                '[Black "Known Player"]\n\n'
+                "1. e4 e5\n",
+                encoding="utf-8",
+            )
+            spelling_data = {
+                "PLAYER": {
+                    "entries": {
+                        "aberganton": "Aaberg, Anton",
+                        "knownplayer": "Known Player",
+                    },
+                    "ignore_chars": "., -_*",
+                    "prefix_rules": [],
+                    "suffix_rules": [],
+                }
+            }
+
+            result = normalize_pgn_metadata_file(str(pgn), spelling_data)
+
+            self.assertTrue(result["changed"])
+            self.assertTrue(result["output_file"].endswith("-NORM.pgn"))
+            output_text = Path(result["output_file"]).read_text(encoding="utf-8")
+            self.assertIn('[White "Aaberg, Anton"]', output_text)
+            self.assertTrue(
+                normalized_output_path(str(tmp_path / "done-NORM.pgn")).endswith(
+                    "done-NORM-novo.pgn"
+                )
+            )
+
+            files, skipped = collect_spellcheck_pgn_files(str(tmp_path), process_subdirs=False)
+            self.assertIn(str(pgn), files)
+            self.assertNotIn(result["output_file"], files)
+            self.assertEqual(skipped, 1)
 
 
 class EditorTextTests(unittest.TestCase):

@@ -135,6 +135,7 @@ def setup_main_ui(app):
             {"text": "Backup BD", "command": app.backup_database},
             {"text": "Restaurar BD", "command": app.restore_database},
             {"text": "Aplicar Automaticas", "command": app.apply_automatic_rules},
+            {"text": "Normalizar PGN", "command": app.normalize_pgn_metadata},
             {"text": "Editar Traduções", "command": app.open_edit_window},
             {"text": "Editar Glossário", "command": app.open_glossary_window},
         ],

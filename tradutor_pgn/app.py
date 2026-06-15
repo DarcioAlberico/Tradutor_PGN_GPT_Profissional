@@ -111,6 +111,9 @@ class PGNTranslatorApp:
     def apply_automatic_rules(self):
         app_actions.apply_automatic_rules(self)
 
+    def normalize_pgn_metadata(self):
+        app_actions.normalize_pgn_metadata(self)
+
     # ============================
     #   EDITAR TRADUÇÕES
     # ============================

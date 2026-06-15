@@ -28,6 +28,15 @@ Execute os testes automatizados:
 uv run python -m unittest discover -s .\tests
 ```
 
+## Normalizacao de metadados PGN
+
+O botao `Normalizar PGN` corrige apenas metadados PGN (`White`, `Black`, `Site`,
+`Event` e `Round`) usando um arquivo externo opcional em
+`spelling_ssp/spelling.ssp`. Comentarios, lances e variantes nao sao alterados.
+
+Os arquivos corrigidos sao gravados ao lado do original com o sufixo
+`-NORM.pgn`. O arquivo `spelling.ssp` nao e versionado neste repositorio.
+
 ## Arquivos principais
 
 - `PGN_Tradutor_Pro.py`: ponto de entrada da aplicacao.
@@ -40,6 +49,7 @@ uv run python -m unittest discover -s .\tests
 - `tradutor_pgn/edit_window.py`: janela de revisao e edicao de traducoes.
 - `tradutor_pgn/glossary_editor.py`: janela dedicada para manter o glossario persistente.
 - `tradutor_pgn/main_window.py`: montagem da janela principal.
+- `tradutor_pgn/pgn_spellcheck.py`: normalizacao opcional de metadados PGN com `spelling.ssp`.
 - `tradutor_pgn/pgn_utils.py`: leitura, escrita, encoding e manipulacao de arquivos PGN.
 - `tradutor_pgn/translation_api.py`: chamadas de traducao e divisao de comentarios longos.
 - `tradutor_pgn/translation_worker.py`: orquestracao do processamento em segundo plano.
