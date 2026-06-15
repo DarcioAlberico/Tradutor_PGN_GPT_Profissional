@@ -5,7 +5,7 @@ import threading
 import tkinter as tk
 
 from . import app_actions
-from .glossario import load_substitutions
+from .glossario import load_interactive_substitutions
 from .main_window import setup_main_ui
 from .window_utils import bring_window_to_front
 
@@ -25,7 +25,7 @@ class PGNTranslatorApp:
         self.is_processing = False
         self.log_queue = queue.Queue()
 
-        self.glossary_substitutions = load_substitutions()
+        self.glossary_substitutions = load_interactive_substitutions()
         self.log_message(f"Glossário carregado: {len(self.glossary_substitutions)} entradas")
 
         # Banco de dados SEMPRE ao lado do script

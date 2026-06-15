@@ -786,8 +786,14 @@ def find_glossary_matches(text, orig):
 
     matches = []
     start = 0
+    if orig == orig.lower():
+        searchable_text = text.lower()
+        searchable_orig = orig.lower()
+    else:
+        searchable_text = text
+        searchable_orig = orig
     while True:
-        index = text.find(orig, start)
+        index = searchable_text.find(searchable_orig, start)
         if index == -1:
             break
 
@@ -797,6 +803,18 @@ def find_glossary_matches(text, orig):
         start = index + 1
 
     return matches
+
+
+def case_adjusted_replacement(matched_text, replacement):
+    if not matched_text or not replacement:
+        return replacement
+
+    letters = [char for char in matched_text if char.isalpha()]
+    if letters and all(char.isupper() for char in letters):
+        return replacement.upper()
+    if letters and letters[0].isupper():
+        return replacement[:1].upper() + replacement[1:]
+    return replacement
 
 
 def _replace_glossary_matches(text, orig, new, count=0):
@@ -810,7 +828,7 @@ def _replace_glossary_matches(text, orig, new, count=0):
     last = 0
     for start, end in matches:
         parts.append(text[last:start])
-        parts.append(new)
+        parts.append(case_adjusted_replacement(text[start:end], new))
         last = end
     parts.append(text[last:])
     return "".join(parts)
@@ -861,6 +879,16 @@ def load_automatic_substitutions(path=None):
         load_glossary_entry_details(path),
         GLOSSARY_RULE_AUTOMATIC,
     )
+
+
+def load_interactive_substitutions(path=None):
+    entries = load_glossary_entry_details(path)
+    allowed_types = {GLOSSARY_RULE_SUGGESTION, GLOSSARY_RULE_AUTOMATIC}
+    return [
+        glossary_entry_pair(entry)
+        for entry in _normalize_detailed_entries(entries)
+        if glossary_entry_type(entry) in allowed_types
+    ]
 
 
 def apply_substitution(text, orig, new):

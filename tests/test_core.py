@@ -47,6 +47,7 @@ from tradutor_pgn.glossario import (
     load_glossary_entries_from_db,
     load_cleanup_substitutions,
     load_automatic_substitutions,
+    load_interactive_substitutions,
     load_substitutions,
     rebuild_glossary_database,
     restore_glossary_from_backup,
@@ -1488,11 +1489,26 @@ class GlossaryTests(unittest.TestCase):
                 [("rainha", "dama"), ("mate", "xeque-mate")],
             )
             self.assertEqual(
+                load_interactive_substitutions(str(glossary)),
+                [
+                    ("file", "coluna"),
+                    ("rainha", "dama"),
+                    ("mate", "xeque-mate"),
+                ],
+            )
+            self.assertEqual(
                 apply_automatic_substitutions(
                     "A rainha ameaca mate, mas rainhas ficam.",
                     load_automatic_substitutions(str(glossary)),
                 ),
                 "A dama ameaca xeque-mate, mas rainhas ficam.",
+            )
+            self.assertEqual(
+                apply_automatic_substitutions(
+                    "Cavaleiro CAVALEIRO cavaleiro.",
+                    [("cavaleiro", "cavalo")],
+                ),
+                "Cavalo CAVALO cavalo.",
             )
 
     def test_glossary_validation_and_deduplication(self):
@@ -1548,6 +1564,11 @@ class GlossaryTests(unittest.TestCase):
                 ("brancas joga", "brancas jogam"),
                 (", as brancas joga", ", as brancas jogam"),
             ],
+        )
+        self.assertEqual(find_glossary_matches("Cavaleiro", "cavaleiro"), [(0, 9)])
+        self.assertEqual(
+            find_glossary_suggestions("Cavaleiro ativo", [("cavaleiro", "cavalo")]),
+            [("cavaleiro", "cavalo")],
         )
         self.assertEqual(apply_substitution("forma for", "for", "para"), "forma para")
         self.assertEqual(apply_substitution("forma", "for", "para"), "forma")

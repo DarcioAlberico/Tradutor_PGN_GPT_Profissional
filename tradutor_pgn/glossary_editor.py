@@ -23,7 +23,7 @@ from .glossario import (
     glossary_entry_type,
     load_glossary_entry_details,
     load_glossary_entries,
-    load_substitutions,
+    load_interactive_substitutions,
     restore_glossary_from_backup,
     save_glossary_entries,
     update_glossary_entry,
@@ -434,7 +434,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
                 pass
 
     def update_app_glossary():
-        app.glossary_substitutions = load_substitutions()
+        app.glossary_substitutions = load_interactive_substitutions()
         if hasattr(app, "log_message"):
             app.log_message(
                 f"Glossário atualizado: {len(app.glossary_substitutions)} entradas"

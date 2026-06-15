@@ -25,9 +25,10 @@ from .db_tools import apply_automatic_rules_to_database
 from .editor_text import find_text_ranges, replace_all_text
 from .glossario import (
     add_to_glossary,
+    case_adjusted_replacement,
     find_glossary_matches,
     find_glossary_suggestions,
-    load_substitutions,
+    load_interactive_substitutions,
 )
 from .glossary_editor import open_glossary_editor
 from .review_quality import (
@@ -1968,8 +1969,9 @@ def open_translation_editor(app):
             before = text[last:start]
             parts.append(before)
             cursor_offset += len(before)
-            parts.append(new)
-            cursor_offset += len(new)
+            replacement = case_adjusted_replacement(text[start:end], new)
+            parts.append(replacement)
+            cursor_offset += len(replacement)
             insert_offset = cursor_offset
             last = end
         parts.append(text[last:])
@@ -2056,7 +2058,7 @@ def open_translation_editor(app):
 
     def reload_glossary(show_feedback=True):
         nonlocal glossary
-        glossary = load_substitutions()
+        glossary = load_interactive_substitutions()
         app.glossary_substitutions = glossary
         refresh_suggestions()
         if show_feedback:
