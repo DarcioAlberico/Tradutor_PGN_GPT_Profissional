@@ -3,6 +3,8 @@ import random
 import time
 from tkinter import messagebox
 
+import requests
+
 from .database import initialize_database, load_translation_cache, save_translation
 from .glossario import (
     apply_automatic_substitutions,
@@ -27,6 +29,7 @@ TRANSLATION_REQUEST_DELAY_SECONDS = (0.08, 0.22)
 def run_translation(app, source_path, target_language, process_subdirs):
     conn = None
     canceled = False
+    http_session = requests.Session()
 
     try:
         app.log_message(f"Iniciando traducao para idioma: {target_language}")
@@ -157,7 +160,8 @@ def run_translation(app, source_path, target_language, process_subdirs):
                             cleaned_comment,
                             target_language,
                             app.log_message,
-                            app.cancel_flag
+                            app.cancel_flag,
+                            session=http_session,
                         )
                         batch_api_time += time.perf_counter() - api_started
                         batch_api_requests += 1
@@ -278,6 +282,7 @@ def run_translation(app, source_path, target_language, process_subdirs):
                 conn.close()
             except Exception as e:
                 app.log_message(f"[ERRO] Falha ao fechar banco de dados: {e}")
+        http_session.close()
 
         app.is_processing = False
         app.pause_flag.clear()

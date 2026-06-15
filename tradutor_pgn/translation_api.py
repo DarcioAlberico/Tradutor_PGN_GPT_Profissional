@@ -42,7 +42,7 @@ def split_text_for_translation(text: str, max_chars=MAX_TRANSLATE_CHARS):
     return chunks
 
 
-def translate_text_chunk(text: str, target_language: str, log_message=None):
+def translate_text_chunk(text: str, target_language: str, log_message=None, session=None):
     url = "https://translate.googleapis.com/translate_a/single"
     params = {
         "client": "gtx",
@@ -51,10 +51,11 @@ def translate_text_chunk(text: str, target_language: str, log_message=None):
         "dt": "t",
         "q": text,
     }
+    http_client = session or requests
 
     for attempt in range(1, 4):
         try:
-            response = requests.get(url, params=params, timeout=30)
+            response = http_client.get(url, params=params, timeout=30)
 
             if response.status_code == 200:
                 result = response.json()
@@ -77,12 +78,18 @@ def translate_text_chunk(text: str, target_language: str, log_message=None):
             return None
 
         if attempt < 3:
-            time.sleep(random.uniform(0.6, 2.2))
+            time.sleep(random.uniform(0.3, 2.2))
 
     return None
 
 
-def translate_text(text: str, target_language: str, log_message=None, cancel_flag=None):
+def translate_text(
+    text: str,
+    target_language: str,
+    log_message=None,
+    cancel_flag=None,
+    session=None,
+):
     chunks = split_text_for_translation(text)
     if len(chunks) > 1 and log_message:
         log_message(f"Comentario longo dividido em {len(chunks)} partes.")
@@ -92,7 +99,12 @@ def translate_text(text: str, target_language: str, log_message=None, cancel_fla
         if cancel_flag is not None and cancel_flag.is_set():
             return None
 
-        translated = translate_text_chunk(chunk, target_language, log_message)
+        translated = translate_text_chunk(
+            chunk,
+            target_language,
+            log_message,
+            session=session,
+        )
         if translated is None:
             return None
         translated_chunks.append(translated)

@@ -104,7 +104,7 @@ from tradutor_pgn.settings import (
     save_settings,
     set_editor_draft,
 )
-from tradutor_pgn.translation_api import split_text_for_translation
+from tradutor_pgn.translation_api import split_text_for_translation, translate_text
 from tradutor_pgn import translation_worker
 
 
@@ -292,6 +292,32 @@ class PgnUtilsTests(unittest.TestCase):
             self.assertIn(str(pgn), files)
             self.assertNotIn(result["output_file"], files)
             self.assertEqual(skipped, 1)
+
+
+class TranslationApiTests(unittest.TestCase):
+    def test_translate_text_uses_provided_session(self):
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return [[["Ola", "Hello"]]]
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, params=None, timeout=None):
+                self.calls.append((url, params, timeout))
+                return FakeResponse()
+
+        session = FakeSession()
+
+        result = translate_text("Hello", "pt", session=session)
+
+        self.assertEqual(result, "Ola")
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(session.calls[0][1]["q"], "Hello")
+        self.assertEqual(session.calls[0][2], 30)
 
 
 class EditorTextTests(unittest.TestCase):
