@@ -979,7 +979,34 @@ essa protecao cair.
 
 ---
 
-## 5. Cobertura de testes — EM ANDAMENTO (72 -> 311 testes)
+## 4.1 Negrito por selecao, perdido e restaurado — CONCLUIDO (2026-07-27)
+
+Comparando esta branch com a `origin/main` (que refatorou o mesmo codigo por
+outro caminho) apareceu a unica diferenca de comportamento entre as duas: o
+projeto original tinha `toggle_bold_selection`, que marcava em negrito o trecho
+selecionado da traducao. Em algum ponto o botao "B" passou a alternar a fonte do
+editor inteiro (`toggle_bold_view`) e o recurso antigo sumiu junto.
+
+Nao e o mesmo recurso: um e leitura (a fonte toda), o outro e marcacao (um
+trecho). Os dois voltaram a existir. O botao ficou com o alternador de fonte,
+onde ele pertence — ao lado dos controles A-/A+ —, e a marcacao voltou no
+`Ctrl+B`, que estava livre e e o gesto universal para "negrito no que esta
+selecionado".
+
+Ficou registrado no codigo o que a marca **nao** e: a tag do Tk nao vai para o
+banco e recarregar a traducao a desfaz. Era assim no original e faz sentido — o
+que se grava e o texto do comentario, nao a formatacao de quem revisa.
+
+Tinha sobrado plumbing morto: a tag `bold` continuava sendo configurada em dois
+pontos sem que nada a aplicasse. Voltou a ter uso.
+
+Conferido por mutacao: nao ligar o `Ctrl+B`, marcar sem nunca desmarcar, marcar
+mesmo sem selecao, e o alternador de fonte apagando a marcacao — as quatro
+falham.
+
+---
+
+## 5. Cobertura de testes — EM ANDAMENTO (72 -> 315 testes)
 
 **A premissa deste item estava errada.** Ele dizia que testar
 `open_translation_editor` / `open_glossary_editor` "so e viavel depois de 3.1".

@@ -687,6 +687,8 @@ class TranslationEditor:
         self.trans_text.bind("<Control-Z>", lambda _event: (self.undo_translation(), "break")[1])
         self.trans_text.bind("<Control-y>", lambda _event: (self.redo_translation(), "break")[1])
         self.trans_text.bind("<Control-Y>", lambda _event: (self.redo_translation(), "break")[1])
+        self.trans_text.bind("<Control-b>", self.toggle_bold_selection)
+        self.trans_text.bind("<Control-B>", self.toggle_bold_selection)
         self.win.bind("<Control-f>", self.focus_search)
         self.win.bind("<Control-F>", self.focus_search)
         self.win.bind("<Control-h>", lambda _event: (self.open_history_window(), "break")[1])
@@ -1107,6 +1109,33 @@ class TranslationEditor:
         else:
             self.trans_text.configure(font=self.body_font)
             self.btn_bold.configure(fg_color=("#3B8ED0", "#1F6AA5"), hover_color=("#36719F", "#144870"))
+
+    def toggle_bold_selection(self, _event=None):
+        """Marca (ou desmarca) em negrito o trecho selecionado da traducao.
+
+        Existia no projeto original e se perdeu quando o botao "B" passou a
+        alternar a fonte do editor inteiro (`toggle_bold_view`). Sao recursos
+        diferentes e ambos uteis: um e leitura, o outro e marcacao. O botao
+        continua com o alternador de fonte, junto dos controles A-/A+ onde ele
+        pertence; a marcacao voltou no `Ctrl+B`, que e o gesto universal para
+        "negrito no que esta selecionado".
+
+        A marca e **visual e da sessao**: a tag do Tk nao vai para o banco, e
+        recarregar a traducao a desfaz. Era assim no original, e faz sentido —
+        o que se grava e o texto do comentario, nao a formatacao de quem revisa.
+        """
+        try:
+            inicio = self.trans_text.index(tk.SEL_FIRST)
+            fim = self.trans_text.index(tk.SEL_LAST)
+        except tk.TclError:
+            self.show_message("Selecione um trecho da tradução")
+            return "break"
+
+        if "bold" in self.trans_text.tag_names(inicio):
+            self.trans_text.tag_remove("bold", inicio, fim)
+        else:
+            self.trans_text.tag_add("bold", inicio, fim)
+        return "break"
 
     def highlight_glossary_hits(self):
         self.trans_text.tag_remove("glossary_hit", "1.0", tk.END)

@@ -822,6 +822,66 @@ class TranslationEditorMethodCoverageTests(EditorWindowTestCase):
         self.editor.open_integrated_glossary_editor()
         self.pump()
 
+    def marcas_de_negrito(self):
+        return self.editor.trans_text.tag_ranges("bold")
+
+    def test_bold_marks_the_selection_and_unmarks_it(self):
+        """O recurso que existia no projeto original e se perdeu no caminho.
+
+        E marcacao de quem revisa, nao formatacao do comentario: a tag e do Tk e
+        nao vai para o banco.
+        """
+        self.editor.select_index(0)
+        self.editor.set_translation_text("O bispo domina a diagonal", mark_dirty=False)
+        self.pump()
+
+        self.editor.trans_text.tag_add(tk.SEL, "1.0+2c", "1.0+7c")
+        self.editor.toggle_bold_selection()
+        self.assertTrue(self.marcas_de_negrito(), "a selecao nao ficou em negrito")
+
+        self.editor.toggle_bold_selection()
+        self.assertFalse(self.marcas_de_negrito(), "clicar de novo nao desmarcou")
+
+    def test_bold_without_a_selection_says_so_instead_of_failing(self):
+        self.editor.select_index(0)
+        self.editor.trans_text.tag_remove(tk.SEL, "1.0", tk.END)
+        self.editor.toggle_bold_selection()
+        self.assertFalse(self.marcas_de_negrito())
+
+    def test_bold_is_reachable_by_the_keyboard(self):
+        """Sem o atalho o metodo existiria sem nenhuma forma de aciona-lo."""
+        self.editor.select_index(0)
+        self.editor.set_translation_text("O bispo domina a diagonal", mark_dirty=False)
+        self.pump()
+        self.editor.trans_text.tag_add(tk.SEL, "1.0+2c", "1.0+7c")
+        self.editor.trans_text.focus_set()
+        self.pump()
+
+        self.editor.trans_text.event_generate("<Control-b>")
+        self.pump()
+        self.assertTrue(self.marcas_de_negrito(), "o Ctrl+B nao chegou ao metodo")
+
+    def test_the_two_bold_features_do_not_replace_each_other(self):
+        """Alternar a fonte do editor e marcar um trecho sao coisas distintas.
+
+        O botao "B" continua com o alternador de fonte, ao lado do A-/A+; a
+        marcacao vive no Ctrl+B. Trocar um pelo outro foi como o recurso se
+        perdeu.
+        """
+        self.editor.select_index(0)
+        self.editor.set_translation_text("O bispo domina a diagonal", mark_dirty=False)
+        self.pump()
+
+        self.editor.trans_text.tag_add(tk.SEL, "1.0+2c", "1.0+7c")
+        self.editor.toggle_bold_selection()
+        marcado = self.marcas_de_negrito()
+
+        self.editor.toggle_bold_view()
+        self.assertEqual(
+            self.marcas_de_negrito(), marcado, "a fonte do editor apagou a marcacao"
+        )
+        self.assertTrue(self.editor.state.bold_view)
+
     def test_the_search_mode_selector_changes_what_the_list_shows(self):
         """Roadmap 2.8 / R8: os dois modos convivem, e o seletor decide qual vale.
 
