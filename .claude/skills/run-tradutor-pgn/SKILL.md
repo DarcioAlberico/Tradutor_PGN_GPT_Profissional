@@ -44,9 +44,9 @@ python -c "import sys, customtkinter, PIL; print(sys.version.split()[0], 'ok')"
 python .claude/skills/run-tradutor-pgn/driver.py
 ```
 
-Abre o app, semeia duas traduções e uma regra de glossário, abre o editor de
-traduções e o de glossário, exercita o `Ctrl+B` (negrito na seleção) e grava
-PNGs em `.claude/skills/run-tradutor-pgn/capturas/`. Sai sozinho.
+Abre o app, semeia dados, abre as duas janelas de edição, exercita o `Ctrl+B`
+(negrito na seleção) e o aviso de conflito do glossário, e grava PNGs em
+`.claude/skills/run-tradutor-pgn/capturas/`. Sai sozinho.
 
 **Olhe as capturas.** Um quadro em branco é falha de lançamento disfarçada de
 sucesso.
@@ -71,6 +71,41 @@ with Driver() as d:
 é alcançável: `select_index`, `save_changes`, `apply_one`, `go_to_id`,
 `toggle_bold_selection`, e todos os widgets por nome (`editor.trans_text`,
 `editor.search_mode_segment`, `editor.btn_bold`…).
+
+## Dirigir o editor de glossário — é diferente, e mais difícil
+
+As duas janelas **não** se dirigem do mesmo jeito, e a diferença não é adivinhável:
+
+| | editor de traduções | editor de glossário |
+|---|---|---|
+| o que a abertura devolve | a instância `TranslationEditor` | `None` |
+| como chegar no que interessa | `editor.select_index(0)`, `editor.trans_text` | andar na árvore de widgets |
+
+`open_glossary_editor` ainda é uma função com tudo em closures (o item 3.1 do
+ROADMAP converteu só o outro editor), então o único handle é o `Toplevel`. Os
+helpers do driver existem para isso:
+
+```python
+with Driver() as d:
+    d.seed(glossario_entradas=[("rook", "torre", "suggestion"),
+                               ("rook", "torre alta", "suggestion")])
+    win = d.open_glossary_editor()               # Toplevel, nao instancia
+
+    d.button_containing(win, "torre alta").invoke()   # seleciona a linha
+    d.pump()
+    print(d.label_starting(win, "Conflito em"))       # o aviso de S9
+    d.button(win, "Manter esta").invoke()             # resolve o conflito
+```
+
+- `d.button(win, "Salvar")` — rótulo exato; se errar, o erro lista os que existem.
+- `d.button_containing(win, "torre alta")` — as **linhas da lista** têm rótulo de
+  três linhas (`AVISO  #1  -  Sugestão
+De: rook
+Para: torre`), então é assim
+  que se seleciona uma entrada.
+- `d.label_starting(win, "Conflito em")` — lê rótulos **visíveis**. O `so_visiveis`
+  importa: o aviso de conflito existe sempre como widget e apenas sai do grid
+  quando não há conflito; ler sem checar acha aviso que não está na tela.
 
 ## Rodar (caminho humano)
 
@@ -131,6 +166,10 @@ Todos custaram tempo nesta sessão.
   remover o sandbox; o driver usa `ignore_errors=True` porque o app pode ter
   deixado alguma viva.
 
+- **O editor de glossário não devolve instância.** Ver a seção própria acima. Se
+  você tentar `editor.algum_metodo()` depois de `open_glossary_editor()`, vai
+  receber `AttributeError: 'NoneType'` — não é bug, é o estado do refactor.
+
 - **`ImageGrab` fotografa a TELA.** A janela precisa estar visível e por cima —
   uma janela `withdraw()`n sai como o que estiver atrás dela. Não use com a
   máquina bloqueada.
@@ -146,3 +185,6 @@ Todos custaram tempo nesta sessão.
 | `PermissionError` ao limpar o sandbox | Conexão SQLite viva. Inofensivo — o diretório fica em `%TEMP%`. |
 | `backups/` do projeto encolheu | Você rodou com `--real` ou `sandbox=False`. É a retenção S8 fazendo o trabalho dela. |
 | `ModuleNotFoundError` logo após instalar | `pip` e `python` são interpretadores diferentes. Sempre `python -m pip`. |
+| `AttributeError: 'NoneType'` após abrir o glossário | Ele não devolve instância. Use os helpers de árvore. |
+| `LookupError: botao 'X' nao encontrado` | O erro lista os rótulos existentes — provavelmente acento ou espaço. |
+| Aviso de conflito lido mas não visível | `label_starting(..., so_visiveis=False)` pega widget fora do grid. |

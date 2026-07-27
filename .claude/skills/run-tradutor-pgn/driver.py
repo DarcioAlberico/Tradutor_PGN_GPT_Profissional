@@ -182,10 +182,72 @@ class Driver:
         return editor
 
     def open_glossary_editor(self):
+        """Devolve o `Toplevel` — nao ha instancia para devolver.
+
+        Assimetria que custa caro e nao da para adivinhar:
+        `open_translation_editor` devolve o `TranslationEditor`, entao la todo
+        metodo e widget e alcancavel pelo nome. `open_glossary_editor` ainda e
+        uma funcao com tudo em closures e devolve `None`; aqui o unico handle e
+        a janela, e mexer nela e andar na arvore de widgets. Use `button`,
+        `button_containing` e `label_starting` abaixo.
+        """
         self.glossary_editor.open_glossary_editor(self.app)
         self.pump(1.2)
         tops = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
         return tops[-1] if tops else None
+
+    # ------------------------------------------------- achar widget sem handle
+
+    @staticmethod
+    def walk(widget):
+        yield widget
+        for filho in widget.winfo_children():
+            yield from Driver.walk(filho)
+
+    def widgets(self, raiz, kind):
+        return [w for w in self.walk(raiz) if isinstance(w, kind)]
+
+    def _texto(self, w):
+        try:
+            return w.cget("text") or ""
+        except tk.TclError:
+            return ""
+
+    def button(self, raiz, rotulo):
+        """Botao cujo rotulo e exatamente `rotulo`."""
+        for w in self.widgets(raiz, self.ctk.CTkButton):
+            if self._texto(w).strip() == rotulo:
+                return w
+        raise LookupError(
+            f"botao {rotulo!r} nao encontrado; ha: "
+            f"{sorted({self._texto(w).strip() for w in self.widgets(raiz, self.ctk.CTkButton)})}"
+        )
+
+    def button_containing(self, raiz, trecho):
+        """Botao cujo rotulo CONTEM `trecho`.
+
+        As linhas das listas tem rotulo de tres linhas
+        (`AVISO  #1  -  Sugestao\\nDe: rook\\nPara: torre`), entao selecionar uma
+        entrada e achar o botao por um pedaco do texto e invocar.
+        """
+        for w in self.widgets(raiz, self.ctk.CTkButton):
+            if trecho in self._texto(w):
+                return w
+        raise LookupError(f"nenhum botao contem {trecho!r}")
+
+    def label_starting(self, raiz, prefixo, so_visiveis=True):
+        """Textos dos rotulos que comecam com `prefixo`.
+
+        `so_visiveis` importa: o aviso de conflito existe sempre como widget e
+        sai do grid quando nao ha conflito. Ler o texto sem checar
+        `winfo_ismapped()` acha aviso que nao esta na tela.
+        """
+        achados = []
+        for w in self.widgets(raiz, self.ctk.CTkLabel):
+            texto = self._texto(w)
+            if texto.startswith(prefixo) and (not so_visiveis or w.winfo_ismapped()):
+                achados.append(texto)
+        return achados
 
     def key(self, widget, atalho):
         """Dispara um atalho DE VERDADE no widget.
@@ -248,11 +310,28 @@ def smoke():
         d.shot("02-negrito-selecao.png", editor.trans_text)
 
         glossario = d.open_glossary_editor()
-        if glossario is not None:
-            d.shot("03-editor-glossario.png", glossario)
-            print("glossario   | janela aberta")
+        d.shot("03-editor-glossario.png", glossario)
+        print("glossario   | janela aberta")
+
+        # Fluxo do editor de glossario: selecionar a regra que PERDE um conflito
+        # e ler o aviso que diz qual esta valendo (garantia S9).
+        d.seed(glossario_entradas=[
+            ("rook", "torre", "suggestion"),
+            ("rook", "torre alta", "suggestion"),   # perde para a de cima
+            ("queen", "dama", "suggestion"),
+        ])
+        d.button(glossario, "Recarregar").invoke()
+        d.pump()
+        d.button_containing(glossario, "torre alta").invoke()
+        d.pump()
+
+        avisos = d.label_starting(glossario, "Conflito em")
+        print(f"conflito    | {avisos[0] if avisos else 'NENHUM AVISO'}")
+        d.shot("04-glossario-conflito.png", glossario)
 
         assert marcas == 1, "o Ctrl+B nao marcou o trecho"
+        assert avisos, "o aviso de conflito (S9) nao apareceu na tela"
+        assert "vence a regra" in avisos[0], "o aviso nao diz qual regra vence"
         print("\nOK")
 
 
