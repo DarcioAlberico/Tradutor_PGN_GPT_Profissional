@@ -120,13 +120,19 @@ with Driver() as d:
     g.select_entry(1)                            # a regra que perde o conflito
     d.pump()
     print(d.label_starting(g.win, "Conflito em"))     # o aviso de S9, na tela
-    g.keep_this_rule()                                # resolve o conflito
+    g.promote_this_rule()                             # prioriza, sem apagar nada
+    # g.keep_this_rule()                              # a outra saida: apaga as concorrentes
     print(len(g.state.entries), "entradas")
 ```
 
+As duas saídas do conflito não são equivalentes: `promote_this_rule` grava uma
+prioridade (garantia S10) e deixa as regras concorrentes no arquivo;
+`keep_this_rule` remove-as. Ao dirigir, prefira a primeira — a segunda apaga
+regras do glossário que estiver em uso.
+
 O estado vive em `g.state` (`entries`, `filtered_indices`, `page_index`,
 `selected_index`, `dirty`) e os widgets são atributos de `g` (`g.orig_text`,
-`g.new_text`, `g.filter_segment`, `g.rows_frame`). `d.open_glossary_editor()`
+`g.new_text`, `g.filter_segment`, `g.rows_frame`, `g.priority_text`). `d.open_glossary_editor()`
 repassa `initial_original=`/`initial_replacement=`, que é como o editor de
 traduções manda um trecho para cá.
 
@@ -207,7 +213,7 @@ bloqueia o terminal e não dá handle nenhum sobre o app.
 python -m unittest discover -s tests
 ```
 
-366 testes, ~70 s. Os de `test_editor_windows.py` e `test_main_window.py` abrem
+396 testes, ~75 s. Os de `test_editor_windows.py` e `test_main_window.py` abrem
 janelas de verdade — os editores e a janela principal — e são pulados onde não
 houver display. O harness comum deles (gate de display, silenciamento de
 diálogos, sandbox de caminhos) está em `tests/gui_harness.py`.

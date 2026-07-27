@@ -40,7 +40,22 @@ from tradutor_pgn import (
     window_utils,
 )
 from tradutor_pgn.database import initialize_database, save_translation
-from tradutor_pgn.glossario import load_glossary_entry_details, save_glossary_entries
+from tradutor_pgn.glossario import (
+    glossary_entry_priority,
+    load_glossary_entry_details,
+    save_glossary_entries,
+)
+
+
+def com_prioridade(entries, priority=0):
+    """Entradas de tres campos como o arquivo as devolve: com a prioridade.
+
+    A entrada detalhada ganhou um quarto campo no item 1.5 parte 2. Nos testes
+    cujo assunto nao e a prioridade, escrever `, 0` em cada tupla so acrescenta
+    ruido — mas apaga-la da comparacao esconderia uma prioridade mexida por
+    engano.
+    """
+    return [(orig, new, rule_type, priority) for orig, new, rule_type in entries]
 
 
 class FakeApp:
@@ -340,8 +355,8 @@ class GlossaryEditorTests(EditorWindowTestCase):
         self.set_text(self.texts()[1], "rainha")
         self.click(self.button("Salvar"))
 
-        self.assertIn(("queen", "rainha", "suggestion"), self.entries_on_disk())
-        self.assertIn(("rook", "torre", "suggestion"), self.entries_on_disk())
+        self.assertIn(("queen", "rainha", "suggestion", 0), self.entries_on_disk())
+        self.assertIn(("rook", "torre", "suggestion", 0), self.entries_on_disk())
 
     def test_saving_survives_an_external_insertion(self):
         """O bug do item 3.4.
@@ -357,9 +372,9 @@ class GlossaryEditorTests(EditorWindowTestCase):
         self.click(self.button("Salvar"))
 
         entradas = self.entries_on_disk()
-        self.assertIn(("rook", "torre", "suggestion"), entradas, "gravou por cima da vizinha")
-        self.assertIn(("queen", "rainha", "suggestion"), entradas)
-        self.assertNotIn(("queen", "dama", "suggestion"), entradas)
+        self.assertIn(("rook", "torre", "suggestion", 0), entradas, "gravou por cima da vizinha")
+        self.assertIn(("queen", "rainha", "suggestion", 0), entradas)
+        self.assertNotIn(("queen", "dama", "suggestion", 0), entradas)
 
     def test_deleting_survives_an_external_insertion(self):
         self.click(self.row_for("queen"))
@@ -368,8 +383,8 @@ class GlossaryEditorTests(EditorWindowTestCase):
         self.click(self.button("Excluir"))
 
         entradas = self.entries_on_disk()
-        self.assertIn(("rook", "torre", "suggestion"), entradas, "excluiu a vizinha")
-        self.assertNotIn(("queen", "dama", "suggestion"), entradas)
+        self.assertIn(("rook", "torre", "suggestion", 0), entradas, "excluiu a vizinha")
+        self.assertNotIn(("queen", "dama", "suggestion", 0), entradas)
 
     def test_saving_an_entry_removed_elsewhere_writes_nothing(self):
         self.click(self.row_for("rook"))
@@ -379,7 +394,7 @@ class GlossaryEditorTests(EditorWindowTestCase):
         self.set_text(self.texts()[1], "torre nova")
         self.click(self.button("Salvar"))
 
-        self.assertEqual(self.entries_on_disk(), sobraram, "gravou uma entrada que sumiu")
+        self.assertEqual(self.entries_on_disk(), com_prioridade(sobraram), "gravou uma entrada que sumiu")
         self.assertIn("Entrada não encontrada", self.dialogs.titles("warning"))
 
     def test_deleting_an_entry_removed_elsewhere_writes_nothing(self):
@@ -389,7 +404,7 @@ class GlossaryEditorTests(EditorWindowTestCase):
 
         self.click(self.button("Excluir"))
 
-        self.assertEqual(self.entries_on_disk(), sobraram)
+        self.assertEqual(self.entries_on_disk(), com_prioridade(sobraram))
         self.assertIn("Entrada não encontrada", self.dialogs.titles("warning"))
 
 
@@ -460,12 +475,161 @@ class GlossaryConflictEditorTests(EditorWindowTestCase):
         self.click(self.button("Manter esta"))
 
         entradas = self.entries_on_disk()
-        self.assertIn(("torre", "castle", "suggestion"), entradas)
-        self.assertNotIn(("torre", "rook", "suggestion"), entradas)
-        self.assertIn(("dama", "queen", "suggestion"), entradas, "levou junto quem nao disputava")
+        self.assertIn(("torre", "castle", "suggestion", 0), entradas)
+        self.assertNotIn(("torre", "rook", "suggestion", 0), entradas)
+        self.assertIn(("dama", "queen", "suggestion", 0), entradas, "levou junto quem nao disputava")
 
         # Resolvido tambem na tela: nao sobra aviso de conflito nenhum.
         self.assertEqual(self.conflict_text(), "")
+
+
+class GlossaryPriorityEditorTests(EditorWindowTestCase):
+    """Item 1.5 parte 2: a prioridade na janela.
+
+    A logica pura esta coberta em `GlossaryPriorityTests` e
+    `GlossaryPromotionTests`. O que so aparece aqui e o outro lado: que o campo
+    carrega e grava o valor, que um valor invalido nao chega ao arquivo, e que
+    "Priorizar esta" resolve o conflito **sem apagar** a regra concorrente — que
+    era a unica saida que a janela oferecia ate agora.
+    """
+
+    module = glossary_editor
+
+    ENTRIES = [
+        ("torre", "rook", "suggestion"),
+        ("dama", "queen", "suggestion"),
+        ("torre", "castle", "suggestion"),
+    ]
+
+    def setUp(self):
+        super().setUp()
+        self.glossary_path = glossario._default_substitutions_path()
+        save_glossary_entries(self.ENTRIES, self.glossary_path, create_backup=False)
+        self.editor = glossary_editor.open_glossary_editor(self.app)
+        self.pump()
+        self.win = self.editor.win
+
+    def entries_on_disk(self):
+        return load_glossary_entry_details(self.glossary_path, deduplicate=False)
+
+    def conflict_text(self):
+        for widget in self.widgets(glossary_editor.ctk.CTkLabel):
+            try:
+                text = widget.cget("text") or ""
+            except tk.TclError:
+                continue
+            if text.startswith("Conflito em") and widget.winfo_ismapped():
+                return text
+        return ""
+
+    # ------------------------------------------------ o campo
+
+    def test_the_field_loads_and_saves_the_priority(self):
+        self.editor.select_entry(2)
+        self.assertEqual(self.editor.priority_text.get(), "0")
+
+        self.editor.priority_text.set("3")
+        self.editor.mark_dirty()
+        self.assertTrue(self.editor.state.dirty, "mexer na prioridade nao sujou o form")
+
+        self.click(self.button("Salvar"))
+
+        self.assertIn(("torre", "castle", "suggestion", 3), self.entries_on_disk())
+        self.assertIn(("torre", "rook", "suggestion", 0), self.entries_on_disk())
+
+    def test_an_invalid_priority_never_reaches_the_file(self):
+        """Cair para zero em silencio gravaria uma decisao que ninguem tomou.
+
+        A regra parte com prioridade 5, e nao com zero: se o teste comecasse em
+        zero, gravar "zero por engano" produziria exatamente o arquivo que ja
+        estava la e a falha seria invisivel. Foi o que a conferencia por mutacao
+        acusou na primeira versao deste teste.
+        """
+        self.editor.select_entry(2)
+        self.editor.priority_text.set("5")
+        self.editor.mark_dirty()
+        self.click(self.button("Salvar"))
+        self.assertIn(("torre", "castle", "suggestion", 5), self.entries_on_disk())
+        antes = self.entries_on_disk()
+
+        self.editor.priority_text.set("alta")
+        self.editor.mark_dirty()
+        self.assertIn(
+            glossary_editor.INVALID_PRIORITY_WARNING,
+            self.editor.validation_label.cget("text"),
+        )
+
+        self.click(self.button("Salvar"))
+        self.assertEqual(self.entries_on_disk(), antes, "gravou uma prioridade invalida")
+
+        self.click(self.button("Salvar como nova"))
+        self.assertEqual(self.entries_on_disk(), antes)
+
+    def test_promoting_keeps_the_rule_selected(self):
+        """Depois de priorizar, a regra continua no formulario.
+
+        Ela e reencontrada pelo par e pelo tipo — a prioridade acabou de mudar,
+        entao nao serve para identificar. Sem isso o formulario e limpo e o
+        usuario perde de vista a regra sobre a qual acabou de decidir.
+        """
+        self.click(self.row_for("castle"))
+        self.click(self.button("Priorizar esta"))
+
+        self.assertIsNotNone(self.editor.state.selected_index, "perdeu a selecao")
+        self.assertEqual(self.editor.text_value(self.editor.new_text), "castle")
+        self.assertEqual(self.editor.priority_text.get(), "1")
+
+    def test_the_row_shows_the_priority_only_when_there_is_one(self):
+        self.assertIsNone(self.button_containing("P+"), "P0 apareceu na lista")
+
+        self.editor.select_entry(2)
+        self.editor.priority_text.set("2")
+        self.editor.mark_dirty()
+        self.click(self.button("Salvar"))
+
+        self.assertIsNotNone(
+            self.button_containing("P+2"), "a linha nao mostra a prioridade"
+        )
+
+    # ------------------------------------------------ priorizar
+
+    def test_promoting_resolves_the_conflict_without_deleting(self):
+        """A diferenca em relacao a "Manter esta", que e o ponto do item."""
+        self.click(self.row_for("castle"))
+        self.assertIn("nunca é aplicada", self.conflict_text())
+
+        self.click(self.button("Priorizar esta"))
+
+        entradas = self.entries_on_disk()
+        self.assertEqual(len(entradas), 3, "a promocao apagou uma regra")
+        self.assertIn(("torre", "rook", "suggestion", 0), entradas)
+        self.assertIn(("torre", "castle", "suggestion", 1), entradas)
+        self.assertNotIn("nunca é aplicada", self.conflict_text())
+
+    def test_promoting_the_winner_says_there_is_nothing_to_do(self):
+        self.click(self.row_for("rook"))
+        antes = self.entries_on_disk()
+
+        self.click(self.button("Priorizar esta"))
+
+        self.assertEqual(self.entries_on_disk(), antes, "reescreveu o arquivo a toa")
+
+    def test_the_app_glossary_follows_the_new_order(self):
+        """A promocao tem de chegar as sugestoes do editor de traducoes."""
+        self.click(self.row_for("castle"))
+        self.click(self.button("Priorizar esta"))
+
+        regras = self.app.glossary_substitutions
+        self.assertEqual(
+            glossario.apply_all_substitutions("a torre", regras),
+            "a castle",
+            f"o glossario do app nao acompanhou: {regras}",
+        )
+
+    def row_for(self, needle):
+        widget = self.button_containing(needle)
+        self.assertIsNotNone(widget, f"linha {needle!r} nao encontrada")
+        return widget
 
 
 class GlossaryEditorMethodCoverageTests(EditorWindowTestCase):
@@ -591,11 +755,11 @@ class GlossaryEditorMethodCoverageTests(EditorWindowTestCase):
         self.click(self.button("Salvar como nova"))
 
         entradas = self.entries_on_disk()
-        self.assertIn(("bishop", "bispo", "suggestion"), entradas)
+        self.assertIn(("bishop", "bispo", "suggestion", 0), entradas)
         self.assertIsNotNone(self.editor.state.selected_index, "nao reencontrou o que gravou")
         self.assertEqual(
             entradas[self.editor.state.selected_index],
-            ("bishop", "bispo", "suggestion"),
+            ("bishop", "bispo", "suggestion", 0),
         )
 
     # ------------------------------------------------ fechar

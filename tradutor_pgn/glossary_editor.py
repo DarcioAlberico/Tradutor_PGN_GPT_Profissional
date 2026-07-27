@@ -6,6 +6,7 @@ import customtkinter as ctk
 
 from .glossario import (
     build_glossary_lookup,
+    GLOSSARY_PRIORITY_DEFAULT,
     GLOSSARY_RULE_AUTOMATIC,
     GLOSSARY_RULE_CLEANUP,
     GLOSSARY_RULE_SUGGESTION,
@@ -24,7 +25,10 @@ from .glossario import (
     apply_substitution,
     import_glossary_csv,
     glossary_entry_pair,
+    glossary_entry_priority,
     glossary_entry_type,
+    normalize_glossary_priority,
+    promote_glossary_rule,
     load_glossary_entry_details,
     load_glossary_entries,
     load_interactive_substitutions,
@@ -55,6 +59,7 @@ from .editor_widgets import (
 from .window_utils import bring_window_to_front
 
 
+INVALID_PRIORITY_WARNING = "Prioridade precisa ser um número inteiro."
 WARNING_COLOR = "#f59e0b"
 OK_COLOR = "#16a34a"
 ERROR_COLOR = "#dc2626"
@@ -186,7 +191,14 @@ def row_label(entries, index, diagnostics=None):
     type_label = rule_type_label(glossary_entry_type(entry))
     warnings = glossary_entry_warnings(entries, index, diagnostics)
     status = "AVISO" if warnings else "OK"
-    return f"{status}  #{index + 1}  -  {type_label}\nDe: {preview(orig)}\nPara: {preview(new)}"
+    # A prioridade so aparece quando ha uma: mostra-la como "P0" em 7 mil linhas
+    # transformaria a ausencia de decisao em ruido em toda a lista.
+    priority = glossary_entry_priority(entry)
+    marca = f"  ·  P{priority:+d}" if priority != GLOSSARY_PRIORITY_DEFAULT else ""
+    return (
+        f"{status}  #{index + 1}  -  {type_label}{marca}\n"
+        f"De: {preview(orig)}\nPara: {preview(new)}"
+    )
 
 
 class GlossaryEditorState:
@@ -275,7 +287,12 @@ class GlossaryEditor:
 
         self.state = GlossaryEditorState()
         self.row_buttons = []
-        self.form_baseline = {"orig": "", "new": "", "type": GLOSSARY_RULE_SUGGESTION}
+        self.form_baseline = {
+            "orig": "",
+            "new": "",
+            "type": GLOSSARY_RULE_SUGGESTION,
+            "priority": GLOSSARY_PRIORITY_DEFAULT,
+        }
 
         self.search_text = tk.StringVar(master=self.win, value="")
         self.test_text_var = tk.StringVar(master=self.win, value="")
@@ -286,6 +303,9 @@ class GlossaryEditor:
         self.rule_type_text = tk.StringVar(
             master=self.win,
             value=rule_type_label(GLOSSARY_RULE_SUGGESTION),
+        )
+        self.priority_text = tk.StringVar(
+            master=self.win, value=str(GLOSSARY_PRIORITY_DEFAULT)
         )
 
         self.win.columnconfigure(0, weight=1)
@@ -404,7 +424,7 @@ class GlossaryEditor:
 
         type_bar = ctk.CTkFrame(detail_frame, fg_color="transparent")
         type_bar.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 8))
-        type_bar.columnconfigure(1, weight=1)
+        type_bar.columnconfigure(4, weight=1)
         ctk.CTkLabel(type_bar, text="Tipo:").grid(row=0, column=0, sticky="w", padx=(0, 6))
         self.type_menu = ctk.CTkOptionMenu(
             type_bar,
@@ -413,6 +433,28 @@ class GlossaryEditor:
             width=160,
         )
         self.type_menu.grid(row=0, column=1, sticky="w")
+
+        # Campo de texto, e nao um seletor de valores: a prioridade e um inteiro
+        # qualquer no arquivo, e um `Substituicoes.txt` editado a mao pode trazer
+        # um valor fora de qualquer faixa que a janela oferecesse. Um seletor
+        # teria de escolher entre esconder esse valor ou troca-lo — o campo
+        # mostra o que esta la, e o que nao for inteiro vira aviso de validacao.
+        ctk.CTkLabel(type_bar, text="Prioridade:").grid(
+            row=0, column=2, sticky="w", padx=(16, 6)
+        )
+        self.priority_entry = ctk.CTkEntry(
+            type_bar,
+            textvariable=self.priority_text,
+            width=70,
+            justify="center",
+        )
+        self.priority_entry.grid(row=0, column=3, sticky="w")
+        ctk.CTkLabel(
+            type_bar,
+            text="(maior vence; 0 deixa o comprimento decidir)",
+            text_color="#64748b",
+            anchor="w",
+        ).grid(row=0, column=4, sticky="w", padx=(8, 0))
 
         self.validation_label = ctk.CTkLabel(
             detail_frame,
@@ -437,8 +479,15 @@ class GlossaryEditor:
             wraplength=460,
         )
         self.conflict_label.grid(row=0, column=0, sticky="ew")
+        # Duas saidas para o mesmo conflito, e a ordem na barra e a ordem em que
+        # convem tenta-las: priorizar nao apaga nada e da para desfazer mudando
+        # um numero; manter remove as concorrentes do arquivo.
+        self.btn_promote_conflict = ctk.CTkButton(
+            self.conflict_bar, text="Priorizar esta", width=120
+        )
+        self.btn_promote_conflict.grid(row=0, column=1, sticky="e", padx=(6, 0))
         self.btn_keep_conflict = ctk.CTkButton(self.conflict_bar, text="Manter esta", width=110)
-        self.btn_keep_conflict.grid(row=0, column=1, sticky="e", padx=(6, 0))
+        self.btn_keep_conflict.grid(row=0, column=2, sticky="e", padx=(6, 0))
         self.conflict_bar.grid_remove()
 
         test_header = ctk.CTkFrame(detail_frame, fg_color="transparent")
@@ -516,6 +565,8 @@ class GlossaryEditor:
         self.btn_search.configure(command=self.apply_search)
         self.btn_clear_search.configure(command=self.clear_search)
         self.btn_keep_conflict.configure(command=self.keep_this_rule)
+        self.btn_promote_conflict.configure(command=self.promote_this_rule)
+        self.priority_text.trace_add("write", lambda *_a: self.mark_dirty())
         self.btn_apply_preview.configure(command=self.refresh_preview)
         self.btn_apply_all_preview.configure(command=self.apply_all_to_preview)
         self.sort_menu.configure(command=self.restart_at_first_page)
@@ -593,10 +644,29 @@ class GlossaryEditor:
     def set_rule_type(self, rule_type):
         self.rule_type_text.set(rule_type_label(glossary_entry_type((None, None, rule_type))))
 
-    def set_form_baseline(self, orig="", new="", rule_type=None):
+    def current_priority(self):
+        """A prioridade digitada, ou `None` se o texto nao for um inteiro.
+
+        `None` e um estado legitimo do formulario, e nao um erro a esconder: o
+        campo esta vazio ou tem lixo, a validacao avisa e "Salvar" recusa. Cair
+        para zero em silencio gravaria uma decisao que o usuario nao tomou.
+        """
+        texto = self.priority_text.get().strip()
+        if not texto:
+            return None
+        try:
+            return int(texto)
+        except ValueError:
+            return None
+
+    def set_priority(self, priority):
+        self.priority_text.set(str(normalize_glossary_priority(priority)))
+
+    def set_form_baseline(self, orig="", new="", rule_type=None, priority=None):
         self.form_baseline["orig"] = orig or ""
         self.form_baseline["new"] = new or ""
         self.form_baseline["type"] = rule_type or GLOSSARY_RULE_SUGGESTION
+        self.form_baseline["priority"] = normalize_glossary_priority(priority)
 
     def form_changed(self):
         orig, new = self.current_pair()
@@ -604,6 +674,7 @@ class GlossaryEditor:
             orig != self.form_baseline["orig"]
             or new != self.form_baseline["new"]
             or self.current_rule_type() != self.form_baseline["type"]
+            or self.current_priority() != self.form_baseline["priority"]
         )
 
     def set_dirty(self, value):
@@ -647,6 +718,8 @@ class GlossaryEditor:
             rule_type=self.current_rule_type(),
             existing_lookup=self.current_validation_lookup(),
         )
+        if self.current_priority() is None:
+            warnings.append(INVALID_PRIORITY_WARNING)
         if warnings:
             self.validation_label.configure(
                 text="Avisos: " + " | ".join(warnings),
@@ -725,6 +798,58 @@ class GlossaryEditor:
         else:
             self.clear_form()
         self.show_message(f"{len(descartadas)} regra(s) em conflito removida(s)")
+
+    def promote_this_rule(self):
+        """Resolve o conflito pela prioridade, sem apagar nada (ROADMAP 1.5).
+
+        "Manter esta" tambem faz esta regra vencer, mas removendo as outras do
+        arquivo — uma decisao que nao da para revisar depois, porque o que foi
+        descartado nao esta mais la. Aqui as duas regras continuam existindo e a
+        escolha e um numero no glossario.
+        """
+        index = self.state.selected_index
+        if index is None or index not in self.state.conflicts:
+            self.show_message("Selecione uma regra em conflito", WARNING_COLOR)
+            return
+        if self.state.dirty and not self.confirm_discard_changes():
+            return
+
+        promovidas = promote_glossary_rule(self.state.entries, index, self.state.conflicts)
+        if promovidas is None:
+            self.show_message("Esta regra já vence o conflito", WARNING_COLOR)
+            return
+
+        nova = glossary_entry_priority(promovidas[index])
+        info = self.state.conflicts[index]
+        if not messagebox.askyesno(
+            "Priorizar esta regra",
+            f"Dar prioridade {nova} à regra #{index + 1} para {info['pattern']!r}?\n\n"
+            "As regras que disputam o mesmo texto continuam no glossário; esta "
+            "passa a ser a aplicada.",
+            parent=self.win,
+        ):
+            return
+
+        # Reencontrada pelo conteudo, como em "Manter esta": nada foi removido
+        # aqui, mas o arquivo pode ter mudado por fora (S6).
+        entrada = self.state.entries[index]
+        promovida = (*glossary_entry_pair(entrada), glossary_entry_type(entrada))
+        try:
+            save_glossary_entries(promovidas)
+        except Exception as exc:
+            messagebox.showerror("Erro", f"Erro ao gravar glossário:\n{exc}", parent=self.win)
+            return
+
+        self.load_rows_from_file()
+        self.state.selected_index = find_glossary_entry_index(self.state.entries, promovida)
+        self.set_dirty(False)
+        self.update_app_glossary()
+        self.apply_filter()
+        if self.state.selected_index is not None:
+            self.select_entry(self.state.selected_index)
+        else:
+            self.clear_form()
+        self.show_message(f"Regra priorizada (prioridade {nova})")
 
     def load_rows_from_file(self):
         try:
@@ -858,10 +983,12 @@ class GlossaryEditor:
         entry = self.state.entries[index]
         orig, new = glossary_entry_pair(entry)
         rule_type = glossary_entry_type(entry)
+        priority = glossary_entry_priority(entry)
         self.set_text(self.orig_text, orig)
         self.set_text(self.new_text, new)
         self.set_rule_type(rule_type)
-        self.set_form_baseline(orig, new, rule_type)
+        self.set_priority(priority)
+        self.set_form_baseline(orig, new, rule_type, priority)
         self.state.loading = False
         self.set_dirty(False)
         self.update_row_selection(index)
@@ -874,6 +1001,7 @@ class GlossaryEditor:
         self.set_text(self.orig_text, "")
         self.set_text(self.new_text, "")
         self.set_rule_type(GLOSSARY_RULE_SUGGESTION)
+        self.set_priority(GLOSSARY_PRIORITY_DEFAULT)
         self.set_form_baseline()
         self.state.loading = False
         self.set_dirty(False)
@@ -890,6 +1018,7 @@ class GlossaryEditor:
         self.set_text(self.orig_text, (original or "").strip())
         self.set_text(self.new_text, (replacement or "").strip())
         self.set_rule_type(GLOSSARY_RULE_SUGGESTION)
+        self.set_priority(GLOSSARY_PRIORITY_DEFAULT)
         self.set_form_baseline()
         self.state.loading = False
         self.set_dirty(True)
@@ -963,6 +1092,7 @@ class GlossaryEditor:
     def save_current(self):
         orig, new = self.current_pair()
         rule_type = self.current_rule_type()
+        priority = self.current_priority()
         warnings = validate_glossary_entry(
             orig,
             new,
@@ -970,10 +1100,16 @@ class GlossaryEditor:
             self.state.selected_index,
             rule_type=rule_type,
         )
+        if priority is None:
+            warnings.append(INVALID_PRIORITY_WARNING)
         blocking = [
             warning
             for warning in warnings
-            if warning in {"Texto original vazio.", "Texto de substituição vazio."}
+            if warning in {
+                "Texto original vazio.",
+                "Texto de substituição vazio.",
+                INVALID_PRIORITY_WARNING,
+            }
         ]
         if blocking:
             self.show_message("Corrija os campos obrigatórios", ERROR_COLOR)
@@ -981,7 +1117,9 @@ class GlossaryEditor:
 
         try:
             if self.state.selected_index is None:
-                result = add_glossary_entry(orig, new, rule_type=rule_type)
+                result = add_glossary_entry(
+                    orig, new, rule_type=rule_type, priority=priority
+                )
                 self.load_rows_from_file()
                 self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
                 self.show_message(
@@ -1000,6 +1138,7 @@ class GlossaryEditor:
                     new,
                     rule_type=rule_type,
                     index_hint=self.state.selected_index,
+                    priority=priority,
                 )
                 self.load_rows_from_file()
                 if result is None:
@@ -1011,7 +1150,7 @@ class GlossaryEditor:
             messagebox.showerror("Erro", f"Erro ao salvar glossário:\n{exc}", parent=self.win)
             return
 
-        self.set_form_baseline(orig, new, rule_type)
+        self.set_form_baseline(orig, new, rule_type, priority)
         self.set_dirty(False)
         self.update_app_glossary()
         self.apply_filter()
@@ -1024,13 +1163,20 @@ class GlossaryEditor:
     def save_as_new(self):
         orig, new = self.current_pair()
         rule_type = self.current_rule_type()
+        priority = self.current_priority()
         warnings = validate_glossary_entry(orig, new, self.state.entries, rule_type=rule_type)
-        if "Texto original vazio." in warnings or "Texto de substituição vazio." in warnings:
+        if (
+            "Texto original vazio." in warnings
+            or "Texto de substituição vazio." in warnings
+            or priority is None
+        ):
             self.show_message("Corrija os campos obrigatórios", ERROR_COLOR)
             return
 
         try:
-            result = add_glossary_entry(orig, new, rule_type=rule_type)
+            result = add_glossary_entry(
+                orig, new, rule_type=rule_type, priority=priority
+            )
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao salvar nova entrada:\n{exc}", parent=self.win)
             return
@@ -1044,7 +1190,7 @@ class GlossaryEditor:
         # localizadas do mesmo jeito. `len(entries) - 1` so acertava porque a
         # insercao acrescenta no fim, e errava quando ela nao acontecia.
         self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
-        self.set_form_baseline(orig, new, rule_type)
+        self.set_form_baseline(orig, new, rule_type, priority)
         self.set_dirty(False)
         self.update_app_glossary()
         self.apply_filter()

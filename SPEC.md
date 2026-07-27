@@ -289,6 +289,21 @@ o texto que uma regra longa pretendia casar. Com `('verificacao' -> 'xeque')` e
 `('da verificacao intermediaria' -> 'do xeque intermediario')`, vence a segunda.
 Empates preservam a ordem do arquivo.
 
+**Garantia S10 — a prioridade explicita decide antes do comprimento.** Uma regra
+pode declarar uma prioridade inteira; a maior e aplicada primeiro, e so entre
+prioridades iguais o comprimento (S3) volta a decidir. Zero e o valor de toda
+regra que ninguem priorizou, entao S3 continua sendo o criterio de praticamente
+todo o glossario.
+
+Existe porque a especificidade e **derivada do texto**: sem prioridade, adiantar
+uma regra exige alongar o padrao — mudar o que ela casa para mudar quando ela
+roda. O campo separa as duas coisas.
+
+No arquivo, a prioridade e o quarto elemento da tupla e so aparece quando nao e
+zero (`('orig', 'novo', 'suggestion', 2)`); no CSV e a coluna `priority`, opcional
+na leitura. Um `Substituicoes.txt` ou um CSV de antes desta versao continua
+valendo, com prioridade zero em tudo.
+
 **Garantia S4 — o texto substituido e final.** Um trecho ja produzido por uma
 regra nao e reexaminado pelas regras seguintes. Sem isso, duas regras
 contraditorias se desfazem uma a outra e o resultado passa a depender da ordem
@@ -304,10 +319,12 @@ declarou, e a regra genérica continua valendo onde a especifica nao alcanca.
 
 **Garantia S9 — a interface diz qual regra do conflito esta valendo.** Duas
 regras com o mesmo padrao e substituicoes diferentes nao empatam. S3 ordena por
-comprimento do padrao; padroes identicos empatam sempre, e o desempate mantem a
-ordem do arquivo — vence quem foi digitado primeiro, e o congelamento de S4
-impede a outra de rever o trecho. O editor mostra, na regra selecionada, qual
-delas o programa aplica, e oferece "Manter esta", que remove as concorrentes.
+comprimento do padrao; padroes identicos empatam sempre, entao o que decide e a
+prioridade (S10) e, sem ela, a ordem do arquivo — vence quem foi digitado
+primeiro, e o congelamento de S4 impede a outra de rever o trecho. O editor
+mostra, na regra selecionada, qual delas o programa aplica, e oferece duas
+saidas: "Priorizar esta", que a poe na frente sem apagar nada, e "Manter esta",
+que remove as concorrentes do arquivo.
 
 O vencedor e **por contexto**. `Substituicoes.txt` e uma lista so, mas o programa
 carrega tres recortes dela: limpeza, automaticas, e sugestoes do editor (que
@@ -539,6 +556,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | S7 | Entradas sem espaco nas pontas | Bug: 48 regras colavam palavras |
 | S8 | Retencao so apaga backup, da familia certa | Risco da limpeza automatica |
 | S9 | A interface diz qual regra do conflito vence | Bug: regras iguais lado a lado, sem dizer qual dispara |
+| S10 | Prioridade explicita decide antes do comprimento | Limite: adiantar uma regra exigia alongar o padrao |
 | R1 | Gravacao so por acao do usuario | Bug: navegar reescreve o banco |
 | R5 | Navegar custa O(pagina) | Perf: paginacao anulada por varredura |
 | R8 | Navegar custa O(pagina) tambem com busca ativa | Perf: `LIKE '%x%'` varre a tabela a cada interacao |
@@ -574,11 +592,9 @@ leia uma garantia acima como mais ampla do que ela e.
 
 **Glossario e arquivos gerados**
 
-- O glossario e uma lista linear; regras conflitantes sao resolvidas por
-  especificidade (S3) e, entre padroes identicos, por ordem de digitacao. A
-  janela passou a dizer qual delas vence (S9), mas nao ha campo de prioridade:
-  adiantar uma regra ainda exige alongar o padrao ou mover a linha no arquivo.
-  (ROADMAP 1.5)
+- O glossario e uma lista linear. A prioridade explicita (S10) resolve o caso de
+  adiantar uma regra, mas so entre regras — nao ha grupos, escopos por idioma
+  nem condicoes: uma regra vale para todo texto do seu recorte.
 
 **Estrutura**
 

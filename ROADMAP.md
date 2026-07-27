@@ -294,8 +294,128 @@ em vez de fixar a lista dos quatro, exige que nao haja nenhum. Conferido
 introduzindo um conflito novo no arquivo — ele falha imprimindo qual e o padrao e
 qual regra esta vencendo, que e a informacao necessaria para decidir.
 
-**Falta:** so o item 2 acima, prioridade explicita, que continua adiado ate
-ficar claro que mostrar o vencedor nao basta.
+**Feito o item 2 (2026-07-27): prioridade explicita.**
+
+**A precondicao declarada nao foi cumprida, e vale registrar.** Este item dizia
+"so depois que 1 estiver em uso e ficar claro que nao basta". Nao houve esse
+periodo de uso: mostrar o vencedor ficou pronto no mesmo dia, e os quatro
+conflitos reais foram todos decididos por "Manter esta". A prioridade foi feita
+por decisao de seguir adiante, e nao porque a evidencia chegou. O que se sabe
+sobre ela e o que o proprio item argumentava; o que ainda nao se sabe e se, na
+pratica, alguem prefere priorizar a apagar.
+
+**O que ela e.** Um inteiro por regra, zero por padrao. `order_rules_by_specificity`
+passou a ordenar por `(-prioridade, -comprimento, posicao)`: a prioridade decide
+antes do comprimento, e entre prioridades iguais **nada muda** — que e o caso de
+todas as 7.061 regras de hoje. Garantia S10.
+
+**A resposta nao destrutiva ao conflito, que e o ganho real.** O item 1 resolveu
+a disputa apagando: "Manter esta" remove as concorrentes do arquivo, e o que foi
+descartado nao volta. A prioridade resolve a mesma disputa com um numero, e as
+duas regras continuam la — a decisao e visivel no glossario e reversivel
+priorizando a outra. A barra de conflito ganhou "Priorizar esta" ao lado de
+"Manter esta", nessa ordem, que e a ordem em que convem tenta-las.
+
+A prioridade nova e "a maior entre as concorrentes mais um", e nao um valor
+fixo: priorizar duas vezes a mesma regra e um no-op, e priorizar a outra depois
+inverte a decisao — que e o que "priorizar" promete.
+
+**Tres formatos mudaram, e nenhum quebrou.**
+
+| onde | como | compatibilidade |
+|---|---|---|
+| `Substituicoes.txt` | 4o elemento da tupla | so escrito quando != 0 |
+| `glossario.db` | coluna `priority` | `ALTER TABLE` + reconstrucao |
+| CSV | coluna `priority` | opcional na leitura |
+
+O arquivo so ganha o campo quando ha o que dizer. Nao e economia de bytes: sao
+7 mil linhas versionadas, e escrever `, 0` em todas transformaria uma decisao
+tomada em quatro regras num diff de 7 mil linhas.
+
+**O `glossario.db` precisou de mais do que um `ALTER TABLE`,** e este e o tipo de
+detalhe que passa despercebido ate estragar algo. A coluna nova entra com o
+padrao para todas as regras, e o `mtime` do `Substituicoes.txt` **nao mudou** —
+entao o cache continuaria valendo e as prioridades do arquivo seriam lidas como
+zero. Entrou `GLOSSARY_DB_SCHEMA_VERSION` nos metadados: banco de esquema antigo
+e reconstruido a partir do arquivo. Tem teste, montando exatamente esse cenario.
+
+**Duas decisoes de forma, e o motivo de cada uma:**
+
+- **A entrada detalhada virou uma 4-tupla** `(orig, novo, tipo, prioridade)`, e
+  nao uma 3-tupla com a prioridade pendurada como atributo. A segunda forma
+  custaria zero alteracoes nos testes — e por isso mesmo seria errada: `==`
+  ignoraria a prioridade, e qualquer reconstrucao da tupla a perderia **em
+  silencio**. Custou 25 assercoes atualizadas, com o helper `com_prioridade`
+  onde a prioridade nao e o assunto do teste.
+- **A regra continua sendo um par**, e so ganha o terceiro elemento quando
+  carrega prioridade. As listas de regras circulam por todo o programa e sao
+  comparadas com pares literais em dezenas de lugares; acrescentar um `0` a
+  todas mudaria a forma de tudo para representar a ausencia de uma decisao. Os
+  tres pontos que faziam `for orig, new in rules` passaram a indexar.
+
+**A prioridade nao entra na identidade da entrada.** `find_glossary_entry_index`
+compara `(orig, novo, tipo)`: o editor localiza a linha pelo estado que exibiu
+quando ela foi selecionada, e mudar a prioridade e justamente uma das coisas que
+"Salvar" faz. Se ela contasse ali, salvar uma prioridade nova nunca acharia a
+entrada a atualizar.
+
+**O criterio do vencedor esta em dois lugares, e isso e um risco declarado.**
+`glossary_conflicts` decide por conta propria quem vence (os padroes sao
+identicos, entao ele compara prioridade e posicao) enquanto quem aplica e
+`order_rules_by_specificity`. Se os dois divergirem, a janela anuncia uma regra e
+o texto recebe outra — pior do que nao anunciar nada. Por isso
+`test_the_announced_winner_follows_the_priority_too` continua conferindo contra
+`apply_all_substitutions`, e nao contra outra copia da regra de ordenacao.
+
+**O campo e de texto, e nao um seletor.** A prioridade e um inteiro qualquer no
+arquivo, e um `Substituicoes.txt` editado a mao pode trazer um valor fora de
+qualquer faixa que a janela oferecesse — um seletor teria de escolher entre
+esconder esse valor ou troca-lo. O que nao for inteiro vira aviso de validacao e
+**bloqueia** a gravacao: cair para zero em silencio gravaria uma decisao que o
+usuario nao tomou.
+
+**Conferido por mutacao**, treze maneiras de errar: a prioridade fora da
+ordenacao, a prioridade valendo menos que o comprimento, a chave do cache sem
+ela, o conflito voltando a decidir so pela ordem do arquivo, o arquivo deixando
+de grava-la, as regras carregadas perdendo-a, o banco de esquema antigo
+continuando a valer como cache, promover sem subir acima das concorrentes,
+promover apagando-as, a identidade da entrada passando a inclui-la, atualizar sem
+opinar zerando-a, o CSV deixando de ler a coluna, e a prioridade invalida virando
+zero em silencio.
+
+**Onze foram pegas de primeira, e as duas restantes eram testes meus que nao
+testavam nada** — os dois pelo mesmo motivo, que vale registrar porque nao e
+obvio: **a mutacao produzia o mesmo arquivo que ja estava la.**
+
+1. *Identidade incluindo a prioridade.* O teste atualizava uma entrada de
+   prioridade **zero**, e a linha-base tambem vale zero: comparar a prioridade
+   acertava por coincidencia. Refeito sobre uma entrada que ja tem prioridade 3.
+2. *Prioridade invalida virando zero.* O teste digitava lixo numa regra de
+   prioridade **zero**, entao "gravar zero por engano" reproduzia exatamente o
+   arquivo anterior e a falha era invisivel. Refeito partindo de prioridade 5.
+
+A primeira mutacao apontou um caminho de producao que faltava cobrir, e nao so
+um teste fraco: depois de "Priorizar esta" a regra fica com prioridade 1 e a
+janela precisa reencontra-la **pelo par e pelo tipo** para manter a selecao. Com
+a prioridade na comparacao, a busca falha e o formulario e limpo — o usuario
+perde de vista a regra sobre a qual acabou de decidir. Entrou
+`test_promoting_keeps_the_rule_selected`.
+
+**Verificado na janela de verdade**, que e onde o item se paga: com `'torre'`
+disputado por `'rook'` e `'castle'`, selecionar a perdedora mostra "Esta regra
+nunca é aplicada"; um clique em "Priorizar esta" troca a mensagem para "vence
+esta regra", a linha passa a exibir `P+1`, a regra continua selecionada com o
+campo em 1, **as tres regras continuam no arquivo** e o texto passa de
+`a rook` para `a castle`. No `Substituicoes.txt`, so a regra promovida ganhou o
+quarto campo:
+
+```
+substituicoes = [
+    ('torre', 'rook'),
+    ('dama', 'queen'),
+    ('torre', 'castle', 'suggestion', 1),
+]
+```
 
 ---
 

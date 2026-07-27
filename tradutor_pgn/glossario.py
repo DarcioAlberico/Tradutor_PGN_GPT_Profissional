@@ -23,8 +23,20 @@ GLOSSARY_RULE_TYPES = (
     GLOSSARY_RULE_CLEANUP,
     GLOSSARY_RULE_AUTOMATIC,
 )
-GLOSSARY_CSV_HEADERS = ["original", "replacement", "type"]
+GLOSSARY_CSV_HEADERS = ["original", "replacement", "type", "priority"]
 GLOSSARY_DB_FILENAME = "glossario.db"
+
+# Prioridade explicita (ROADMAP 1.5, parte 2). Zero e "sem opiniao", e e o valor
+# de toda regra que nao foi tocada — por isso o formato do arquivo so escreve o
+# campo quando ele nao e zero: um glossario de 7 mil regras nao muda de tamanho
+# por causa de uma decisao tomada em quatro delas.
+GLOSSARY_PRIORITY_DEFAULT = 0
+
+# Sobe quando o `glossario.db` ganha coluna. Um banco gravado por uma versao
+# anterior tem de ser reconstruido a partir do arquivo, e nao apenas alterado:
+# a coluna nova entraria com o valor padrao para todas as regras, sem que o
+# `mtime` do `Substituicoes.txt` tivesse mudado para acusar a diferenca.
+GLOSSARY_DB_SCHEMA_VERSION = 2
 
 
 # ============================================================================
@@ -152,6 +164,30 @@ def _entry_rule_type(item):
     return GLOSSARY_RULE_SUGGESTION
 
 
+def normalize_glossary_priority(value):
+    """Prioridade como inteiro, ou o padrao quando o valor nao serve.
+
+    O `Substituicoes.txt` e o CSV sao editaveis a mao e sobrevivem a versoes do
+    programa: uma prioridade escrita como `"alta"` nao pode virar excecao no
+    meio da carga do glossario. Vale a mesma regra do `rule_type` — o que nao da
+    para entender vira o padrao.
+    """
+    if isinstance(value, bool) or value is None:
+        return GLOSSARY_PRIORITY_DEFAULT
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return GLOSSARY_PRIORITY_DEFAULT
+
+
+def _entry_priority(item):
+    if isinstance(item, dict):
+        return normalize_glossary_priority(item.get("priority"))
+    if isinstance(item, (list, tuple)) and len(item) >= 4:
+        return normalize_glossary_priority(item[3])
+    return GLOSSARY_PRIORITY_DEFAULT
+
+
 def _normalize_entries(entries):
     normalized = []
     for item in entries:
@@ -168,7 +204,9 @@ def _normalize_detailed_entries(entries):
         pair = _entry_pair(item)
         if pair is not None:
             orig, new = pair
-            normalized.append((str(orig), str(new), _entry_rule_type(item)))
+            normalized.append(
+                (str(orig), str(new), _entry_rule_type(item), _entry_priority(item))
+            )
     return normalized
 
 
@@ -180,10 +218,23 @@ def glossary_entry_type(entry):
     return _entry_rule_type(entry)
 
 
+def glossary_entry_priority(entry):
+    return _entry_priority(entry)
+
+
 def _serialize_entries(entries):
+    """Escreve o `Substituicoes.txt`, com o campo mais curto que basta.
+
+    Cada campo so aparece quando tem algo a dizer: o tipo quando nao e sugestao,
+    a prioridade quando nao e zero. Nao e economia de bytes — e que o arquivo
+    tem 7 mil linhas e e versionado: escrever `, 0` em todas elas transformaria
+    a decisao tomada em quatro regras num diff de 7 mil linhas.
+    """
     lines = ["substituicoes = [\n"]
-    for orig, new, rule_type in _normalize_detailed_entries(entries):
-        if rule_type == GLOSSARY_RULE_SUGGESTION:
+    for orig, new, rule_type, priority in _normalize_detailed_entries(entries):
+        if priority != GLOSSARY_PRIORITY_DEFAULT:
+            lines.append(f"    ({orig!r}, {new!r}, {rule_type!r}, {priority!r}),\n")
+        elif rule_type == GLOSSARY_RULE_SUGGESTION:
             lines.append(f"    ({orig!r}, {new!r}),\n")
         else:
             lines.append(f"    ({orig!r}, {new!r}, {rule_type!r}),\n")
@@ -266,6 +317,7 @@ def initialize_glossary_database(db_path=None):
             original_text TEXT NOT NULL,
             replacement_text TEXT NOT NULL,
             rule_type TEXT NOT NULL DEFAULT 'suggestion',
+            priority INTEGER NOT NULL DEFAULT 0,
             position INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -281,6 +333,13 @@ def initialize_glossary_database(db_path=None):
             """
             ALTER TABLE glossary_entries
             ADD COLUMN rule_type TEXT NOT NULL DEFAULT 'suggestion'
+            """
+        )
+    if "priority" not in cols:
+        conn.execute(
+            """
+            ALTER TABLE glossary_entries
+            ADD COLUMN priority INTEGER NOT NULL DEFAULT 0
             """
         )
     conn.execute(
@@ -342,18 +401,20 @@ def sync_glossary_database(entries, db_path=None, source_path=None):
                 original_text,
                 replacement_text,
                 rule_type,
+                priority,
                 position,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             [
-                (orig, new, rule_type, index, now, now)
-                for index, (orig, new, rule_type) in enumerate(entries)
+                (orig, new, rule_type, priority, index, now, now)
+                for index, (orig, new, rule_type, priority) in enumerate(entries)
             ],
         )
         _set_glossary_metadata(conn, "entry_count", len(entries))
+        _set_glossary_metadata(conn, "schema_version", GLOSSARY_DB_SCHEMA_VERSION)
         if source_path is not None:
             _set_glossary_metadata(conn, "source_path", os.path.abspath(source_path))
             _set_glossary_metadata(conn, "source_mtime", _source_mtime(source_path))
@@ -403,7 +464,7 @@ def load_glossary_entry_details_from_db(db_path=None, deduplicate=True):
     try:
         rows = conn.execute(
             """
-            SELECT original_text, replacement_text, rule_type
+            SELECT original_text, replacement_text, rule_type, priority
             FROM glossary_entries
             ORDER BY position, id
             """
@@ -412,7 +473,7 @@ def load_glossary_entry_details_from_db(db_path=None, deduplicate=True):
         conn.close()
 
     entries = [
-        (row[0], row[1], _normalize_rule_type(row[2]))
+        (row[0], row[1], _normalize_rule_type(row[2]), normalize_glossary_priority(row[3]))
         for row in rows
     ]
     if deduplicate:
@@ -431,10 +492,18 @@ def _glossary_database_needs_sync(path, db_path):
         count = conn.execute("SELECT COUNT(*) FROM glossary_entries").fetchone()[0]
         source_path = _get_glossary_metadata(conn, "source_path")
         source_mtime = _get_glossary_metadata(conn, "source_mtime")
+        schema = _get_glossary_metadata(conn, "schema_version")
     finally:
         conn.close()
 
     if count == 0:
+        return True
+    if schema != str(GLOSSARY_DB_SCHEMA_VERSION):
+        # Um `glossario.db` gravado por uma versao anterior nao tem as colunas
+        # novas. O `ALTER TABLE` acima cria a coluna com o padrao, e sem esta
+        # checagem o banco continuaria valendo como cache: as regras seriam
+        # lidas com prioridade zero enquanto o arquivo diz outra coisa. Errado,
+        # e em silencio — e o `mtime` do arquivo nao mudou para acusar.
         return True
     if source_path and os.path.abspath(source_path) != os.path.abspath(path):
         return True
@@ -655,10 +724,11 @@ def glossary_conflicts(entries):
 
     Duas regras com o mesmo `orig` e substituicoes diferentes nao empatam: uma
     delas vence sempre, e a outra nunca dispara. Quem decide e
-    `order_rules_by_specificity`, que ordena por comprimento do padrao (garantia
-    S3) — como os padroes em conflito sao identicos por definicao, o comprimento
-    empata e o desempate mantem a ordem do arquivo. A primeira do arquivo vence,
-    e o congelamento de S4 impede que a seguinte reveja o trecho.
+    `order_rules_by_specificity`, que ordena por prioridade explicita (garantia
+    S10) e depois por comprimento do padrao (garantia S3) — como os padroes em
+    conflito sao identicos por definicao, o comprimento empata sempre, e o que
+    sobra e a prioridade e, sem ela, a ordem do arquivo. O congelamento de S4
+    impede que a seguinte reveja o trecho.
 
     O vencedor e **por contexto**: uma regra automatica e uma de sugestao com o
     mesmo padrao competem no editor (que carrega as duas), mas na aplicacao das
@@ -683,12 +753,24 @@ def glossary_conflicts(entries):
     indices_by_pattern = {}
     rule_types = []
     replacements = []
+    priorities = []
     for index, entry in enumerate(entries):
         orig, new = glossary_entry_pair(entry)
         rule_types.append(glossary_entry_type(entry))
         replacements.append(new)
+        priorities.append(glossary_entry_priority(entry))
         if orig:
             indices_by_pattern.setdefault(orig, []).append(index)
+
+    def vencedor(members):
+        """A regra que `order_rules_by_specificity` poria na frente.
+
+        Os padroes sao identicos por definicao, entao o comprimento nao separa
+        nada aqui: sobram a prioridade e a posicao no arquivo, nessa ordem. Se
+        este criterio divergir do de la, a janela anuncia um vencedor que nao e
+        o aplicado — que e pior do que nao anunciar nenhum.
+        """
+        return min(members, key=lambda index: (-priorities[index], index))
 
     conflicts = {}
     for pattern, indices in indices_by_pattern.items():
@@ -710,8 +792,7 @@ def glossary_conflicts(entries):
                     "key": key,
                     "label": label,
                     "members": members,
-                    # A ordem do arquivo decide o empate de comprimento.
-                    "winner": members[0],
+                    "winner": vencedor(members),
                     "disputed": disputed,
                 }
             )
@@ -791,6 +872,52 @@ def resolve_glossary_conflict(entries, index, conflicts=None):
     return [entry for position, entry in enumerate(entries) if position not in removidos]
 
 
+def promote_glossary_rule(entries, index, conflicts=None):
+    """Entradas com a regra `index` priorizada acima de quem disputa com ela.
+
+    E a resposta **nao destrutiva** ao conflito, e a razao de a prioridade
+    existir (ROADMAP 1.5, parte 2). `resolve_glossary_conflict` tambem faz a
+    regra escolhida vencer, mas apagando as outras: uma decisao que nao da para
+    revisar depois, porque o que foi descartado nao esta mais no arquivo. Aqui as
+    duas regras continuam la e a escolha e um numero — reversivel, e visivel no
+    proprio glossario.
+
+    Devolve `None` quando nao ha o que fazer: a regra nao esta em disputa, ou ja
+    vence em todos os contextos que a carregam. Gravar nesses casos seria
+    reescrever 7 mil linhas para nao mudar nada.
+
+    A prioridade nova e a maior entre as concorrentes mais um — nao um valor
+    fixo. Priorizar duas vezes a mesma regra e um no-op; priorizar a outra regra
+    depois inverte a decisao, que e o comportamento que "priorizar" promete.
+    """
+    if conflicts is None:
+        conflicts = glossary_conflicts(entries)
+    info = conflicts.get(index)
+    if not info:
+        return None
+
+    if all(context["winner"] == index for context in info["contexts"]):
+        return None
+
+    concorrentes = {
+        membro
+        for context in info["contexts"]
+        for membro in context["members"]
+        if membro != index
+    }
+    detalhadas = _normalize_detailed_entries(entries)
+    maior = max(
+        (glossary_entry_priority(detalhadas[membro]) for membro in concorrentes),
+        default=GLOSSARY_PRIORITY_DEFAULT,
+    )
+    nova = max(maior + 1, glossary_entry_priority(detalhadas[index]) + 1)
+
+    resultado = list(detalhadas)
+    orig, new, rule_type, _antiga = resultado[index]
+    resultado[index] = (orig, new, rule_type, nova)
+    return resultado
+
+
 def deduplicate_glossary_entries(entries):
     """Remove duplicatas exatas preservando a primeira ocorrência."""
     seen = set()
@@ -821,14 +948,21 @@ def normalize_glossary_text(value):
     return "" if value is None else str(value).strip()
 
 
-def add_glossary_entry(orig, new, path=None, backup_dir=None, timestamp=None, rule_type=None):
+def add_glossary_entry(
+    orig, new, path=None, backup_dir=None, timestamp=None, rule_type=None, priority=None
+):
     entries = load_glossary_entry_details(path, deduplicate=False)
     entry = (
         normalize_glossary_text(orig),
         normalize_glossary_text(new),
         _normalize_rule_type(rule_type),
+        normalize_glossary_priority(priority),
     )
-    if entry in entries:
+    # A prioridade fica de fora da checagem de duplicata: a mesma regra com
+    # outra prioridade continua sendo a mesma regra, e inseri-la de novo daria
+    # duas linhas identicas disputando entre si — exatamente o problema que a
+    # prioridade existe para resolver.
+    if entry[:3] in [item[:3] for item in entries]:
         return {"status": "unchanged", "backup_path": None, "entries": len(entries)}
 
     entries.append(entry)
@@ -841,7 +975,10 @@ def add_glossary_entry(orig, new, path=None, backup_dir=None, timestamp=None, ru
     return {"status": "inserted", **result}
 
 
-def update_glossary_entry(index, orig, new, path=None, backup_dir=None, timestamp=None, rule_type=None):
+def update_glossary_entry(
+    index, orig, new, path=None, backup_dir=None, timestamp=None, rule_type=None,
+    priority=None,
+):
     entries = load_glossary_entry_details(path, deduplicate=False)
     index = int(index)
     if not (0 <= index < len(entries)):
@@ -852,6 +989,11 @@ def update_glossary_entry(index, orig, new, path=None, backup_dir=None, timestam
         normalize_glossary_text(orig),
         normalize_glossary_text(new),
         _normalize_rule_type(rule_type or current_type),
+        # `None` mantem a prioridade que a entrada ja tinha: quem chama sem
+        # opinar sobre prioridade nao pode zera-la sem querer.
+        glossary_entry_priority(entries[index])
+        if priority is None
+        else normalize_glossary_priority(priority),
     )
     result = save_glossary_entries(
         entries,
@@ -874,6 +1016,12 @@ def find_glossary_entry_index(entries, target, index_hint=None, match_type=True)
     `match_type=False` compara apenas o par (original, substituicao), para quem
     nao conhece o tipo da regra.
 
+    **A prioridade nao entra na comparacao**, de proposito. Ela e uma decisao
+    sobre a regra, nao parte da identidade dela: o editor localiza a entrada
+    pelo estado que exibiu quando ela foi selecionada, e mudar a prioridade e
+    justamente uma das coisas que "Salvar" faz. Se a prioridade contasse aqui,
+    salvar uma prioridade nova nunca encontraria a entrada a atualizar.
+
     Os dois lados passam por `normalize_glossary_text` antes de serem
     comparados. Nao e detalhe: a gravacao normaliza as pontas (garantia S7),
     entao procurar pelo texto como o usuario digitou nao acha a entrada que
@@ -886,7 +1034,7 @@ def find_glossary_entry_index(entries, target, index_hint=None, match_type=True)
         return None
 
     def key(entry):
-        orig, new, rule_type = entry
+        orig, new, rule_type, _priority = entry
         pair = (normalize_glossary_text(orig), normalize_glossary_text(new))
         return pair + (rule_type,) if match_type else pair
 
@@ -917,6 +1065,7 @@ def update_glossary_entry_by_entry(
     timestamp=None,
     rule_type=None,
     index_hint=None,
+    priority=None,
 ):
     """Atualiza a entrada que ainda for igual a `previous`.
 
@@ -940,6 +1089,9 @@ def update_glossary_entry_by_entry(
         normalize_glossary_text(orig),
         normalize_glossary_text(new),
         _normalize_rule_type(rule_type or current_type),
+        glossary_entry_priority(entries[index])
+        if priority is None
+        else normalize_glossary_priority(priority),
     )
     result = save_glossary_entries(
         entries,
@@ -1060,6 +1212,13 @@ def read_glossary_csv(csv_path):
             or normalized_fields.get("rule_type")
             or normalized_fields.get("tipo")
         )
+        # Sem coluna de prioridade toda regra entra com a padrao. Um CSV de
+        # antes desta versao — ou montado a mao numa planilha com tres colunas —
+        # continua importavel, que e o que o formato tem de garantir.
+        priority_field = (
+            normalized_fields.get("priority")
+            or normalized_fields.get("prioridade")
+        )
         if not original_field or not replacement_field:
             raise ValueError("CSV precisa conter colunas original e replacement.")
 
@@ -1070,6 +1229,9 @@ def read_glossary_csv(csv_path):
                     (row.get(original_field) or "").strip(),
                     (row.get(replacement_field) or "").strip(),
                     _normalize_rule_type(row.get(type_field) if type_field else None),
+                    normalize_glossary_priority(
+                        row.get(priority_field) if priority_field else None
+                    ),
                 )
             )
         return rows
@@ -1120,7 +1282,7 @@ def analyze_glossary_csv_import(path, csv_path, allow_conflicts=False):
                 stats["skipped"] += 1
                 continue
 
-        to_insert.append((orig, new, rule_type))
+        to_insert.append((orig, new, rule_type, glossary_entry_priority(row_entry)))
         inserted_pairs.add(pair)
         replacements_by_original.setdefault(orig, set()).add(new)
         stats["inserted"] += 1
@@ -1318,7 +1480,11 @@ def find_glossary_suggestions(text, substitutions, max_suggestions=80):
         return []
 
     suggestions = []
-    for orig, new in order_rules_by_specificity(substitutions):
+    # Indexado, e nao `for orig, new in ...`: uma regra priorizada chega aqui
+    # com tres elementos. As sugestoes devolvidas continuam sendo pares — quem
+    # as recebe aplica o par, nao reordena.
+    for rule in order_rules_by_specificity(substitutions):
+        orig, new = rule[0], rule[1]
         if find_glossary_matches(text, orig):
             suggestions.append((orig, new))
             if len(suggestions) >= max_suggestions:
@@ -1327,10 +1493,26 @@ def find_glossary_suggestions(text, substitutions, max_suggestions=80):
     return suggestions
 
 
+def _as_rule(entry):
+    """Entrada detalhada -> regra `(orig, new)` ou `(orig, new, prioridade)`.
+
+    A regra so ganha o terceiro elemento quando ha prioridade para carregar. E
+    deliberado: `app.glossary_substitutions` e as listas de regras circulam por
+    todo o programa e sao comparadas com pares literais em dezenas de lugares.
+    Acrescentar um `0` a todas mudaria a forma de tudo para representar a
+    ausencia de uma decisao.
+    """
+    orig, new = glossary_entry_pair(entry)
+    priority = glossary_entry_priority(entry)
+    if priority == GLOSSARY_PRIORITY_DEFAULT:
+        return (orig, new)
+    return (orig, new, priority)
+
+
 def filter_glossary_entries_by_type(entries, rule_type):
     rule_type = _normalize_rule_type(rule_type)
     return [
-        glossary_entry_pair(entry)
+        _as_rule(entry)
         for entry in _normalize_detailed_entries(entries)
         if glossary_entry_type(entry) == rule_type
     ]
@@ -1361,7 +1543,7 @@ def load_interactive_substitutions(path=None):
     entries = load_glossary_entry_details(path)
     allowed_types = {GLOSSARY_RULE_SUGGESTION, GLOSSARY_RULE_AUTOMATIC}
     return [
-        glossary_entry_pair(entry)
+        _as_rule(entry)
         for entry in _normalize_detailed_entries(entries)
         if glossary_entry_type(entry) in allowed_types
     ]
@@ -1372,15 +1554,34 @@ def apply_substitution(text, orig, new):
     return _replace_glossary_matches(text, orig, new, count=1)
 
 
+def rule_priority(rule):
+    """Prioridade de uma regra `(orig, new[, prioridade])`.
+
+    As regras que circulam pelo programa sao pares; as que vem do glossario
+    trazem a prioridade num terceiro elemento. Um par escrito a mao continua
+    valendo, com prioridade zero — e o que mantem `apply_all_substitutions`
+    utilizavel com uma lista literal.
+    """
+    if isinstance(rule, (list, tuple)) and len(rule) >= 3:
+        return normalize_glossary_priority(rule[2])
+    return GLOSSARY_PRIORITY_DEFAULT
+
+
 def _ordered_rules_cache_key(rules):
     """Chave estavel para o cache de ordenacao, ou `None` se nao der para gerar.
 
     Uma lista nao e hashavel, e o `id()` dela nao serve (uma lista nova pode
     reaproveitar o endereco de uma coletada). A tupla dos pares e hashavel e
     identifica o conteudo, que e exatamente do que a ordem depende.
+
+    A prioridade entra na chave porque entra na ordem. Sem ela, duas listas com
+    os mesmos pares e prioridades diferentes compartilhariam a entrada do cache
+    e a segunda receberia a ordem da primeira — errado, e em silencio.
     """
     try:
-        return tuple((str(rule[0]), str(rule[1])) for rule in rules)
+        return tuple(
+            (str(rule[0]), str(rule[1]), rule_priority(rule)) for rule in rules
+        )
     except (TypeError, IndexError):
         return None
 
@@ -1408,6 +1609,13 @@ def order_rules_by_specificity(rules):
     `('da verificação intermediária' -> 'do xeque intermediário')` faz a segunda
     nunca disparar. Ordenar por comprimento do padrão resolve (garantia S3).
 
+    **A prioridade explícita vem antes do comprimento** (garantia S10). Era essa
+    a queixa do item 1.5: a especificidade é derivada do texto, então adiantar
+    uma regra exigia alongar o padrão — mudar o que a regra casa para mudar
+    quando ela roda. Com a prioridade, a intenção é declarada, e o comprimento
+    volta a decidir apenas entre regras que ninguém priorizou (prioridade zero,
+    que é a de praticamente todas).
+
     O desempate mantém a ordem original do arquivo, para que o resultado seja
     determinístico e a intenção do autor seja preservada entre regras de mesmo
     tamanho.
@@ -1417,12 +1625,12 @@ def order_rules_by_specificity(rules):
         return list(_ordered_rules_cache[chave])
 
     ordenadas = [
-        rule for _, _, rule in sorted(
+        rule for _, _, _, rule in sorted(
             (
-                (-len(str(rule[0])), index, rule)
+                (-rule_priority(rule), -len(str(rule[0])), index, rule)
                 for index, rule in enumerate(rules)
             ),
-            key=lambda item: (item[0], item[1]),
+            key=lambda item: (item[0], item[1], item[2]),
         )
     ]
 
@@ -1462,15 +1670,17 @@ def apply_all_substitutions(
     rules = order_rules_by_specificity(suggestions) if order_by_specificity else list(suggestions)
 
     if not protect_replacements:
-        for orig, new in rules:
-            text = _replace_glossary_matches(text, orig, new)
+        for rule in rules:
+            text = _replace_glossary_matches(text, rule[0], rule[1])
         return text
 
     # (trecho, congelado): um trecho congelado veio de uma substituição e não
     # pode ser reexaminado pelas regras seguintes.
     segments = [(text or "", False)]
 
-    for orig, new in rules:
+    for rule in rules:
+        # Indexado: uma regra priorizada tem tres elementos (ver `_as_rule`).
+        orig, new = rule[0], rule[1]
         if not orig:
             continue
 

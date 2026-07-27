@@ -48,10 +48,15 @@ from tradutor_pgn.database import (
 from tradutor_pgn.glossario import (
     build_glossary_lookup,
     order_rules_by_specificity,
+    GLOSSARY_PRIORITY_DEFAULT,
     GLOSSARY_RULE_AUTOMATIC,
     GLOSSARY_RULE_CLEANUP,
     GLOSSARY_RULE_SUGGESTION,
     add_glossary_entry,
+    glossary_entry_priority,
+    promote_glossary_rule,
+    rule_priority,
+    normalize_glossary_priority,
     add_to_glossary,
     analyze_glossary_csv_import,
     apply_automatic_substitutions,
@@ -1523,6 +1528,19 @@ class CallbackErrorReportingTests(unittest.TestCase):
         self.assertTrue(logs)
 
 
+def com_prioridade(entries, priority=GLOSSARY_PRIORITY_DEFAULT):
+    """Entradas de tres campos como o arquivo as devolve: com a prioridade.
+
+    A entrada detalhada ganhou um quarto campo no item 1.5 parte 2. Nos testes
+    cujo assunto nao e a prioridade, escrever `, 0` em cada tupla so acrescenta
+    ruido — mas apagar o campo da comparacao esconderia uma prioridade mexida
+    por engano. Este helper diz explicitamente qual prioridade se espera.
+    """
+    return [
+        (orig, new, rule_type, priority) for orig, new, rule_type in entries
+    ]
+
+
 class SynchronousProgress:
     """Substitui `run_with_progress` rodando o trabalho na hora.
 
@@ -1702,7 +1720,7 @@ class CsvImportSingleReadTests(unittest.TestCase):
             )
 
             entradas = load_glossary_entry_details(str(glossary), deduplicate=False)
-            pares = {(orig, new) for orig, new, _tipo in entradas}
+            pares = {(orig, new) for orig, new, _tipo, _prio in entradas}
             self.assertEqual(stats["inserted"], 2)
             self.assertIn(("queen", "dama"), pares)
             self.assertIn(("bishop", "bispo"), pares)
@@ -3220,19 +3238,19 @@ class GlossaryTests(unittest.TestCase):
             )
             self.assertEqual(
                 load_glossary_entry_details(str(glossary), db_path=str(glossary_db)),
-                [
+                com_prioridade([
                     ("mate threat", "ameaca de mate", GLOSSARY_RULE_SUGGESTION),
                     ("== EndSquare ==", "", GLOSSARY_RULE_CLEANUP),
                     ("rainha", "dama", GLOSSARY_RULE_AUTOMATIC),
-                ],
+                ]),
             )
             self.assertEqual(
                 load_glossary_entry_details_from_db(str(glossary_db)),
-                [
+                com_prioridade([
                     ("mate threat", "ameaca de mate", GLOSSARY_RULE_SUGGESTION),
                     ("== EndSquare ==", "", GLOSSARY_RULE_CLEANUP),
                     ("rainha", "dama", GLOSSARY_RULE_AUTOMATIC),
-                ],
+                ]),
             )
 
             add_glossary_entry(
@@ -3250,17 +3268,17 @@ class GlossaryTests(unittest.TestCase):
             )
             self.assertEqual(
                 load_glossary_entry_details(str(glossary), prefer_db=False),
-                [
+                com_prioridade([
                     ("mate threat", "ameaca de mate", GLOSSARY_RULE_CLEANUP),
                     ("== EndSquare ==", "", GLOSSARY_RULE_CLEANUP),
                     ("rainha", "dama", GLOSSARY_RULE_AUTOMATIC),
                     ("queen", "dama", GLOSSARY_RULE_AUTOMATIC),
-                ],
+                ]),
             )
 
             export_glossary_csv(str(csv_path), path=str(glossary))
             self.assertIn(
-                "original,replacement,type",
+                "original,replacement,type,priority",
                 csv_path.read_text(encoding="utf-8-sig"),
             )
 
@@ -3731,7 +3749,7 @@ class GlossaryTests(unittest.TestCase):
             self.assertEqual(stats["duplicates"], 2)
             self.assertEqual(stats["invalid"], 1)
             self.assertEqual(
-                [(o, n) for o, n, _t in stats["entries"]],
+                [(o, n) for o, n, _t, _p in stats["entries"]],
                 [("knight", "cavalo"), ("pawn", "peão")],
             )
 
@@ -4924,12 +4942,12 @@ class GlossaryEntryLocationTests(unittest.TestCase):
             self.assertEqual(result["index"], 2)
             self.assertEqual(
                 load_glossary_entry_details(str(path), deduplicate=False),
-                [
+                com_prioridade([
                     ("bishop", "bispo", GLOSSARY_RULE_SUGGESTION),
                     ("rook", "torre", GLOSSARY_RULE_SUGGESTION),
                     ("queen", "rainha", GLOSSARY_RULE_SUGGESTION),
                     ("pawn", "peao", GLOSSARY_RULE_AUTOMATIC),
-                ],
+                ]),
             )
 
     def test_positional_update_is_what_used_to_corrupt_the_neighbour(self):
@@ -4953,9 +4971,9 @@ class GlossaryEntryLocationTests(unittest.TestCase):
 
             entradas = load_glossary_entry_details(str(path), deduplicate=False)
             # "rook" foi destruida e "queen" continua intacta: a entrada errada.
-            self.assertEqual(entradas[1], ("queen", "rainha", GLOSSARY_RULE_SUGGESTION))
-            self.assertIn(("queen", "dama", GLOSSARY_RULE_SUGGESTION), entradas)
-            self.assertNotIn(("rook", "torre", GLOSSARY_RULE_SUGGESTION), entradas)
+            self.assertEqual(entradas[1], ("queen", "rainha", GLOSSARY_RULE_SUGGESTION, 0))
+            self.assertIn(("queen", "dama", GLOSSARY_RULE_SUGGESTION, 0), entradas)
+            self.assertNotIn(("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0), entradas)
 
     def test_update_by_entry_refuses_when_the_entry_is_gone(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4977,7 +4995,8 @@ class GlossaryEntryLocationTests(unittest.TestCase):
             self.assertIsNone(result)
             # Nada foi gravado: o arquivo continua exatamente como estava.
             self.assertEqual(
-                load_glossary_entry_details(str(path), deduplicate=False), sem_queen
+                load_glossary_entry_details(str(path), deduplicate=False),
+                com_prioridade(sem_queen),
             )
 
     def test_update_by_entry_normalizes_on_write(self):
@@ -4995,7 +5014,7 @@ class GlossaryEntryLocationTests(unittest.TestCase):
             self.assertEqual(result["index"], 0)
             self.assertEqual(
                 load_glossary_entry_details(str(path), deduplicate=False)[0],
-                ("rook", "torre alta", GLOSSARY_RULE_SUGGESTION),
+                ("rook", "torre alta", GLOSSARY_RULE_SUGGESTION, 0),
             )
 
     def test_update_by_entry_keeps_the_type_when_none_is_given(self):
@@ -5012,7 +5031,7 @@ class GlossaryEntryLocationTests(unittest.TestCase):
 
             self.assertEqual(
                 load_glossary_entry_details(str(path), deduplicate=False)[2],
-                ("pawn", "peao livre", GLOSSARY_RULE_AUTOMATIC),
+                ("pawn", "peao livre", GLOSSARY_RULE_AUTOMATIC, 0),
             )
 
     def test_delete_by_pair_can_target_the_type_and_the_duplicate(self):
@@ -5036,7 +5055,7 @@ class GlossaryEntryLocationTests(unittest.TestCase):
             self.assertEqual(removed["index"], 2)
             self.assertEqual(
                 load_glossary_entry_details(str(path), deduplicate=False),
-                entries[:2],
+                com_prioridade(entries[:2]),
             )
 
     def test_delete_by_pair_without_a_type_still_matches_only_the_pair(self):
@@ -5054,7 +5073,8 @@ class GlossaryEntryLocationTests(unittest.TestCase):
 
             self.assertEqual(removed["index"], 0)
             self.assertEqual(
-                load_glossary_entry_details(str(path), deduplicate=False), entries[1:]
+                load_glossary_entry_details(str(path), deduplicate=False),
+                com_prioridade(entries[1:]),
             )
 
     def test_delete_by_pair_returns_none_for_a_missing_entry(self):
@@ -5071,8 +5091,348 @@ class GlossaryEntryLocationTests(unittest.TestCase):
             )
             self.assertEqual(
                 load_glossary_entry_details(str(path), deduplicate=False),
-                list(self.ENTRIES),
+                com_prioridade(self.ENTRIES),
             )
+
+
+class GlossaryPriorityTests(unittest.TestCase):
+    """Item 1.5 parte 2 / garantia S10: a prioridade decide antes do comprimento.
+
+    A queixa do item era que a especificidade e derivada do texto: para adiantar
+    uma regra era preciso alongar o padrao — mudar o que ela casa para mudar
+    quando ela roda. Com a prioridade a intencao e declarada.
+    """
+
+    def test_priority_beats_length(self):
+        curta = ("torre", "roque", 5)
+        longa = ("torre da dama", "torre longa")
+
+        ordem = order_rules_by_specificity([longa, curta])
+
+        self.assertEqual(ordem[0], curta, "o comprimento venceu a prioridade")
+
+    def test_without_priority_nothing_changes(self):
+        """Prioridade zero e o caso de praticamente todas as regras."""
+        curta = ("torre", "roque")
+        longa = ("torre da dama", "torre longa")
+
+        self.assertEqual(order_rules_by_specificity([curta, longa]), [longa, curta])
+
+    def test_a_negative_priority_pushes_the_rule_back(self):
+        adiada = ("torre da dama", "torre longa", -1)
+        normal = ("torre", "roque")
+
+        self.assertEqual(order_rules_by_specificity([adiada, normal]), [normal, adiada])
+
+    def test_equal_priority_falls_back_to_length_then_file_order(self):
+        regras = [
+            ("bispo", "alfil", 2),
+            ("bispo de casas claras", "alfil claro", 2),
+            ("dama", "rainha", 2),
+        ]
+
+        ordem = order_rules_by_specificity(regras)
+
+        self.assertEqual(ordem[0], regras[1], "o comprimento nao desempatou")
+        self.assertEqual(ordem[1:], [regras[0], regras[2]], "a ordem do arquivo nao desempatou")
+
+    def test_the_ordering_cache_notices_a_change_of_priority(self):
+        """Duas listas com os mesmos pares e prioridades diferentes.
+
+        A chave do cache era so os pares. Sem a prioridade nela, a segunda lista
+        receberia a ordem da primeira: as regras continuariam sendo aplicadas,
+        so que na ordem errada — sem erro nenhum, que e o pior modo de falhar.
+        """
+        sem = [("torre", "roque"), ("torre da dama", "torre longa")]
+        com = [("torre", "roque", 5), ("torre da dama", "torre longa")]
+
+        primeira = order_rules_by_specificity(sem)
+        segunda = order_rules_by_specificity(com)
+
+        self.assertEqual(primeira[0], sem[1])
+        self.assertEqual(segunda[0], com[0], "o cache devolveu a ordem da outra lista")
+
+    def test_the_priority_changes_what_the_text_receives(self):
+        """A prova de que a ordem importa: o texto sai diferente."""
+        sem = [("torre", "roque"), ("torre da dama", "torre longa")]
+        com = [("torre", "roque", 5), ("torre da dama", "torre longa")]
+
+        self.assertEqual(apply_all_substitutions("a torre da dama", sem), "a torre longa")
+        self.assertEqual(apply_all_substitutions("a torre da dama", com), "a roque da dama")
+
+    # ------------------------------------------------ o valor em si
+
+    def test_anything_that_is_not_an_integer_becomes_the_default(self):
+        """O arquivo e o CSV sao editaveis a mao e sobrevivem a versoes.
+
+        Uma prioridade escrita como `"alta"` nao pode virar excecao no meio da
+        carga do glossario — isso desligaria as 7 mil regras por causa de uma.
+        """
+        for valor in (None, "", "alta", "1.5", [], {}, True, False):
+            with self.subTest(valor=valor):
+                self.assertEqual(normalize_glossary_priority(valor), 0)
+
+        self.assertEqual(normalize_glossary_priority("3"), 3)
+        self.assertEqual(normalize_glossary_priority(" -2 "), -2)
+        self.assertEqual(normalize_glossary_priority(7), 7)
+
+    def test_a_plain_pair_still_has_a_priority(self):
+        self.assertEqual(rule_priority(("a", "b")), 0)
+        self.assertEqual(rule_priority(("a", "b", 4)), 4)
+
+    # ------------------------------------------------ persistencia
+
+    def test_the_file_only_writes_the_field_when_there_is_one(self):
+        """7 mil linhas nao podem ganhar `, 0` por causa de quatro decisoes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Substituicoes.txt"
+            save_glossary_entries(
+                [
+                    ("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0),
+                    ("pawn", "peao", GLOSSARY_RULE_AUTOMATIC, 0),
+                    ("queen", "dama", GLOSSARY_RULE_SUGGESTION, 3),
+                ],
+                str(path),
+                create_backup=False,
+                sync_db=False,
+            )
+
+            texto = path.read_text(encoding="utf-8")
+            self.assertIn("('rook', 'torre'),", texto)
+            self.assertIn("('pawn', 'peao', 'automatic'),", texto)
+            self.assertIn("('queen', 'dama', 'suggestion', 3),", texto)
+
+    def test_a_file_from_before_this_version_still_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Substituicoes.txt"
+            path.write_text(
+                "substituicoes = [\n"
+                "    ('rook', 'torre'),\n"
+                "    ('pawn', 'peao', 'automatic'),\n"
+                "]\n",
+                encoding="utf-8",
+            )
+
+            entradas = load_glossary_entry_details(str(path), prefer_db=False)
+
+            self.assertEqual(
+                entradas,
+                com_prioridade([
+                    ("rook", "torre", GLOSSARY_RULE_SUGGESTION),
+                    ("pawn", "peao", GLOSSARY_RULE_AUTOMATIC),
+                ]),
+            )
+
+    def test_the_priority_survives_the_round_trip_through_the_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            path = base / "Substituicoes.txt"
+            db_path = base / "glossario.db"
+            save_glossary_entries(
+                [("queen", "dama", GLOSSARY_RULE_SUGGESTION, 3)],
+                str(path),
+                create_backup=False,
+                db_path=str(db_path),
+            )
+
+            do_banco = load_glossary_entry_details_from_db(str(db_path))
+            self.assertEqual(do_banco, [("queen", "dama", GLOSSARY_RULE_SUGGESTION, 3)])
+
+    def test_a_database_from_the_previous_schema_is_rebuilt(self):
+        """O `ALTER TABLE` sozinho seria uma armadilha.
+
+        A coluna nova entra com o padrao para todas as regras, e o `mtime` do
+        arquivo nao mudou para acusar: o banco continuaria valendo como cache e
+        as prioridades do arquivo seriam lidas como zero.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            path = base / "Substituicoes.txt"
+            db_path = base / "glossario.db"
+            save_glossary_entries(
+                [("queen", "dama", GLOSSARY_RULE_SUGGESTION, 3)],
+                str(path),
+                create_backup=False,
+                db_path=str(db_path),
+            )
+
+            # Um banco gravado pela versao anterior: sem a marca de esquema.
+            conn = initialize_glossary_database(str(db_path))
+            conn.execute("DELETE FROM glossary_metadata WHERE key = 'schema_version'")
+            conn.execute("UPDATE glossary_entries SET priority = 0")
+            conn.commit()
+            conn.close()
+
+            entradas = load_glossary_entry_details(str(path), db_path=str(db_path))
+
+            self.assertEqual(
+                glossary_entry_priority(entradas[0]), 3, "leu a prioridade do cache velho"
+            )
+
+    def test_the_csv_carries_the_priority_and_tolerates_its_absence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            csv_path = base / "glossario.csv"
+            entradas = [
+                ("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0),
+                ("queen", "dama", GLOSSARY_RULE_AUTOMATIC, 2),
+            ]
+            export_glossary_csv(str(csv_path), entradas)
+
+            self.assertEqual(read_glossary_csv(str(csv_path)), entradas)
+
+            # Um CSV de tres colunas — de antes desta versao, ou montado numa
+            # planilha — continua importavel.
+            antigo = base / "antigo.csv"
+            antigo.write_text(
+                "original,replacement,type\r\nrook,torre,suggestion\r\n",
+                encoding="utf-8-sig",
+            )
+            self.assertEqual(
+                read_glossary_csv(str(antigo)),
+                [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0)],
+            )
+
+    def test_saving_a_new_priority_finds_the_entry_to_update(self):
+        """A prioridade nao entra na identidade da entrada, de proposito.
+
+        O editor localiza a linha pelo estado que exibiu quando ela foi
+        selecionada, e mudar a prioridade e justamente uma das coisas que
+        "Salvar" faz. Se ela contasse na comparacao, salvar uma prioridade nova
+        nunca encontraria a entrada a atualizar.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Substituicoes.txt"
+            # A entrada JA TEM prioridade, e e esse o caso que importa: com uma
+            # entrada em zero, um criterio que comparasse a prioridade acertaria
+            # por coincidencia, porque a linha-base tambem vale zero.
+            save_glossary_entries(
+                [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 3)],
+                str(path),
+                create_backup=False,
+                sync_db=False,
+            )
+
+            resultado = update_glossary_entry_by_entry(
+                # O editor identifica a linha pelo que exibiu — sem prioridade.
+                ("rook", "torre", GLOSSARY_RULE_SUGGESTION),
+                "rook",
+                "torre",
+                str(path),
+                backup_dir=str(Path(tmp) / "backups"),
+                priority=5,
+            )
+
+            self.assertIsNotNone(resultado, "nao achou a entrada para atualizar")
+            entradas = load_glossary_entry_details(str(path), prefer_db=False)
+            self.assertEqual(entradas, [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 5)])
+
+    def test_locating_an_entry_ignores_the_priority(self):
+        """O mesmo, direto na funcao — e o que a promocao tambem depende.
+
+        Depois de "Priorizar esta" a regra fica com prioridade 1 e a janela
+        precisa reencontra-la pelo par e pelo tipo para manter a selecao. Com a
+        prioridade na comparacao, a busca falha e o formulario e limpo.
+        """
+        entradas = [("torre", "castle", GLOSSARY_RULE_SUGGESTION, 1)]
+
+        self.assertEqual(
+            find_glossary_entry_index(entradas, ("torre", "castle", GLOSSARY_RULE_SUGGESTION)),
+            0,
+        )
+
+    def test_updating_without_an_opinion_keeps_the_priority(self):
+        """Quem chama sem falar de prioridade nao pode zerar a que existia."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Substituicoes.txt"
+            save_glossary_entries(
+                [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 6)],
+                str(path),
+                create_backup=False,
+                sync_db=False,
+            )
+
+            update_glossary_entry(
+                0,
+                "rook",
+                "torre alta",
+                str(path),
+                backup_dir=str(Path(tmp) / "backups"),
+            )
+
+            entradas = load_glossary_entry_details(str(path), prefer_db=False)
+            self.assertEqual(glossary_entry_priority(entradas[0]), 6)
+
+    def test_adding_the_same_rule_with_another_priority_is_not_a_new_rule(self):
+        """Senao a insercao criaria duas linhas identicas disputando entre si —
+        exatamente o problema que a prioridade existe para resolver."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Substituicoes.txt"
+            save_glossary_entries(
+                [("rook", "torre", GLOSSARY_RULE_SUGGESTION)],
+                str(path),
+                create_backup=False,
+                sync_db=False,
+            )
+
+            resultado = add_glossary_entry(
+                "rook", "torre", str(path), rule_type=GLOSSARY_RULE_SUGGESTION, priority=9
+            )
+
+            self.assertEqual(resultado["status"], "unchanged")
+            self.assertEqual(
+                len(load_glossary_entry_details(str(path), prefer_db=False)), 1
+            )
+
+
+class GlossaryPromotionTests(unittest.TestCase):
+    """`promote_glossary_rule`: resolver o conflito sem apagar nada."""
+
+    ENTRIES = [
+        ("torre", "rook", GLOSSARY_RULE_SUGGESTION),
+        ("dama", "queen", GLOSSARY_RULE_SUGGESTION),
+        ("torre", "castle", GLOSSARY_RULE_SUGGESTION),
+    ]
+
+    def test_promoting_the_loser_makes_it_win_without_removing_anything(self):
+        promovidas = promote_glossary_rule(list(self.ENTRIES), 2)
+
+        self.assertEqual(len(promovidas), 3, "a promocao removeu alguma regra")
+        self.assertEqual(glossary_entry_priority(promovidas[2]), 1)
+        self.assertEqual(glossary_entry_priority(promovidas[0]), 0, "mexeu na outra")
+
+        conflitos = glossario.glossary_conflicts(promovidas)
+        for info in conflitos.values():
+            for contexto in info["contexts"]:
+                self.assertEqual(contexto["winner"], 2)
+
+    def test_the_promotion_reaches_the_text(self):
+        promovidas = promote_glossary_rule(list(self.ENTRIES), 2)
+        regras = [
+            (orig, new, prio)
+            for orig, new, _tipo, prio in promovidas
+        ]
+
+        self.assertEqual(apply_all_substitutions("a torre", self.ENTRIES), "a rook")
+        self.assertEqual(apply_all_substitutions("a torre", regras), "a castle")
+
+    def test_promoting_the_winner_changes_nothing(self):
+        self.assertIsNone(promote_glossary_rule(list(self.ENTRIES), 0))
+
+    def test_promoting_a_rule_without_conflict_changes_nothing(self):
+        self.assertIsNone(promote_glossary_rule(list(self.ENTRIES), 1))
+
+    def test_the_decision_can_be_reversed(self):
+        """E a diferenca em relacao a "Manter esta": nada foi perdido."""
+        promovidas = promote_glossary_rule(list(self.ENTRIES), 2)
+        de_volta = promote_glossary_rule(promovidas, 0)
+
+        self.assertIsNotNone(de_volta, "a decisao anterior nao pode ser revista")
+        self.assertEqual(glossary_entry_priority(de_volta[0]), 2)
+        conflitos = glossario.glossary_conflicts(de_volta)
+        for info in conflitos.values():
+            for contexto in info["contexts"]:
+                self.assertEqual(contexto["winner"], 0)
 
 
 class GlossaryConflictTests(unittest.TestCase):
@@ -5115,6 +5475,32 @@ class GlossaryConflictTests(unittest.TestCase):
                 # A ordem do arquivo decide: invertida, o resultado muda junto.
                 esperado = regras[0][1]
                 self.assertEqual(self.aplicada(regras, "a torre avanca"), f"a {esperado} avanca")
+
+    def test_the_announced_winner_follows_the_priority_too(self):
+        """A mesma exigencia, agora com a prioridade no meio (garantia S10).
+
+        E aqui que um criterio duplicado se paga caro: `glossary_conflicts`
+        decide o vencedor por conta propria, e se ele divergir de
+        `order_rules_by_specificity` a janela anuncia uma regra e o texto recebe
+        outra. Por isso a afirmacao continua sendo verificada contra
+        `apply_all_substitutions`.
+        """
+        entradas = [
+            ("torre", "rook", GLOSSARY_RULE_SUGGESTION, 0),
+            ("torre", "castle", GLOSSARY_RULE_SUGGESTION, 2),
+        ]
+        conflitos = glossario.glossary_conflicts(entradas)
+
+        for info in conflitos.values():
+            for contexto in info["contexts"]:
+                self.assertEqual(contexto["winner"], 1, "a ordem do arquivo venceu")
+
+        regras = [(orig, new, prio) for orig, new, _tipo, prio in entradas]
+        self.assertEqual(self.aplicada(regras, "a torre avanca"), "a castle avanca")
+
+        # E a mensagem acompanha: quem perde continua sendo avisado.
+        self.assertIn("nunca é aplicada", glossario.describe_glossary_conflict(entradas, 0, conflitos))
+        self.assertNotIn("nunca é aplicada", glossario.describe_glossary_conflict(entradas, 1, conflitos))
 
     def test_the_loser_is_told_it_never_applies(self):
         entradas = [
@@ -5736,10 +6122,10 @@ class ReadGlossaryCsvTests(unittest.TestCase):
 
             self.assertEqual(
                 read_glossary_csv(path),
-                [
+                com_prioridade([
                     ("rook", "torre", GLOSSARY_RULE_SUGGESTION),
                     ("pawn", "peao", GLOSSARY_RULE_AUTOMATIC),
-                ],
+                ]),
             )
 
     def test_round_trip_with_the_exporter(self):
@@ -5751,7 +6137,7 @@ class ReadGlossaryCsvTests(unittest.TestCase):
             ]
             export_glossary_csv(path, entries)
 
-            self.assertEqual(read_glossary_csv(path), entries)
+            self.assertEqual(read_glossary_csv(path), com_prioridade(entries))
 
     def test_accepts_the_portuguese_headers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5760,7 +6146,7 @@ class ReadGlossaryCsvTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_CLEANUP)]
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_CLEANUP, 0)]
             )
 
     def test_headers_are_matched_ignoring_case_and_spaces(self):
@@ -5770,7 +6156,7 @@ class ReadGlossaryCsvTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION)]
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0)]
             )
 
     def test_missing_type_column_defaults_to_suggestion(self):
@@ -5778,7 +6164,7 @@ class ReadGlossaryCsvTests(unittest.TestCase):
             path = self.write_csv(tmp, "original,replacement\r\nrook,torre\r\n")
 
             self.assertEqual(
-                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION)]
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0)]
             )
 
     def test_unknown_type_falls_back_to_suggestion(self):
@@ -5788,7 +6174,7 @@ class ReadGlossaryCsvTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION)]
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0)]
             )
 
     def test_values_are_stripped(self):
@@ -5798,7 +6184,7 @@ class ReadGlossaryCsvTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION)]
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0)]
             )
 
     def test_missing_required_column_is_rejected(self):
