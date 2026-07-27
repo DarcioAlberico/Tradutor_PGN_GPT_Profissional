@@ -44,8 +44,9 @@ python -c "import sys, customtkinter, PIL; print(sys.version.split()[0], 'ok')"
 python .claude/skills/run-tradutor-pgn/driver.py
 ```
 
-Abre o app, semeia dados, abre as duas janelas de edição, exercita o `Ctrl+B`
-(negrito na seleção) e o aviso de conflito do glossário, e grava PNGs em
+Abre o app, roda uma tradução completa pelo botão "Iniciar Tradução", abre as
+duas janelas de edição, exercita o `Ctrl+B` (negrito na seleção) e o aviso de
+conflito do glossário, e grava PNGs em
 `.claude/skills/run-tradutor-pgn/capturas/`. Sai sozinho.
 
 **Olhe as capturas.** Um quadro em branco é falha de lançamento disfarçada de
@@ -71,6 +72,38 @@ with Driver() as d:
 é alcançável: `select_index`, `save_changes`, `apply_one`, `go_to_id`,
 `toggle_bold_selection`, e todos os widgets por nome (`editor.trans_text`,
 `editor.search_mode_segment`, `editor.btn_bold`…).
+
+## Rodar uma tradução pela janela principal
+
+É o fluxo central do app, e passa por código que `run_worker` **não** toca:
+`app_actions.start_translation` (arquivo de log, estado dos botões, flags), a
+thread, e o `_reset_buttons` do fim.
+
+```python
+with Driver() as d:
+    d.fake_network()                       # ANTES de iniciar, senão vai à rede
+    pgn = d.escreve_pgn("partida.pgn",
+        '[Event "T"]
+
+1. e4 {A comment.} *
+')
+
+    d.start_translation(pgn)               # preenche o caminho e clica
+    assert d.app.start_button.cget("state") == "disabled"
+    d.wait_translation(90)                 # ver o aviso abaixo: usa mainloop()
+    print(d.log())                         # o log da janela
+```
+
+**`wait_translation` usa `mainloop()`, não `pump()`** — é a única parte do driver
+onde isso vale, e o motivo só aparece com thread no meio:
+
+> O worker roda em outra thread e agenda tudo por `root.after` (garantia C1). O
+> Tk só aceita chamadas de outra thread enquanto a main thread está **dentro do
+> `mainloop()`**. Bombeando com `update()` num laço ela não está, e o worker
+> morre com `RuntimeError: main thread is not in main loop` — que na tela
+> aparece como `[ERRO GERAL]` e nenhum PGN gerado. O padrão certo é entrar no
+> `mainloop()` e sair por `quit()` de um `after` periódico; `quit()` encerra o
+> laço sem destruir os widgets, então a janela continua utilizável depois.
 
 ## Dirigir o editor de glossário — é diferente, e mais difícil
 
@@ -216,6 +249,9 @@ Todos custaram tempo nesta sessão.
   remover o sandbox; o driver usa `ignore_errors=True` porque o app pode ter
   deixado alguma viva.
 
+- **Thread + Tk exige `mainloop()`.** Ver a seção da janela principal. Vale para
+  qualquer coisa que rode em thread e toque a interface — hoje, a tradução.
+
 - **O worker chama `messagebox` no fim, pela fila do Tk.** Numa raiz que executa
   na hora (é o caso do `HeadlessApp`), isso abre um diálogo modal de verdade e
   trava o processo. `run_worker` silencia; se você chamar `run_translation`
@@ -249,4 +285,6 @@ Todos custaram tempo nesta sessão.
 | `LookupError: botao 'X' nao encontrado` | O erro lista os rótulos existentes — provavelmente acento ou espaço. |
 | Aviso de conflito lido mas não visível | `label_starting(..., so_visiveis=False)` pega widget fora do grid. |
 | `--worker` trava no fim da execução | Algum `messagebox` do worker não foi silenciado. |
-| Worker cai na tradução individual sem motivo | Sua função falsa não preservou ` ||| ` (B2). |
+| Worker cai na tradução individual sem motivo | Sua função falsa não preservou o separador de lote (B2). |
+| `[ERRO GERAL] main thread is not in main loop` | Esperou a tradução com `pump()` em vez de `wait_translation()`. |
+| Tradução termina mas nenhum PGN aparece | Ou é o caso acima, ou a API não respondeu — sem resposta o PGN não é gerado de propósito (B3). |

@@ -1,8 +1,12 @@
 """Driver do PGN Tradutor Pro: sobe o app de verdade e deixa mexer nele.
 
 O app e Tkinter/CustomTkinter, entao nao ha Playwright nem DevTools: o jeito de
-dirigi-lo e carrega-lo NO PROPRIO PROCESSO e bombear o laco de eventos a mao.
-`mainloop()` nao serve — ele bloqueia para sempre.
+dirigi-lo e carrega-lo NO PROPRIO PROCESSO e bombear o laco de eventos a mao
+(`pump`), em vez de entregar o controle ao `mainloop()`.
+
+A excecao e esperar a traducao: ela roda em outra thread, e o Tk so aceita
+chamadas de outra thread com a main thread DENTRO do `mainloop()`. Por isso
+`wait_translation` entra nele e sai por `quit()` — ver o metodo.
 
 Uso como biblioteca:
 
@@ -85,15 +89,31 @@ class Driver:
 
         import customtkinter as ctk
 
-        from tradutor_pgn import app_actions, db_tools, edit_window, glossary_editor
+        from tradutor_pgn import (
+            app_actions,
+            db_tools,
+            edit_window,
+            glossary_editor,
+            translation_worker,
+        )
         from tradutor_pgn.app import PGNTranslatorApp
 
         self.ctk = ctk
         self.edit_window = edit_window
         self.glossary_editor = glossary_editor
+        self.translation_worker = translation_worker
 
         if self.silenciar:
-            for modulo in (edit_window, glossary_editor, db_tools, app_actions):
+            # `translation_worker` PRECISA estar aqui: ele abre o dialogo do fim
+            # da execucao pela fila do Tk, e sem silenciar isso clicar em
+            # "Iniciar Traducao" trava o driver esperando um OK.
+            for modulo in (
+                edit_window,
+                glossary_editor,
+                db_tools,
+                app_actions,
+                translation_worker,
+            ):
                 if hasattr(modulo, "messagebox"):
                     modulo.messagebox = _SemDialogos
                 if hasattr(modulo, "filedialog"):
@@ -195,6 +215,78 @@ class Driver:
         self.pump(1.2)
         tops = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
         return tops[-1] if tops else None
+
+    # ------------------------------------------- janela principal: a traducao
+
+    def fake_network(self, funcao=None):
+        """Troca a camada de rede do worker. Chame ANTES de iniciar a traducao.
+
+        Sem isso, clicar em "Iniciar Traducao" faz requisicoes de verdade.
+        """
+        if funcao is None:
+            def funcao(texto, *_a, **_k):
+                # Preserva o separador de lote: sem ele o worker cai no caminho
+                # individual e voce mede outra coisa (garantia B2).
+                return " ||| ".join(f"[{p.strip()}]" for p in texto.split(" ||| "))
+
+        self.translation_worker.translate_text = funcao
+
+    def escreve_pgn(self, nome, conteudo):
+        """Cria um PGN dentro do sandbox e devolve o caminho."""
+        caminho = os.path.join(self.dir_dados, nome)
+        with open(caminho, "w", encoding="utf-8") as f:
+            f.write(conteudo)
+        return caminho
+
+    def start_translation(self, caminho):
+        """Preenche o caminho e clica em "Iniciar Traducao", como um usuario.
+
+        Diferente de `run_worker`: aqui passa por `app_actions.start_translation`
+        — arquivo de log, estado dos botoes, `cancel_flag`/`pause_flag` e a
+        thread. O worker roda em OUTRA thread; use `wait_translation`.
+        """
+        self.app.source_path.set(caminho)
+        self.pump(0.3)
+        self.app.start_button.invoke()
+        self.pump(0.3)
+
+    def wait_translation(self, timeout=120):
+        """Espera a traducao terminar. `True` se terminou a tempo.
+
+        **Aqui e `mainloop()`, e nao `pump()`** — e a unica parte do driver onde
+        isso vale, por um motivo que so aparece com thread no meio.
+
+        O worker roda em outra thread e agenda tudo por `root.after` (garantia
+        C1). O Tk so aceita chamadas de outra thread enquanto a main thread esta
+        DENTRO do `mainloop()`; bombeando com `update()` num laco ela nao esta, e
+        o worker morre com `RuntimeError: main thread is not in main loop` — o
+        que na tela aparece como `[ERRO GERAL]` e nenhum PGN gerado.
+
+        O padrao correto e entrar no `mainloop()` e sair dele por `quit()` a
+        partir de um `after` periodico. `quit()` encerra o laco sem destruir os
+        widgets, entao a janela continua utilizavel depois.
+        """
+        estado = {"terminou": False}
+        limite = time.time() + timeout
+
+        def checa():
+            if not self.app.is_processing:
+                estado["terminou"] = True
+                self.root.quit()
+                return
+            if time.time() > limite:
+                self.root.quit()
+                return
+            self.root.after(100, checa)
+
+        self.root.after(100, checa)
+        self.root.mainloop()
+        self.pump(0.5)          # deixa os `after` finais rodarem
+        return estado["terminou"]
+
+    def log(self):
+        """O texto do log da janela principal."""
+        return self.app.log_text.get("1.0", tk.END).strip()
 
     # ------------------------------------------------- achar widget sem handle
 
@@ -400,12 +492,32 @@ def smoke():
         )
         d.shot("00-janela-principal.png")
 
+        # O fluxo principal do app, pelo botao: "Iniciar Traducao" -> thread ->
+        # worker -> PGN gerado -> botoes de volta ao estado inicial.
+        d.fake_network()
+        pgn = d.escreve_pgn(
+            "partida.pgn",
+            '[Event "Smoke"]\n\n1. e4 {The bishop eyes the diagonal.} e5 {Careful.} *\n',
+        )
+        d.start_translation(pgn)
+        durante = d.app.start_button.cget("state")
+        terminou = d.wait_translation(90)
+        gerado = os.path.join(d.dir_dados, "partida-BR.pgn")
+        print(f"traducao    | terminou={terminou} | PGN gerado={os.path.exists(gerado)} "
+              f"| botao: {durante} -> {d.app.start_button.cget('state')}")
+        d.shot("01-apos-traducao.png")
+
+        assert terminou, "a traducao nao terminou no tempo"
+        assert os.path.exists(gerado), "nenhum PGN de saida foi gerado"
+        assert durante == "disabled", "o botao Iniciar nao foi desabilitado durante"
+        assert d.app.start_button.cget("state") == "normal", "os botoes nao voltaram"
+
         editor = d.open_translation_editor()
         editor.select_index(0)
         d.pump()
         print(f"editor      | {editor.state.total_rows} traducoes; "
               f"carregada: {editor.draft_text()[:40]!r}")
-        d.shot("01-editor-traducoes.png", editor.win)
+        d.shot("02-editor-traducoes.png", editor.win)
 
         # Um fluxo de usuario de ponta a ponta: marcar em negrito com Ctrl+B.
         texto = editor.draft_text()
@@ -413,10 +525,10 @@ def smoke():
         d.key(editor.trans_text, "<Control-b>")
         marcas = len(editor.trans_text.tag_ranges("bold")) // 2
         print(f"Ctrl+B      | {marcas} trecho(s) em negrito")
-        d.shot("02-negrito-selecao.png", editor.trans_text)
+        d.shot("03-negrito-selecao.png", editor.trans_text)
 
         glossario = d.open_glossary_editor()
-        d.shot("03-editor-glossario.png", glossario)
+        d.shot("04-editor-glossario.png", glossario)
         print("glossario   | janela aberta")
 
         # Fluxo do editor de glossario: selecionar a regra que PERDE um conflito
@@ -433,7 +545,7 @@ def smoke():
 
         avisos = d.label_starting(glossario, "Conflito em")
         print(f"conflito    | {avisos[0] if avisos else 'NENHUM AVISO'}")
-        d.shot("04-glossario-conflito.png", glossario)
+        d.shot("05-glossario-conflito.png", glossario)
 
         assert marcas == 1, "o Ctrl+B nao marcou o trecho"
         assert avisos, "o aviso de conflito (S9) nao apareceu na tela"
