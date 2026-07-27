@@ -26,6 +26,7 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 
+from gui_harness import DISPLAY, GuiTestCase
 from tradutor_pgn import (
     app_actions,
     db_tools,
@@ -40,98 +41,6 @@ from tradutor_pgn import (
 )
 from tradutor_pgn.database import initialize_database, save_translation
 from tradutor_pgn.glossario import load_glossary_entry_details, save_glossary_entries
-
-
-def _display_available():
-    try:
-        root = tk.Tk()
-    except Exception:
-        return False
-    root.destroy()
-    return True
-
-
-DISPLAY = _display_available()
-
-# Todo modulo capaz de abrir um dialogo durante os testes.
-DIALOG_MODULES = (
-    edit_window,
-    glossary_editor,
-    db_tools,
-    app_actions,
-    translation_worker,
-)
-
-
-class _SilentDialogs:
-    """Substitui o `messagebox` do modulo sob teste e registra as chamadas."""
-
-    def __init__(self):
-        self.calls = []
-
-    def _record(self, kind):
-        def handler(title, message, **_kwargs):
-            self.calls.append((kind, title, message))
-            return None
-
-        return handler
-
-    def install(self, *modules):
-        """Silencia o `messagebox` de TODOS os modulos que possam abrir dialogo.
-
-        Nao basta cobrir o modulo sob teste: "Aplicar automaticas" no editor de
-        traducoes chama `db_tools`, que abre a confirmacao no proprio namespace.
-        Um so modulo esquecido trava a suite num dialogo modal invisivel.
-        """
-        self.calls.clear()
-        recorder = self
-
-        class Fake:
-            showinfo = staticmethod(recorder._record("info"))
-            showwarning = staticmethod(recorder._record("warning"))
-            showerror = staticmethod(recorder._record("error"))
-
-            @staticmethod
-            def askyesno(title, message, **_kwargs):
-                recorder.calls.append(("askyesno", title, message))
-                return True
-
-        self.previous = []
-        for module in modules:
-            if hasattr(module, "messagebox"):
-                self.previous.append((module, module.messagebox))
-                module.messagebox = Fake
-
-    def restore(self):
-        for module, original in self.previous:
-            module.messagebox = original
-
-    def titles(self, kind=None):
-        return [t for k, t, _m in self.calls if kind is None or k == kind]
-
-
-class _SilentFileDialogs:
-    """Faz todo seletor de arquivo responder "cancelado".
-
-    Sem isto, varrer os botoes abriria dialogos nativos e a suite travaria
-    esperando alguem clicar.
-    """
-
-    def install(self, *modules):
-        class Fake:
-            asksaveasfilename = staticmethod(lambda **_kwargs: "")
-            askopenfilename = staticmethod(lambda **_kwargs: "")
-            askdirectory = staticmethod(lambda **_kwargs: "")
-
-        self.previous = []
-        for module in modules:
-            if hasattr(module, "filedialog"):
-                self.previous.append((module, module.filedialog))
-                module.filedialog = Fake
-
-    def restore(self):
-        for module, original in self.previous:
-            module.filedialog = original
 
 
 class FakeApp:
@@ -149,72 +58,16 @@ class FakeApp:
         self.logs.append(message)
 
 
-@unittest.skipUnless(DISPLAY, "sem display para o Tk")
-class EditorWindowTestCase(unittest.TestCase):
-    """Base: sandbox em disco, janela aberta, helpers de widget."""
+class EditorWindowTestCase(GuiTestCase):
+    """Base dos editores: o `GuiTestCase` mais os helpers de widget."""
 
     module = None  # definido pelas subclasses
 
     def setUp(self):
-        self.sandbox = tempfile.TemporaryDirectory(prefix="editor-test-")
-        base = Path(self.sandbox.name)
-        self.addCleanup(self.sandbox.cleanup)
-
-        # Mesmo isolamento do test_core: nada aqui pode tocar os arquivos reais.
-        self._paths = (
-            glossario._default_substitutions_path,
-            glossario._default_glossary_db_path,
-            settings.default_settings_path,
-        )
-        glossario._default_substitutions_path = lambda: str(base / "Substituicoes.txt")
-        glossario._default_glossary_db_path = lambda: str(base / "glossario.db")
-        settings.default_settings_path = lambda: str(base / "settings.json")
-        self.addCleanup(self._restore_paths)
-
-        self.db_path = str(base / "traducoes.db")
-        self.root = tk.Tk()
-        self.root.withdraw()          # nada pisca na tela durante a suite
-        self.addCleanup(self._destroy_root)
+        super().setUp()
         self.app = FakeApp(self.root, self.db_path)
 
-        self.dialogs = _SilentDialogs()
-        self.dialogs.install(*DIALOG_MODULES)
-        self.addCleanup(self.dialogs.restore)
-
-        self.file_dialogs = _SilentFileDialogs()
-        self.file_dialogs.install(*DIALOG_MODULES)
-        self.addCleanup(self.file_dialogs.restore)
-
-    def _restore_paths(self):
-        (
-            glossario._default_substitutions_path,
-            glossario._default_glossary_db_path,
-            settings.default_settings_path,
-        ) = self._paths
-
-    def _destroy_root(self):
-        # As janelas agendam trabalho com `after` (levantar a janela, restaurar a
-        # posicao do divisor). Destruir sem cancelar deixa esses callbacks
-        # dispararem no vazio e o Tk imprime "invalid command name" no meio da
-        # saida da suite — barulho que esconderia uma falha de verdade.
-        try:
-            for after_id in self.root.tk.eval("after info").split():
-                try:
-                    self.root.after_cancel(after_id)
-                except tk.TclError:
-                    pass
-        except tk.TclError:
-            pass
-
-        try:
-            self.root.destroy()
-        except tk.TclError:
-            pass
-
     # ---------------- helpers de widget ----------------
-
-    def pump(self):
-        self.root.update()
 
     def open_window(self, opener, *args, **kwargs):
         opener(self.app, *args, **kwargs)

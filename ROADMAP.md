@@ -1188,7 +1188,7 @@ falham.
 
 ---
 
-## 5. Cobertura de testes — EM ANDAMENTO (72 -> 315 testes)
+## 5. Cobertura de testes — EM ANDAMENTO (72 -> 366 testes)
 
 **A premissa deste item estava errada.** Ele dizia que testar
 `open_translation_editor` / `open_glossary_editor` "so e viavel depois de 3.1".
@@ -1219,11 +1219,53 @@ Todos os testes novos de rede, de B2 e de regressao foram conferidos por
 mutacao: quebrando a producao de proposito, eles falham. Um teste que passa dos
 dois jeitos nao protege nada.
 
+### 5.1 `app_actions.py`, o modulo menos coberto — CONCLUIDO (2026-07-27)
+
+**A medicao inicial estava otimista.** A anotacao dizia "11 de 25 funcoes
+aparecem em algum teste", e aparecer nao e ser exercitada: instrumentando as 25 e
+rodando a suite inteira, **cinco** eram chamadas. As outras vinte sao justamente
+o caminho por onde o usuario comeca tudo — iniciar, pausar, cancelar,
+reprocessar o que falhou, abrir os dois editores e as ferramentas de banco.
+
+Criado `tests/test_main_window.py`, que abre a **janela principal de verdade**
+(`PGNTranslatorApp`) e clica nos botoes dela. Nao e capricho: quase tudo o que
+estas funcoes fazem e estado de botao, e um botao habilitado quando nao devia so
+aparece na tela. Um app falso com atributos soltos passaria por cima exatamente
+do que ha para verificar. **25 de 25** agora sao exercitadas.
+
+O harness comum saiu para `tests/gui_harness.py` — o gate de display, o
+silenciamento dos dialogos e o sandbox de caminhos. Uma segunda copia de
+`SilentDialogs` seria a armadilha que o item 3.2 descreve nos editores: corrigir
+uma e esquecer a outra. O sandbox ganhou tambem o `sys.argv[0]`, que nao e
+detalhe — e dele que saem `output_db`, `backups/` e `logs/`, e a abertura do
+programa roda a retencao de `backups/`: um teste que abra o app sobre o diretorio
+do projeto **apaga backups de verdade**.
+
+O teste que mais rende e
+`test_the_run_log_is_named_so_the_retention_can_find_it`, e ele fecha uma ponta
+solta do item 1.4. Aquele item registrou o modo de falha mais chato possivel — se
+o formato do nome divergir do que `prune_log_files` procura, a retencao de `logs/`
+vira um **no-op silencioso** — mas o teste que ficou usava nomes escritos a mao.
+Agora o produtor de verdade (`_begin_translation_run`, com o relogio fixado) gera
+dois logs e o consumidor de verdade (`prune_log_files`) remove o mais antigo.
+
+**Conferido por mutacao**, doze maneiras de errar em `app_actions.py`: pausar sem
+execucao, cancelar deixando a execucao pausada, o carimbo do log voltando ao
+underscore, reprocessar pelo idioma do seletor em vez do idioma do registro,
+reprocessar mandando junto os arquivos que sumiram do disco, o handle do log nao
+sendo zerado, comecar sem zerar o `cancel_flag`, as regras automaticas perdendo o
+idioma, o seletor de arquivo gravando o cancelamento por cima do caminho
+anterior, o fim da normalizacao nao liberando os botoes, a limpeza da abertura
+propagando a falha, e iniciar aceitando um caminho que nao existe.
+
+**Onze foram pegas de primeira; a decima segunda expos um teste meu que nao
+testava nada.** Remover o `reset_buttons` do fim da normalizacao nao quebrava
+coisa alguma, porque o teste afirmava que os botoes estavam habilitados **sem
+nunca te-los desabilitado**. Os dois testes passaram a montar antes o estado que
+`normalize_pgn_metadata` deixa de verdade; a mesma mutacao agora falha nos dois.
+
 **Falta:**
 
-- `app_actions.py` continua pouco coberto. `retry_failed_translation` (7.3) foi
-  testada pelo lado do worker e das funcoes puras, mas o dialogo em si nao tem
-  teste de widget.
 - ~~Nenhum teste exercita duas partes do programa ao mesmo tempo.~~ **FEITO**
   (2026-07-27): `ConcurrentDatabaseAccessTests` e `FallbackTransactionTests`
   sobem uma thread com transacao de escrita aberta no `traducoes.db` e checam,
@@ -1233,9 +1275,14 @@ dois jeitos nao protege nada.
   O harness do worker virou `WorkerFallbackHarness` (uma classe simples, nao um
   `TestCase`) para que as duas classes o usem sem que herdar de uma faca os
   testes da outra rodarem duas vezes.
-- Falta um teste que fixe a codificacao de entrada UTF-16 (secao 8). O caso
-  reproduz em quatro linhas e hoje passa despercebido porque toda a suite de
-  codificacao usa arquivos de byte unico.
+- ~~Falta um teste que fixe a codificacao de entrada UTF-16 (secao 8).~~ **FEITO**
+  junto com a secao 8: as sete codificacoes sao exercitadas com e sem `chardet`,
+  incluindo UTF-16-LE sem BOM, que era o caso que escapava de E1/E2/E3.
+
+Nada mais pendente aqui: com 5.1, `app_actions.py` deixou de ser o modulo menos
+coberto. O que nao tem teste hoje sao os dois modulos que so montam widgets
+(`main_window.py` e as etapas de construcao dos editores), exercitados de fora —
+pela abertura das janelas e pelos cliques — e nao afirmados peca a peca.
 
 ---
 
