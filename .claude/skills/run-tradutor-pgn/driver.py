@@ -281,6 +281,112 @@ class Driver:
         return caminho
 
 
+# ===========================================================================
+# Worker de traducao — invocacao direta, sem abrir janela nenhuma
+# ===========================================================================
+
+
+class _RaizImediata:
+    """`root.after(ms, cb)` executando na hora.
+
+    O worker roda numa thread e agenda toda atualizacao de interface pela fila
+    do Tk (garantia C1). Sem janela, executar na hora e o equivalente honesto —
+    e e o que expoe os dialogos do fim da execucao, que precisam ser silenciados.
+    """
+
+    def after(self, _ms, callback=None, *a):
+        if callback is not None:
+            callback(*a)
+
+
+class _ProgressoMudo:
+    def set(self, _valor):
+        pass
+
+
+class HeadlessApp:
+    """O minimo que `run_translation` exige. Nove atributos, nenhum widget."""
+
+    def __init__(self, output_db, verboso=True):
+        import threading
+
+        self.output_db = output_db
+        self.translation_cache = {}
+        self.pause_flag = threading.Event()
+        self.cancel_flag = threading.Event()
+        self.is_processing = True
+        self.root = _RaizImediata()
+        self.progress = _ProgressoMudo()
+        self.logs = []
+        self.verboso = verboso
+
+    def log_message(self, mensagem):
+        self.logs.append(mensagem)
+        if self.verboso:
+            print(f"    [worker] {mensagem}")
+
+    def _reset_buttons(self):
+        pass
+
+
+def run_worker(pgn, idioma="pt", traduzir=None, online=False, verboso=True):
+    """Roda o worker de traducao de verdade sobre um PGN, sem abrir janela.
+
+    `pgn` e o conteudo do arquivo. Devolve
+    `(app, caminho_do_pgn_gerado, diretorio)`.
+
+    Por padrao a rede e substituida por uma funcao determinista: o worker inteiro
+    roda — lotes, cache, regras, gravacao, geracao do PGN —, so a chamada HTTP
+    que nao acontece. Use `online=True` para exercitar a rede de verdade (endpoint
+    publico do Google Translate; deixe o arquivo pequeno).
+
+    O diretorio devolvido NAO e apagado: e onde estao o PGN gerado, o banco e o
+    log para voce inspecionar.
+    """
+    if PROJETO not in sys.path:
+        sys.path.insert(0, PROJETO)
+
+    dados = tempfile.mkdtemp(prefix="pgn-worker-")
+    argv0 = sys.argv[0]
+    sys.argv[0] = os.path.join(dados, "PGN_Tradutor_Pro.py")
+
+    from tradutor_pgn import translation_worker
+
+    origem = os.path.join(dados, "entrada.pgn")
+    with open(origem, "w", encoding="utf-8") as f:
+        f.write(pgn)
+
+    app = HeadlessApp(os.path.join(dados, "traducoes.db"), verboso=verboso)
+
+    if traduzir is None and not online:
+        def traduzir(texto, *_a, **_k):
+            # Mantem o separador de lote intacto: o worker precisa reencontra-lo
+            # para realinhar as partes (garantia B2).
+            return " ||| ".join(f"[{p.strip()}]" for p in texto.split(" ||| "))
+
+    anteriores = (
+        translation_worker.translate_text,
+        translation_worker.messagebox,
+    )
+    try:
+        if traduzir is not None:
+            translation_worker.translate_text = traduzir
+        # O worker termina chamando `messagebox` pela fila do Tk. Com a raiz
+        # imediata isso abre um dialogo modal DE VERDADE e trava o processo.
+        translation_worker.messagebox = _SemDialogos
+        translation_worker.run_translation(app, origem, idioma, False)
+    finally:
+        translation_worker.translate_text, translation_worker.messagebox = anteriores
+        sys.argv[0] = argv0
+
+    gerados = [
+        os.path.join(dados, n)
+        for n in os.listdir(dados)
+        if n.endswith(".pgn") and n != "entrada.pgn"
+    ]
+    return app, (gerados[0] if gerados else None), dados
+
+
 def smoke():
     """Abre o app, as duas janelas de edicao, captura cada uma e sai."""
     with Driver() as d:
@@ -335,12 +441,38 @@ def smoke():
         print("\nOK")
 
 
+def smoke_worker(online=False):
+    """Roda o worker de traducao de ponta a ponta. Nenhuma janela e aberta."""
+    pgn = (
+        '[Event "Smoke"]\n\n'
+        "1. e4 {The bishop eyes the long diagonal.} e5 {Black must be careful.}\n"
+        "2. Nf3 {White develops with tempo.} Nc6 *\n"
+    )
+    app, saida, dados = run_worker(pgn, online=online)
+    assert saida, "nenhum PGN de saida foi gerado"
+    conteudo = open(saida, encoding="utf-8").read()
+    print(f"\n  PGN gerado: {saida}")
+    print(f"  dados em:   {dados}")
+    assert "1. e4" in conteudo and "Nc6" in conteudo, "os lances nao sobreviveram (G1)"
+    assert "{" in conteudo, "os comentarios sumiram"
+    assert not any("FALHA" in linha for linha in app.logs), "houve falha de traducao"
+    print("\nOK")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--real", action="store_true",
                    help="usa os dados reais do projeto (APAGA backups pela retencao S8)")
+    p.add_argument("--worker", action="store_true",
+                   help="roda o worker de traducao em vez da interface (sem janela)")
+    p.add_argument("--online", action="store_true",
+                   help="com --worker: usa a rede de verdade em vez da traducao falsa")
     args = p.parse_args()
-    if args.real:
-        print("ATENCAO: rodando sobre os dados reais; a limpeza de arranque poda backups/.")
-        Driver.__init__.__defaults__ = (False, True)
-    smoke()
+
+    if args.worker:
+        smoke_worker(online=args.online)
+    else:
+        if args.real:
+            print("ATENCAO: rodando sobre os dados reais; a limpeza de arranque poda backups/.")
+            Driver.__init__.__defaults__ = (False, True)
+        smoke()

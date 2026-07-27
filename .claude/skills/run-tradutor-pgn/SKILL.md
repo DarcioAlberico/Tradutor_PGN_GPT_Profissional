@@ -107,6 +107,56 @@ Para: torre`), então é assim
   importa: o aviso de conflito existe sempre como widget e apenas sai do grid
   quando não há conflito; ler sem checar acha aviso que não está na tela.
 
+## Dirigir o worker de tradução — sem janela nenhuma
+
+O worker (`translation_worker.run_translation`) é onde a maior parte das
+mudanças acontece, e **não precisa de GUI**. Ele exige nove atributos de um
+objeto `app`, e nenhum é widget: o driver traz um `HeadlessApp` com todos.
+
+```bash
+python .claude/skills/run-tradutor-pgn/driver.py --worker
+```
+
+Roda o pipeline inteiro — detecção de codificação, lotes, regras de limpeza e
+automáticas, cache, gravação no banco e geração do PGN — com a **rede
+substituída** por uma função determinista. Nenhuma requisição sai.
+
+Para exercitar a rede de verdade (endpoint público do Google Translate; use
+arquivos pequenos):
+
+```bash
+python .claude/skills/run-tradutor-pgn/driver.py --worker --online
+```
+
+Como biblioteca, sobre o seu próprio PGN:
+
+```python
+import sys; sys.path.insert(0, ".claude/skills/run-tradutor-pgn")
+from driver import run_worker
+
+app, saida, dados = run_worker('[Event "T"]
+
+1. e4 {A comment.} *
+')
+print(open(saida, encoding="utf-8").read())   # o PGN traduzido
+print(app.logs)                               # o log da execução
+print(dados)                                  # banco e arquivos, para inspecionar
+```
+
+`run_worker(..., traduzir=fn)` troca a camada de rede pela sua função — é assim
+que se exercita falha de API, resposta desalinhada, 429 e o disjuntor, sem tocar
+a rede:
+
+```python
+def sempre_falha(texto, *a, **k):
+    return None          # a API nao respondeu -> garantia B3
+
+app, saida, dados = run_worker(PGN, traduzir=sempre_falha)
+```
+
+O diretório devolvido **não é apagado** — é onde ficam o PGN gerado, o banco e o
+log para você olhar.
+
 ## Rodar (caminho humano)
 
 ```bash
@@ -166,6 +216,16 @@ Todos custaram tempo nesta sessão.
   remover o sandbox; o driver usa `ignore_errors=True` porque o app pode ter
   deixado alguma viva.
 
+- **O worker chama `messagebox` no fim, pela fila do Tk.** Numa raiz que executa
+  na hora (é o caso do `HeadlessApp`), isso abre um diálogo modal de verdade e
+  trava o processo. `run_worker` silencia; se você chamar `run_translation`
+  direto, silencie você.
+
+- **A função de tradução falsa precisa preservar o separador ` ||| `.** O worker
+  junta o lote com ele e reencontra as partes para realinhar (garantia B2). Uma
+  falsa que devolva texto solto cai no caminho individual e você mede outra
+  coisa sem perceber.
+
 - **O editor de glossário não devolve instância.** Ver a seção própria acima. Se
   você tentar `editor.algum_metodo()` depois de `open_glossary_editor()`, vai
   receber `AttributeError: 'NoneType'` — não é bug, é o estado do refactor.
@@ -188,3 +248,5 @@ Todos custaram tempo nesta sessão.
 | `AttributeError: 'NoneType'` após abrir o glossário | Ele não devolve instância. Use os helpers de árvore. |
 | `LookupError: botao 'X' nao encontrado` | O erro lista os rótulos existentes — provavelmente acento ou espaço. |
 | Aviso de conflito lido mas não visível | `label_starting(..., so_visiveis=False)` pega widget fora do grid. |
+| `--worker` trava no fim da execução | Algum `messagebox` do worker não foi silenciado. |
+| Worker cai na tradução individual sem motivo | Sua função falsa não preservou ` ||| ` (B2). |
