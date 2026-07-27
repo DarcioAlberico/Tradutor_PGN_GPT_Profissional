@@ -615,6 +615,164 @@ class GlossaryConflictEditorTests(EditorWindowTestCase):
         self.assertEqual(self.conflict_text(), "")
 
 
+class GlossaryEditorMethodCoverageTests(EditorWindowTestCase):
+    """Roadmap 3.5: os caminhos que varrer os botoes nao alcanca.
+
+    Mesmo contrato do `TranslationEditorMethodCoverageTests`. Instrumentando a
+    classe, `click_every_button` mais os testes de S6 e S9 alcancavam 51 dos 56
+    metodos; estes existem para os cinco que sobravam — paginacao, fechamento,
+    confirmacao de descarte, a entrada pre-preenchida e a localizacao do que
+    acabou de ser gravado. Eram exatamente onde um `NameError` da conversao
+    sobreviveria: sob `pythonw` ele some sem deixar rastro.
+    """
+
+    module = glossary_editor
+
+    # Duas paginas cheias: `PAGE_SIZE` e 150, e sem passar dele `change_page`
+    # nao tem para onde ir — os botoes de pagina ficam desabilitados e varrer a
+    # janela nunca chega la.
+    TOTAL = 200
+
+    def setUp(self):
+        super().setUp()
+        self.glossary_path = glossario._default_substitutions_path()
+        save_glossary_entries(
+            [(f"peca{i:03d}", f"pieza{i:03d}", "suggestion") for i in range(self.TOTAL)],
+            self.glossary_path,
+            create_backup=False,
+        )
+        self.editor = glossary_editor.open_glossary_editor(self.app)
+        self.pump()
+        self.win = self.editor.win
+
+    def entries_on_disk(self):
+        return load_glossary_entry_details(self.glossary_path, deduplicate=False)
+
+    def answer_no_to_dialogs(self):
+        """Faz o `askyesno` responder "nao". Devolve como restaurar."""
+        original = glossary_editor.messagebox
+
+        class Nao:
+            showinfo = staticmethod(lambda *_a, **_k: None)
+            showwarning = staticmethod(lambda *_a, **_k: None)
+            showerror = staticmethod(lambda *_a, **_k: None)
+            askyesno = staticmethod(lambda *_a, **_k: False)
+
+        glossary_editor.messagebox = Nao
+
+        def restaura():
+            glossary_editor.messagebox = original
+
+        return restaura
+
+    def test_opening_returns_the_instance(self):
+        """A assimetria que a skill tinha registrado como armadilha.
+
+        Abrir o editor de traducoes devolvia a instancia e abrir este devolvia
+        `None`, entao dirigi-lo de fora — nos testes ou na skill — exigia andar
+        na arvore de widgets para alcancar qualquer coisa.
+        """
+        self.assertIsInstance(self.editor, glossary_editor.GlossaryEditor)
+        self.assertIs(self.editor.win, self.win)
+
+    # ------------------------------------------------ paginacao
+
+    def test_paging_moves_the_list_and_stops_at_the_ends(self):
+        self.assertEqual(self.editor.page_count(), 2)
+        self.assertIsNotNone(self.button_containing("peca000"))
+
+        self.editor.change_page(1)
+        self.pump()
+        self.assertEqual(self.editor.state.page_index, 1)
+        self.assertIsNone(self.button_containing("peca000"), "a pagina nao trocou")
+        self.assertIsNotNone(self.button_containing("peca150"))
+
+        self.editor.change_page(1)
+        self.assertEqual(self.editor.state.page_index, 1, "passou da ultima pagina")
+
+        self.editor.change_page(-1)
+        self.pump()
+        self.assertEqual(self.editor.state.page_index, 0)
+        self.editor.change_page(-1)
+        self.assertEqual(self.editor.state.page_index, 0, "passou da primeira pagina")
+
+    def test_changing_the_filter_goes_back_to_the_first_page(self):
+        """Era um `lambda` com `page_index.update({"value": 0})` embutido.
+
+        Sem o retorno a primeira pagina, trocar o filtro na pagina 2 mostraria
+        uma pagina que a lista nova pode nem ter.
+        """
+        self.editor.change_page(1)
+        self.assertEqual(self.editor.state.page_index, 1)
+
+        self.editor.restart_at_first_page("Todas")
+        self.pump()
+        self.assertEqual(self.editor.state.page_index, 0)
+
+    # ------------------------------------------------ entrada pre-preenchida
+
+    def test_a_prefilled_entry_opens_ready_to_review(self):
+        """O caminho que o editor de traducoes usa ao mandar um trecho para ca."""
+        editor = glossary_editor.open_glossary_editor(
+            self.app, initial_original="  bishop  ", initial_replacement="  bispo  "
+        )
+        self.pump()
+        self.addCleanup(editor.win.destroy)
+
+        self.assertEqual(editor.text_value(editor.orig_text), "bishop")
+        self.assertEqual(editor.text_value(editor.new_text), "bispo")
+        self.assertIsNone(editor.state.selected_index, "pre-preenchida e entrada nova")
+        self.assertTrue(editor.state.dirty, "abriu pedindo revisao, e nao salva")
+
+    # ------------------------------------------------ gravar uma entrada nova
+
+    def test_saving_as_new_selects_the_entry_it_just_wrote(self):
+        """`locate_saved_entry` procura pelo conteudo NORMALIZADO (garantia S7).
+
+        A gravacao tira os espacos das pontas, entao reencontrar pelo texto que
+        foi digitado nao acha nada — e a selecao cairia na entrada errada ou em
+        nenhuma.
+        """
+        self.editor.set_text(self.editor.orig_text, "  bishop  ")
+        self.editor.set_text(self.editor.new_text, "  bispo  ")
+        self.click(self.button("Salvar como nova"))
+
+        entradas = self.entries_on_disk()
+        self.assertIn(("bishop", "bispo", "suggestion"), entradas)
+        self.assertIsNotNone(self.editor.state.selected_index, "nao reencontrou o que gravou")
+        self.assertEqual(
+            entradas[self.editor.state.selected_index],
+            ("bishop", "bispo", "suggestion"),
+        )
+
+    # ------------------------------------------------ fechar
+
+    def test_closing_with_unsaved_changes_asks_before_discarding(self):
+        self.editor.select_entry(0)
+        self.editor.set_text(self.editor.new_text, "torre alta")
+        self.editor.mark_dirty()
+        self.assertTrue(self.editor.state.dirty, "a edicao nao marcou a janela como suja")
+
+        restaura = self.answer_no_to_dialogs()
+        try:
+            self.editor.close_editor()
+        finally:
+            restaura()
+        self.assertTrue(
+            self.editor.win.winfo_exists(), "fechou apesar de o usuario ter dito nao"
+        )
+
+        self.editor.close_editor()      # o dialogo da suite responde "sim"
+        self.pump()
+        self.assertFalse(self.editor.win.winfo_exists())
+
+    def test_closing_without_changes_does_not_ask(self):
+        self.editor.close_editor()
+        self.pump()
+        self.assertFalse(self.editor.win.winfo_exists())
+        self.assertNotIn("Alterações não salvas", self.dialogs.titles("askyesno"))
+
+
 class TranslationEditorMethodCoverageTests(EditorWindowTestCase):
     """Roadmap 3.1 etapa 2: os caminhos que varrer os botoes nao alcanca.
 

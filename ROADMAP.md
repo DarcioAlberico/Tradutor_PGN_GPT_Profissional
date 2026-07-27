@@ -727,6 +727,10 @@ interface. Conferido por mutacao nas quatro formas de regredir.
 
 ### 3.1 `edit_window.py`: funcao gigante — CONCLUIDO (2026-07-27)
 
+> Este item foi escrito so para o `edit_window.py`. O mesmo problema existia no
+> editor de glossario e nao estava registrado em lugar nenhum — virou o item
+> 3.5, feito pela receita que este deixou pronta.
+
 `open_translation_editor` concentra dezenas de funcoes aninhadas num so escopo,
 com todo o estado em dicts-celula (`{"value": ...}`) para contornar o escopo de
 closure. E o principal debito tecnico do projeto: qualquer alteracao exige ler o
@@ -959,6 +963,97 @@ inserida por fora no inicio do arquivo, salvar e excluir atingem a entrada certa
 e a vizinha sobrevive; com a entrada removida por fora, nada e gravado e o aviso
 aparece. A contraprova com a funcao posicional antiga, no mesmo cenario,
 destroi a vizinha — e esta fixada em teste.
+
+### 3.5 O editor de glossario nunca recebeu o tratamento do 3.1 — CONCLUIDO (2026-07-27)
+
+O item 3.1 foi escrito so para o `edit_window.py`, entao isto nao estava
+registrado em lugar nenhum: `open_glossary_editor` tinha **985 linhas e 49
+funcoes aninhadas**, e o modulo nao tinha uma classe. E exatamente o problema que
+3.1 descreve, no outro editor — inclusive o estado em dicts-celula.
+
+**A assimetria aparecia de fora, e foi por fora que ela apareceu.** Escrevendo a
+skill de execucao ficou registrado como armadilha que o editor de traducoes
+devolve a instancia e o de glossario devolve `None`, obrigando quem dirige a
+janela a andar na arvore de widgets. A assimetria estava descrita; que ela era
+divida, nao.
+
+**Feito pela receita que a outra conversao deixou pronta**, e ela se pagou: o
+script veio de la, e as tres verificacoes tambem.
+
+**Nem todo local do escopo externo virou atributo — e essa foi a diferenca.**
+Em 3.1 a promocao foi indiscriminada. Aqui o script classifica: um nome lido por
+alguma funcao aninhada nao tem escolha (perderia o acesso), e o resto so vira
+atributo se cruzar mais de uma etapa de construcao. `self.pane_bg` seria ruido.
+Deu **95 atributos** — 49 metodos e 46 nomes de estado e widget — e **24 nomes
+que continuam locais** do trecho onde nascem.
+
+**Contar ocorrencias por posicao no texto nao funciona**, e isto custou uma
+rodada. A primeira versao do script acusou dez conflitos de nome, entre eles
+`rule_type` — que aparece na compreensao de `type_menu` e tambem como variavel
+em seis metodos. Desde a **PEP 709**, que embutiu as compreensoes no escopo de
+fora, aquele `rule_type` e um local da funcao externa, e um scanner de tokens nao
+distingue um do outro. Quem responde isso e o escopo: `symtable` para os nomes
+lidos por closure, e uma passagem de AST que percorre o corpo **sem entrar** nas
+funcoes aninhadas para o resto.
+
+As tres guardas do 3.1 continuam valendo (`obj.nome`, `f(nome=...)`, atribuicao
+local a um nome promovido). Desta vez a terceira nao achou nenhum conflito real
+— o `state` do outro editor nao tem equivalente aqui.
+
+**Conferido das mesmas tres formas:**
+
+1. **`symtable`** — nenhum metodo tem nome livre, e todo global que eles usam
+   existe no modulo. Um `NameError` latente nao passa por ali.
+2. **Diff linha a linha contra o original**, normalizando `self.` e a
+   indentacao: das **874 linhas de codigo, nenhuma linha de corpo mudou**. As
+   unicas diferencas sao o andaime (a classe, o `__init__`, as seis etapas de
+   construcao) e os dois `nonlocal` que sairam. O diff e feito **regiao a
+   regiao**: as etapas de construcao saem na ordem em que o `__init__` as chama,
+   que nao e a ordem em que estavam no corpo, e um diff plano acusaria 72 linhas
+   mudadas onde nao mudou nenhuma.
+3. **Cobertura por metodo.** Instrumentando a classe, os testes existentes
+   alcancavam **51 dos 56** metodos. Os cinco restantes — paginacao, fechamento,
+   confirmacao de descarte, entrada pre-preenchida e a localizacao do que acabou
+   de ser gravado — ganharam testes. Hoje sao **56 de 56**.
+
+O `__init__` tem 8 linhas e chama seis etapas nomeadas (`build_state`,
+`build_list_pane`, `build_detail_pane`, `build_footer`, `connect_events`,
+`load_first_entry`).
+
+**A etapa 1 foi junto, porque numa classe ela e subtracao.** As cinco celulas
+(`dirty["value"]`, `selected["index"]`, `page_index["value"]`,
+`validation_lookup["value"]`, e mais o `loading`) viraram `GlossaryEditorState`,
+espelho do `EditorState`: 125 referencias reescritas. O dict-celula existia
+porque atribuir dentro de funcao aninhada cria variavel local em vez de alterar a
+de fora; com metodos, `self.x = ...` ja faz isso. `form_baseline` ficou como
+dict, que e um registro de tres campos e nao uma celula — o mesmo tratamento que
+`self.current` tem no outro editor.
+
+Um efeito colateral util: os dois `lambda` com `page_index.update({"value": 0})`
+embutido — a unica forma de atribuir dentro de uma expressao — viraram o metodo
+`restart_at_first_page`, como o `toggle_filter` de la.
+
+**A cobertura por metodo encontrou um defeito de verdade**, e do tipo que so
+aparece quando alguem escreve o teste. `locate_saved_entry` afirma na propria
+docstring que `find_glossary_entry_index` "normaliza os dois lados antes de
+comparar" — e nao normalizava. A gravacao tira os espacos das pontas (garantia
+S7), entao salvar `"  bishop  "` gravava `"bishop"` e a busca pelo texto digitado
+**nao achava nada**: a entrada recem gravada ficava sem selecao, sem erro nenhum.
+Corrigido em `find_glossary_entry_index`, que passou a normalizar os dois lados —
+para as entradas ja em disco e um no-op, porque elas ja estao normalizadas.
+
+**Conferido por mutacao**, simulando conversoes incompletas — um `self.` que
+ficou para tras em cada um dos cinco metodos que ninguem exercitava:
+`change_page`, `restart_at_first_page`, `locate_saved_entry`,
+`start_prefilled_entry` e `close_editor`. As cinco falham, cada uma no teste que
+a cobre. A correcao da normalizacao tambem: desligando-a, falham exatamente os
+dois testes novos que a cobrem, e mais nenhum.
+
+**A skill foi atualizada junto.** `open_glossary_editor` devolve a instancia, o
+driver devolve `GlossaryEditor` em vez do `Toplevel`, e a secao "e diferente, e
+mais dificil" saiu. Os helpers de arvore ficaram, com o motivo dito: eles servem
+para conferir o que esta na **tela**, e nao para alcancar um metodo — um metodo
+diz o que o programa acha, um widget diz o que o usuario ve.
 
 ---
 

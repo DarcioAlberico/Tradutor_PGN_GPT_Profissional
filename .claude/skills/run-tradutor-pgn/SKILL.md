@@ -105,38 +105,40 @@ onde isso vale, e o motivo só aparece com thread no meio:
 > `mainloop()` e sair por `quit()` de um `after` periódico; `quit()` encerra o
 > laço sem destruir os widgets, então a janela continua utilizável depois.
 
-## Dirigir o editor de glossário — é diferente, e mais difícil
+## Dirigir o editor de glossário
 
-As duas janelas **não** se dirigem do mesmo jeito, e a diferença não é adivinhável:
-
-| | editor de traduções | editor de glossário |
-|---|---|---|
-| o que a abertura devolve | a instância `TranslationEditor` | `None` |
-| como chegar no que interessa | `editor.select_index(0)`, `editor.trans_text` | andar na árvore de widgets |
-
-`open_glossary_editor` ainda é uma função com tudo em closures (o item 3.1 do
-ROADMAP converteu só o outro editor), então o único handle é o `Toplevel`. Os
-helpers do driver existem para isso:
+Desde o item 3.5 do ROADMAP as duas janelas se dirigem do mesmo jeito: as duas
+aberturas devolvem a instância (`TranslationEditor`, `GlossaryEditor`) e todo
+método e widget é alcançável pelo nome.
 
 ```python
 with Driver() as d:
     d.seed(glossario_entradas=[("rook", "torre", "suggestion"),
                                ("rook", "torre alta", "suggestion")])
-    win = d.open_glossary_editor()               # Toplevel, nao instancia
+    g = d.open_glossary_editor()                 # a instancia GlossaryEditor
 
-    d.button_containing(win, "torre alta").invoke()   # seleciona a linha
+    g.select_entry(1)                            # a regra que perde o conflito
     d.pump()
-    print(d.label_starting(win, "Conflito em"))       # o aviso de S9
-    d.button(win, "Manter esta").invoke()             # resolve o conflito
+    print(d.label_starting(g.win, "Conflito em"))     # o aviso de S9, na tela
+    g.keep_this_rule()                                # resolve o conflito
+    print(len(g.state.entries), "entradas")
 ```
 
-- `d.button(win, "Salvar")` — rótulo exato; se errar, o erro lista os que existem.
-- `d.button_containing(win, "torre alta")` — as **linhas da lista** têm rótulo de
-  três linhas (`AVISO  #1  -  Sugestão
-De: rook
-Para: torre`), então é assim
-  que se seleciona uma entrada.
-- `d.label_starting(win, "Conflito em")` — lê rótulos **visíveis**. O `so_visiveis`
+O estado vive em `g.state` (`entries`, `filtered_indices`, `page_index`,
+`selected_index`, `dirty`) e os widgets são atributos de `g` (`g.orig_text`,
+`g.new_text`, `g.filter_segment`, `g.rows_frame`). `d.open_glossary_editor()`
+repassa `initial_original=`/`initial_replacement=`, que é como o editor de
+traduções manda um trecho para cá.
+
+**Os helpers de árvore continuam valendo, e para uma coisa específica:** conferir
+o que está na **tela**. Um método diz o que o programa acha; um widget diz o que o
+usuário vê — e o defeito costuma estar entre os dois.
+
+- `d.button(g.win, "Salvar")` — rótulo exato; se errar, o erro lista os que existem.
+- `d.button_containing(g.win, "torre alta")` — as **linhas da lista** têm rótulo de
+  três linhas (`AVISO  #1  -  Sugestão / De: rook / Para: torre`), então é assim
+  que se clica numa entrada como um usuário clicaria.
+- `d.label_starting(g.win, "Conflito em")` — lê rótulos **visíveis**. O `so_visiveis`
   importa: o aviso de conflito existe sempre como widget e apenas sai do grid
   quando não há conflito; ler sem checar acha aviso que não está na tela.
 
@@ -205,7 +207,7 @@ bloqueia o terminal e não dá handle nenhum sobre o app.
 python -m unittest discover -s tests
 ```
 
-315 testes, ~40 s. Os de `test_editor_windows.py` abrem janelas de verdade e são
+323 testes, ~50 s. Os de `test_editor_windows.py` abrem janelas de verdade e são
 pulados onde não houver display.
 
 ## Gotchas
@@ -262,10 +264,6 @@ Todos custaram tempo nesta sessão.
   falsa que devolva texto solto cai no caminho individual e você mede outra
   coisa sem perceber.
 
-- **O editor de glossário não devolve instância.** Ver a seção própria acima. Se
-  você tentar `editor.algum_metodo()` depois de `open_glossary_editor()`, vai
-  receber `AttributeError: 'NoneType'` — não é bug, é o estado do refactor.
-
 - **`ImageGrab` fotografa a TELA.** A janela precisa estar visível e por cima —
   uma janela `withdraw()`n sai como o que estiver atrás dela. Não use com a
   máquina bloqueada.
@@ -281,7 +279,6 @@ Todos custaram tempo nesta sessão.
 | `PermissionError` ao limpar o sandbox | Conexão SQLite viva. Inofensivo — o diretório fica em `%TEMP%`. |
 | `backups/` do projeto encolheu | Você rodou com `--real` ou `sandbox=False`. É a retenção S8 fazendo o trabalho dela. |
 | `ModuleNotFoundError` logo após instalar | `pip` e `python` são interpretadores diferentes. Sempre `python -m pip`. |
-| `AttributeError: 'NoneType'` após abrir o glossário | Ele não devolve instância. Use os helpers de árvore. |
 | `LookupError: botao 'X' nao encontrado` | O erro lista os rótulos existentes — provavelmente acento ou espaço. |
 | Aviso de conflito lido mas não visível | `label_starting(..., so_visiveis=False)` pega widget fora do grid. |
 | `--worker` trava no fim da execução | Algum `messagebox` do worker não foi silenciado. |

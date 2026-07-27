@@ -873,13 +873,22 @@ def find_glossary_entry_index(entries, target, index_hint=None, match_type=True)
 
     `match_type=False` compara apenas o par (original, substituicao), para quem
     nao conhece o tipo da regra.
+
+    Os dois lados passam por `normalize_glossary_text` antes de serem
+    comparados. Nao e detalhe: a gravacao normaliza as pontas (garantia S7),
+    entao procurar pelo texto como o usuario digitou nao acha a entrada que
+    acabou de ser gravada — `"  bishop  "` foi para o arquivo como `"bishop"`.
+    Para as entradas ja em disco isto e um no-op, porque elas ja estao
+    normalizadas.
     """
     candidates = _normalize_detailed_entries([target])
     if not candidates:
         return None
 
     def key(entry):
-        return entry if match_type else entry[:2]
+        orig, new, rule_type = entry
+        pair = (normalize_glossary_text(orig), normalize_glossary_text(new))
+        return pair + (rule_type,) if match_type else pair
 
     wanted = key(candidates[0])
     normalized = _normalize_detailed_entries(entries)

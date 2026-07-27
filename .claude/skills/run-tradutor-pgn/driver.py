@@ -201,20 +201,21 @@ class Driver:
         self.pump(1.2)
         return editor
 
-    def open_glossary_editor(self):
-        """Devolve o `Toplevel` — nao ha instancia para devolver.
+    def open_glossary_editor(self, **kwargs):
+        """Devolve a instancia de `GlossaryEditor` — da para chamar metodos.
 
-        Assimetria que custa caro e nao da para adivinhar:
-        `open_translation_editor` devolve o `TranslationEditor`, entao la todo
-        metodo e widget e alcancavel pelo nome. `open_glossary_editor` ainda e
-        uma funcao com tudo em closures e devolve `None`; aqui o unico handle e
-        a janela, e mexer nela e andar na arvore de widgets. Use `button`,
-        `button_containing` e `label_starting` abaixo.
+        Ate o item 3.5 do ROADMAP isto devolvia so o `Toplevel`, porque
+        `open_glossary_editor` era uma funcao com tudo em closures. As duas
+        janelas se dirigem do mesmo jeito agora.
+
+        Os helpers de arvore (`button`, `button_containing`, `label_starting`)
+        continuam existindo e recebem `editor.win`: para conferir o que esta na
+        TELA eles seguem sendo o caminho certo — um metodo diz o que o programa
+        acha, um widget diz o que o usuario ve.
         """
-        self.glossary_editor.open_glossary_editor(self.app)
+        editor = self.glossary_editor.open_glossary_editor(self.app, **kwargs)
         self.pump(1.2)
-        tops = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
-        return tops[-1] if tops else None
+        return editor
 
     # ------------------------------------------- janela principal: a traducao
 
@@ -528,8 +529,8 @@ def smoke():
         d.shot("03-negrito-selecao.png", editor.trans_text)
 
         glossario = d.open_glossary_editor()
-        d.shot("04-editor-glossario.png", glossario)
-        print("glossario   | janela aberta")
+        d.shot("04-editor-glossario.png", glossario.win)
+        print(f"glossario   | {len(glossario.state.entries)} entradas carregadas")
 
         # Fluxo do editor de glossario: selecionar a regra que PERDE um conflito
         # e ler o aviso que diz qual esta valendo (garantia S9).
@@ -538,18 +539,21 @@ def smoke():
             ("rook", "torre alta", "suggestion"),   # perde para a de cima
             ("queen", "dama", "suggestion"),
         ])
-        d.button(glossario, "Recarregar").invoke()
+        glossario.reload_all()
         d.pump()
-        d.button_containing(glossario, "torre alta").invoke()
+        d.button_containing(glossario.win, "torre alta").invoke()
         d.pump()
 
-        avisos = d.label_starting(glossario, "Conflito em")
+        # O aviso e lido do WIDGET, de proposito: o que importa aqui e que a
+        # frase chegou a tela, e nao que o metodo saberia monta-la.
+        avisos = d.label_starting(glossario.win, "Conflito em")
         print(f"conflito    | {avisos[0] if avisos else 'NENHUM AVISO'}")
-        d.shot("05-glossario-conflito.png", glossario)
+        d.shot("05-glossario-conflito.png", glossario.win)
 
         assert marcas == 1, "o Ctrl+B nao marcou o trecho"
         assert avisos, "o aviso de conflito (S9) nao apareceu na tela"
         assert "vence a regra" in avisos[0], "o aviso nao diz qual regra vence"
+        assert glossario.state.selected_index is not None, "nenhuma regra selecionada"
         print("\nOK")
 
 

@@ -4446,6 +4446,35 @@ class GlossaryEntryLocationTests(unittest.TestCase):
             2,
         )
 
+    def test_it_finds_what_the_write_normalized(self):
+        """A gravacao tira os espacos das pontas; a busca tem de saber disso.
+
+        Apareceu ao cobrir `save_as_new` do editor de glossario: com
+        `"  bishop  "` no formulario, a entrada ia para o arquivo como
+        `"bishop"` e `locate_saved_entry` nao a reencontrava — a entrada recem
+        gravada ficava sem selecao, sem erro nenhum. A docstring de
+        `locate_saved_entry` ja afirmava que os dois lados eram normalizados; e
+        que nao eram.
+        """
+        self.assertEqual(
+            find_glossary_entry_index(
+                self.ENTRIES, ("  queen  ", "  dama  ", "suggestion")
+            ),
+            1,
+        )
+        # Do outro lado tambem: uma entrada nao normalizada na lista.
+        self.assertEqual(
+            find_glossary_entry_index(
+                [("  rook  ", "torre ", GLOSSARY_RULE_SUGGESTION)],
+                ("rook", "torre", "suggestion"),
+            ),
+            0,
+        )
+        # E normalizar nao pode fazer o par casar com quem ele nao e.
+        self.assertIsNone(
+            find_glossary_entry_index(self.ENTRIES, ("qu een", "dama", "suggestion"))
+        )
+
     def test_hint_decides_between_exact_duplicates(self):
         """Com duplicatas identicas, vale a que estava na tela."""
         entries = [
