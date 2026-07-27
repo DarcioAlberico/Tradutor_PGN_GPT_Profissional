@@ -1,11 +1,11 @@
 import os
-import re
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
 from .glossario import (
+    build_glossary_lookup,
     GLOSSARY_RULE_AUTOMATIC,
     GLOSSARY_RULE_CLEANUP,
     GLOSSARY_RULE_SUGGESTION,
@@ -14,8 +14,12 @@ from .glossario import (
     analyze_glossary_csv_import,
     create_glossary_backup,
     deduplicate_glossary_entries,
-    delete_glossary_entry,
+    delete_glossary_entry_by_pair,
+    describe_glossary_conflict,
     export_glossary_csv,
+    glossary_conflicts,
+    resolve_glossary_conflict,
+    find_glossary_entry_index,
     apply_all_substitutions,
     apply_substitution,
     import_glossary_csv,
@@ -26,23 +30,37 @@ from .glossario import (
     load_interactive_substitutions,
     restore_glossary_from_backup,
     save_glossary_entries,
-    update_glossary_entry,
+    update_glossary_entry_by_entry,
     validate_glossary_entry,
 )
-from .settings import load_settings, save_settings
+from .settings import load_settings
+from .editor_common import (
+    ROW_COLOR,
+    ROW_HOVER_COLOR,
+    ROW_TEXT_COLOR,
+    SELECTED_ROW_COLOR,
+    SELECTED_ROW_TEXT_COLOR,
+    clamp_page,
+    page_count as compute_page_count,
+    page_offset,
+    preview as common_preview,
+    window_safe_geometry,
+)
+from .editor_widgets import (
+    flash_message,
+    render_row_buttons,
+    restore_sash,
+    save_window_section,
+)
 from .window_utils import bring_window_to_front
 
 
-ROW_COLOR = ("#f8fafc", "#1f2937")
-ROW_TEXT_COLOR = ("#111827", "#e5e7eb")
-ROW_HOVER_COLOR = ("#e2e8f0", "#374151")
-SELECTED_ROW_COLOR = ("#3b82f6", "#1f6aa5")
-SELECTED_ROW_TEXT_COLOR = "#ffffff"
 WARNING_COLOR = "#f59e0b"
 OK_COLOR = "#16a34a"
 ERROR_COLOR = "#dc2626"
 PAGE_SIZE = 150
-GEOMETRY_RE = re.compile(r"^(\d+)x(\d+)([+-])(-?\d+)([+-])(-?\d+)$")
+MIN_WIDTH = 1040
+MIN_HEIGHT = 640
 RULE_TYPE_LABELS = {
     GLOSSARY_RULE_SUGGESTION: "Sugestão",
     GLOSSARY_RULE_CLEANUP: "Limpeza",
@@ -64,44 +82,31 @@ def entry_pairs(entries):
 
 
 def preview(text, limit=68):
-    value = " ".join((text or "").split())
-    if len(value) <= limit:
-        return value
-    return value[: max(0, limit - 3)] + "..."
+    return common_preview(text, limit)
 
 
 def safe_geometry(win, geometry):
-    match = GEOMETRY_RE.match(geometry or "")
-    if not match:
-        return geometry
-
-    width = int(match.group(1))
-    height = int(match.group(2))
-    x = int(match.group(4))
-    y = int(match.group(6))
-    if match.group(3) == "-" and x >= 0:
-        x = -x
-    if match.group(5) == "-" and y >= 0:
-        y = -y
-
-    screen_width = win.winfo_screenwidth()
-    screen_height = win.winfo_screenheight()
-    width = min(max(width, 1040), screen_width)
-    height = min(max(height, 640), screen_height)
-    x = min(max(0, x), max(0, screen_width - width))
-    y = min(max(0, y), max(0, screen_height - height))
-    return f"{width}x{height}+{x}+{y}"
+    return window_safe_geometry(win, geometry, MIN_WIDTH, MIN_HEIGHT)
 
 
-def build_glossary_diagnostics(entries):
+def build_glossary_diagnostics(entries, conflicts=None):
+    """Avisos por entrada, na ordem de `entries`.
+
+    O aviso de conflito vem de `glossary_conflicts`, e nao de um agrupamento
+    proprio, para que o filtro "Conflitos" mostre exatamente as regras para as
+    quais o editor consegue dizer quem vence. Sem isso a lista acusaria disputas
+    que nao existem — duas regras de mesmo padrao em contextos que o programa
+    nunca carrega juntos.
+    """
     pair_counts = {}
-    replacements_by_original = {}
     for orig, new in entry_pairs(entries):
         pair_counts[(orig, new)] = pair_counts.get((orig, new), 0) + 1
-        replacements_by_original.setdefault(orig, set()).add(new)
+
+    if conflicts is None:
+        conflicts = glossary_conflicts(entries)
 
     diagnostics = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         orig, new = glossary_entry_pair(entry)
         warnings = validate_glossary_entry(
             orig,
@@ -110,7 +115,7 @@ def build_glossary_diagnostics(entries):
         )
         if pair_counts.get((orig, new), 0) > 1:
             warnings.append("Entrada duplicada.")
-        if orig and len(replacements_by_original.get(orig, set())) > 1:
+        if index in conflicts:
             warnings.append("Mesmo original com substituição diferente.")
         diagnostics.append(warnings)
     return diagnostics
@@ -205,9 +210,11 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
 
     entries = []
     diagnostics = []
+    conflicts = {}
     filtered_indices = []
     row_buttons = []
     selected = {"index": None}
+    validation_lookup = {"value": None}
     page_index = {"value": 0}
     dirty = {"value": False, "loading": False}
     form_baseline = {"orig": "", "new": "", "type": GLOSSARY_RULE_SUGGESTION}
@@ -305,7 +312,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     detail_frame.columnconfigure(0, weight=1)
     detail_frame.rowconfigure(1, weight=1)
     detail_frame.rowconfigure(3, weight=1)
-    detail_frame.rowconfigure(8, weight=1)
+    detail_frame.rowconfigure(9, weight=1)
 
     ctk.CTkLabel(detail_frame, text="Texto encontrado:").grid(
         row=0,
@@ -348,8 +355,26 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     )
     validation_label.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 8))
 
+    # So aparece quando a entrada selecionada disputa um padrao com outra. Fora
+    # disso a barra sai do grid, para nao ocupar espaco permanente com nada.
+    conflict_bar = ctk.CTkFrame(detail_frame, fg_color="transparent")
+    conflict_bar.grid(row=6, column=0, sticky="ew", padx=10, pady=(0, 8))
+    conflict_bar.columnconfigure(0, weight=1)
+    conflict_label = ctk.CTkLabel(
+        conflict_bar,
+        text="",
+        anchor="w",
+        justify=tk.LEFT,
+        text_color=WARNING_COLOR,
+        wraplength=460,
+    )
+    conflict_label.grid(row=0, column=0, sticky="ew")
+    btn_keep_conflict = ctk.CTkButton(conflict_bar, text="Manter esta", width=110)
+    btn_keep_conflict.grid(row=0, column=1, sticky="e", padx=(6, 0))
+    conflict_bar.grid_remove()
+
     test_header = ctk.CTkFrame(detail_frame, fg_color="transparent")
-    test_header.grid(row=6, column=0, sticky="ew", padx=10, pady=(0, 2))
+    test_header.grid(row=7, column=0, sticky="ew", padx=10, pady=(0, 2))
     test_header.columnconfigure(1, weight=1)
     ctk.CTkLabel(test_header, text="Teste rápido:").grid(row=0, column=0, sticky="w")
     btn_apply_preview = ctk.CTkButton(test_header, text="Aplicar selecionada", width=140)
@@ -362,10 +387,10 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         textvariable=test_text_var,
         placeholder_text="Digite ou cole uma frase para testar a substituição selecionada",
     )
-    test_input.grid(row=7, column=0, sticky="ew", padx=10, pady=(0, 6))
+    test_input.grid(row=8, column=0, sticky="ew", padx=10, pady=(0, 6))
 
     preview_text = ctk.CTkTextbox(detail_frame, height=90, wrap=tk.WORD)
-    preview_text.grid(row=8, column=0, sticky="nsew", padx=10, pady=(0, 10))
+    preview_text.grid(row=9, column=0, sticky="nsew", padx=10, pady=(0, 10))
     preview_text.configure(state="disabled")
 
     footer = ctk.CTkFrame(win, corner_radius=8)
@@ -405,33 +430,19 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         buttons[text] = button
 
     def show_message(text, color=OK_COLOR):
-        msg_label.configure(text=text, text_color=color)
-        win.after(1800, lambda: msg_label.configure(text=""))
+        flash_message(msg_label, win, text, 1800, text_color=color)
 
     def save_editor_settings():
-        editor = settings.setdefault("glossary_editor", {})
-        if not isinstance(editor, dict):
-            editor = {}
-            settings["glossary_editor"] = editor
-        editor["geometry"] = win.geometry()
-        editor["filter"] = filter_segment.get()
-        editor["sort"] = sort_text.get()
-        try:
-            editor["main_sash_x"] = main_pane.sash_coord(0)[0]
-        except tk.TclError:
-            pass
-        try:
-            save_settings(settings)
-        except OSError:
-            pass
+        save_window_section(
+            settings,
+            "glossary_editor",
+            {"filter": filter_segment.get(), "sort": sort_text.get()},
+            window=win,
+            sashes=(("main_sash_x", main_pane, 0),),
+        )
 
     def restore_pane_position():
-        sash_x = editor_settings.get("main_sash_x")
-        if isinstance(sash_x, int) and sash_x > 0:
-            try:
-                main_pane.sash_place(0, max(360, min(520, sash_x)), 0)
-            except tk.TclError:
-                pass
+        restore_sash(main_pane, editor_settings.get("main_sash_x"), 360, 520)
 
     def update_app_glossary():
         app.glossary_substitutions = load_interactive_substitutions()
@@ -510,9 +521,9 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         warnings = validate_glossary_entry(
             orig,
             new,
-            entries,
             current_index=current_index,
             rule_type=current_rule_type(),
+            existing_lookup=current_validation_lookup(),
         )
         if warnings:
             validation_label.configure(
@@ -525,16 +536,92 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
             validation_label.configure(text="", text_color=OK_COLOR)
         refresh_preview()
 
+    def refresh_conflict():
+        """Diz qual regra do conflito o programa aplica (garantia S9).
+
+        Descreve a entrada **como esta no arquivo**, nao o que esta no
+        formulario: quem vence depende da posicao no glossario e do tipo
+        gravados, e o texto sendo digitado ainda nao e nenhum dos dois.
+        """
+        index = selected["index"]
+        message = ""
+        if index is not None and 0 <= index < len(entries):
+            message = describe_glossary_conflict(entries, index, conflicts)
+
+        if message:
+            conflict_label.configure(text=message)
+            conflict_bar.grid()
+        else:
+            conflict_label.configure(text="")
+            conflict_bar.grid_remove()
+
+    def keep_this_rule():
+        index = selected["index"]
+        if index is None or index not in conflicts:
+            show_message("Selecione uma regra em conflito", WARNING_COLOR)
+            return
+        if dirty["value"] and not confirm_discard_changes():
+            return
+
+        info = conflicts[index]
+        descartadas = [position for position in info["group"] if position != index]
+        detalhes = "\n".join(
+            f"#{position + 1}  {rule_type_label(glossary_entry_type(entries[position]))}"
+            f"  ->  {preview(glossary_entry_pair(entries[position])[1], 48)}"
+            for position in descartadas
+        )
+        if not messagebox.askyesno(
+            "Manter esta regra",
+            f"Manter a regra #{index + 1} para {info['pattern']!r} e remover "
+            f"{len(descartadas)} regra(s) que disputam o mesmo texto?\n\n{detalhes}",
+            parent=win,
+        ):
+            return
+
+        restantes = resolve_glossary_conflict(entries, index, conflicts)
+        if restantes is None:
+            show_message("Nada a resolver", WARNING_COLOR)
+            return
+
+        # A entrada mantida e reencontrada pelo conteudo: remover as anteriores
+        # desloca a posicao dela, e o arquivo pode ter mudado por fora (S6).
+        mantida = (*glossary_entry_pair(entries[index]), glossary_entry_type(entries[index]))
+        try:
+            save_glossary_entries(restantes)
+        except Exception as exc:
+            messagebox.showerror("Erro", f"Erro ao gravar glossário:\n{exc}", parent=win)
+            return
+
+        load_rows_from_file()
+        selected["index"] = find_glossary_entry_index(entries, mantida)
+        set_dirty(False)
+        update_app_glossary()
+        apply_filter()
+        if selected["index"] is not None:
+            select_entry(selected["index"])
+        else:
+            clear_form()
+        show_message(f"{len(descartadas)} regra(s) em conflito removida(s)")
+
     def load_rows_from_file():
-        nonlocal entries, diagnostics
+        nonlocal entries, diagnostics, conflicts
         try:
             entries = load_glossary_entry_details(deduplicate=False)
-            diagnostics = build_glossary_diagnostics(entries)
+            conflicts = glossary_conflicts(entries)
+            diagnostics = build_glossary_diagnostics(entries, conflicts)
         except Exception as exc:
             entries = []
             diagnostics = []
+            conflicts = {}
             messagebox.showerror("Erro", f"Erro ao carregar glossário:\n{exc}")
+        # O indice de validacao e derivado de `entries`; invalida junto.
+        validation_lookup["value"] = None
         file_label.configure(text=f"Arquivo: Substituicoes.txt")
+
+    def current_validation_lookup():
+        if validation_lookup["value"] is None:
+            validation_lookup["value"] = build_glossary_lookup(entries)
+        return validation_lookup["value"]
 
     def apply_filter():
         nonlocal filtered_indices
@@ -545,15 +632,14 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
             diagnostics,
         )
         filtered_indices = sort_glossary_indices(entries, filtered_indices, sort_text.get())
-        pages = page_count()
-        page_index["value"] = min(page_index["value"], max(0, pages - 1))
+        page_index["value"] = clamp_page(
+            page_index["value"], len(filtered_indices), PAGE_SIZE
+        )
         render_rows()
         save_editor_settings()
 
     def page_count():
-        if not filtered_indices:
-            return 0
-        return (len(filtered_indices) + PAGE_SIZE - 1) // PAGE_SIZE
+        return compute_page_count(len(filtered_indices), PAGE_SIZE)
 
     def update_page_controls():
         pages = page_count()
@@ -583,41 +669,50 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         list_count_label.configure(text=f"{len(filtered_indices)} exibidas")
         update_page_controls()
 
+    def build_row_button(parent, _visible_index, entry_index):
+        button = ctk.CTkButton(
+            parent,
+            text=row_label(entries, entry_index, diagnostics),
+            anchor="w",
+            height=64,
+            fg_color=ROW_COLOR,
+            text_color=ROW_TEXT_COLOR,
+            hover_color=ROW_HOVER_COLOR,
+            command=lambda i=entry_index: select_entry(i),
+        )
+        if entry_index == selected["index"]:
+            button.configure(
+                fg_color=SELECTED_ROW_COLOR,
+                text_color=SELECTED_ROW_TEXT_COLOR,
+            )
+        return button
+
     def render_rows():
-        for child in rows_frame.winfo_children():
-            child.destroy()
         row_buttons.clear()
         refresh_counts()
 
-        if not filtered_indices:
-            ctk.CTkLabel(rows_frame, text="Nenhuma entrada encontrada.").pack(
-                anchor="w",
-                padx=6,
-                pady=6,
-            )
-            return
-
-        start = page_index["value"] * PAGE_SIZE
+        start = page_offset(page_index["value"], PAGE_SIZE)
         page_indices = filtered_indices[start:start + PAGE_SIZE]
+        botoes = render_row_buttons(
+            rows_frame, page_indices, build_row_button, "Nenhuma entrada encontrada."
+        )
+        # A lista guarda pares: o destaque e movido pela posicao no ARQUIVO, que
+        # nao e a posicao na pagina quando ha filtro ou ordenacao.
+        row_buttons.extend(zip(page_indices, botoes))
 
-        for visible_index, entry_index in enumerate(page_indices):
-            button = ctk.CTkButton(
-                rows_frame,
-                text=row_label(entries, entry_index, diagnostics),
-                anchor="w",
-                height=64,
-                fg_color=ROW_COLOR,
-                text_color=ROW_TEXT_COLOR,
-                hover_color=ROW_HOVER_COLOR,
-                command=lambda i=entry_index: select_entry(i),
+    def update_row_selection(index):
+        """Move o destaque trocando so as cores dos botoes afetados.
+
+        Antes isto chamava `render_rows()`, que destroi e recria ate 150
+        CTkButtons e ainda recalcula os contadores sobre todas as entradas — a
+        cada clique numa linha. O editor de traducoes ja fazia assim.
+        """
+        for entry_index, button in row_buttons:
+            selecionado = entry_index == index
+            button.configure(
+                fg_color=SELECTED_ROW_COLOR if selecionado else ROW_COLOR,
+                text_color=SELECTED_ROW_TEXT_COLOR if selecionado else ROW_TEXT_COLOR,
             )
-            button.pack(fill=tk.X, padx=2, pady=2)
-            row_buttons.append((entry_index, button))
-            if entry_index == selected["index"]:
-                button.configure(
-                    fg_color=SELECTED_ROW_COLOR,
-                    text_color=SELECTED_ROW_TEXT_COLOR,
-                )
 
     def select_entry(index):
         if dirty["value"] and not confirm_discard_changes():
@@ -633,7 +728,8 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         set_form_baseline(orig, new, rule_type)
         dirty["loading"] = False
         set_dirty(False)
-        render_rows()
+        update_row_selection(index)
+        refresh_conflict()
         orig_text.focus_set()
 
     def clear_form():
@@ -645,6 +741,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         set_form_baseline()
         dirty["loading"] = False
         set_dirty(False)
+        refresh_conflict()
         render_rows()
         orig_text.focus_set()
 
@@ -660,6 +757,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         set_form_baseline()
         dirty["loading"] = False
         set_dirty(True)
+        refresh_conflict()
         apply_filter()
         if text_value(orig_text):
             new_text.focus_set()
@@ -692,6 +790,40 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         else:
             clear_form()
 
+    def current_baseline_entry():
+        """A entrada como estava quando foi carregada no formulario.
+
+        E o que identifica a linha no arquivo — a posicao nao serve, porque a
+        janela nao e notificada de alteracoes externas ao glossario.
+        """
+        return (
+            form_baseline["orig"],
+            form_baseline["new"],
+            form_baseline["type"],
+        )
+
+    def locate_saved_entry(orig, new, rule_type):
+        """Posicao, no `entries` recem recarregado, da entrada acabada de gravar.
+
+        A gravacao normaliza os espacos das pontas (garantia S7), entao procurar
+        pelo texto digitado pode nao achar nada. `find_glossary_entry_index`
+        normaliza os dois lados antes de comparar.
+        """
+        return find_glossary_entry_index(entries, (orig, new, rule_type))
+
+    def report_entry_vanished():
+        """A entrada editada nao existe mais como estava no arquivo."""
+        apply_filter()
+        clear_form()
+        messagebox.showwarning(
+            "Entrada não encontrada",
+            "A entrada que estava sendo editada foi alterada ou removida do "
+            "glossário por fora desta janela.\n\n"
+            "Nada foi gravado, para não sobrescrever outra entrada. A lista foi "
+            "recarregada.",
+            parent=win,
+        )
+
     def save_current():
         orig, new = current_pair()
         rule_type = current_rule_type()
@@ -715,8 +847,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
             if selected["index"] is None:
                 result = add_glossary_entry(orig, new, rule_type=rule_type)
                 load_rows_from_file()
-                entry = (orig, new, rule_type)
-                selected["index"] = entries.index(entry) if entry in entries else len(entries) - 1
+                selected["index"] = locate_saved_entry(orig, new, rule_type)
                 show_message(
                     "Entrada adicionada"
                     if result["status"] == "inserted"
@@ -724,8 +855,21 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
                     OK_COLOR if result["status"] == "inserted" else WARNING_COLOR,
                 )
             else:
-                update_glossary_entry(selected["index"], orig, new, rule_type=rule_type)
+                # Pelo estado exibido, nao pela posicao guardada: o arquivo pode
+                # ter mudado por fora desde que esta entrada foi selecionada, e
+                # ai o indice aponta para a vizinha (garantia S6).
+                result = update_glossary_entry_by_entry(
+                    current_baseline_entry(),
+                    orig,
+                    new,
+                    rule_type=rule_type,
+                    index_hint=selected["index"],
+                )
                 load_rows_from_file()
+                if result is None:
+                    report_entry_vanished()
+                    return
+                selected["index"] = result["index"]
                 show_message("Entrada salva")
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao salvar glossário:\n{exc}", parent=win)
@@ -755,11 +899,12 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         load_rows_from_file()
         if result["status"] == "unchanged":
             show_message("Entrada já existia", WARNING_COLOR)
-            entry = (orig, new, rule_type)
-            selected["index"] = entries.index(entry) if entry in entries else None
         else:
-            selected["index"] = len(entries) - 1
             show_message("Nova entrada salva")
+        # Vale para os dois casos: a entrada existente e a recem inserida sao
+        # localizadas do mesmo jeito. `len(entries) - 1` so acertava porque a
+        # insercao acrescenta no fim, e errava quando ela nao acontecia.
+        selected["index"] = locate_saved_entry(orig, new, rule_type)
         set_form_baseline(orig, new, rule_type)
         set_dirty(False)
         update_app_glossary()
@@ -780,10 +925,20 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         ):
             return
 
+        orig, new = glossary_entry_pair(entries[index])
+        rule_type = glossary_entry_type(entries[index])
         try:
-            delete_glossary_entry(index)
+            # Pelo conteudo, nao pela posicao: mesma razao do "Salvar" (S6).
+            removed = delete_glossary_entry_by_pair(
+                orig, new, rule_type=rule_type, index_hint=index
+            )
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao excluir entrada:\n{exc}", parent=win)
+            return
+
+        if removed is None:
+            load_rows_from_file()
+            report_entry_vanished()
             return
 
         load_rows_from_file()
@@ -792,7 +947,13 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
         update_app_glossary()
         apply_filter()
         if filtered_indices:
-            select_entry(filtered_indices[min(index, len(filtered_indices) - 1)])
+            # `removed["index"]` e a posicao real da entrada no arquivo, que
+            # pode diferir da que estava selecionada. `filtered_indices` guarda
+            # posicoes de `entries`, entao a vizinha e a primeira que sobrou a
+            # partir dela — nao `filtered_indices[index]`, que com filtro ou
+            # ordenacao ativos apontaria para uma entrada arbitraria.
+            seguintes = [i for i in filtered_indices if i >= removed["index"]]
+            select_entry(seguintes[0] if seguintes else filtered_indices[-1])
         else:
             clear_form()
         show_message("Entrada excluída")
@@ -899,7 +1060,9 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
             return
 
         try:
-            stats = import_glossary_csv(None, csv_path)
+            # A previa acima ja tem as entradas escolhidas; importar recalculando
+            # releria o CSV e poderia gravar algo diferente do confirmado.
+            stats = import_glossary_csv(None, csv_path, analysis=preview)
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao importar CSV:\n{exc}", parent=win)
             return
@@ -988,6 +1151,7 @@ def open_glossary_editor(app, on_change=None, initial_original=None, initial_rep
     btn_page_next.configure(command=lambda: change_page(1))
     btn_search.configure(command=apply_search)
     btn_clear_search.configure(command=clear_search)
+    btn_keep_conflict.configure(command=keep_this_rule)
     btn_apply_preview.configure(command=refresh_preview)
     btn_apply_all_preview.configure(command=apply_all_to_preview)
     sort_menu.configure(command=lambda _value: (page_index.update({"value": 0}), apply_filter()))

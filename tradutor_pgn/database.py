@@ -1,14 +1,226 @@
 import sqlite3
 
+from .review_quality import evaluate_translation_quality
+
+
+# Incrementar sempre que o schema mudar. Enquanto o PRAGMA user_version do
+# arquivo bater com este valor, initialize_database pula toda a migracao.
+SCHEMA_VERSION = 3
+
+# Modos de busca do editor. Sao semanticas diferentes, e nenhuma substitui a
+# outra — ver a garantia R8 na SPEC.
+SEARCH_MODE_TERMS = "terms"          # indexado (FTS5): casa palavras inteiras
+SEARCH_MODE_SUBSTRING = "substring"  # `LIKE '%x%'`: casa qualquer trecho
+SEARCH_MODES = (SEARCH_MODE_TERMS, SEARCH_MODE_SUBSTRING)
+
+FTS_TABLE = "comments_fts"
+
 
 def open_database(db_path):
+    """Abre `db_path` no modo que o uso concorrente exige (garantia C3).
+
+    O editor de traducoes e o worker usam o MESMO arquivo, cada um com sua
+    conexao. Duas propriedades interessam aqui, e vale separar bem uma da outra:
+
+    **Leitura.** No `journal_mode` padrao (`delete`) o leitor so e barrado
+    enquanto o escritor esta no commit (lock EXCLUSIVE). Com transacoes curtas
+    isso e curto, entao a leitura nunca foi o problema grave — quem escreveu
+    `WAL` esperando consertar a leitura estava mirando no alvo errado. Em WAL o
+    leitor simplesmente nunca espera, o que ainda assim e o comportamento
+    desejado para uma janela de interface.
+
+    **Escrita.** Essa e a que mordia. Duas conexoes nao escrevem ao mesmo tempo
+    em modo nenhum, WAL inclusive: enquanto o worker mantiver transacao aberta,
+    o "Salvar" do editor espera o `busy_timeout` (30 s) e depois falha. O que
+    resolve isso nao e o modo do banco e sim nao segurar transacao aberta
+    atravessando a rede — ver o commit por comentario em `translation_worker`.
+
+    **`synchronous = NORMAL`** e o que torna aquele commit por comentario
+    barato. Medido inserindo 300 linhas no banco real, comitando uma a uma:
+
+        journal=delete synchronous=FULL     3,45 ms por traducao
+        journal=wal    synchronous=NORMAL   0,14 ms por traducao
+
+    Em WAL o fsync acontece no checkpoint, e nao em cada commit. Uma queda do
+    SISTEMA pode custar as ultimas transacoes; uma queda do PROGRAMA, nao. Para
+    um cache de traducoes que se reconstroi reexecutando, e a troca certa.
+    """
     conn = sqlite3.connect(db_path, timeout=30)
     conn.execute("PRAGMA busy_timeout = 30000")
+
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+    except sqlite3.DatabaseError:
+        # Mudar de modo exige lock exclusivo por um instante. Se outra conexao
+        # estiver escrevendo agora, a troca falha — e tudo bem: o modo fica
+        # gravado no arquivo, entao a proxima abertura que pegar o banco livre
+        # resolve. Nao abrir o banco por causa disso seria pior que abrir sem
+        # WAL.
+        pass
+
     return conn
 
 
+def quality_warning_flag(original, translated):
+    """1 se a traducao tem algum aviso de qualidade, 0 caso contrario.
+
+    Materializado na coluna `quality_warning` para que contar e paginar por
+    "com aviso" seja uma consulta SQL, e nao uma varredura da tabela inteira em
+    Python a cada troca de pagina. Precisa ser a MESMA funcao que a interface
+    usa para exibir os avisos, senao a contagem diverge do que aparece na tela.
+    """
+    return 1 if evaluate_translation_quality(original, translated) else 0
+
+
 def initialize_database(db_path):
+    """Abre a conexao garantindo que o schema esteja atualizado.
+
+    E chamada em muitos pontos da interface (um clique de linha, um save, uma
+    navegacao). Por isso a migracao roda apenas quando `user_version` esta
+    desatualizado; no caminho comum sobra so o connect.
+    """
     conn = open_database(db_path)
+
+    current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current_version == SCHEMA_VERSION:
+        return conn
+
+    _migrate_database(conn)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.commit()
+    return conn
+
+
+def fts5_available(conn):
+    """O SQLite desta instalacao foi compilado com FTS5?
+
+    E um modulo opcional. Sem ele a busca por termos nao existe, e o programa
+    tem de continuar funcionando com o `LIKE` — mais lento, mas correto. Testar
+    criando uma tabela em `temp` e o unico jeito confiavel: `compile_options`
+    nem sempre lista o modulo, e `PRAGMA module_list` nao existe em toda versao.
+    """
+    try:
+        conn.execute("CREATE VIRTUAL TABLE temp.fts5_probe USING fts5(x)")
+    except sqlite3.Error:
+        return False
+    try:
+        conn.execute("DROP TABLE temp.fts5_probe")
+    except sqlite3.Error:
+        pass
+    return True
+
+
+def fts_index_ready(cursor):
+    """O indice de busca existe neste banco?
+
+    Separado de `fts5_available` porque as duas coisas falham por motivos
+    diferentes: o modulo pode existir e o indice nao (banco antigo, migracao que
+    nao rodou), e o indice pode existir num arquivo aberto por um Python cujo
+    SQLite nao tem FTS5. Consultar sem checar os dois daria `OperationalError`
+    no meio de uma navegacao.
+    """
+    try:
+        row = cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (FTS_TABLE,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def _create_fts_index(conn):
+    """Cria o indice de busca e os gatilhos que o mantem em dia.
+
+    `content='comments'` faz do indice um "external content": ele guarda so os
+    termos, e o texto continua vivendo uma vez so na tabela original. Num banco
+    de 80 MB duplicar o texto seria caro sem necessidade.
+
+    O preco do external content e que a sincronizacao passa a ser
+    responsabilidade dos gatilhos, e uma remocao exige o comando `'delete'`
+    (com os valores ANTIGOS): apagar a linha sem isso deixa os termos dela no
+    indice para sempre, e a busca passa a devolver linhas que nao existem mais.
+
+    `remove_diacritics 2` e o que faz "traducao" achar "tradução". Num corpus em
+    portugues digitado por gente, ignorar isso seria a maior fonte de "nao achei"
+    injustificado.
+    """
+    conn.execute(f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS {FTS_TABLE} USING fts5(
+            original_comment,
+            translated_comment,
+            content='comments',
+            content_rowid='id',
+            tokenize="unicode61 remove_diacritics 2"
+        )
+    """)
+    conn.execute(f"""
+        CREATE TRIGGER IF NOT EXISTS comments_fts_insert AFTER INSERT ON comments
+        BEGIN
+            INSERT INTO {FTS_TABLE}(rowid, original_comment, translated_comment)
+            VALUES (new.id, new.original_comment, new.translated_comment);
+        END
+    """)
+    conn.execute(f"""
+        CREATE TRIGGER IF NOT EXISTS comments_fts_delete AFTER DELETE ON comments
+        BEGIN
+            INSERT INTO {FTS_TABLE}({FTS_TABLE}, rowid, original_comment, translated_comment)
+            VALUES ('delete', old.id, old.original_comment, old.translated_comment);
+        END
+    """)
+    conn.execute(f"""
+        CREATE TRIGGER IF NOT EXISTS comments_fts_update AFTER UPDATE ON comments
+        BEGIN
+            INSERT INTO {FTS_TABLE}({FTS_TABLE}, rowid, original_comment, translated_comment)
+            VALUES ('delete', old.id, old.original_comment, old.translated_comment);
+            INSERT INTO {FTS_TABLE}(rowid, original_comment, translated_comment)
+            VALUES (new.id, new.original_comment, new.translated_comment);
+        END
+    """)
+    # Popula a partir do conteudo que ja existe. Num banco vazio custa nada; num
+    # banco cheio e a unica parte cara da migracao, e roda uma vez so.
+    conn.execute(f"INSERT INTO {FTS_TABLE}({FTS_TABLE}) VALUES ('rebuild')")
+
+
+def build_fts_match_query(search_text):
+    """Traduz o que o usuario digitou para a sintaxe do FTS5, ou `None`.
+
+    O texto digitado nao pode ir cru para o `MATCH`: `AND`, `OR`, `NOT`, `-`,
+    `*`, `:`, `(`, `"` sao operadores, e uma busca por `bispo (branco)` ou por
+    um trecho com aspas viraria erro de sintaxe no meio da navegacao — nao um
+    resultado vazio, um `OperationalError`.
+
+    Cada palavra vira um termo entre aspas (literal para o FTS5), e os termos
+    sao exigidos todos (o `AND` implicito). Um `*` no fim de uma palavra e a
+    unica sintaxe preservada, porque e a que devolve o casamento por prefixo que
+    o `LIKE` dava de graca: `bisp*` acha "bispo".
+
+    Devolve `None` quando nao sobra nenhum termo — busca so de pontuacao, por
+    exemplo. Quem chama trata isso como "sem filtro de busca", que e o mesmo que
+    o campo vazio faria.
+    """
+    texto = (search_text or "").strip()
+    if not texto:
+        return None
+
+    termos = []
+    for bruto in texto.split():
+        prefixo = bruto.endswith("*")
+        palavra = bruto[:-1] if prefixo else bruto
+        # Fora letras e digitos nao ha o que casar: o tokenizador do FTS5 ja
+        # descarta essa pontuacao, e mante-la so quebraria a sintaxe.
+        limpa = "".join(c for c in palavra if c.isalnum() or c in "_")
+        if not limpa:
+            continue
+        termos.append(f'"{limpa}"*' if prefixo else f'"{limpa}"')
+
+    if not termos:
+        return None
+    return " ".join(termos)
+
+
+def _migrate_database(conn):
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -62,6 +274,10 @@ def initialize_database(db_path):
         """)
         conn.commit()
 
+    if "quality_warning" not in cols:
+        cursor.execute("ALTER TABLE comments ADD COLUMN quality_warning INTEGER")
+        conn.commit()
+
     cursor.execute("""
         UPDATE comments
         SET verified = CASE WHEN verified = 1 THEN 1 ELSE 0 END
@@ -77,27 +293,173 @@ def initialize_database(db_path):
         ON comments(target_language, verified, id)
     """)
     cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_comments_quality
+        ON comments(target_language, quality_warning, id)
+    """)
+    # Indice de cobertura para get_review_status_counts: com ele o SQLite le so
+    # o indice (33 ms em 200 mil linhas), sem tocar na tabela (83 ms).
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_comments_counts
+        ON comments(target_language, verified, quality_warning)
+    """)
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_comment_history_comment
         ON comment_history(comment_id, id)
     """)
 
+    if fts5_available(conn):
+        _create_fts_index(conn)
+    # Sem FTS5 o programa continua inteiro, so que a busca por termos nao fica
+    # disponivel e a interface cai no `LIKE`. Nao abrir o banco por causa de um
+    # modulo opcional ausente seria desproporcional.
+
     conn.commit()
+    backfill_quality_warnings(conn)
     return conn
 
 
-def load_translation_cache(cursor, target_language):
-    cursor.execute(
-        """
-        SELECT original_comment, translated_comment
-        FROM comments
-        WHERE target_language = ?
-          AND translated_comment IS NOT NULL
-          AND translated_comment <> ''
-        ORDER BY id
-        """,
-        (target_language,)
-    )
-    return {orig: trans for orig, trans in cursor.fetchall()}
+def backfill_quality_warnings(conn, batch_size=5000):
+    """Preenche `quality_warning` nas linhas que ainda estao com NULL.
+
+    So roda no upgrade de schema; depois disso a coluna e mantida em cada
+    escrita. Devolve quantas linhas foram preenchidas.
+    """
+    cursor = conn.cursor()
+    total = 0
+
+    while True:
+        rows = cursor.execute(
+            """
+            SELECT id, original_comment, translated_comment
+            FROM comments
+            WHERE quality_warning IS NULL
+            LIMIT ?
+            """,
+            (batch_size,),
+        ).fetchall()
+        if not rows:
+            break
+
+        cursor.executemany(
+            "UPDATE comments SET quality_warning = ? WHERE id = ?",
+            [
+                (quality_warning_flag(original, translated), row_id)
+                for row_id, original, translated in rows
+            ],
+        )
+        conn.commit()
+        total += len(rows)
+
+    return total
+
+
+# Quantos comentarios por consulta ao restringir a carga do cache. O limite de
+# parametros do SQLite e 32766 nas versoes recentes e 999 nas antigas; 900 cabe
+# em qualquer uma e o custo de mais um lote e desprezivel perto de errar aqui.
+CACHE_LOOKUP_CHUNK = 900
+
+# Acima desta fracao da tabela, vale carregar tudo de uma vez.
+#
+# O limite e sobre MEMORIA, que e o que este item trata, e nao sobre tempo: as
+# duas cargas se cruzam em tempo perto de 10% da tabela, mas ate bem depois disso
+# a restrita continua valendo a pena. Medido no banco real (195.607 linhas,
+# 74 MB na carga completa), pedindo uma fracao da tabela:
+#
+#     fracao   tempo extra   memoria poupada   MB por 100 ms
+#       10%        -34 ms          68 MB          (de graca)
+#       25%        443 ms          59 MB             13,3
+#       50%       1208 ms          44 MB              3,7
+#       75%       1872 ms          32 MB              1,7
+#
+# A troca piora sem parar: quanto maior a fatia pedida, menos memoria se poupa e
+# mais tempo se paga. Em 50% ainda se trocam 44 MB por 1,2 s — aceitavel numa
+# operacao que depois passa minutos na rede. Dali para cima, nao.
+CACHE_FULL_LOAD_RATIO = 0.50
+
+# So vale consultar o tamanho da tabela (10 ms) quando ha o que decidir. Abaixo
+# deste numero a carga restrita custa no maximo ~26 ms, entao gastar 10 ms para
+# escolher seria pagar quase metade do trabalho so para pensar nele.
+CACHE_RATIO_CHECK_MINIMUM = 2 * CACHE_LOOKUP_CHUNK
+
+
+def _full_load_is_cheaper(cursor, target_language, quantos):
+    """A carga completa compensa para este numero de comentarios?
+
+    Errar aqui nao produz resultado errado — as duas cargas devolvem o mesmo
+    dicionario para os comentarios pedidos —, so um tempo pior.
+    """
+    if quantos < CACHE_RATIO_CHECK_MINIMUM:
+        return False
+    try:
+        total = cursor.execute(
+            "SELECT COUNT(*) FROM comments WHERE target_language = ?",
+            (target_language,),
+        ).fetchone()[0]
+    except sqlite3.Error:  # pragma: no cover - defensivo
+        return False
+    return total > 0 and quantos >= total * CACHE_FULL_LOAD_RATIO
+
+
+def load_translation_cache(cursor, target_language, comments=None):
+    """Traducoes ja gravadas do idioma, como `{original: traduzido}`.
+
+    `comments` restringe a carga aos comentarios que a execucao vai de fato
+    consultar. Sem ele, carrega o idioma inteiro — 58 MB no banco real, contra
+    o que o worker precisa, que e so o conteudo dos arquivos escolhidos
+    (ROADMAP 2.9).
+
+    A restricao **nao muda o resultado das consultas do worker**: ele so pergunta
+    ao cache por comentarios que extraiu dos arquivos, e sao exatamente esses que
+    entram aqui. O que sai da memoria e o que ele nunca perguntaria.
+
+    O contrato e "contem os pedidos que existem", e nao "contem so os pedidos":
+    quando a fatia pedida e grande o bastante, a carga completa sai mais barata e
+    o resultado traz tudo. Quem precisar de uma contagem exata do que pediu deve
+    conta-la sobre a propria lista, e nao pelo tamanho do dicionario.
+
+    A consulta e feita em lotes por causa do limite de parametros do SQLite. O
+    `IN` e indexado: `UNIQUE(original_comment, target_language)` ja cria o indice
+    que ele usa.
+    """
+    if comments is None:
+        cursor.execute(
+            """
+            SELECT original_comment, translated_comment
+            FROM comments
+            WHERE target_language = ?
+              AND translated_comment IS NOT NULL
+              AND translated_comment <> ''
+            ORDER BY id
+            """,
+            (target_language,)
+        )
+        return {orig: trans for orig, trans in cursor.fetchall()}
+
+    # `dict.fromkeys` remove repetidos preservando a ordem — o mesmo comentario
+    # aparece em varios arquivos, e perguntar duas vezes por ele e desperdicio.
+    procurados = list(dict.fromkeys(comments))
+    if not procurados:
+        return {}
+    if _full_load_is_cheaper(cursor, target_language, len(procurados)):
+        return load_translation_cache(cursor, target_language)
+
+    cache = {}
+    for inicio in range(0, len(procurados), CACHE_LOOKUP_CHUNK):
+        lote = procurados[inicio:inicio + CACHE_LOOKUP_CHUNK]
+        marcadores = ",".join("?" * len(lote))
+        cursor.execute(
+            f"""
+            SELECT original_comment, translated_comment
+            FROM comments
+            WHERE target_language = ?
+              AND translated_comment IS NOT NULL
+              AND translated_comment <> ''
+              AND original_comment IN ({marcadores})
+            """,
+            [target_language] + lote,
+        )
+        cache.update(cursor.fetchall())
+    return cache
 
 
 def save_translation(cursor, original_comment, translated_comment, target_language):
@@ -128,12 +490,18 @@ def save_translation(cursor, original_comment, translated_comment, target_langua
                 original_comment,
                 translated_comment,
                 target_language,
+                quality_warning,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
-            (original_comment, translated_comment, target_language)
+            (
+                original_comment,
+                translated_comment,
+                target_language,
+                quality_warning_flag(original_comment, translated_comment),
+            )
         )
         return "inserted" if cursor.rowcount else "unchanged"
 
@@ -143,12 +511,17 @@ def save_translation(cursor, original_comment, translated_comment, target_langua
             """
             UPDATE comments
             SET translated_comment = ?,
+                quality_warning = ?,
                 verified = 0,
                 updated_at = CURRENT_TIMESTAMP,
                 verified_at = NULL
             WHERE id = ?
             """,
-            (translated_comment, row_id)
+            (
+                translated_comment,
+                quality_warning_flag(original_comment, translated_comment),
+                row_id,
+            )
         )
         if cursor.rowcount:
             record_comment_history(
@@ -193,6 +566,14 @@ def get_database_stats(cursor):
 
 
 def fetch_export_rows(cursor):
+    """Cursor das linhas do CSV — deliberadamente NAO materializado.
+
+    O `fetchall` que estava aqui construia uma lista com o banco inteiro antes
+    de a primeira linha ser escrita: 102 MB residentes em 195.607 linhas, so
+    para depois entregar tudo ao `csv.writerows`, que aceita qualquer iteravel.
+
+    Quem quiser a lista chama `list(...)`; o exportador nao quer.
+    """
     return cursor.execute("""
         SELECT
             original_comment,
@@ -204,10 +585,33 @@ def fetch_export_rows(cursor):
             verified_at
         FROM comments
         ORDER BY id
-    """).fetchall()
+    """)
 
 
-def _review_where(target_language, only_unverified=False, search_text="", status_filter=None):
+def _review_where(
+    target_language,
+    only_unverified=False,
+    search_text="",
+    status_filter=None,
+    search_mode=SEARCH_MODE_SUBSTRING,
+    cursor=None,
+):
+    """Monta o `WHERE` compartilhado por contagem, paginacao e offset.
+
+    `search_mode` decide COMO a busca filtra, e as duas formas existem por
+    motivos diferentes (garantia R8):
+
+    - `terms` usa o indice FTS5. Cada interacao passa a custar o tamanho da
+      pagina, e nao o da tabela. Em troca, casa palavras inteiras: `bisp` so
+      acha "bispo" com `bisp*`.
+    - `substring` mantem o `LIKE '%x%'`, que acha qualquer trecho — inclusive no
+      meio de uma palavra — ao preco de varrer a tabela. E o unico jeito de
+      procurar por um pedaco literal, entao continua disponivel.
+
+    Cai para `substring` sozinho quando o indice nao existe ou o SQLite nao tem
+    FTS5, e tambem quando a expressao nao sobra nenhum termo utilizavel. Um
+    resultado correto e lento e melhor que um erro.
+    """
     clauses = ["target_language = ?"]
     params = [target_language]
 
@@ -218,12 +622,26 @@ def _review_where(target_language, only_unverified=False, search_text="", status
         clauses.append("verified <> 1")
     elif status_filter == "verified":
         clauses.append("verified = 1")
+    elif status_filter == "warnings":
+        # Usa a coluna materializada: contar e paginar "com aviso" vira uma
+        # consulta indexada, em vez de ler a tabela inteira e avaliar em Python.
+        clauses.append("quality_warning = 1")
 
     search_text = (search_text or "").strip()
     if search_text:
-        clauses.append("(original_comment LIKE ? OR translated_comment LIKE ?)")
-        pattern = f"%{search_text}%"
-        params.extend([pattern, pattern])
+        expressao = None
+        if search_mode == SEARCH_MODE_TERMS and cursor is not None and fts_index_ready(cursor):
+            expressao = build_fts_match_query(search_text)
+
+        if expressao is not None:
+            clauses.append(
+                f"id IN (SELECT rowid FROM {FTS_TABLE} WHERE {FTS_TABLE} MATCH ?)"
+            )
+            params.append(expressao)
+        else:
+            clauses.append("(original_comment LIKE ? OR translated_comment LIKE ?)")
+            pattern = f"%{search_text}%"
+            params.extend([pattern, pattern])
 
     return " AND ".join(clauses), params
 
@@ -234,12 +652,15 @@ def fetch_review_rows(
     only_unverified=False,
     search_text="",
     status_filter=None,
+    search_mode=SEARCH_MODE_SUBSTRING,
 ):
     where_sql, params = _review_where(
         target_language,
         only_unverified,
         search_text,
         status_filter,
+        search_mode=search_mode,
+        cursor=cursor,
     )
     return cursor.execute(f"""
         SELECT
@@ -262,12 +683,15 @@ def count_review_rows(
     only_unverified=False,
     search_text="",
     status_filter=None,
+    search_mode=SEARCH_MODE_SUBSTRING,
 ):
     where_sql, params = _review_where(
         target_language,
         only_unverified,
         search_text,
         status_filter,
+        search_mode=search_mode,
+        cursor=cursor,
     )
     return cursor.execute(f"""
         SELECT COUNT(*)
@@ -276,17 +700,25 @@ def count_review_rows(
     """, params).fetchone()[0]
 
 
-def get_review_status_counts(cursor, target_language, search_text=""):
+def get_review_status_counts(
+    cursor,
+    target_language,
+    search_text="",
+    search_mode=SEARCH_MODE_SUBSTRING,
+):
     where_sql, params = _review_where(
         target_language,
         search_text=search_text,
         status_filter="all",
+        search_mode=search_mode,
+        cursor=cursor,
     )
-    total, pending, verified = cursor.execute(f"""
+    total, pending, verified, warnings = cursor.execute(f"""
         SELECT
             COUNT(*),
             COALESCE(SUM(CASE WHEN verified <> 1 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN quality_warning = 1 THEN 1 ELSE 0 END), 0)
         FROM comments
         WHERE {where_sql}
     """, params).fetchone()
@@ -294,7 +726,37 @@ def get_review_status_counts(cursor, target_language, search_text=""):
         "total": total,
         "pending": pending,
         "verified": verified,
+        "warnings": warnings,
     }
+
+
+# O total de cada filtro da lista ja esta dentro do resumo acima: as duas
+# consultas varrem a mesma tabela com o mesmo `WHERE`, e a agregada so separa por
+# status o que a outra conta inteiro. A correspondencia mora aqui, e nao
+# espalhada pelo editor, para que o teste que a protege tenha um lugar so a que
+# apontar — se os dois criterios divergirem, a lista pagina pelo numero errado
+# sem nada quebrar na tela.
+STATUS_COUNT_KEYS = {
+    "all": "total",
+    "pending": "pending",
+    "verified": "verified",
+    "warnings": "warnings",
+}
+
+
+def count_from_status_counts(status_counts, status_filter=None, only_unverified=False):
+    """O total do filtro, tirado do resumo ja calculado.
+
+    Devolve `None` quando o resumo nao cobre o filtro pedido, para o chamador
+    cair no `count_review_rows`. A ausencia e explicita de proposito: um zero
+    devolvido por engano esvaziaria a lista sem erro nenhum.
+    """
+    if status_filter is None:
+        status_filter = "pending" if only_unverified else "all"
+    key = STATUS_COUNT_KEYS.get(status_filter)
+    if key is None:
+        return None
+    return status_counts.get(key)
 
 
 def fetch_review_rows_page(
@@ -305,12 +767,15 @@ def fetch_review_rows_page(
     offset=0,
     search_text="",
     status_filter=None,
+    search_mode=SEARCH_MODE_SUBSTRING,
 ):
     where_sql, params = _review_where(
         target_language,
         only_unverified,
         search_text,
         status_filter,
+        search_mode=search_mode,
+        cursor=cursor,
     )
     return cursor.execute(f"""
         SELECT
@@ -335,12 +800,15 @@ def get_review_row_offset(
     only_unverified=False,
     search_text="",
     status_filter=None,
+    search_mode=SEARCH_MODE_SUBSTRING,
 ):
     where_sql, params = _review_where(
         target_language,
         only_unverified,
         search_text,
         status_filter,
+        search_mode=search_mode,
+        cursor=cursor,
     )
     row = cursor.execute(f"""
         SELECT id
@@ -429,7 +897,7 @@ def update_translation_by_id(
 ):
     existing = cursor.execute(
         """
-        SELECT translated_comment, verified
+        SELECT translated_comment, verified, original_comment
         FROM comments
         WHERE id = ?
         """,
@@ -438,7 +906,7 @@ def update_translation_by_id(
     if existing is None:
         return 0
 
-    previous_translation, previous_verified = existing
+    previous_translation, previous_verified, original_comment = existing
     previous_verified = 1 if previous_verified == 1 else 0
     new_verified = 1 if mark_verified else previous_verified
 
@@ -460,12 +928,14 @@ def update_translation_by_id(
     cursor.execute("""
         UPDATE comments
         SET translated_comment = ?,
+            quality_warning = ?,
             verified = CASE WHEN ? THEN 1 ELSE verified END,
             updated_at = CURRENT_TIMESTAMP,
             verified_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE verified_at END
         WHERE id = ?
     """, (
         translated_comment,
+        quality_warning_flag(original_comment, translated_comment),
         1 if mark_verified else 0,
         1 if mark_verified else 0,
         comment_id,
@@ -580,23 +1050,11 @@ def set_exact_translation_matches_verified(cursor, comment_id):
     return changed_rows
 
 
-def analyze_automatic_translation_updates(
-    cursor,
-    automatic_rules,
-    apply_substitutions,
-    target_language=None,
-    sample_limit=10,
-):
-    if not automatic_rules:
-        return {
-            "rules": 0,
-            "scanned": 0,
-            "changed": 0,
-            "unchanged": 0,
-            "target_language": target_language,
-            "examples": [],
-        }
+class AutomaticRulesCanceled(Exception):
+    """A varredura das regras automaticas foi interrompida pelo usuario."""
 
+
+def _automatic_rules_query(target_language):
     clauses = [
         "translated_comment IS NOT NULL",
         "translated_comment <> ''",
@@ -605,20 +1063,89 @@ def analyze_automatic_translation_updates(
     if target_language:
         clauses.append("target_language = ?")
         params.append(target_language)
+    return " AND ".join(clauses), params
 
-    rows = cursor.execute(
+
+def _iter_automatic_rule_rows(
+    cursor,
+    target_language,
+    progress_callback=None,
+    should_cancel=None,
+    progress_every=2000,
+):
+    """Itera as linhas candidatas SEM materializar a tabela.
+
+    O `fetchall` anterior trazia 195.603 linhas de texto de uma vez — 80 MB de
+    pico so nessa lista, e a lista era construida antes de a primeira linha ser
+    examinada. Iterando o cursor, a memoria e constante e o progresso comeca a
+    andar na hora.
+
+    `progress_every` existe para nao pagar uma chamada de callback por linha: a
+    interface nao precisa de 195 mil atualizacoes, e cada uma custa um
+    `root.after`.
+    """
+    where_sql, params = _automatic_rules_query(target_language)
+    total = cursor.execute(
+        f"SELECT COUNT(*) FROM comments WHERE {where_sql}", params
+    ).fetchone()[0]
+
+    if progress_callback:
+        progress_callback(0, total)
+
+    lidas = 0
+    for row in cursor.execute(
         f"""
-        SELECT id, original_comment, translated_comment, target_language
+        SELECT id, original_comment, translated_comment, target_language, verified
         FROM comments
-        WHERE {" AND ".join(clauses)}
+        WHERE {where_sql}
         ORDER BY id
         """,
         params,
-    ).fetchall()
+    ):
+        lidas += 1
+        if should_cancel is not None and lidas % 200 == 0 and should_cancel():
+            raise AutomaticRulesCanceled()
+        if progress_callback and (lidas % progress_every == 0 or lidas == total):
+            progress_callback(lidas, total)
+        yield row
 
+    if progress_callback:
+        progress_callback(total, total)
+
+
+def _empty_automatic_stats(target_language, rules=0):
+    return {
+        "rules": rules,
+        "scanned": 0,
+        "changed": 0,
+        "unchanged": 0,
+        "target_language": target_language,
+        "examples": [],
+    }
+
+
+def analyze_automatic_translation_updates(
+    cursor,
+    automatic_rules,
+    apply_substitutions,
+    target_language=None,
+    sample_limit=10,
+    progress_callback=None,
+    should_cancel=None,
+):
+    if not automatic_rules:
+        return _empty_automatic_stats(target_language)
+
+    scanned = 0
     changed = 0
     examples = []
-    for comment_id, original, translation, row_language in rows:
+    for comment_id, original, translation, row_language, _verified in _iter_automatic_rule_rows(
+        cursor,
+        target_language,
+        progress_callback=progress_callback,
+        should_cancel=should_cancel,
+    ):
+        scanned += 1
         updated_translation = apply_substitutions(translation, automatic_rules)
         if updated_translation != translation:
             changed += 1
@@ -635,9 +1162,9 @@ def analyze_automatic_translation_updates(
 
     return {
         "rules": len(automatic_rules),
-        "scanned": len(rows),
+        "scanned": scanned,
         "changed": changed,
-        "unchanged": len(rows) - changed,
+        "unchanged": scanned - changed,
         "target_language": target_language,
         "examples": examples,
     }
@@ -648,55 +1175,76 @@ def apply_automatic_translation_updates(
     automatic_rules,
     apply_substitutions,
     target_language=None,
+    sample_limit=10,
+    progress_callback=None,
+    should_cancel=None,
 ):
-    stats = analyze_automatic_translation_updates(
-        cursor,
-        automatic_rules,
-        apply_substitutions,
-        target_language=target_language,
-    )
-    if stats["changed"] == 0:
-        return stats
+    """Aplica as regras automaticas numa unica passagem.
 
-    clauses = [
-        "translated_comment IS NOT NULL",
-        "translated_comment <> ''",
-    ]
-    params = []
-    if target_language:
-        clauses.append("target_language = ?")
-        params.append(target_language)
+    Antes, a primeira linha desta funcao era uma chamada a
+    `analyze_automatic_translation_updates` — que percorre a tabela inteira
+    aplicando as regras — e so depois vinha a passagem de escrita, que percorria
+    tudo e aplicava as regras DE NOVO. Somada a previa que a interface ja tinha
+    calculado para montar o dialogo de confirmacao, um clique no botao custava
+    tres passagens completas: 38,1 s no banco real, com a janela travada.
 
-    rows = cursor.execute(
-        f"""
-        SELECT id, translated_comment, verified
-        FROM comments
-        WHERE {" AND ".join(clauses)}
-        ORDER BY id
-        """,
-        params,
-    ).fetchall()
+    A previa continua existindo (o usuario precisa confirmar sabendo quantas
+    linhas mudam), mas esta funcao nao a repete: ela calcula e grava no mesmo
+    laco. Sao duas passagens em vez de tres.
 
+    A escrita usa um cursor proprio: `UPDATE` no mesmo cursor que esta iterando
+    o `SELECT` invalidaria a iteracao.
+    """
+    if not automatic_rules:
+        return _empty_automatic_stats(target_language)
+
+    write_cursor = cursor.connection.cursor()
+    scanned = 0
     changed = 0
-    for comment_id, previous_translation, previous_verified in rows:
+    examples = []
+
+    for comment_id, original_comment, previous_translation, row_language, previous_verified in (
+        _iter_automatic_rule_rows(
+            cursor,
+            target_language,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
+        )
+    ):
+        scanned += 1
         previous_verified = 1 if previous_verified == 1 else 0
         updated_translation = apply_substitutions(previous_translation, automatic_rules)
         if updated_translation == previous_translation:
             continue
 
-        cursor.execute(
+        write_cursor.execute(
             """
             UPDATE comments
             SET translated_comment = ?,
+                quality_warning = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (updated_translation, comment_id),
+            (
+                updated_translation,
+                quality_warning_flag(original_comment, updated_translation),
+                comment_id,
+            ),
         )
-        if cursor.rowcount:
+        if write_cursor.rowcount:
             changed += 1
+            if len(examples) < sample_limit:
+                examples.append(
+                    {
+                        "id": comment_id,
+                        "original_comment": original_comment,
+                        "target_language": row_language,
+                        "previous_translation": previous_translation,
+                        "new_translation": updated_translation,
+                    }
+                )
             record_comment_history(
-                cursor,
+                write_cursor,
                 comment_id,
                 "automatic_rules",
                 previous_translation,
@@ -705,6 +1253,11 @@ def apply_automatic_translation_updates(
                 previous_verified,
             )
 
-    stats["changed"] = changed
-    stats["unchanged"] = stats["scanned"] - changed
-    return stats
+    return {
+        "rules": len(automatic_rules),
+        "scanned": scanned,
+        "changed": changed,
+        "unchanged": scanned - changed,
+        "target_language": target_language,
+        "examples": examples,
+    }

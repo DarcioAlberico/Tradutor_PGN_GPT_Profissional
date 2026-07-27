@@ -14,6 +14,8 @@ from .database import (
     save_translation,
     set_translation_verified_by_id,
 )
+from .backup_retention import prune_database_backups
+from .background_task import run_with_progress
 from .glossario import apply_automatic_substitutions, load_automatic_substitutions
 from .review_quality import summarize_quality_warnings
 
@@ -28,7 +30,7 @@ def _unique_backup_path(backup_dir, stem, timestamp):
     return backup_path
 
 
-def create_database_backup(db_path, backup_dir=None, timestamp=None):
+def create_database_backup(db_path, backup_dir=None, timestamp=None, prune=True, protect=()):
     source_path = Path(db_path)
     if backup_dir is None:
         backup_dir = source_path.parent / "backups"
@@ -47,6 +49,15 @@ def create_database_backup(db_path, backup_dir=None, timestamp=None):
     finally:
         target_conn.close()
         source_conn.close()
+
+    if prune:
+        # A copia recem criada e o arquivo que o chamador ainda vai ler (numa
+        # restauracao, o backup escolhido) ficam fora do alcance da limpeza.
+        prune_database_backups(
+            str(backup_dir),
+            source_path.stem,
+            protected=(str(backup_path),) + tuple(str(item) for item in protect),
+        )
 
     return str(backup_path)
 
@@ -85,6 +96,7 @@ def restore_database_from_backup(db_path, backup_path, safety_backup_dir=None):
     safety_backup_path = create_database_backup(
         target_path,
         backup_dir=safety_backup_dir,
+        protect=(backup_path,),
     )
 
     source_conn = sqlite3.connect(str(backup_path))
@@ -186,8 +198,10 @@ def _existing_translation(cursor, original_comment, target_language):
     ).fetchone()
 
 
-def analyze_translations_csv_import(db_path, csv_path):
-    csv_rows = _read_translation_csv_rows(csv_path)
+def analyze_translations_csv_import(db_path, csv_path, csv_rows=None):
+    """Previa da importacao. `csv_rows` evita reler o arquivo (ROADMAP 2.10)."""
+    if csv_rows is None:
+        csv_rows = _read_translation_csv_rows(csv_path)
     stats = _empty_import_stats()
 
     conn = initialize_database(db_path)
@@ -229,8 +243,16 @@ def import_translations_from_csv(
     csv_path,
     create_backup=True,
     backup_dir=None,
+    csv_rows=None,
 ):
-    csv_rows = _read_translation_csv_rows(csv_path)
+    """Aplica a importacao. `csv_rows` evita reler o arquivo (ROADMAP 2.10).
+
+    Reaproveitar as linhas da previa nao e so economia: e o que garante que o
+    usuario confirmou exatamente o que sera gravado. Lendo duas vezes, um arquivo
+    alterado entre a previa e o "Sim" aplicaria numeros diferentes dos exibidos.
+    """
+    if csv_rows is None:
+        csv_rows = _read_translation_csv_rows(csv_path)
 
     backup_path = None
     if create_backup:
@@ -284,7 +306,13 @@ def import_translations_from_csv(
     return stats
 
 
-def analyze_database_automatic_rules(db_path, target_language=None, automatic_rules=None):
+def analyze_database_automatic_rules(
+    db_path,
+    target_language=None,
+    automatic_rules=None,
+    progress_callback=None,
+    should_cancel=None,
+):
     if automatic_rules is None:
         automatic_rules = load_automatic_substitutions()
 
@@ -295,6 +323,8 @@ def analyze_database_automatic_rules(db_path, target_language=None, automatic_ru
             automatic_rules,
             apply_automatic_substitutions,
             target_language=target_language,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
         )
     finally:
         conn.close()
@@ -306,6 +336,8 @@ def apply_database_automatic_rules(
     automatic_rules=None,
     create_backup=True,
     backup_dir=None,
+    progress_callback=None,
+    should_cancel=None,
 ):
     if automatic_rules is None:
         automatic_rules = load_automatic_substitutions()
@@ -321,9 +353,14 @@ def apply_database_automatic_rules(
             automatic_rules,
             apply_automatic_substitutions,
             target_language=target_language,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
         )
         conn.commit()
     except Exception:
+        # Vale tambem para o cancelamento: `AutomaticRulesCanceled` sobe por aqui
+        # e o rollback desfaz o que ja tinha sido alterado. Cancelar deixa o
+        # banco como estava, nao pela metade.
         conn.rollback()
         raise
     finally:
@@ -364,22 +401,118 @@ def format_automatic_rule_examples(examples, max_items=5):
     return "\n".join(lines)
 
 
-def apply_automatic_rules_to_database(app, target_language=None, parent=None):
+def _format_automatic_preview(target_language, preview):
+    return (
+        "Aplicar regras automaticas nas traducoes existentes?\n\n"
+        f"Escopo: {format_automatic_rules_scope(target_language)}\n"
+        f"Regras automaticas: {preview['rules']}\n"
+        f"Traducoes analisadas: {preview['scanned']}\n"
+        f"Traducoes que serao alteradas: {preview['changed']}\n\n"
+        f"{format_automatic_rule_examples(preview.get('examples', []))}\n\n"
+        "Um backup do banco sera criado antes de alterar os dados."
+    )
+
+
+def _format_automatic_result(target_language, stats):
+    return (
+        "Regras automaticas aplicadas com sucesso.\n\n"
+        f"Escopo: {format_automatic_rules_scope(target_language)}\n"
+        f"Regras automaticas: {stats['rules']}\n"
+        f"Traducoes analisadas: {stats['scanned']}\n"
+        f"Traducoes alteradas: {stats['changed']}\n"
+        f"Sem alteracao: {stats['unchanged']}\n\n"
+        f"Backup criado em:\n{stats['backup_path']}"
+    )
+
+
+def apply_automatic_rules_to_database(
+    app,
+    target_language=None,
+    parent=None,
+    on_finish=None,
+):
+    """Aplica as regras automaticas, com previa, backup e confirmacao.
+
+    As duas varreduras (previa e escrita) rodam FORA da thread do Tk, cada uma
+    com barra de progresso e cancelamento: sao 38 s de janela travada no banco
+    real, sem nenhum sinal de vida, se rodarem no proprio callback do botao.
+
+    Isso obriga o resultado a chegar por callback. `on_finish(stats)` e chamado
+    na thread principal quando tudo termina — com `None` se o usuario cancelou,
+    se nao havia regras ou se nada mudou. Quem chama sem `on_finish` (a janela
+    principal) so quer disparar a operacao e nao precisa do resultado.
+    """
+    janela = parent if parent is not None else app.root
+
+    def falhou(erro):
+        messagebox.showerror(
+            "Erro",
+            f"Erro ao aplicar substituicoes automaticas:\n{erro}",
+            parent=parent,
+        )
+        if on_finish is not None:
+            on_finish(None)
+
+    def cancelado(_valor=None):
+        messagebox.showinfo(
+            "Substituicoes automaticas",
+            "Operacao cancelada. Nenhuma traducao foi alterada.",
+            parent=parent,
+        )
+        if on_finish is not None:
+            on_finish(None)
+
     try:
         automatic_rules = load_automatic_substitutions()
-        if not automatic_rules:
+    except Exception as exc:
+        falhou(exc)
+        return None
+
+    if not automatic_rules:
+        messagebox.showinfo(
+            "Substituicoes automaticas",
+            "Nenhuma regra automatica cadastrada no glossario.",
+            parent=parent,
+        )
+        if on_finish is not None:
+            on_finish(None)
+        return None
+
+    def aplicar(preview):
+        def trabalho(task):
+            return apply_database_automatic_rules(
+                app.output_db,
+                target_language=target_language,
+                automatic_rules=automatic_rules,
+                progress_callback=task.report,
+                should_cancel=task.cancelado,
+            )
+
+        def aplicado(stats):
+            if hasattr(app, "translation_cache"):
+                app.translation_cache.clear()
             messagebox.showinfo(
                 "Substituicoes automaticas",
-                "Nenhuma regra automatica cadastrada no glossario.",
+                _format_automatic_result(target_language, stats),
                 parent=parent,
             )
-            return None
+            if on_finish is not None:
+                on_finish(stats)
 
-        preview = analyze_database_automatic_rules(
-            app.output_db,
-            target_language=target_language,
-            automatic_rules=automatic_rules,
+        run_with_progress(
+            janela,
+            "Aplicando regras automaticas",
+            trabalho,
+            on_success=aplicado,
+            on_error=falhou,
+            on_cancel=cancelado,
+            message=(
+                f"Aplicando {preview['rules']} regra(s) em "
+                f"{preview['changed']} traducao(oes)..."
+            ),
         )
+
+    def analisado(preview):
         if preview["changed"] == 0:
             messagebox.showinfo(
                 "Substituicoes automaticas",
@@ -391,53 +524,40 @@ def apply_automatic_rules_to_database(app, target_language=None, parent=None):
                 ),
                 parent=parent,
             )
-            return preview
+            if on_finish is not None:
+                on_finish(preview)
+            return
 
-        confirmed = messagebox.askyesno(
+        if not messagebox.askyesno(
             "Substituicoes automaticas",
-            (
-                "Aplicar regras automaticas nas traducoes existentes?\n\n"
-                f"Escopo: {format_automatic_rules_scope(target_language)}\n"
-                f"Regras automaticas: {preview['rules']}\n"
-                f"Traducoes analisadas: {preview['scanned']}\n"
-                f"Traducoes que serao alteradas: {preview['changed']}\n\n"
-                f"{format_automatic_rule_examples(preview.get('examples', []))}\n\n"
-                "Um backup do banco sera criado antes de alterar os dados."
-            ),
+            _format_automatic_preview(target_language, preview),
             parent=parent,
-        )
-        if not confirmed:
-            return None
+        ):
+            if on_finish is not None:
+                on_finish(None)
+            return
 
-        stats = apply_database_automatic_rules(
+        aplicar(preview)
+
+    def analisar(task):
+        return analyze_database_automatic_rules(
             app.output_db,
             target_language=target_language,
             automatic_rules=automatic_rules,
+            progress_callback=task.report,
+            should_cancel=task.cancelado,
         )
-        if hasattr(app, "translation_cache"):
-            app.translation_cache.clear()
 
-        messagebox.showinfo(
-            "Substituicoes automaticas",
-            (
-                "Regras automaticas aplicadas com sucesso.\n\n"
-                f"Escopo: {format_automatic_rules_scope(target_language)}\n"
-                f"Regras automaticas: {stats['rules']}\n"
-                f"Traducoes analisadas: {stats['scanned']}\n"
-                f"Traducoes alteradas: {stats['changed']}\n"
-                f"Sem alteracao: {stats['unchanged']}\n\n"
-                f"Backup criado em:\n{stats['backup_path']}"
-            ),
-            parent=parent,
-        )
-        return stats
-    except Exception as e:
-        messagebox.showerror(
-            "Erro",
-            f"Erro ao aplicar substituicoes automaticas:\n{e}",
-            parent=parent,
-        )
-        return None
+    run_with_progress(
+        janela,
+        "Substituicoes automaticas",
+        analisar,
+        on_success=analisado,
+        on_error=falhou,
+        on_cancel=cancelado,
+        message="Analisando as traducoes existentes...",
+    )
+    return None
 
 
 def format_quality_stats(summary, indent=""):
@@ -463,7 +583,10 @@ def show_db_stats(app):
         quality_rows_by_language = {}
         all_quality_rows = []
         for lang, _count, _verified, _pending in stats["per_language"]:
-            lang_rows = fetch_review_rows(cursor, lang)
+            # Só as linhas marcadas com aviso: o resumo exibido conta apenas
+            # essas, entao carregar a tabela inteira era desperdicio puro
+            # (~2 s de interface congelada e ~100 MB em 195 mil linhas).
+            lang_rows = fetch_review_rows(cursor, lang, status_filter="warnings")
             quality_rows_by_language[lang] = lang_rows
             all_quality_rows.extend(lang_rows)
 
@@ -539,7 +662,12 @@ def import_csv(app):
         return
 
     try:
-        preview = analyze_translations_csv_import(app.output_db, csv_path)
+        # Lido uma vez so: a previa e a aplicacao trabalham sobre as MESMAS
+        # linhas, entao o que o usuario confirma e o que e gravado (ROADMAP 2.10).
+        csv_rows = _read_translation_csv_rows(csv_path)
+        preview = analyze_translations_csv_import(
+            app.output_db, csv_path, csv_rows=csv_rows
+        )
         confirmed = messagebox.askyesno(
             "Importar CSV",
             (
@@ -558,7 +686,9 @@ def import_csv(app):
         if not confirmed:
             return
 
-        stats = import_translations_from_csv(app.output_db, csv_path)
+        stats = import_translations_from_csv(
+            app.output_db, csv_path, csv_rows=csv_rows
+        )
         if hasattr(app, "translation_cache"):
             app.translation_cache.clear()
         messagebox.showinfo(

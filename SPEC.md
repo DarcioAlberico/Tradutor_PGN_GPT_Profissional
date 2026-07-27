@@ -1,0 +1,592 @@
+# Especificacao — PGN Tradutor Pro
+
+Documento de referencia do comportamento do sistema. Descreve **o que** o programa
+faz e sob quais garantias, nao **como** cada funcao esta escrita.
+
+Versao do documento: 2026-07-27.
+
+---
+
+## 1. Objetivo
+
+Traduzir os comentarios (`{...}`) de arquivos PGN de xadrez, preservando
+integralmente lances, variantes e metadados, com:
+
+- cache persistente de traducoes (SQLite), para nunca pagar duas vezes pela
+  mesma frase;
+- um glossario de substituicoes controlado pelo usuario, para corrigir a
+  terminologia enxadristica que o tradutor automatico erra;
+- uma etapa de revisao humana assistida.
+
+Nao-objetivos: jogar xadrez, validar legalidade de lances, editar a arvore de
+variantes.
+
+---
+
+## 2. Componentes e artefatos em disco
+
+Todos os caminhos sao resolvidos a partir do diretorio de `sys.argv[0]`
+(o diretorio do `PGN_Tradutor_Pro.py`).
+
+| Artefato | Papel | Versionado |
+|---|---|---|
+| `traducoes.db` | Cache de traducoes + historico de edicoes | Nao |
+| `traducoes.db` (`PRAGMA user_version`) | Versao do schema; migracao so roda quando desatualizada | — |
+| `comments_fts` (dentro do `traducoes.db`) | Indice de busca FTS5, mantido por gatilhos (R8) | Nao |
+| `Substituicoes.txt` | Fonte de verdade do glossario | Sim |
+| `glossario.db` | Indice SQLite derivado do `Substituicoes.txt` | Nao |
+| `pgn_tradutor_pro_settings.json` | Estado da UI e rascunhos de edicao | Nao |
+| `backups/` | Copias automaticas do glossario e do banco, com retencao (S8) | Nao |
+| `logs/` | Log por execucao de traducao (`traducao-<carimbo>.log`), com retencao | Nao |
+| `spelling_ssp/spelling.ssp` | Dicionario externo de nomes proprios (opcional) | Nao |
+
+O `pgn_tradutor_pro_settings.json` guarda tambem a lista de arquivos que ficaram
+com comentarios sem traduzir na ultima execucao, usada pelo "Reprocessar Falhas"
+(garantia T4).
+
+---
+
+## 3. Pipeline de traducao
+
+### 3.1 Extracao
+
+1. Coleta os `.pgn` do caminho escolhido (arquivo ou pasta, com ou sem
+   subdiretorios). Arquivos ja gerados pelo programa (sufixo de idioma) sao
+   ignorados quando a origem e uma pasta.
+2. Para cada arquivo, detecta a codificacao e le o conteudo.
+3. Extrai cada comentario `{...}` e o **achata**: colapsa espacos em branco e
+   normaliza o espaco depois de `.`, `!` e `?`. O texto achatado e a chave de
+   cache; a posicao (inicio, fim) no arquivo original e guardada.
+
+**Garantia E1 — deteccao de codificacao.** A codificacao e decidida analisando
+o arquivo **inteiro**, nunca uma amostra. Um arquivo cujos acentos aparecem so
+depois dos primeiros 64 KB deve ser lido corretamente.
+
+**Garantia E2 — `ascii` nunca e um veredito final.** Um arquivo cujo prefixo e
+ASCII puro nao pode ser lido como ASCII, porque bytes altos podem aparecer
+adiante. Quando o conteudo e integralmente ASCII, adota-se UTF-8 (superset
+seguro).
+
+**Garantia E3 — ordem de preferencia.** BOM UTF-8 vence; depois UTF-8 valido;
+depois o palpite do `chardet` (confianca >= 0.60), com `windows-1252` mapeado
+para `cp1252`; por fim `cp1252` e `latin-1` por tentativa de decodificacao.
+
+**Garantia E4 — a codificacao escolhida decodifica o arquivo inteiro.** Nenhum
+ramo da deteccao devolve uma codificacao sem confirmar que ela da conta de todos
+os bytes, nem mesmo quando ha BOM ou quando o `chardet` responde com confianca
+alta. Sem isso, `errors='replace'` na leitura injeta `U+FFFD` em silencio — e
+esse texto e o que vira chave de cache e o que e gravado de volta no PGN.
+
+E4 tambem cobre o que E1/E2/E3 nao alcancavam, que era conteudo multibyte:
+
+- As BOMs de UTF-16 e UTF-32 sao reconhecidas junto com a de UTF-8. A BOM longa
+  e testada antes da curta, porque `FF FE` (UTF-16-LE) e prefixo de
+  `FF FE 00 00` (UTF-32-LE).
+- UTF-16 **sem** BOM e reconhecido pelos NUL intercalados, antes do teste de
+  ASCII puro — que ele passaria, ja que `\x00` e ASCII valido. O lado em que os
+  NUL caem decide entre little e big-endian.
+
+A leitura de um mesmo PGN gravado em UTF-8, UTF-8 com BOM, cp1252, UTF-16 LE/BE
+sem BOM, UTF-16 com BOM e UTF-32 produz os mesmos comentarios, com ou sem o
+`chardet` instalado — que e um import opcional.
+
+### 3.2 Lotes
+
+Comentarios sao agrupados em lotes e enviados **numa unica requisicao**,
+unidos pelo separador `" ||| "`.
+
+- O tamanho do lote respeita `BATCH_MAX_CHARS`, ja contando os separadores.
+- Um comentario maior que o limite forma um lote sozinho.
+
+**Garantia B1 — o lote nunca e fatiado.** `BATCH_MAX_CHARS` e estritamente
+menor que `MAX_TRANSLATE_CHARS` (o limite de divisao por sentenca da camada de
+API). Se nao fosse, um lote poderia ser cortado no meio de um separador e o
+realinhamento seria impossivel. Essa relacao e verificada em teste.
+
+**Garantia B2 — realinhamento ou nada.** Se a resposta traduzida nao devolver
+exatamente o numero esperado de partes, o lote e descartado e os comentarios
+sao traduzidos individualmente. Nunca se atribui uma traducao a um comentario
+sem certeza de alinhamento.
+
+**Garantia B3 — falha de API nao e desalinhamento.** O caminho individual so e
+acionado quando a resposta **veio** e nao pode ser realinhada. Se a chamada em si
+falhou, os comentarios do lote sao contados como falha de uma vez: repeti-los um
+a um so gastaria outras 3 tentativas por comentario contra um endpoint que ja
+nao respondeu.
+
+`MAX_CONSECUTIVE_FAILED_BATCHES` lotes seguidos sem nenhuma resposta interrompem
+a execucao, com o motivo no log e no dialogo final. O contador zera assim que a
+API responde qualquer coisa, inclusive uma resposta desalinhada — que e problema
+do conteudo e nao da conexao.
+
+Quando a execucao e interrompida assim, o PGN de saida do arquivo em andamento
+**nao** e gerado: ele sairia quase todo no idioma original e pareceria pronto. O
+que ja foi traduzido esta no banco, entao reexecutar paga so o que falta.
+
+### 3.3 Traducao e cache
+
+Para cada comentario:
+
+1. Se ja esta no cache em memoria, reusa.
+2. Senao, aplica as regras de **limpeza** (`cleanup`). Se o resultado ficar
+   vazio, o comentario e considerado descartavel e vira string vazia.
+3. Senao, vai para a API. A resposta recebe as regras **automaticas**
+   (`automatic`) e e gravada no cache.
+
+O cache em memoria traz **apenas os comentarios dos arquivos desta execucao**, e
+nao o idioma inteiro: sao os unicos pelos quais o worker pergunta. Acima de
+metade da tabela a carga completa sai mais barata e e usada — o dicionario passa
+a conter mais do que foi pedido, o que e indiferente para a consulta mas torna
+`len(cache)` inutil como contagem do que veio destes arquivos.
+
+**Garantia T1 — nunca sobrescrever traducao existente.** A gravacao no cache
+so insere linhas novas ou preenche traducoes vazias. Uma traducao ja
+preenchida (possivelmente revisada por humano) jamais e substituida pelo
+processo automatico.
+
+**Garantia T2 — falha e sempre reportada.** Um comentario que nao pode ser
+traduzido e contabilizado como falha, registrado no log e exibido no resumo
+final. O programa nunca apresenta uma execucao com falhas como sucesso limpo.
+
+**Garantia T4 — a falha fica anotada.** Terminada uma execucao com falhas, os
+arquivos que ficaram devendo sao registrados junto com o idioma, e
+"Reprocessar Falhas" reexecuta **so eles**. Reprocessar tudo tambem funciona (o
+cache torna barato o que ja deu certo), mas cobra uma varredura da pasta inteira
+por causa de dois arquivos.
+
+O idioma vem do registro, e nao do seletor: a lista foi montada traduzindo para
+aquele idioma, e reaproveita-la com outro produziria um arquivo misturado sem que
+ninguem tivesse pedido. A lista explicita nao passa pelo filtro de arquivos ja
+gerados — senao um PGN de origem chamado `estudo-BR.pgn` sairia dela justamente
+por ter falhado antes.
+
+Uma execucao sem falhas apaga o registro; uma execucao cancelada nao o toca,
+porque os arquivos ainda nao visitados nao foram avaliados e a lista parcial
+perderia o que a anterior ja sabia. Arquivos que sumiram do disco no intervalo
+sao ignorados e informados.
+
+**Garantia T3 — falha nao inventa texto.** Um comentario que falhou permanece
+no idioma original no arquivo de saida. E um resultado aceitavel, desde que
+declarado (ver T2).
+
+### 3.4 Geracao do PGN traduzido
+
+O arquivo de origem e relido e cada comentario e substituido pela traducao, de
+tras para frente (para nao invalidar as posicoes). Chaves `{` e `}` dentro de
+uma traducao viram parenteses, para nao quebrar a estrutura do PGN.
+
+Saida: `<nome>-<SUFIXO>.pgn` ao lado do original (`BR`, `EN`, `ES`, `FR`,
+`DE`, `IT`, `RU`). Se o nome ja existir, sufixa `-2`, `-3`, ...
+
+**Garantia G1 — o original nunca e modificado.**
+
+**Garantia G2 — a saida preserva os acentos.** A gravacao usa a codificacao
+detectada na origem; se algum caractere nao couber nela, cai para UTF-8 e
+registra isso no log. Em nenhuma hipotese um caractere e substituido por
+`U+FFFD` no arquivo gerado.
+
+### 3.5 Controle de execucao
+
+Roda em thread separada, com pausa e cancelamento cooperativos. Toda
+atualizacao de interface e agendada na thread principal do Tk.
+
+**Garantia C1 — Tk so na main thread.** Nenhum widget e tocado fora da thread
+principal; o log usa fila + polling.
+
+**Garantia C2 — cancelamento preserva o trabalho feito.** Ao cancelar, o que
+ja foi traduzido esta gravado no banco.
+
+**Garantia C3 — o worker nao segura o banco.** O worker e o editor de traducoes
+usam o **mesmo** `traducoes.db`, cada um com sua conexao. Duas conexoes nunca
+escrevem ao mesmo tempo — nem em WAL —, entao uma transacao de escrita aberta no
+worker bloqueia o "Salvar" do editor ate o `busy_timeout` (30 s) e depois falha.
+
+Por isso **nenhuma transacao de escrita permanece aberta atravessando uma chamada
+de rede**. No caminho individual (o do fallback), cada traducao e comitada antes
+da requisicao seguinte; antes disso a transacao atravessava o lote inteiro, o que
+com 40 comentarios passava dos 30 s do editor. Gravar no editor durante uma
+traducao espera, no maximo, o tempo de uma gravacao.
+
+O banco fica em `journal_mode=WAL` com `synchronous=NORMAL`. Isso nao e o que
+resolve o bloqueio acima — e o que torna o commit por traducao barato (0,14 ms
+contra 3,45 ms em `delete`+`FULL`) e o que garante que a leitura do editor nunca
+espere, nem durante um commit. `synchronous=NORMAL` significa que uma queda do
+sistema operacional pode custar as ultimas transacoes; uma queda do programa,
+nao. Para um cache que se reconstroi reexecutando, e a troca aceita.
+
+A outra metade de C3 e que **uma colisao nunca aparece como traceback**. Hoje
+improvavel, mas nao impossivel — e sob `pythonw` nao ha console, entao ela
+simplesmente desapareceria e a gravacao apenas nao aconteceria.
+
+O tratamento e o gancho do proprio Tk (`report_callback_exception`, instalado na
+raiz na abertura do programa), e nao um `try` em cada acesso ao banco. Duas
+razoes: o buraco nunca foi so do lock — era de **todo** callback do programa —, e
+capturar dentro de `save_changes` e seguir adiante seria pior do que o
+comportamento atual, porque a navegacao continuaria e a edicao do usuario seria
+descartada em silencio. Deixando a excecao subir, o fluxo aborta como ja abortava
+e o usuario passa a ser avisado.
+
+O lock tem mensagem propria — diz que ha uma traducao em andamento, que nada foi
+gravado e que basta tentar de novo — porque e o unico caso previsto e com causa
+conhecida. A mesma mensagem nao reabre o dialogo por alguns segundos, para que um
+callback periodico que falhe sempre nao encha a tela; passada essa janela, quem
+tentar de novo e avisado de novo.
+
+Rodam fora da thread da interface, com progresso e cancelamento: a traducao (que
+tem tambem pausa), a normalizacao de metadados e a aplicacao das regras
+automaticas. Cancelar a aplicacao das regras faz `rollback` — o banco fica como
+estava, nunca com parte das traducoes alteradas.
+
+Ainda rodam no proprio callback do Tk: backup, restauracao e importacao de CSV
+(ROADMAP 2.7).
+
+---
+
+## 4. Glossario
+
+### 4.1 Formato
+
+`Substituicoes.txt` contem uma atribuicao Python com uma lista de pares,
+lida com `ast.literal_eval` (nunca `exec`):
+
+```python
+substituicoes = [
+    ('rook', 'torre'),
+    ('Queen', 'Dama'),
+]
+```
+
+Comentarios de linha marcam o tipo da regra. Tipos:
+
+| Tipo | Quando e aplicado | Revisao humana |
+|---|---|---|
+| `cleanup` | Antes de enviar para a API | Nao |
+| `automatic` | Na resposta da API e em massa no banco | Nao |
+| `suggestion` | Oferecido no editor, aplicado a pedido | Sim |
+
+### 4.2 Semantica de casamento
+
+- O padrao da regra e sempre tratado como texto literal (escapado), nunca
+  interpretado como expressao regular.
+- Uma regra escrita **inteiramente em minusculas** casa sem diferenciar
+  maiusculas; qualquer maiuscula na regra a torna sensivel a caixa.
+- Quando o primeiro (ou ultimo) caractere do padrao e caractere de palavra,
+  exige-se fronteira de palavra desse lado. `rook` nao casa dentro de `rooks`;
+  `-fileira` casa depois de qualquer coisa.
+- A capitalizacao do texto encontrado e propagada para a substituicao.
+
+**Garantia S1 — matches nunca se sobrepoem.** Numa mesma regra, as ocorrencias
+substituidas sao disjuntas. Aplicar `('de de' -> 'de')` a `"de de de"` produz
+`"de de"`, nunca `"dede"`. Nenhum caractere fora de um match e removido.
+
+**Garantia S2 — indices sao do texto original.** A busca sem diferenciar
+maiusculas nao pode deslocar posicoes. Caracteres cujo `lower()` muda de
+comprimento (`İ`, `ẞ`) nao podem corromper o texto nem impedir o casamento.
+
+**Garantia S3 — a regra mais especifica vence.** As regras sao aplicadas em
+ordem decrescente de comprimento do padrao, para que uma regra curta nao consuma
+o texto que uma regra longa pretendia casar. Com `('verificacao' -> 'xeque')` e
+`('da verificacao intermediaria' -> 'do xeque intermediario')`, vence a segunda.
+Empates preservam a ordem do arquivo.
+
+**Garantia S4 — o texto substituido e final.** Um trecho ja produzido por uma
+regra nao e reexaminado pelas regras seguintes. Sem isso, duas regras
+contraditorias se desfazem uma a outra e o resultado passa a depender da ordem
+em que foram digitadas. Exemplo real do glossario:
+
+```
+('Rei das brancas estao', 'Rei das brancas esta')
+('brancas esta',          'brancas estao')
+```
+
+A segunda nao pode reverter a primeira. Cada regra entrega exatamente o que
+declarou, e a regra genérica continua valendo onde a especifica nao alcanca.
+
+**Garantia S9 — a interface diz qual regra do conflito esta valendo.** Duas
+regras com o mesmo padrao e substituicoes diferentes nao empatam. S3 ordena por
+comprimento do padrao; padroes identicos empatam sempre, e o desempate mantem a
+ordem do arquivo — vence quem foi digitado primeiro, e o congelamento de S4
+impede a outra de rever o trecho. O editor mostra, na regra selecionada, qual
+delas o programa aplica, e oferece "Manter esta", que remove as concorrentes.
+
+O vencedor e **por contexto**. `Substituicoes.txt` e uma lista so, mas o programa
+carrega tres recortes dela: limpeza, automaticas, e sugestoes do editor (que
+carrega sugestoes **e** automaticas). Duas regras so disputam dentro de um
+recorte: uma de limpeza e uma de sugestao nunca sao aplicadas ao mesmo texto e
+por isso nao conflitam. E uma regra pode perder no editor e ser a unica do seu
+padrao nas automaticas — la ela e aplicada, e a mensagem diz isso em vez de
+"nunca e aplicada".
+
+Duplicata exata nao e conflito: e redundancia, e ja tem aviso proprio. O filtro
+"Conflitos" e a contagem do rodape usam a mesma avaliacao da mensagem, entao a
+lista mostra exatamente as regras para as quais a janela sabe dizer quem vence.
+
+**Garantia S5 — falha de carga e visivel.** Se o `Substituicoes.txt` estiver
+malformado, o usuario e avisado no log da janela e num dialogo. O sistema nunca
+opera em silencio com o glossario vazio, e um arquivo quebrado nunca impede o
+programa de abrir — ele degrada para "sem regras" e diz por que.
+
+O aviso nao pode depender do `stdout`: empacotado com `pythonw` nao ha console
+nenhum. `glossario.py` publica as falhas por um handler que a interface
+registra (`set_glossary_error_handler`), de modo que o modulo continua sem
+importar Tk. Como a carga tambem acontece na thread do worker, cabe ao handler
+levar o dialogo para a thread do Tk (garantia C1).
+
+### 4.3 Edicao
+
+- Toda gravacao e atomica (arquivo temporario + troca) e precedida de backup.
+- `glossario.db` e um indice derivado; pode ser reconstruido a partir do
+  arquivo texto a qualquer momento.
+
+**Garantia S6 — a operacao atinge a entrada apontada.** Adicionar, editar ou
+remover afeta exatamente a entrada escolhida, mesmo havendo duplicatas no
+arquivo e mesmo que o glossario tenha mudado por fora desde que a janela
+carregou.
+
+A entrada e identificada pelo **conteudo** que o editor exibiu, nao pela posicao
+no arquivo: a janela nao e notificada de alteracoes externas, e uma insercao
+feita por outra janela desloca todos os indices seguintes. A posicao guardada
+vale como desempate — se ainda contiver a entrada esperada, e ela que e
+afetada, o que resolve o caso de duplicatas exatas.
+
+Se a entrada nao existir mais como estava, **nada e gravado** e o usuario e
+avisado. Escrever na posicao antiga sobrescreveria a entrada vizinha em
+silencio.
+
+**Garantia S7 — entradas nao tem espaco nas pontas.** Padrao e substituicao sao
+normalizados na gravacao. Um espaco no fim do padrao e consumido pelo casamento
+mas nao devolvido pela substituicao, colando duas palavras:
+`(' a-coluna ' -> ' coluna a')` transforma `"na a-coluna aberta"` em
+`"na coluna aaberta"`. Um espaco no inicio ainda desliga a checagem de fronteira
+daquele lado. Nenhum dos dois efeitos e intencional.
+
+**Garantia S8 — `backups/` tem retencao, e ela so apaga backup.** Depois de
+criar uma copia, sobrevivem as `keep_count` mais novas daquela especie; das
+restantes, saem as mais velhas que `BACKUP_MAX_AGE_DAYS`, nunca abaixo de um
+piso de `BACKUP_KEEP_MINIMUM`. Tres limites do que a limpeza pode tocar:
+
+- Os backups do glossario (`.txt`) e do banco (`.db`) convivem na mesma pasta e
+  sao contados **separadamente** — salvar o glossario nao descarta backup do
+  banco.
+- Um arquivo cujo nome nao tenha o carimbo `AAAAMMDD-HHMMSS` nao e backup do
+  programa e nunca e removido.
+- A copia recem criada, e o backup que uma restauracao ainda vai ler, ficam
+  fora do alcance da limpeza.
+
+A ordem "mais novo" vem do carimbo no **nome**, nao do `mtime`: a copia do
+glossario preserva o mtime da origem, entao todas teriam a mesma data.
+
+A politica e avaliada em dois momentos: depois de cada backup criado e **uma vez
+na abertura do programa**, fora da thread da interface. So o primeiro nao basta —
+enquanto ninguem salvar o glossario, nada e avaliado, e quem parar de edita-lo
+fica com a pilha inteira para sempre.
+
+`logs/` tem a mesma politica (`LOG_KEEP_COUNT`, `LOG_MAX_AGE_DAYS`), com os
+arquivos nomeados `traducao-<carimbo>.log`. Logs gravados antes disso usavam
+underscore no carimbo, nao casam com o padrao e por isso nunca sao removidos.
+
+---
+
+## 5. Editor de traducoes
+
+Lista paginada por idioma, com filtros (pendentes / verificadas / avisos de
+qualidade) e busca. Permite editar, marcar como verificada, navegar por avisos,
+consultar e restaurar historico, e aplicar sugestoes do glossario.
+
+**Garantia R1 — gravacao e sempre intencional.** Apenas uma acao deliberada do
+usuario altera o banco. Navegar pela lista nao reescreve traducoes.
+
+**Garantia R5 — navegar custa O(tamanho da pagina).** Trocar de
+pagina ou de filtro nunca le a tabela inteira. Os avisos de qualidade ficam
+materializados na coluna `quality_warning`, entao contar e paginar "com aviso" e
+uma consulta indexada.
+
+**Garantia R8 — navegar custa O(pagina) tambem com busca ativa.** A busca do
+editor tem dois modos, e o usuario escolhe qual vale:
+
+| modo | como filtra | casa | custo |
+|---|---|---|---|
+| **Termos** | indice FTS5 | palavra inteira (`bisp*` para prefixo) | O(pagina) |
+| **Trecho** | `LIKE '%x%'` | qualquer pedaco, ate no meio de palavra | O(tabela) |
+
+Nenhum substitui o outro, e por isso os dois existem. O indice resolve o custo,
+mas muda a semantica: `bisp` deixa de achar "bispo". O `LIKE` e o unico jeito de
+procurar um trecho literal, e continua disponivel — mais lento, e declaradamente.
+"Termos" e o padrao, e a escolha e lembrada entre sessoes.
+
+Medido em 195.607 linhas, somando o resumo de status e a pagina:
+
+| | Trecho | Termos |
+|---|---|---|
+| sem busca | 33,9 ms | 33,4 ms |
+| `bispo`, 1a pagina | 109,4 ms | **39,1 ms** |
+| `bispo`, pagina 100 | 205,7 ms | **45,8 ms** |
+| termo sem resultado | 196,5 ms | **18,6 ms** |
+
+Com o indice, buscar custa o mesmo que nao buscar, e o custo para de crescer com
+a profundidade da pagina — que era o ponto de R5.
+
+O indice e um FTS5 `external content` (`content='comments'`): guarda so os termos,
+sem duplicar o texto. Custa ~25 MB sobre um banco de 81 MB, e a criacao leva 1,8 s
+uma vez, na primeira abertura apos a atualizacao. Quem o mantem em dia sao tres
+gatilhos; a remocao usa o comando `'delete'` com os valores **antigos**, sem o
+qual os termos de uma linha apagada ficam no indice para sempre. Os acentos sao
+dobrados (`remove_diacritics 2`), entao "traducao" acha "tradução".
+
+O texto digitado nunca vai cru para o `MATCH`: `AND`, `-`, `*`, `:`, `(` e aspas
+sao operadores do FTS5, e uma busca por `bispo (branco)` viraria erro de sintaxe
+no meio da navegacao. Cada palavra e enviada como termo literal; so o `*` final e
+preservado, porque e ele que devolve o casamento por prefixo.
+
+A busca por termos **degrada para o `LIKE`** — sem avisar, porque o resultado
+continua correto — quando o SQLite nao tem o modulo FTS5, quando o indice ainda
+nao existe no arquivo, ou quando a expressao nao sobra nenhum termo utilizavel.
+
+Eram duas varreduras por interacao ate 2026-07-27: o total do filtro ativo era
+pedido numa segunda consulta, com o mesmo `WHERE` da agregada de status que ja
+havia acabado de rodar. Hoje ele sai do proprio resumo (`STATUS_COUNT_KEYS`), e a
+correspondencia entre filtro e chave do resumo e verificada em teste contra a
+consulta dedicada — os dois criterios vivem em codigos diferentes e, se
+divergirem, a lista pagina por um numero errado sem erro visivel.
+
+**Garantia R6 — o cache de avisos nunca diverge.** `quality_warning` e derivada
+de `evaluate_translation_quality` e atualizada em toda escrita de traducao
+(insercao, preenchimento de vazia, edicao manual e aplicacao em massa das regras
+automaticas). A contagem exibida e sempre igual ao que a avaliacao em Python
+produziria para as mesmas linhas.
+
+**Garantia R2 — historico completo.** Toda alteracao registra estado anterior,
+novo, e status de verificacao, em `comment_history`.
+
+**Garantia R3 — a janela de historico opera sobre o item que ela declara.** Ela
+e modeless: a lista principal continua clicavel enquanto ela esta aberta. O item
+e fixado na abertura e nunca relido do editor, senao "Restaurar" gravaria naquele
+que estivesse selecionado no instante do clique. Se o editor ja estiver mostrando
+outra traducao, a restauracao grava no banco e **nao** toca no texto na tela.
+
+**Garantia R7 — a lista carrega o item clicado.** Selecionar uma linha grava a
+anterior, e essa gravacao pode remover linhas da lista: com o filtro "Avisos QA"
+ativo, corrigir o aviso tira a propria linha; com "Pendentes", verificar faz o
+mesmo. A linha a carregar e identificada pelo **id** capturado antes da
+gravacao, nunca pela posicao — que a essa altura ja aponta para outra coisa.
+Vale igualmente para "proxima" depois de verificar: se a linha atual saiu da
+lista, quem ocupou o lugar dela e a proxima, e nao a seguinte.
+
+**Garantia R4 — rascunhos sobrevivem.** O rascunho nao salvo e persistido e
+recuperado. Janelas concorrentes nao apagam os rascunhos uma da outra, e a
+gravacao das configuracoes e atomica.
+
+---
+
+## 6. Normalizacao de metadados PGN
+
+Corrige **apenas** as tags `White`, `Black`, `Site`, `Event` e `Round`, usando
+`spelling_ssp/spelling.ssp`. Saida com sufixo `-NORM.pgn`.
+
+**Garantia N1 — comentarios, lances e variantes nao sao tocados.**
+
+---
+
+## 7. Rede
+
+Usa o endpoint publico do Google Translate, sem autenticacao. Nao ha chave de
+API no projeto — nem deve haver.
+
+- Sessao HTTP reusada durante toda a execucao.
+- Ate 3 tentativas, apenas para 429/500/502/503/504.
+- Outros codigos falham imediatamente.
+
+**Garantia W1 — o programa nunca envia nada alem do texto a traduzir.**
+
+**Garantia W2 — o programa desacelera quando a API reclama.** A resposta a um 429
+acontece em dois lugares, porque um so nao basta:
+
+- **Entre as tentativas da mesma requisicao**, a espera dobra a cada tentativa
+  (teto de 20 s), e 429 parte de uma base maior que 5xx — um pede ritmo menor, o
+  outro e instabilidade passageira do servidor. O jitter e multiplicativo, para
+  que execucoes simultaneas se espalhem em proporcao a espera.
+- **Entre requisicoes**, o intervalo normal e multiplicado a cada 429 e volta a
+  cair so depois de uma sequencia de requisicoes sem reclamacao. Sem isso, o
+  retry consertaria a requisicao que falhou e deixaria intacta a causa: a
+  seguinte sairia no mesmo ritmo que provocou o 429.
+
+Sobe rapido e desce devagar. Um 5xx nao altera o ritmo. Em repouso — nenhum 429 —
+o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
+
+---
+
+## 8. Invariantes que os testes devem proteger
+
+| # | Invariante | Origem |
+|---|---|---|
+| E1 | Codificacao decidida pelo arquivo inteiro | Bug: acentos destruidos apos 64 KB |
+| E2 | `ascii` nunca e veredito final | Mesmo bug |
+| E4 | A codificacao escolhida decodifica o arquivo inteiro | Bug: UTF-16 lido como UTF-8, com NUL entre as letras |
+| G2 | Saida sem `U+FFFD` | Mesmo bug |
+| B1 | `BATCH_MAX_CHARS < MAX_TRANSLATE_CHARS` | Acoplamento fragil entre modulos |
+| B2 | Desalinhamento -> traducao individual | — |
+| B3 | Falha de API nao vira reprocessamento comentario a comentario | Bug: um lote morto custava ~1 h de requisicoes inuteis |
+| W2 | Backoff exponencial, e o ritmo cai ao ver 429 | Risco: intervalo agressivo sem defesa contra limite de taxa |
+| T1 | Nao sobrescrever traducao existente | — |
+| T2 | Falhas contabilizadas e exibidas | Bug: sucesso reportado com PGN bilingue |
+| T4 | A lista de falhas sobrevive a execucao, e so ela e reprocessada | Custo: reexecutar tudo por causa de dois arquivos |
+| S1 | Matches disjuntos | Bug: `"de de de"` -> `"dede"` |
+| S2 | Indices do texto original | Bug: `İ` desloca offsets |
+| S3 | Regra especifica vence a generica | Bug: regra curta encobre a longa |
+| S4 | Texto substituido e final | Bug: regras contraditorias se desfazem |
+| S5 | Falha de carga chega na interface | Bug: `print` invisivel sob `pythonw` |
+| S6 | Editar/excluir atinge a entrada correta | Bug: indice obsoleto grava na vizinha |
+| S7 | Entradas sem espaco nas pontas | Bug: 48 regras colavam palavras |
+| S8 | Retencao so apaga backup, da familia certa | Risco da limpeza automatica |
+| S9 | A interface diz qual regra do conflito vence | Bug: regras iguais lado a lado, sem dizer qual dispara |
+| R1 | Gravacao so por acao do usuario | Bug: navegar reescreve o banco |
+| R5 | Navegar custa O(pagina) | Perf: paginacao anulada por varredura |
+| R8 | Navegar custa O(pagina) tambem com busca ativa | Perf: `LIKE '%x%'` varre a tabela a cada interacao |
+| R6 | Cache de avisos nao diverge | Risco da coluna materializada |
+| R7 | A lista carrega o item clicado | Bug: clicar em B carregava C |
+| C3 | Nenhuma transacao de escrita atravessa uma chamada de rede, e um lock vira mensagem | Bug: worker travava o "Salvar" do editor por um lote inteiro |
+
+---
+
+## 9. Limites conhecidos
+
+Cada item tem o numero do ROADMAP que o resolve. Estao aqui para que ninguem
+leia uma garantia acima como mais ampla do que ela e.
+
+**Concorrencia**
+
+- Backup, restauracao e importacao de CSV ainda rodam na thread da interface,
+  sem progresso nem cancelamento. (ROADMAP 2.7)
+
+**Desempenho e escala**
+
+- O modo "Trecho" varre a tabela por definicao — e o preco de achar um pedaco
+  literal, e a interface declara qual modo esta ativo.
+
+**Rede**
+
+- Depende de um endpoint nao oficial, sujeito a bloqueio por volume.
+
+**Glossario e arquivos gerados**
+
+- O glossario e uma lista linear; regras conflitantes sao resolvidas por
+  especificidade (S3) e, entre padroes identicos, por ordem de digitacao. A
+  janela passou a dizer qual delas vence (S9), mas nao ha campo de prioridade:
+  adiantar uma regra ainda exige alongar o padrao ou mover a linha no arquivo.
+  (ROADMAP 1.5)
+
+**Estrutura**
+
+
+---
+
+## 10. Garantias planejadas
+
+Declaradas aqui para que a secao 8 continue sendo apenas o que os testes ja
+protegem. Cada uma entra na tabela quando o item correspondente do ROADMAP
+estiver pronto e tiver teste que falhe sem a correcao.
+
+Nenhuma pendente no momento.
+
+| # | Garantia | Item |
+|---|---|---|

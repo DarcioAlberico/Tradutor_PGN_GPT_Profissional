@@ -29,6 +29,13 @@ def load_settings(path=None):
 
 
 def save_settings(settings, path=None):
+    """Grava as configuracoes de forma atomica.
+
+    `open(..., "w")` trunca o arquivo antes de escrever: uma queda no meio do
+    `json.dump` deixaria um JSON invalido, e `load_settings` devolve `{}` em
+    silencio nesse caso — ou seja, todas as preferencias e rascunhos sumiriam.
+    Grava num temporario e troca de nome (garantia R4 da SPEC.md).
+    """
     if path is None:
         path = default_settings_path()
 
@@ -36,9 +43,29 @@ def save_settings(settings, path=None):
     if directory:
         os.makedirs(directory, exist_ok=True)
 
-    with open(path, "w", encoding="utf-8") as file:
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as file:
         json.dump(settings, file, ensure_ascii=False, indent=2, sort_keys=True)
         file.write("\n")
+    os.replace(tmp_path, path)
+
+
+def update_settings(mutator, path=None):
+    """Aplica `mutator` sobre o estado atual do disco e grava o resultado.
+
+    Cada janela do app carrega seu proprio snapshot das configuracoes na
+    abertura. Se cada uma gravasse esse snapshot inteiro, a ultima a salvar
+    apagaria tudo o que a outra tivesse escrito depois — inclusive os rascunhos
+    de traducao nao salvos. Reler do disco imediatamente antes de gravar
+    preserva o que a outra janela mudou (garantia R4 da SPEC.md).
+
+    `mutator` recebe o dicionario lido do disco e o altera no lugar; o valor que
+    devolver e repassado ao chamador.
+    """
+    settings = load_settings(path)
+    result = mutator(settings)
+    save_settings(settings, path)
+    return result
 
 
 def editor_draft_key(db_path, target_language, comment_id):

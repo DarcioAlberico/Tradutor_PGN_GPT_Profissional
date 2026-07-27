@@ -5,9 +5,9 @@ import threading
 import tkinter as tk
 
 from . import app_actions
-from .glossario import load_interactive_substitutions
+from .glossario import set_glossary_error_handler
 from .main_window import setup_main_ui
-from .window_utils import bring_window_to_front
+from .window_utils import bring_window_to_front, install_callback_error_reporter
 
 
 class PGNTranslatorApp:
@@ -25,7 +25,21 @@ class PGNTranslatorApp:
         self.is_processing = False
         self.log_queue = queue.Queue()
 
-        self.glossary_substitutions = load_interactive_substitutions()
+        # Antes de qualquer coisa que possa falhar: sob `pythonw` nao ha console,
+        # entao sem isto um erro em callback do Tk desaparece sem deixar rastro e
+        # a operacao apenas nao acontece (ROADMAP 6.2). Instalado na raiz, vale
+        # tambem para as janelas de edicao, que sao `Toplevel` dela.
+        install_callback_error_reporter(self.root, log_message=self.log_message)
+
+        # Registrado ANTES da primeira carga: e justamente essa que pode falhar
+        # (garantia S5). Sem o handler, o erro so existiria como print, que num
+        # app Tk empacotado com `pythonw` nao aparece em lugar nenhum.
+        self._glossary_error_shown = None
+        set_glossary_error_handler(
+            lambda message: app_actions.report_glossary_failure(self, message)
+        )
+
+        self.glossary_substitutions = app_actions.load_interactive_glossary(self)
         self.log_message(f"Glossário carregado: {len(self.glossary_substitutions)} entradas")
 
         # Banco de dados SEMPRE ao lado do script
@@ -44,6 +58,12 @@ class PGNTranslatorApp:
 
         # Atualização do log
         self.update_log()
+
+        # Retencao de `backups/` e `logs/` (garantia S8). Roda aqui, e nao so
+        # quando um backup novo e criado, senao quem parar de editar o glossario
+        # fica com a pilha inteira para sempre. Numa thread: sao centenas de
+        # arquivos numa pasta com meses de uso.
+        app_actions.run_startup_cleanup(self)
 
     # ============================
     #       INTERFACE
@@ -74,6 +94,9 @@ class PGNTranslatorApp:
     # ============================
     def start_translation(self):
         app_actions.start_translation(self)
+
+    def retry_failed_translation(self):
+        app_actions.retry_failed_translation(self)
 
     # ============================
     #   PAUSAR / CONTINUAR

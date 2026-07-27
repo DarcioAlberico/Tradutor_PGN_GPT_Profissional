@@ -4,6 +4,12 @@ __pycache__/
 *.pyo
 *.db
 *.db-journal
+# Arquivos auxiliares do WAL (ver open_database, garantia C3): ficam ao lado do
+# banco enquanto ele esta aberto.
+*.db-wal
+*.db-shm
 pgn_tradutor_pro_settings.json
 traducoes.db-journal
 spelling_ssp/
+backups/
+logs/

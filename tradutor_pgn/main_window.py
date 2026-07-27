@@ -123,6 +123,15 @@ def setup_main_ui(app):
     )
     app.cancel_button.pack(side=tk.LEFT, padx=6)
 
+    # Fica ao lado dos controles de execucao, e nao em "Ferramentas": e uma forma
+    # de iniciar uma traducao, so que restrita ao que ficou devendo (ROADMAP 7.3).
+    app.retry_button = ctk.CTkButton(
+        btns_line,
+        text="Reprocessar Falhas",
+        command=app.retry_failed_translation,
+    )
+    app.retry_button.pack(side=tk.LEFT, padx=6)
+
     tools_section, tools_frame = create_section(main_frame, "Ferramentas")
     tools_section.pack(fill=tk.X, pady=(0, 8))
 

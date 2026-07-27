@@ -1,12 +1,33 @@
 import io
 import sqlite3
+import sys
+import types
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta
 from pathlib import Path
 
+from tradutor_pgn import database, glossario, settings
+from tradutor_pgn.app_config import (
+    DATABASE_BACKUP_KEEP_COUNT,
+    GLOSSARY_BACKUP_KEEP_COUNT,
+    LOG_KEEP_COUNT,
+    MAX_TRANSLATE_CHARS,
+)
 from tradutor_pgn.database import (
+    FTS_TABLE,
+    SCHEMA_VERSION,
+    SEARCH_MODE_SUBSTRING,
+    SEARCH_MODE_TERMS,
+    build_fts_match_query,
+    fts_index_ready,
+    AutomaticRulesCanceled,
+    apply_automatic_translation_updates,
+    backfill_quality_warnings,
+    count_from_status_counts,
     count_review_rows,
     fetch_comment_history,
     fetch_export_rows,
@@ -24,6 +45,8 @@ from tradutor_pgn.database import (
     update_translation_by_id,
 )
 from tradutor_pgn.glossario import (
+    build_glossary_lookup,
+    order_rules_by_specificity,
     GLOSSARY_RULE_AUTOMATIC,
     GLOSSARY_RULE_CLEANUP,
     GLOSSARY_RULE_SUGGESTION,
@@ -36,7 +59,12 @@ from tradutor_pgn.glossario import (
     clean_comment_for_translation,
     deduplicate_glossary_entries,
     delete_glossary_entry,
+    delete_glossary_entry_by_pair,
+    glossary_entry_pair,
+    case_adjusted_replacement,
     export_glossary_csv,
+    find_glossary_entry_index,
+    read_glossary_csv,
     import_glossary_csv,
     initialize_glossary_database,
     find_glossary_matches,
@@ -54,14 +82,19 @@ from tradutor_pgn.glossario import (
     save_glossary_entries,
     sync_glossary_database,
     update_glossary_entry,
+    update_glossary_entry_by_entry,
     validate_glossary_entry,
 )
 from tradutor_pgn.pgn_utils import (
+    BATCH_MAX_CHARS,
     collect_pgn_files,
     create_comment_batches,
+    detect_encoding,
     extract_comments_from_file,
     generate_translated_pgn,
     is_generated_pgn,
+    join_comments_for_batch,
+    split_batch_translation,
     translated_output_path,
 )
 from tradutor_pgn.pgn_spellcheck import (
@@ -90,8 +123,19 @@ from tradutor_pgn.db_tools import (
     import_translations_from_csv,
     restore_database_from_backup,
 )
+from tradutor_pgn.editor_common import (
+    clamp_geometry,
+    clamp_page,
+    local_index_for_offset,
+    page_count,
+    page_of_offset,
+    page_offset,
+    preview,
+    row_index_for_id,
+)
 from tradutor_pgn.editor_text import find_text_ranges, replace_all_text, replace_text_range
 from tradutor_pgn.edit_window import safe_geometry
+from tradutor_pgn.glossary_editor import safe_geometry as glossary_safe_geometry
 from tradutor_pgn.glossary_editor import (
     build_glossary_diagnostics,
     glossary_counts,
@@ -104,9 +148,35 @@ from tradutor_pgn.settings import (
     load_settings,
     save_settings,
     set_editor_draft,
+    update_settings,
 )
+from tradutor_pgn import pgn_utils
 from tradutor_pgn.translation_api import split_text_for_translation, translate_text
-from tradutor_pgn import translation_worker
+from tradutor_pgn import translation_api
+from tradutor_pgn import (
+    app_actions,
+    db_tools,
+    editor_common,
+    editor_widgets,
+    failed_runs,
+    translation_worker,
+    window_utils,
+)
+from tradutor_pgn.backup_retention import (
+    backup_timestamp,
+    is_backup_of_family,
+    prune_backups,
+    prune_glossary_backups,
+    select_backups_to_delete,
+    uniqueness_suffix,
+)
+from tradutor_pgn.glossario import (
+    clear_glossary_error,
+    create_glossary_backup,
+    last_glossary_error,
+    report_glossary_error,
+    set_glossary_error_handler,
+)
 
 
 def call_quietly(func, *args, **kwargs):
@@ -159,6 +229,46 @@ class FakeApp:
         self.reset_called = True
 
 
+_GLOSSARY_SANDBOX = None
+
+
+def setUpModule():
+    """Impede que qualquer teste escreva no glossario real do projeto.
+
+    `glossario._default_substitutions_path()` deriva o caminho de
+    `sys.argv[0]`. Sob `python -m unittest`, `sys.argv[0]` e a string
+    `'python.exe -m unittest'` — sem barra nenhuma —, entao
+    `os.path.dirname(os.path.abspath(...))` resolve para o DIRETORIO ATUAL. Como
+    a suite roda da raiz do projeto, o caminho padrao aponta para o
+    `Substituicoes.txt` de verdade, com as milhares de regras do usuario.
+
+    Hoje nenhum teste chama essas funcoes sem passar um caminho, mas basta um
+    esquecimento para uma execucao da suite apagar entradas do glossario real,
+    silenciosamente e sem relacao aparente com o teste que falhou. Redirecionar
+    o padrao para um diretorio temporario elimina a categoria inteira.
+    """
+    global _GLOSSARY_SANDBOX
+    _GLOSSARY_SANDBOX = tempfile.TemporaryDirectory(prefix="glossario-sandbox-")
+    base = Path(_GLOSSARY_SANDBOX.name)
+    glossario._default_substitutions_path = lambda: str(base / "Substituicoes.txt")
+    glossario._default_glossary_db_path = lambda: str(base / "glossario.db")
+    settings.default_settings_path = lambda: str(base / "settings.json")
+
+
+def tearDownModule():
+    if _GLOSSARY_SANDBOX is not None:
+        _GLOSSARY_SANDBOX.cleanup()
+
+
+class DefaultPathSafetyTests(unittest.TestCase):
+    def test_default_glossary_path_is_never_the_real_project_file(self):
+        # Se esta protecao cair, um teste distraido apaga o glossario do usuario.
+        caminho = Path(glossario._default_substitutions_path()).resolve()
+        projeto = Path(__file__).resolve().parent.parent / "Substituicoes.txt"
+        self.assertNotEqual(caminho, projeto.resolve())
+        self.assertIn("glossario-sandbox-", str(caminho))
+
+
 class PgnUtilsTests(unittest.TestCase):
     def test_extract_and_generate_translated_pgn(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -202,7 +312,7 @@ class PgnUtilsTests(unittest.TestCase):
             self.assertEqual(skipped, 1)
 
     def test_batches_and_translation_chunks_respect_limits(self):
-        batches = create_comment_batches(["a" * 2000, "b" * 2000, "c"])
+        batches = create_comment_batches(["a" * 2000, "b" * 2000, "c"], max_chars=3800)
 
         self.assertEqual(batches, [["a" * 2000], ["b" * 2000, "c"]])
 
@@ -210,6 +320,191 @@ class PgnUtilsTests(unittest.TestCase):
 
         self.assertTrue(chunks)
         self.assertTrue(all(len(chunk) <= 100 for chunk in chunks))
+
+    def test_batch_limit_stays_below_api_split_limit(self):
+        # Garantia B1: um lote nunca pode ser grande a ponto de a camada de API
+        # dividi-lo, porque o corte pode cair no meio do separador " ||| ".
+        self.assertLess(BATCH_MAX_CHARS, MAX_TRANSLATE_CHARS)
+
+        comments = ["a" * 900 for _ in range(40)]
+        for batch in create_comment_batches(comments):
+            self.assertLessEqual(
+                len(join_comments_for_batch(batch)),
+                MAX_TRANSLATE_CHARS,
+            )
+
+    def test_batch_round_trip_splits_back_into_same_number_of_parts(self):
+        comments = ["First comment.", "Second one!", "Terceiro: com acento."]
+        joined = join_comments_for_batch(comments)
+
+        self.assertEqual(split_batch_translation(joined, len(comments)), comments)
+
+        # Contagem divergente deve recusar o alinhamento em vez de adivinhar.
+        self.assertIsNone(split_batch_translation(joined, len(comments) + 1))
+
+        # O tradutor costuma mexer nos espacos ao redor do separador.
+        self.assertEqual(
+            split_batch_translation("um|||dois ||| tres", 3),
+            ["um", "dois", "tres"],
+        )
+
+    def test_encoding_detection_reads_whole_file_not_just_a_sample(self):
+        # Garantias E1/E2: um PGN com dezenas de milhares de linhas ASCII e
+        # acentos so no fim nao pode ser detectado como ascii.
+        filler = "".join(
+            f'[Event "Open"]\n[White "Smith"]\n[Round "{i}"]\n\n'
+            f'1. e4 e5 {{Quiet move}} 1-0\n\n'
+            for i in range(1, 1200)
+        )
+        tail = '[Event "Final"]\n[White "Garcia, Jose"]\n\n1. d4 {Posicao dificil} 1-0\n'
+        tail = tail.replace("Garcia, Jose", "García, José")
+        tail = tail.replace("Posicao dificil", "Posição difícil")
+        text = filler + tail
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for label, encoding in (("cp1252", "cp1252"), ("utf8", "utf-8")):
+                pgn = tmp_path / f"grande_{label}.pgn"
+                pgn.write_bytes(text.encode(encoding))
+                self.assertGreater(pgn.stat().st_size, 65536)
+
+                detected = detect_encoding(str(pgn))
+                self.assertNotEqual(detected, "ascii")
+
+                info = extract_comments_from_file(str(pgn))
+                joined = " ".join(info["comments"])
+                self.assertNotIn("�", joined)
+                self.assertIn("Posição difícil", joined)
+
+    def test_utf16_pgn_is_read_as_text_and_not_as_nul_separated_bytes(self):
+        """Garantia E4: UTF-16 escapava de E1/E2/E3.
+
+        Um PGN em UTF-16-LE com texto ASCII e uma letra e um `\\x00`
+        alternados — e `\\x00` E ASCII valido. Entao E2 concluia "e tudo ASCII,
+        adoto UTF-8" e cada comentario saia com um NUL entre cada letra. Esse
+        texto vira a CHAVE DE CACHE, entao o erro nao ficava so na tela: era
+        gravado no `traducoes.db` para sempre.
+
+        O caso com BOM funcionava, mas por sorte: quem acertava era o `chardet`,
+        que e um import opcional. Por isso cada caso e conferido tambem com ele
+        ausente.
+        """
+        comentarios = ["O bispo domina a diagonal", "Posição difícil para as pretas"]
+        conteudo = (
+            '[Event "Torneio"]\n[White "Gonçalves, João"]\n\n'
+            f"1. e4 {{{comentarios[0]}}} e5 2. Nf3 {{{comentarios[1]}}} 1-0\n"
+        )
+        codificacoes = [
+            ("utf-8", "utf-8"),
+            ("utf-8-sig", "utf-8-sig"),
+            ("cp1252", "cp1252"),
+            ("utf-16", "utf-16"),        # com BOM
+            ("utf-16-le", "utf-16-le"),  # sem BOM: o caso que quebrava
+            ("utf-16-be", "utf-16-be"),  # sem BOM
+            ("utf-32", "utf-32"),
+        ]
+
+        chardet_original = pgn_utils.chardet
+        try:
+            for com_chardet in (True, False):
+                pgn_utils.chardet = chardet_original if com_chardet else None
+                rotulo = "com chardet" if com_chardet else "sem chardet"
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    for nome, encoding in codificacoes:
+                        pgn = Path(tmp) / f"{nome}.pgn"
+                        pgn.write_bytes(conteudo.encode(encoding))
+
+                        detectada = detect_encoding(str(pgn))
+                        lidos = extract_comments_from_file(str(pgn))["comments"]
+
+                        self.assertEqual(
+                            lidos,
+                            comentarios,
+                            f"{nome} ({rotulo}) foi lido como {detectada}",
+                        )
+                        self.assertNotIn(
+                            "\x00",
+                            " ".join(lidos),
+                            f"{nome} ({rotulo}) trouxe NUL para dentro do texto",
+                        )
+                        self.assertNotIn("�", " ".join(lidos))
+        finally:
+            pgn_utils.chardet = chardet_original
+
+    def test_a_detected_encoding_always_decodes_the_whole_file(self):
+        """Garantia E4: nada e adotado sem decodificar o arquivo inteiro.
+
+        O palpite do `chardet` era devolvido no escuro, enquanto o fallback logo
+        abaixo (`cp1252`, `latin-1`) so aceitava o que decodificava. Quando o
+        palpite erra, `errors='replace'` injeta `U+FFFD` no texto lido — e esse
+        texto e o que `generate_translated_pgn` grava de volta, contrariando G2.
+
+        Aqui o `chardet` e substituido por um que responde com confianca alta uma
+        codificacao que nao da conta do arquivo. Sem a verificacao, este teste
+        falha com `U+FFFD` no comentario.
+        """
+
+        class ChardetMentiroso:
+            @staticmethod
+            def detect(_raw):
+                # cp1254 (turco) nao define os bytes 0x81, 0x8D, 0x8F, 0x90, 0x9D.
+                return {"encoding": "cp1254", "confidence": 0.99}
+
+        conteudo = '[Event "Torneio"]\n\n1. e4 {Posição difícil} 1-0\n'
+        bruto = conteudo.encode("cp1252") + b"\x81\x90"
+
+        chardet_original = pgn_utils.chardet
+        try:
+            pgn_utils.chardet = ChardetMentiroso
+            with tempfile.TemporaryDirectory() as tmp:
+                pgn = Path(tmp) / "suspeito.pgn"
+                pgn.write_bytes(bruto)
+
+                detectada = detect_encoding(str(pgn))
+                self.assertNotEqual(detectada, "cp1254")
+                bruto.decode(detectada)  # levanta se a escolha nao decodificar
+
+                lidos = extract_comments_from_file(str(pgn))["comments"]
+                self.assertNotIn("�", " ".join(lidos))
+        finally:
+            pgn_utils.chardet = chardet_original
+
+    def test_generated_pgn_preserves_accents_of_large_source(self):
+        # Garantia G2: nenhum caractere pode virar U+FFFD no arquivo de saida.
+        filler = "".join(
+            f'[Event "Open"]\n[White "Smith"]\n[Round "{i}"]\n\n'
+            f'1. e4 e5 {{Quiet move}} 1-0\n\n'
+            for i in range(1, 1200)
+        )
+        tail = (
+            '[Event "Torneio"]\n'
+            '[White "Gonçalves, João"]\n'
+            '[Site "São Paulo"]\n\n'
+            '1. d4 {Posição difícil} 1-0\n'
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            pgn = tmp_path / "torneio.pgn"
+            pgn.write_bytes((filler + tail).encode("cp1252"))
+
+            info = extract_comments_from_file(str(pgn))
+            translated_map = {c: c for c in info["comments"]}
+            output = tmp_path / "saida.pgn"
+
+            self.assertTrue(
+                generate_translated_pgn(
+                    str(pgn), str(output), translated_map, info["positions"]
+                )
+            )
+
+            raw = output.read_bytes()
+            written = raw.decode(detect_encoding(str(output)))
+            self.assertNotIn("�", written)
+            self.assertIn("Gonçalves, João", written)
+            self.assertIn("São Paulo", written)
+            self.assertIn("Posição difícil", written)
 
     def test_spelling_file_normalizes_only_pgn_metadata_tags(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -355,7 +650,9 @@ class DatabaseTests(unittest.TestCase):
             cursor = conn.cursor()
 
             self.assertEqual(get_database_stats(cursor)["total"], 0)
-            self.assertEqual(fetch_export_rows(cursor), [])
+            # `fetch_export_rows` devolve o cursor, nao uma lista: o exportador
+            # escreve linha a linha e nao precisa do banco inteiro na memoria.
+            self.assertEqual(list(fetch_export_rows(cursor)), [])
             self.assertEqual(fetch_review_rows(cursor, "pt"), [])
 
             self.assertEqual(save_translation(cursor, "orig", "trans", "pt"), "inserted")
@@ -830,11 +1127,11 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(count_review_rows(cursor, "pt", status_filter="verified"), 1)
             self.assertEqual(
                 get_review_status_counts(cursor, "pt"),
-                {"total": 5, "pending": 4, "verified": 1},
+                {"total": 5, "pending": 4, "verified": 1, "warnings": 0},
             )
             self.assertEqual(
                 get_review_status_counts(cursor, "pt", search_text="orig 4"),
-                {"total": 1, "pending": 0, "verified": 1},
+                {"total": 1, "pending": 0, "verified": 1, "warnings": 0},
             )
             self.assertEqual(count_review_rows(cursor, "pt", search_text="orig 1"), 1)
             self.assertEqual(
@@ -894,9 +1191,1303 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(count_review_rows(cursor, "pt", status_filter="pending"), 5)
             self.assertEqual(
                 get_review_status_counts(cursor, "pt"),
-                {"total": 5, "pending": 5, "verified": 0},
+                {"total": 5, "pending": 5, "verified": 0, "warnings": 0},
             )
             conn.close()
+
+
+class AutomaticRulesSinglePassTests(unittest.TestCase):
+    """Item 2.7: uma passagem para aplicar, com progresso e cancelamento.
+
+    `apply_automatic_translation_updates` comecava chamando
+    `analyze_automatic_translation_updates` — que percorre a tabela inteira
+    aplicando as regras — e so entao percorria tudo de novo para gravar. Com a
+    previa que a interface ja calcula, um clique custava tres passagens: 38,1 s
+    no banco real, com a janela travada.
+    """
+
+    REGRAS = [("rainha", "dama"), ("torre", "roque")]
+
+    def _semear(self, db_path, linhas=40):
+        conn = initialize_database(str(db_path))
+        cursor = conn.cursor()
+        for indice in range(linhas):
+            # Metade muda, metade nao: separa "varreu" de "alterou".
+            texto = "A rainha avanca" if indice % 2 == 0 else "O bispo avanca"
+            save_translation(cursor, f"orig {indice}", texto, "pt")
+        conn.commit()
+        conn.close()
+        return linhas
+
+    def _contador(self):
+        """Envolve a aplicacao de regras contando quantas vezes ela roda."""
+        chamadas = []
+
+        def contando(texto, regras):
+            chamadas.append(texto)
+            return apply_all_substitutions(texto, regras)
+
+        return chamadas, contando
+
+    def test_applying_runs_the_rules_once_per_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            linhas = self._semear(db_path)
+            chamadas, contando = self._contador()
+
+            conn = initialize_database(str(db_path))
+            try:
+                stats = apply_automatic_translation_updates(
+                    conn.cursor(),
+                    self.REGRAS,
+                    contando,
+                    target_language="pt",
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        self.assertEqual(stats["scanned"], linhas)
+        self.assertEqual(stats["changed"], linhas // 2)
+        self.assertEqual(
+            len(chamadas),
+            linhas,
+            "as regras foram aplicadas mais de uma vez por linha: "
+            "a passagem de analise voltou para dentro da de escrita",
+        )
+
+    def test_applying_reports_progress_and_keeps_the_totals_honest(self):
+        progresso = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            linhas = self._semear(db_path)
+
+            conn = initialize_database(str(db_path))
+            try:
+                stats = apply_automatic_translation_updates(
+                    conn.cursor(),
+                    self.REGRAS,
+                    apply_all_substitutions,
+                    target_language="pt",
+                    progress_callback=lambda feito, total: progresso.append((feito, total)),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        self.assertTrue(progresso)
+        self.assertEqual(progresso[0], (0, linhas))
+        self.assertEqual(progresso[-1], (linhas, linhas))
+        self.assertTrue(
+            all(0 <= feito <= total == linhas for feito, total in progresso),
+            f"progresso incoerente: {progresso}",
+        )
+        self.assertEqual(stats["scanned"], linhas)
+
+    def test_canceling_leaves_the_database_untouched(self):
+        """Cancelar no meio nao pode deixar metade das traducoes alteradas."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            self._semear(db_path, linhas=600)
+
+            def antes():
+                conn = sqlite3.connect(str(db_path))
+                try:
+                    return dict(
+                        conn.execute(
+                            "SELECT id, translated_comment FROM comments"
+                        ).fetchall()
+                    )
+                finally:
+                    conn.close()
+
+            original = antes()
+
+            vistas = {"n": 0}
+
+            def cancelar_depois_de_algumas():
+                vistas["n"] += 1
+                return vistas["n"] > 1  # cancela cedo, com escritas ja feitas
+
+            with self.assertRaises(AutomaticRulesCanceled):
+                apply_database_automatic_rules(
+                    str(db_path),
+                    target_language="pt",
+                    automatic_rules=self.REGRAS,
+                    backup_dir=str(tmp_path / "backups"),
+                    should_cancel=cancelar_depois_de_algumas,
+                )
+
+            self.assertEqual(
+                antes(),
+                original,
+                "o rollback devia ter desfeito as alteracoes ja gravadas",
+            )
+
+
+class FailedRunRecordTests(unittest.TestCase):
+    """Roadmap 7.3: guardar quem falhou para reprocessar so isso.
+
+    Antes, terminada uma execucao com falhas, a unica saida era reprocessar tudo:
+    os acertos voltavam pelo cache (rapido, mas nao de graca) e as falhas eram
+    reencontradas por varredura da pasta inteira.
+    """
+
+    def test_a_clean_run_has_no_record_at_all(self):
+        """Registro vazio nao existe: o certo e nao haver registro."""
+        self.assertIsNone(failed_runs.build_failed_run_record("pt", [], 0))
+        self.assertIsNone(failed_runs.build_failed_run_record("pt", ["a.pgn"], 0))
+        self.assertIsNone(failed_runs.build_failed_run_record("pt", [], 3))
+
+    def test_the_record_keeps_the_language_of_the_failed_run(self):
+        registro = failed_runs.build_failed_run_record("en", ["b.pgn", "a.pgn"], 7)
+        self.assertEqual(registro["target_language"], "en")
+        self.assertEqual(registro["files"], ["a.pgn", "b.pgn"])
+        self.assertEqual(registro["failed_count"], 7)
+
+    def test_duplicated_files_are_counted_once(self):
+        registro = failed_runs.build_failed_run_record("pt", ["a.pgn", "a.pgn"], 2)
+        self.assertEqual(registro["files"], ["a.pgn"])
+
+    def test_a_truncated_record_is_refused(self):
+        """O JSON e editavel a mao e sobrevive a versoes do programa.
+
+        Um registro quebrado nao pode virar um reprocessamento de lista vazia,
+        que terminaria em "Concluido" sem ter feito nada.
+        """
+        for ruim in (
+            None,
+            {},
+            "texto",
+            {"files": [], "target_language": "pt"},
+            {"files": ["a.pgn"]},
+            {"files": ["a.pgn"], "target_language": ""},
+            {"target_language": "pt"},
+        ):
+            with self.subTest(registro=ruim):
+                self.assertIsNone(failed_runs.normalize_failed_run_record(ruim))
+
+    def test_files_removed_from_disk_are_separated(self):
+        presentes, ausentes = failed_runs.split_existing_files(
+            ["existe.pgn", "sumiu.pgn"],
+            exists=lambda caminho: caminho == "existe.pgn",
+        )
+        self.assertEqual(presentes, ["existe.pgn"])
+        self.assertEqual(ausentes, ["sumiu.pgn"])
+
+    def test_the_description_warns_about_missing_files(self):
+        registro = failed_runs.build_failed_run_record(
+            "pt", ["existe.pgn", "sumiu.pgn"], 4
+        )
+        texto = failed_runs.describe_failed_run(
+            registro, exists=lambda caminho: caminho == "existe.pgn"
+        )
+        self.assertIn("4 comentario(s)", texto)
+        self.assertIn("existe.pgn", texto)
+        self.assertIn("nao estao mais no disco", texto)
+
+    def test_the_description_says_when_nothing_is_left(self):
+        registro = failed_runs.build_failed_run_record("pt", ["sumiu.pgn"], 1)
+        texto = failed_runs.describe_failed_run(registro, exists=lambda _c: False)
+        self.assertIn("Nenhum arquivo da lista existe mais", texto)
+
+    def test_saving_does_not_erase_other_settings(self):
+        """Garantia R4: os rascunhos de traducao vivem no mesmo arquivo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "settings.json")
+            settings.save_settings({"editor_drafts": {"x": "rascunho"}}, path)
+
+            registro = failed_runs.build_failed_run_record("pt", ["a.pgn"], 2)
+            failed_runs.save_failed_run(registro, path)
+
+            disco = settings.load_settings(path)
+            self.assertEqual(disco["editor_drafts"], {"x": "rascunho"})
+            self.assertEqual(failed_runs.load_failed_run(path), registro)
+
+            failed_runs.clear_failed_run(path)
+            self.assertIsNone(failed_runs.load_failed_run(path))
+            self.assertEqual(
+                settings.load_settings(path)["editor_drafts"], {"x": "rascunho"}
+            )
+
+
+class CallbackErrorReportingTests(unittest.TestCase):
+    """Roadmap 6.2 / garantia C3: erro de lock nao pode virar traceback invisivel.
+
+    Sob `pythonw` nao ha console. Ate aqui, um `sqlite3.OperationalError` no
+    editor sumia sem deixar rastro e a gravacao apenas nao acontecia — sem
+    mensagem, sem log, sem nada que o usuario pudesse notar.
+    """
+
+    def test_a_lock_says_what_to_do_about_it(self):
+        titulo, mensagem = window_utils.describe_callback_error(
+            sqlite3.OperationalError("database is locked")
+        )
+        self.assertEqual(titulo, window_utils.DATABASE_BUSY_TITLE)
+        self.assertIn("traducao em andamento", mensagem)
+        self.assertIn("Nada foi gravado", mensagem)
+        self.assertIn("tente de novo", mensagem.lower())
+
+    def test_another_database_error_is_not_disguised_as_a_lock(self):
+        titulo, mensagem = window_utils.describe_callback_error(
+            sqlite3.OperationalError("no such column: foo")
+        )
+        self.assertEqual(titulo, window_utils.DATABASE_ERROR_TITLE)
+        self.assertIn("no such column", mensagem)
+
+    def test_any_other_error_still_reaches_the_user(self):
+        titulo, mensagem = window_utils.describe_callback_error(ValueError("xyz"))
+        self.assertEqual(titulo, window_utils.UNEXPECTED_ERROR_TITLE)
+        self.assertIn("ValueError", mensagem)
+        self.assertIn("xyz", mensagem)
+
+    def _reporter(self, relogio):
+        raiz = types.SimpleNamespace()
+        dialogos = []
+        logs = []
+        handler = window_utils.install_callback_error_reporter(
+            raiz,
+            log_message=logs.append,
+            show_error=lambda titulo, msg: dialogos.append((titulo, msg)),
+            now=lambda: relogio[0],
+        )
+        return raiz, handler, dialogos, logs
+
+    def dispara(self, handler, exc):
+        try:
+            raise exc
+        except type(exc):
+            handler(type(exc), exc, sys.exc_info()[2])
+
+    def test_the_handler_is_installed_on_the_root(self):
+        raiz, handler, _dialogos, _logs = self._reporter([0.0])
+        self.assertIs(raiz.report_callback_exception, handler)
+
+    def test_a_burst_of_the_same_error_opens_one_dialog(self):
+        """Um callback periodico que falha sempre nao pode encher a tela."""
+        relogio = [0.0]
+        _raiz, handler, dialogos, logs = self._reporter(relogio)
+
+        for _ in range(5):
+            relogio[0] += 0.1
+            self.dispara(handler, sqlite3.OperationalError("database is locked"))
+
+        self.assertEqual(len(dialogos), 1)
+        self.assertEqual(len(logs), 10, "toda ocorrencia vai para o log")
+
+    def test_trying_again_later_warns_again(self):
+        """A supressao contem rajada; nao pode calar quem tentou de novo."""
+        relogio = [0.0]
+        _raiz, handler, dialogos, _logs = self._reporter(relogio)
+
+        self.dispara(handler, sqlite3.OperationalError("database is locked"))
+        relogio[0] += window_utils.ERROR_DIALOG_REPEAT_SECONDS + 0.1
+        self.dispara(handler, sqlite3.OperationalError("database is locked"))
+
+        self.assertEqual(len(dialogos), 2)
+
+    def test_a_different_error_is_never_suppressed(self):
+        relogio = [0.0]
+        _raiz, handler, dialogos, _logs = self._reporter(relogio)
+
+        self.dispara(handler, sqlite3.OperationalError("database is locked"))
+        self.dispara(handler, ValueError("outra coisa"))
+
+        self.assertEqual(len(dialogos), 2)
+
+    def test_the_traceback_goes_to_the_log(self):
+        _raiz, handler, _dialogos, logs = self._reporter([0.0])
+        self.dispara(handler, ValueError("xyz"))
+
+        texto = "\n".join(logs)
+        self.assertIn("Traceback", texto)
+        self.assertIn("ValueError", texto)
+
+    def test_a_failing_dialog_does_not_replace_the_original_error(self):
+        """O relator de erros nao pode ser a proxima fonte de erro."""
+        raiz = types.SimpleNamespace()
+        logs = []
+
+        def explode(*_args):
+            raise RuntimeError("sem display")
+
+        handler = window_utils.install_callback_error_reporter(
+            raiz, log_message=logs.append, show_error=explode
+        )
+        self.dispara(handler, ValueError("xyz"))
+        self.assertTrue(logs)
+
+
+class CsvImportSingleReadTests(unittest.TestCase):
+    """Roadmap 2.10: previa e aplicacao leem o CSV uma vez so.
+
+    O ganho obvio e nao ler duas vezes. O que importa mais e o outro: relendo, o
+    usuario confirma numeros calculados sobre um arquivo e a gravacao acontece
+    sobre outro, se ele mudar no intervalo. Por isso os testes exercem essa
+    janela, e nao so contam leituras.
+    """
+
+    CABECALHO = "original_comment,translated_comment,target_language,verified\n"
+
+    def escreve_csv(self, path, linhas):
+        path.write_text(
+            self.CABECALHO + "".join(f"{o},{t},pt,0\n" for o, t in linhas),
+            encoding="utf-8",
+        )
+
+    def test_the_apply_uses_the_rows_the_preview_showed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            csv_path = base / "entrada.csv"
+            initialize_database(str(db_path)).close()
+            self.escreve_csv(csv_path, [("alfa", "um"), ("beta", "dois")])
+
+            linhas = db_tools._read_translation_csv_rows(str(csv_path))
+            preview = analyze_translations_csv_import(
+                str(db_path), str(csv_path), csv_rows=linhas
+            )
+
+            # O arquivo muda entre a confirmacao e a gravacao.
+            self.escreve_csv(csv_path, [("gama", "tres")] * 40)
+
+            stats = import_translations_from_csv(
+                str(db_path),
+                str(csv_path),
+                create_backup=False,
+                csv_rows=linhas,
+            )
+
+            self.assertEqual(preview["inserted"], 2)
+            self.assertEqual(stats["inserted"], preview["inserted"])
+            self.assertEqual(stats["total_rows"], preview["total_rows"])
+
+            conn = initialize_database(str(db_path))
+            gravados = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT original_comment FROM comments"
+                ).fetchall()
+            }
+            conn.close()
+            self.assertEqual(gravados, {"alfa", "beta"}, "gravou o CSV trocado")
+
+    def test_the_ui_flow_reads_the_file_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            csv_path = base / "entrada.csv"
+            initialize_database(str(db_path)).close()
+            self.escreve_csv(csv_path, [("alfa", "um"), ("beta", "dois")])
+
+            leituras = []
+            original = db_tools._read_translation_csv_rows
+
+            def contando(caminho):
+                leituras.append(caminho)
+                return original(caminho)
+
+            app = types.SimpleNamespace(output_db=str(db_path), translation_cache={})
+            patches = [
+                (db_tools, "_read_translation_csv_rows", contando),
+                (db_tools, "filedialog", types.SimpleNamespace(
+                    askopenfilename=lambda **_kw: str(csv_path))),
+                (db_tools, "messagebox", types.SimpleNamespace(
+                    askyesno=lambda *_a, **_kw: True,
+                    showinfo=lambda *_a, **_kw: None,
+                    showerror=lambda *_a, **_kw: None)),
+            ]
+            for modulo, nome, novo in patches:
+                self.addCleanup(setattr, modulo, nome, getattr(modulo, nome))
+                setattr(modulo, nome, novo)
+
+            db_tools.import_csv(app)
+
+            self.assertEqual(len(leituras), 1, f"o CSV foi lido {len(leituras)} vezes")
+
+    def test_the_glossary_import_applies_the_previewed_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            glossary = base / "Substituicoes.txt"
+            csv_path = base / "regras.csv"
+            save_glossary_entries(
+                [("rook", "torre", "suggestion")], str(glossary), create_backup=False
+            )
+            csv_path.write_text(
+                "original,replacement\nqueen,dama\nbishop,bispo\n", encoding="utf-8"
+            )
+
+            preview = analyze_glossary_csv_import(str(glossary), str(csv_path))
+            csv_path.write_text(
+                "original,replacement\nknight,cavalo\n", encoding="utf-8"
+            )
+
+            stats = import_glossary_csv(
+                str(glossary),
+                str(csv_path),
+                backup_dir=str(base / "backups"),
+                analysis=preview,
+            )
+
+            entradas = load_glossary_entry_details(str(glossary), deduplicate=False)
+            pares = {(orig, new) for orig, new, _tipo in entradas}
+            self.assertEqual(stats["inserted"], 2)
+            self.assertIn(("queen", "dama"), pares)
+            self.assertIn(("bishop", "bispo"), pares)
+            self.assertNotIn(("knight", "cavalo"), pares, "importou o CSV trocado")
+
+    def test_reading_is_still_automatic_when_no_rows_are_given(self):
+        """Quem chama sem a previa continua funcionando como antes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            csv_path = base / "entrada.csv"
+            initialize_database(str(db_path)).close()
+            self.escreve_csv(csv_path, [("alfa", "um")])
+
+            self.assertEqual(
+                analyze_translations_csv_import(str(db_path), str(csv_path))["inserted"],
+                1,
+            )
+            self.assertEqual(
+                import_translations_from_csv(
+                    str(db_path), str(csv_path), create_backup=False
+                )["inserted"],
+                1,
+            )
+
+
+class RestrictedTranslationCacheTests(unittest.TestCase):
+    """Roadmap 2.9: carregar so os comentarios que a execucao vai consultar.
+
+    Carregar o idioma inteiro trazia 195 mil traducoes (74 MB) para traduzir uma
+    pasta com algumas centenas de comentarios. O worker so pergunta ao cache por
+    comentarios que extraiu dos arquivos, entao o resto nunca foi consultado.
+    """
+
+    def banco(self, quantos=12):
+        """Banco de teste que se fecha ANTES de o diretorio ser removido.
+
+        A ordem importa e custou um diagnostico errado: no Windows um arquivo
+        SQLite aberto nao pode ser apagado, entao um teste que falhe antes do
+        `close` estoura na limpeza e o `PermissionError` aparece NO LUGAR da
+        falha de verdade. `addCleanup` roda em ordem inversa, entao o diretorio
+        e registrado primeiro e a conexao depois.
+        """
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        conn = initialize_database(str(Path(sandbox.name) / "cache.db"))
+        self.addCleanup(conn.close)
+
+        cur = conn.cursor()
+        for i in range(quantos):
+            save_translation(cur, f"original {i}", f"traducao {i}", "pt")
+        save_translation(cur, "outro idioma", "otra", "en")
+        # Uma traducao vazia: o cache nunca deve trazer o que nao foi traduzido.
+        save_translation(cur, "sem traducao", "", "pt")
+        conn.commit()
+        return cur
+
+    def test_it_brings_exactly_the_requested_translations(self):
+        cur = self.banco()
+        self.assertEqual(
+            load_translation_cache(cur, "pt", ["original 3", "original 7"]),
+            {"original 3": "traducao 3", "original 7": "traducao 7"},
+        )
+
+    def test_the_restricted_load_agrees_with_the_full_one(self):
+        """O criterio que importa: mesma resposta, para o que foi pedido."""
+        cur = self.banco()
+        completo = load_translation_cache(cur, "pt")
+        pedidos = ["original 0", "original 5", "sem traducao", "nao existe"]
+        restrito = load_translation_cache(cur, "pt", pedidos)
+
+        for comentario in pedidos:
+            with self.subTest(comentario=comentario):
+                self.assertEqual(restrito.get(comentario), completo.get(comentario))
+
+    def test_it_never_brings_another_language(self):
+        cur = self.banco()
+        self.assertEqual(load_translation_cache(cur, "pt", ["outro idioma"]), {})
+
+    def test_an_untranslated_comment_is_not_in_the_cache(self):
+        """Senao o worker daria por traduzido o que esta vazio."""
+        cur = self.banco()
+        self.assertEqual(load_translation_cache(cur, "pt", ["sem traducao"]), {})
+
+    def test_asking_for_nothing_returns_nothing(self):
+        cur = self.banco()
+        self.assertEqual(load_translation_cache(cur, "pt", []), {})
+
+    def test_repeated_comments_are_asked_only_once(self):
+        """O mesmo comentario aparece em varios arquivos."""
+        cur = self.banco()
+        pedidos = ["original 1"] * 50 + ["original 2"]
+        self.assertEqual(
+            load_translation_cache(cur, "pt", pedidos),
+            {"original 1": "traducao 1", "original 2": "traducao 2"},
+        )
+
+    def test_it_survives_more_comments_than_sqlite_accepts_as_parameters(self):
+        """O limite de parametros do SQLite: sem os lotes, isto e um erro.
+
+        Nao e um limite teorico — uma pasta com alguns milhares de comentarios
+        distintos passa dele com folga.
+        """
+        quantos = database.CACHE_LOOKUP_CHUNK * 3 + 7
+        cur = self.banco(quantos=quantos)
+        pedidos = [f"original {i}" for i in range(quantos)]
+
+        # O que esta sob teste sao os lotes, entao o atalho da carga completa
+        # sai do caminho: com ele, pedir a tabela inteira nunca chegaria ao `IN`.
+        anterior = database.CACHE_FULL_LOAD_RATIO
+        database.CACHE_FULL_LOAD_RATIO = 2.0
+        self.addCleanup(setattr, database, "CACHE_FULL_LOAD_RATIO", anterior)
+
+        class CursorQueConta:
+            def __init__(self, real):
+                self.real = real
+                self.consultas = 0
+
+            def execute(self, *a, **k):
+                self.consultas += 1
+                return self.real.execute(*a, **k)
+
+            def fetchall(self):
+                return self.real.fetchall()
+
+        contador = CursorQueConta(cur)
+        cache = load_translation_cache(contador, "pt", pedidos)
+
+        self.assertEqual(len(cache), quantos)
+        self.assertEqual(cache["original 0"], "traducao 0")
+        self.assertEqual(cache[f"original {quantos - 1}"], f"traducao {quantos - 1}")
+
+        # A contagem e o que prova os lotes. O limite de parametros do SQLite
+        # moderno e 32766, entao 2.707 numa consulta so passaria — e o teste nao
+        # veria a falta dos lotes ate alguem rodar num SQLite antigo (limite 999)
+        # ou processar uma pasta bem maior.
+        lotes = -(-quantos // database.CACHE_LOOKUP_CHUNK)   # divisao para cima
+        # A consulta extra e o `COUNT` que decide entre carga restrita e
+        # completa: acima de `CACHE_RATIO_CHECK_MINIMUM` ele sempre roda.
+        self.assertEqual(
+            contador.consultas, lotes + 1, "os comentarios nao foram em lotes"
+        )
+        self.assertLessEqual(quantos / lotes, database.CACHE_LOOKUP_CHUNK)
+
+    def test_a_large_slice_falls_back_to_loading_everything(self):
+        """Acima do limite, procurar um a um sai mais caro que ler tudo.
+
+        Errar a escolha nao produz resultado errado — as duas cargas respondem o
+        mesmo para o que foi pedido —, so um tempo pior. Por isso o teste afirma
+        a decisao, e nao o conteudo.
+        """
+        cur = self.banco(quantos=100)
+        total = 101  # 100 traduzidos + "sem traducao"
+
+        # O piso e a razao sao regras distintas. Aqui interessa a razao, entao o
+        # piso sai do caminho: com ele valendo, um banco de 101 linhas nunca
+        # chegaria a consultar o tamanho da tabela.
+        anterior = database.CACHE_RATIO_CHECK_MINIMUM
+        database.CACHE_RATIO_CHECK_MINIMUM = 0
+        self.addCleanup(setattr, database, "CACHE_RATIO_CHECK_MINIMUM", anterior)
+
+        self.assertTrue(
+            database._full_load_is_cheaper(cur, "pt", total),
+            "pedir a tabela inteira tinha de cair na carga completa",
+        )
+        self.assertTrue(
+            database._full_load_is_cheaper(cur, "pt", int(total * 0.6)),
+            "acima da fracao limite tambem",
+        )
+        self.assertFalse(
+            database._full_load_is_cheaper(cur, "pt", int(total * 0.2)),
+            "um pedido pequeno nunca deve carregar tudo",
+        )
+
+    def test_the_fallback_still_answers_what_was_asked(self):
+        """Caindo na carga completa, o que foi pedido continua certo.
+
+        Ela devolve um superconjunto — o idioma inteiro —, e isso e proposital:
+        o contrato e "contem os pedidos que existem", nao "contem so os pedidos".
+        """
+        cur = self.banco(quantos=100)
+        anterior = database.CACHE_RATIO_CHECK_MINIMUM
+        database.CACHE_RATIO_CHECK_MINIMUM = 0
+        self.addCleanup(setattr, database, "CACHE_RATIO_CHECK_MINIMUM", anterior)
+
+        cache = load_translation_cache(cur, "pt", [f"original {i}" for i in range(90)])
+        for i in range(90):
+            self.assertEqual(cache[f"original {i}"], f"traducao {i}")
+
+        # E a prova de que o atalho foi mesmo tomado: veio o que ninguem pediu.
+        self.assertIn(
+            "original 95", cache, "a carga completa nao foi usada acima do limite"
+        )
+
+    def test_a_small_request_never_pays_for_the_count(self):
+        """Abaixo do minimo nem se pergunta o tamanho da tabela.
+
+        Consultar custa ~10 ms; a carga restrita de ate 1800 comentarios custa
+        ~26 ms. Gastar 10 ms para decidir seria quase metade do trabalho.
+        """
+
+        class CursorQueRecusa:
+            def execute(self, *_a, **_k):
+                raise AssertionError("consultou o tamanho da tabela sem precisar")
+
+        self.assertFalse(
+            database._full_load_is_cheaper(
+                CursorQueRecusa(), "pt", database.CACHE_RATIO_CHECK_MINIMUM - 1
+            )
+        )
+
+
+class SharedEditorWidgetsTests(unittest.TestCase):
+    """Roadmap 3.2: as pecas que os dois editores usavam em copia.
+
+    `save_window_section` e a que importa: ela implementa a garantia R4 —
+    gravar SO a secao desta janela, relendo o disco antes. Enquanto existiam
+    duas copias, corrigir uma e esquecer a outra reproduzia exatamente o defeito
+    que R4 existe para impedir, e sem quebrar nada na hora: o usuario e que
+    perdia um rascunho depois.
+
+    Nao precisa de Tk: `window=None` e `sashes=()` cobrem a parte que mexe no
+    disco, que e a arriscada.
+    """
+
+    def test_it_writes_only_its_own_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "settings.json")
+            settings.save_settings(
+                {"editor_drafts": {"x": "rascunho"}, "editor": {"font_size": 9}}, path
+            )
+            self.addCleanup(setattr, settings, "default_settings_path",
+                            settings.default_settings_path)
+            settings.default_settings_path = lambda: path
+
+            local = {"glossary_editor": {"sort": "antiga"}}
+            editor_widgets.save_window_section(
+                local, "glossary_editor", {"sort": "Original A-Z"}
+            )
+
+            disco = settings.load_settings(path)
+            self.assertEqual(disco["glossary_editor"]["sort"], "Original A-Z")
+            self.assertEqual(disco["editor_drafts"], {"x": "rascunho"}, "apagou rascunhos")
+            self.assertEqual(disco["editor"], {"font_size": 9}, "apagou a outra janela")
+
+    def test_it_rereads_the_disk_instead_of_writing_its_snapshot(self):
+        """O caso concreto que R4 descreve: a outra janela gravou nesse meio-tempo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "settings.json")
+            settings.save_settings({}, path)
+            self.addCleanup(setattr, settings, "default_settings_path",
+                            settings.default_settings_path)
+            settings.default_settings_path = lambda: path
+
+            # Snapshot que esta janela carregou na abertura: ainda sem rascunhos.
+            local = settings.load_settings(path)
+            # A outra janela grava um rascunho DEPOIS disso.
+            settings.save_settings({"editor_drafts": {"y": "novo"}}, path)
+
+            editor_widgets.save_window_section(local, "editor", {"font_size": 14})
+
+            disco = settings.load_settings(path)
+            self.assertEqual(
+                disco["editor_drafts"],
+                {"y": "novo"},
+                "gravou o snapshot antigo por cima do que a outra janela escreveu",
+            )
+            self.assertEqual(disco["editor"]["font_size"], 14)
+
+    def test_a_corrupted_section_is_replaced_and_not_merged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "settings.json")
+            settings.save_settings({"editor": "isto nao e um dicionario"}, path)
+            self.addCleanup(setattr, settings, "default_settings_path",
+                            settings.default_settings_path)
+            settings.default_settings_path = lambda: path
+
+            editor_widgets.save_window_section({}, "editor", {"font_size": 12})
+            self.assertEqual(settings.load_settings(path)["editor"], {"font_size": 12})
+
+    def test_the_local_snapshot_stays_coherent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "settings.json")
+            settings.save_settings({}, path)
+            self.addCleanup(setattr, settings, "default_settings_path",
+                            settings.default_settings_path)
+            settings.default_settings_path = lambda: path
+
+            local = {}
+            editor_widgets.save_window_section(local, "editor", {"font_size": 20})
+            self.assertEqual(local["editor"]["font_size"], 20)
+
+    def test_the_sash_limits_keep_a_panel_reachable(self):
+        """A decisao de onde colocar o divisor, sem abrir janela.
+
+        Uma posicao gravada numa tela grande deixaria o painel fora da janela
+        numa tela menor, e nao haveria como traze-lo de volta a nao ser apagando
+        as configuracoes na mao.
+        """
+        self.assertEqual(editor_common.clamped_sash_position(400, 360, 520), 400)
+        self.assertEqual(editor_common.clamped_sash_position(9999, 360, 520), 520)
+        self.assertEqual(editor_common.clamped_sash_position(10, 360, 520), 360)
+        self.assertEqual(editor_common.clamped_sash_position(600, 520), 600, "sem teto")
+
+    def test_a_position_that_was_never_saved_is_refused(self):
+        for valor in (None, 0, -5, "480", 12.5, True):
+            with self.subTest(valor=valor):
+                self.assertIsNone(editor_common.clamped_sash_position(valor, 360, 520))
+
+    def test_a_disk_failure_does_not_propagate(self):
+        """A chamada acontece ao fechar a janela: falhar ali nao pode derrubar nada."""
+        self.addCleanup(setattr, settings, "update_settings", settings.update_settings)
+        self.addCleanup(setattr, editor_widgets, "update_settings",
+                        editor_widgets.update_settings)
+
+        def explode(_mutator, _path=None):
+            raise OSError("disco cheio")
+
+        editor_widgets.update_settings = explode
+        local = {}
+        editor_widgets.save_window_section(local, "editor", {"font_size": 11})
+        self.assertEqual(local["editor"]["font_size"], 11, "o snapshot local continua")
+
+
+class FullTextSearchTests(unittest.TestCase):
+    """Roadmap 2.8 / garantia R8: busca por termos indexada, `LIKE` preservado.
+
+    `LIKE '%termo%'` tem curinga a esquerda e nenhum indice o atende, entao com
+    busca ativa cada interacao varria a tabela. O FTS5 resolve isso, mas ao
+    preco de uma semantica diferente — casa palavra inteira. Por isso as duas
+    formas convivem: nenhuma substitui a outra.
+    """
+
+    LINHAS = [
+        ("O bispo domina a diagonal", "El alfil domina la diagonal"),
+        ("A torre entra na coluna aberta", "La torre entra en la columna"),
+        ("Traducao com acento: proximo", "Tradução com acento: próximo"),
+        ("Somente acentuado: ameaça", "Sólo acentuado: amenaza"),
+        ("O cavalo salta", "El caballo salta"),
+    ]
+
+    def banco(self, tmp):
+        conn = initialize_database(str(Path(tmp) / "cache.db"))
+        cur = conn.cursor()
+        for original, traduzido in self.LINHAS:
+            save_translation(cur, original, traduzido, "pt")
+        conn.commit()
+        return conn, cur
+
+    def busca(self, cur, texto, modo=SEARCH_MODE_TERMS):
+        return sorted(
+            row[1]
+            for row in fetch_review_rows(cur, "pt", search_text=texto, search_mode=modo)
+        )
+
+    # ------------------------------------------------ a expressao enviada ao FTS
+
+    def test_the_query_is_built_from_whole_words(self):
+        self.assertEqual(build_fts_match_query("bispo"), '"bispo"')
+        self.assertEqual(build_fts_match_query("torre coluna"), '"torre" "coluna"')
+        self.assertEqual(build_fts_match_query("  espacos   demais "), '"espacos" "demais"')
+
+    def test_a_trailing_star_becomes_a_prefix_query(self):
+        """E o que devolve o casamento parcial que o `LIKE` dava de graca."""
+        self.assertEqual(build_fts_match_query("bisp*"), '"bisp"*')
+        self.assertEqual(build_fts_match_query("bisp* torre"), '"bisp"* "torre"')
+
+    def test_fts_operators_are_neutralized(self):
+        """Sem isto, uma busca comum viraria erro de sintaxe no meio da navegacao.
+
+        `AND`, `-`, `(`, `"` e `:` sao operadores do FTS5. Um usuario que digite
+        `bispo (branco)` nao esta pedindo uma expressao booleana.
+        """
+        self.assertEqual(build_fts_match_query('bispo "branco"'), '"bispo" "branco"')
+        self.assertEqual(build_fts_match_query("bispo (branco)"), '"bispo" "branco"')
+        self.assertEqual(build_fts_match_query("a AND b"), '"a" "AND" "b"')
+        self.assertEqual(build_fts_match_query("coluna: aberta"), '"coluna" "aberta"')
+
+    def test_a_query_with_nothing_to_match_is_none(self):
+        for vazio in ("", "   ", None, "((", "-- ::"):
+            with self.subTest(entrada=vazio):
+                self.assertIsNone(build_fts_match_query(vazio))
+
+    # ------------------------------------------------ as duas semanticas
+
+    def test_terms_match_whole_words_and_substring_matches_pieces(self):
+        """A diferenca entre os dois modos, lado a lado.
+
+        E a razao de os dois existirem: `bisp` so acha "bispo" por trecho, e
+        exigir que o usuario saiba escrever `bisp*` para toda busca parcial
+        seria trocar um custo por outro.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, cur = self.banco(tmp)
+
+            self.assertEqual(self.busca(cur, "bispo"), ["O bispo domina a diagonal"])
+            self.assertEqual(self.busca(cur, "bisp"), [], "termo casa palavra inteira")
+            self.assertEqual(self.busca(cur, "bisp*"), ["O bispo domina a diagonal"])
+            self.assertEqual(
+                self.busca(cur, "bisp", SEARCH_MODE_SUBSTRING),
+                ["O bispo domina a diagonal"],
+                "o `LIKE` continua achando o trecho",
+            )
+            conn.close()
+
+    def test_the_search_covers_both_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, cur = self.banco(tmp)
+            self.assertEqual(self.busca(cur, "caballo"), ["O cavalo salta"])
+            self.assertEqual(self.busca(cur, "cavalo"), ["O cavalo salta"])
+            conn.close()
+
+    def test_accents_are_folded(self):
+        """`remove_diacritics 2`: num corpus em portugues isso decide muita busca.
+
+        A palavra tem de existir SO na forma acentuada. Se a versao sem acento
+        estiver em qualquer das duas colunas, a busca acha por ela e o teste
+        passa mesmo com a dobra desligada — foi o que a verificacao por mutacao
+        mostrou sobre a primeira versao deste teste.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, cur = self.banco(tmp)
+            self.assertNotIn(
+                "ameaca",
+                " ".join(o + " " + t for o, t in self.LINHAS),
+                "a forma sem acento nao pode existir em lugar nenhum",
+            )
+            self.assertEqual(
+                self.busca(cur, "ameaca"),
+                ["Somente acentuado: ameaça"],
+                "buscar sem acento tem de achar a palavra acentuada",
+            )
+            self.assertEqual(self.busca(cur, "ameaça"), ["Somente acentuado: ameaça"])
+            conn.close()
+
+    def test_several_terms_are_all_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, cur = self.banco(tmp)
+            self.assertEqual(
+                self.busca(cur, "torre coluna"), ["A torre entra na coluna aberta"]
+            )
+            self.assertEqual(self.busca(cur, "torre cavalo"), [])
+            conn.close()
+
+    # ------------------------------------------------ o indice acompanha a tabela
+
+    def test_the_index_follows_updates_and_deletes(self):
+        """O ponto fragil do "external content": quem sincroniza sao os gatilhos.
+
+        Sem o comando `'delete'` com os valores antigos, os termos de uma linha
+        removida ficam no indice e a busca passa a devolver linhas que nao
+        existem mais — um resultado errado, nao um erro.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, cur = self.banco(tmp)
+            alvo = cur.execute(
+                "SELECT id FROM comments WHERE original_comment = ?",
+                ("O bispo domina a diagonal",),
+            ).fetchone()[0]
+
+            update_translation_by_id(cur, alvo, "El caballo salta agora", False)
+            conn.commit()
+            self.assertEqual(self.busca(cur, "alfil"), [], "termo antigo sobreviveu")
+            self.assertEqual(self.busca(cur, "agora"), ["O bispo domina a diagonal"])
+
+            cur.execute("DELETE FROM comments WHERE id = ?", (alvo,))
+            conn.commit()
+            self.assertEqual(self.busca(cur, "bispo"), [], "linha removida ainda aparece")
+
+            # O indice PRECISA ser inspecionado direto. A consulta normal cruza
+            # com `comments`, entao uma entrada orfa fica invisivel por ela — e o
+            # `integrity-check` do FTS5 tambem nao acusa este caso (verificado).
+            # Sem esta linha, remover o comando `'delete'` do gatilho passaria
+            # despercebido ate o indice encher de lixo.
+            orfas = cur.execute(
+                f"SELECT count(*) FROM {FTS_TABLE} WHERE {FTS_TABLE} MATCH ?",
+                ('"agora"',),
+            ).fetchone()[0]
+            self.assertEqual(orfas, 0, "os termos da linha removida ficaram no indice")
+            conn.close()
+
+    def test_the_index_is_built_for_a_database_that_already_had_rows(self):
+        """A migracao popula o indice com o que ja estava no banco."""
+        with tempfile.TemporaryDirectory() as tmp:
+            caminho = str(Path(tmp) / "antigo.db")
+            conn, cur = self.banco(tmp)
+            conn.close()
+
+            # Simula um banco de versao anterior: sem indice e sem os gatilhos.
+            conn = sqlite3.connect(str(Path(tmp) / "cache.db"))
+            conn.execute(f"DROP TABLE {FTS_TABLE}")
+            for gatilho in ("insert", "delete", "update"):
+                conn.execute(f"DROP TRIGGER comments_fts_{gatilho}")
+            conn.execute("PRAGMA user_version = 2")
+            conn.commit()
+            conn.close()
+
+            conn = initialize_database(str(Path(tmp) / "cache.db"))
+            cur = conn.cursor()
+            self.assertEqual(self.busca(cur, "bispo"), ["O bispo domina a diagonal"])
+            conn.close()
+
+    # ------------------------------------------------ degradacao
+
+    def test_without_the_index_the_search_still_works(self):
+        """Sem FTS5 o programa nao pode parar: cai no `LIKE` e continua correto."""
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, cur = self.banco(tmp)
+            cur.execute(f"DROP TABLE {FTS_TABLE}")
+            conn.commit()
+
+            self.assertFalse(fts_index_ready(cur))
+            self.assertEqual(
+                self.busca(cur, "bispo"),
+                ["O bispo domina a diagonal"],
+                "sem indice a busca por termos tinha de cair no LIKE",
+            )
+            conn.close()
+
+    def test_a_query_with_no_usable_term_falls_back_instead_of_failing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, cur = self.banco(tmp)
+            # `((` nao tem termo nenhum: vai pelo LIKE, e nao acha nada.
+            self.assertEqual(self.busca(cur, "(("), [])
+            conn.close()
+
+    def test_the_two_modes_agree_when_the_term_is_a_whole_word(self):
+        """Contraprova: onde as semanticas coincidem, o resultado tem de coincidir."""
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, cur = self.banco(tmp)
+            for termo in ("bispo", "torre", "cavalo", "salta", "inexistente"):
+                with self.subTest(termo=termo):
+                    self.assertEqual(
+                        self.busca(cur, termo, SEARCH_MODE_TERMS),
+                        self.busca(cur, termo, SEARCH_MODE_SUBSTRING),
+                    )
+            conn.close()
+
+    def test_counting_and_paging_agree_with_the_rows(self):
+        """O modo tem de valer nas tres consultas, senao a paginacao mente."""
+        with tempfile.TemporaryDirectory() as tmp:
+            conn, cur = self.banco(tmp)
+            # `torr` e escolhido de proposito: por termo nao casa nada (palavra
+            # inteira) e por trecho casa "torre". Com um termo em que os dois
+            # modos concordam, uma consulta que ignorasse o modo passaria.
+            esperado = {SEARCH_MODE_TERMS: 0, SEARCH_MODE_SUBSTRING: 1}
+            for modo, quantas in esperado.items():
+                with self.subTest(modo=modo):
+                    total = count_review_rows(
+                        cur, "pt", search_text="torr", search_mode=modo
+                    )
+                    pagina = fetch_review_rows_page(
+                        cur, "pt", limit=100, offset=0,
+                        search_text="torr", search_mode=modo,
+                    )
+                    resumo = get_review_status_counts(
+                        cur, "pt", search_text="torr", search_mode=modo
+                    )
+                    self.assertEqual(total, quantas, "a contagem nao respeitou o modo")
+                    self.assertEqual(len(pagina), quantas, "a pagina nao respeitou o modo")
+                    self.assertEqual(resumo["total"], quantas, "o resumo nao respeitou o modo")
+            conn.close()
+
+
+class StatusCountReuseTests(unittest.TestCase):
+    """Roadmap 2.8: o total do filtro sai do resumo, sem uma segunda varredura.
+
+    `get_review_status_counts` e `count_review_rows` varriam a mesma tabela com o
+    mesmo `WHERE` a cada interacao do editor, e a segunda pedia um numero que a
+    primeira ja tinha separado por status. Com busca ativa isso custa ~100 ms por
+    troca de pagina, porque `LIKE '%termo%'` nao usa indice.
+
+    O risco de reaproveitar e silencioso: os dois criterios vivem em lugares
+    diferentes (`_review_where` e os `CASE` da agregada) e podem divergir sem que
+    nada quebre na tela — a lista so passa a paginar pelo numero errado. Por isso
+    o teste compara os dois caminhos em vez de conferir constantes.
+    """
+
+    FILTROS = ("all", "pending", "verified", "warnings")
+
+    def _dataset(self, cursor):
+        # Traducao igual ao original => aviso de qualidade; diferente => sem.
+        save_translation(cursor, "alfa original", "alfa original", "pt")
+        save_translation(cursor, "beta original", "beta original", "pt")
+        save_translation(cursor, "gama original", "uma traducao bem diferente", "pt")
+        save_translation(cursor, "delta original", "outra traducao diferente", "pt")
+        save_translation(cursor, "alfa em outro idioma", "seja la o que for", "en")
+        cursor.execute(
+            "UPDATE comments SET verified = 1 WHERE original_comment IN (?, ?)",
+            ("beta original", "gama original"),
+        )
+
+    def test_every_filter_total_matches_a_dedicated_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = initialize_database(str(Path(tmp) / "cache.db"))
+            cursor = conn.cursor()
+            self._dataset(cursor)
+            conn.commit()
+
+            # Sem busca, com busca que acha, e com busca que nao acha nada — os
+            # tres caminhos que o editor produz.
+            for busca in ("", "original", "alfa", "inexistente"):
+                resumo = get_review_status_counts(cursor, "pt", busca)
+                for filtro in self.FILTROS:
+                    with self.subTest(busca=busca, filtro=filtro):
+                        self.assertEqual(
+                            count_from_status_counts(resumo, filtro),
+                            count_review_rows(
+                                cursor, "pt", search_text=busca, status_filter=filtro
+                            ),
+                        )
+            conn.close()
+
+    def test_the_dataset_exercises_every_filter(self):
+        """Sem isto, o teste acima passaria comparando zeros."""
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = initialize_database(str(Path(tmp) / "cache.db"))
+            cursor = conn.cursor()
+            self._dataset(cursor)
+            conn.commit()
+
+            resumo = get_review_status_counts(cursor, "pt")
+            for filtro in self.FILTROS:
+                self.assertGreater(
+                    count_from_status_counts(resumo, filtro),
+                    0,
+                    f"o filtro {filtro!r} nao tem nenhuma linha para comparar",
+                )
+            conn.close()
+
+    def test_only_unverified_reads_the_pending_total(self):
+        resumo = {"total": 9, "pending": 7, "verified": 2, "warnings": 3}
+        self.assertEqual(count_from_status_counts(resumo, only_unverified=True), 7)
+        self.assertEqual(count_from_status_counts(resumo), 9)
+
+    def test_an_unknown_filter_falls_back_instead_of_guessing(self):
+        """O chamador precisa saber que o resumo nao serve, e nao receber zero."""
+        resumo = {"total": 9, "pending": 7, "verified": 2, "warnings": 3}
+        self.assertIsNone(count_from_status_counts(resumo, "filtro-que-nao-existe"))
+
+
+class QualityWarningColumnTests(unittest.TestCase):
+    """A coluna quality_warning e um cache; o perigo e ela ficar obsoleta."""
+
+    def _flags(self, cursor):
+        return dict(
+            cursor.execute(
+                "SELECT id, quality_warning FROM comments ORDER BY id"
+            ).fetchall()
+        )
+
+    def _recalculado(self, cursor):
+        return {
+            row_id: (1 if evaluate_translation_quality(orig, trans) else 0)
+            for row_id, orig, trans in cursor.execute(
+                "SELECT id, original_comment, translated_comment FROM comments ORDER BY id"
+            ).fetchall()
+        }
+
+    def test_column_stays_in_sync_across_every_write_path(self):
+        longo = "White plays a very strong move on the kingside " * 2
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = initialize_database(str(Path(tmp) / "cache.db"))
+            cursor = conn.cursor()
+
+            # 1. insercao: uma com aviso (chaves), uma sem
+            save_translation(cursor, "White plays", "As brancas jogam", "pt")
+            save_translation(cursor, "Black plays", "Contem {chaves}", "pt")
+            # 2. linha vazia depois preenchida
+            save_translation(cursor, longo, "", "pt")
+            conn.commit()
+            self.assertEqual(self._flags(cursor), self._recalculado(cursor))
+            self.assertEqual(self._flags(cursor)[2], 1)  # chaves -> aviso
+
+            # 3. preenchimento de vazia com traducao curta demais -> aviso
+            save_translation(cursor, longo, "curta", "pt")
+            conn.commit()
+            self.assertEqual(self._flags(cursor), self._recalculado(cursor))
+            self.assertEqual(self._flags(cursor)[3], 1)
+
+            # 4. edicao manual que RESOLVE o aviso
+            update_translation_by_id(cursor, 2, "Sem chaves agora")
+            conn.commit()
+            self.assertEqual(self._flags(cursor)[2], 0)
+            self.assertEqual(self._flags(cursor), self._recalculado(cursor))
+
+            # 5. edicao manual que CRIA um aviso
+            update_translation_by_id(cursor, 1, "{quebrado}")
+            conn.commit()
+            self.assertEqual(self._flags(cursor)[1], 1)
+            self.assertEqual(self._flags(cursor), self._recalculado(cursor))
+
+            # 6. verificar nao mexe no texto, entao nao pode mexer no flag
+            antes = self._flags(cursor)
+            set_translation_verified_by_id(cursor, 1, True)
+            conn.commit()
+            self.assertEqual(self._flags(cursor), antes)
+
+            # 7. regras automaticas em massa
+            apply_automatic_translation_updates(
+                cursor,
+                [("{quebrado}", "consertado")],
+                apply_automatic_substitutions,
+                target_language="pt",
+            )
+            conn.commit()
+            self.assertEqual(self._flags(cursor), self._recalculado(cursor))
+            self.assertEqual(self._flags(cursor)[1], 0)
+
+            conn.close()
+
+    def test_backfill_fills_legacy_rows_and_counts_match_python(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "cache.db")
+            conn = initialize_database(db_path)
+            cursor = conn.cursor()
+            for i in range(30):
+                trans = "Contem {chaves}" if i % 3 == 0 else f"Traducao boa {i}"
+                save_translation(cursor, f"Original number {i}", trans, "pt")
+            conn.commit()
+
+            # Simula uma base antiga: coluna existe mas esta toda NULL.
+            cursor.execute("UPDATE comments SET quality_warning = NULL")
+            cursor.execute("PRAGMA user_version = 0")
+            conn.commit()
+            conn.close()
+
+            # Reabrir dispara a migracao e o backfill.
+            conn = initialize_database(db_path)
+            cursor = conn.cursor()
+            self.assertEqual(self._flags(cursor), self._recalculado(cursor))
+
+            # A contagem em SQL tem de bater com a avaliacao em Python.
+            esperado = len(
+                filter_quality_warning_rows(fetch_review_rows(cursor, "pt"))
+            )
+            self.assertEqual(
+                count_review_rows(cursor, "pt", status_filter="warnings"),
+                esperado,
+            )
+            self.assertEqual(
+                get_review_status_counts(cursor, "pt")["warnings"],
+                esperado,
+            )
+
+            # E a pagina do filtro so pode trazer linhas que realmente tem aviso.
+            pagina = fetch_review_rows_page(
+                cursor, "pt", limit=100, offset=0, status_filter="warnings"
+            )
+            self.assertTrue(pagina)
+            self.assertTrue(all(row_has_quality_warning(row) for row in pagina))
+            self.assertEqual(len(pagina), esperado)
+            conn.close()
+
+    def test_migration_runs_once_and_is_skipped_afterwards(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "cache.db")
+            conn = initialize_database(db_path)
+            conn.close()
+
+            conn = initialize_database(db_path)
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            self.assertEqual(version, SCHEMA_VERSION)
+            # Nada a preencher numa base ja migrada.
+            self.assertEqual(backfill_quality_warnings(conn), 0)
+            conn.close()
+
+
+class EditorCommonTests(unittest.TestCase):
+    """Logica das janelas de edicao, agora testavel sem abrir uma janela."""
+
+    def test_page_count_and_clamp(self):
+        self.assertEqual(page_count(0, 100), 0)
+        self.assertEqual(page_count(1, 100), 1)
+        self.assertEqual(page_count(100, 100), 1)
+        self.assertEqual(page_count(101, 100), 2)
+        self.assertEqual(page_count(250, 100), 3)
+        # Defensivo: nao pode estourar com tamanho de pagina invalido.
+        self.assertEqual(page_count(10, 0), 0)
+        self.assertEqual(page_count(-5, 100), 0)
+
+        # Depois de excluir/filtrar, a pagina atual pode ficar alem do fim.
+        self.assertEqual(clamp_page(5, 250, 100), 2)
+        self.assertEqual(clamp_page(0, 250, 100), 0)
+        self.assertEqual(clamp_page(-3, 250, 100), 0)
+        self.assertEqual(clamp_page(7, 0, 100), 0)
+
+    def test_offsets_round_trip(self):
+        self.assertEqual(page_offset(0, 100), 0)
+        self.assertEqual(page_offset(3, 100), 300)
+        self.assertEqual(page_offset(-1, 100), 0)
+
+        self.assertEqual(page_of_offset(0, 100), 0)
+        self.assertEqual(page_of_offset(99, 100), 0)
+        self.assertEqual(page_of_offset(100, 100), 1)
+        self.assertEqual(page_of_offset(250, 100), 2)
+
+        for offset in (0, 1, 99, 100, 101, 999):
+            pagina = page_of_offset(offset, 100)
+            self.assertLessEqual(page_offset(pagina, 100), offset)
+            self.assertLess(offset - page_offset(pagina, 100), 100)
+
+    def test_local_index_is_clamped_to_the_page_actually_returned(self):
+        # Caso normal.
+        self.assertEqual(local_index_for_offset(250, 100, 100), 50)
+        # A pagina veio menor do que o esperado (o banco mudou no meio):
+        # o indice tem de ser limitado, nao estourar IndexError depois.
+        self.assertEqual(local_index_for_offset(250, 100, 10), 9)
+        # Pagina vazia.
+        self.assertIsNone(local_index_for_offset(250, 100, 0))
+
+    def test_clamp_geometry_fits_saved_window_into_current_screen(self):
+        # Cabe: preservado.
+        self.assertEqual(
+            clamp_geometry("1200x700+100+50", 1920, 1080, 1120, 680),
+            "1200x700+100+50",
+        )
+        # Posicao negativa salva num monitor que nao existe mais.
+        self.assertEqual(
+            clamp_geometry("1360x705+-71+28", 1920, 1080, 1120, 680),
+            "1360x705+0+28",
+        )
+        # Maior que a tela atual: encolhe e reposiciona.
+        self.assertEqual(
+            clamp_geometry("3000x2000+500+400", 1920, 1080, 1120, 680),
+            "1920x1080+0+0",
+        )
+        # Menor que o minimo da janela: cresce.
+        self.assertEqual(
+            clamp_geometry("300x200+10+10", 1920, 1080, 1120, 680),
+            "1120x680+10+10",
+        )
+        # Formato desconhecido passa intacto.
+        self.assertEqual(clamp_geometry("zoomed", 1920, 1080, 1120, 680), "zoomed")
+        self.assertIsNone(clamp_geometry(None, 1920, 1080, 1120, 680))
+
+    def test_preview_collapses_whitespace_and_truncates(self):
+        self.assertEqual(preview("  varios   espacos \n aqui "), "varios espacos aqui")
+        self.assertEqual(preview("", 10), "")
+        self.assertIsNotNone(preview(None))
+        self.assertEqual(preview("abcdefghij", 10), "abcdefghij")
+        self.assertEqual(preview("abcdefghijk", 10), "abcdefg...")
+        self.assertLessEqual(len(preview("x" * 500, 54)), 54)
+
+    def test_both_editors_share_the_same_geometry_logic(self):
+        # As duas janelas so devem divergir no tamanho minimo.
+        janela = FakeWindow(1920, 1080)
+        self.assertEqual(
+            safe_geometry(janela, "300x200+10+10"),
+            clamp_geometry("300x200+10+10", 1920, 1080, 1120, 680),
+        )
+        self.assertEqual(
+            glossary_safe_geometry(janela, "300x200+10+10"),
+            clamp_geometry("300x200+10+10", 1920, 1080, 1040, 640),
+        )
 
 
 class SettingsTests(unittest.TestCase):
@@ -929,6 +2520,57 @@ class SettingsTests(unittest.TestCase):
             settings_path.write_text("{invalid", encoding="utf-8")
             self.assertEqual(load_settings(str(settings_path)), {})
             self.assertEqual(load_settings(str(Path(tmp) / "missing.json")), {})
+
+    def test_concurrent_windows_do_not_erase_each_others_settings(self):
+        # Garantia R4: cada janela carrega seu proprio snapshot na abertura.
+        # Se cada uma gravasse o snapshot inteiro, a ultima apagaria o que a
+        # outra escreveu depois — inclusive rascunhos nao salvos.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "settings.json")
+            save_settings({"editor": {"font_size": 12}}, path)
+
+            # As duas janelas abrem e leem o disco.
+            janela_traducoes = load_settings(path)
+            janela_glossario = load_settings(path)
+
+            # O editor de traducoes salva um rascunho.
+            set_editor_draft(
+                janela_traducoes, "/db.sqlite", "pt", 7, "meu rascunho", "original"
+            )
+            update_settings(
+                lambda disk: set_editor_draft(
+                    disk, "/db.sqlite", "pt", 7, "meu rascunho", "original"
+                ),
+                path,
+            )
+
+            # Depois o editor de glossario salva as SUAS preferencias, a partir
+            # de um snapshot que nao conhece o rascunho.
+            janela_glossario["glossary_editor"] = {"filter": "todos"}
+
+            def apply(disk):
+                disk.setdefault("glossary_editor", {}).update({"filter": "todos"})
+
+            update_settings(apply, path)
+
+            gravado = load_settings(path)
+            self.assertEqual(gravado["glossary_editor"]["filter"], "todos")
+            # O rascunho tem de sobreviver.
+            draft = get_editor_draft(gravado, "/db.sqlite", "pt", 7, "original")
+            self.assertIsNotNone(draft)
+            self.assertEqual(draft["text"], "meu rascunho")
+            # E a preferencia original tambem.
+            self.assertEqual(gravado["editor"]["font_size"], 12)
+
+    def test_settings_write_is_atomic_and_leaves_no_temp_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            path = tmp_path / "settings.json"
+            save_settings({"editor": {"font_size": 14}}, str(path))
+
+            self.assertTrue(path.exists())
+            self.assertEqual(list(tmp_path.glob("*.tmp")), [])
+            self.assertEqual(load_settings(str(path))["editor"]["font_size"], 14)
 
     def test_editor_drafts_are_scoped_and_base_checked(self):
         settings = {}
@@ -1108,6 +2750,30 @@ class ReviewQualityTests(unittest.TestCase):
 
 
 class TranslationWorkerTests(unittest.TestCase):
+    def setUp(self):
+        """Silencia TODO o `messagebox` do worker, `showerror` inclusive.
+
+        Cada teste ja silenciava o dialogo do caminho que exercitava, mas nenhum
+        cobria o `showerror` — e `run_translation` tem um `except Exception` que
+        cai justamente nele. Resultado: qualquer falha inesperada abria um
+        dialogo modal de verdade (o `FakeRoot.after` executa na hora) e a suite
+        **travava em vez de falhar**.
+
+        Descoberto verificando uma mutacao do item 2.9: quebrado o cache, o teste
+        "sem chamada de API" levantava `AssertionError`, o worker capturava, e a
+        execucao parava para sempre esperando alguem clicar em OK.
+        """
+        original = translation_worker.messagebox
+
+        class SemDialogos:
+            showinfo = staticmethod(lambda *_a, **_k: None)
+            showwarning = staticmethod(lambda *_a, **_k: None)
+            showerror = staticmethod(lambda *_a, **_k: None)
+            askyesno = staticmethod(lambda *_a, **_k: True)
+
+        translation_worker.messagebox = SemDialogos
+        self.addCleanup(setattr, translation_worker, "messagebox", original)
+
     def test_run_translation_uses_cache_and_generates_pgn_without_api_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1150,6 +2816,106 @@ class TranslationWorkerTests(unittest.TestCase):
             self.assertEqual(app.progress.value, 1)
             self.assertFalse(app.is_processing)
             self.assertTrue(app.reset_called)
+
+    def test_run_translation_reports_failed_comments_instead_of_silent_success(self):
+        # Garantia T2: uma falha parcial nao pode ser apresentada como sucesso.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n'
+                "1. e4 {White seizes the center} e5 {Black responds}\n",
+                encoding="utf-8",
+            )
+
+            app = FakeApp(db_path)
+            dialogs = []
+
+            original_translate_text = translation_worker.translate_text
+            original_showinfo = translation_worker.messagebox.showinfo
+            original_showwarning = translation_worker.messagebox.showwarning
+            try:
+                def flaky_translate(text, *_args, **_kwargs):
+                    if "|||" in text:
+                        # Desalinhamento (resposta com 1 parte para 2
+                        # comentarios): e o que leva ao fallback individual.
+                        #
+                        # Antes este teste devolvia `None` aqui, que tambem caia
+                        # no fallback. Com B3 nao cai mais: `None` significa que
+                        # a API nao respondeu, e reprocessar comentario a
+                        # comentario nesse caso era justamente o defeito. O que
+                        # o teste verifica — T2, falha parcial nao vira sucesso
+                        # limpo — nao mudou; mudou como se chega ao fallback.
+                        return "As brancas tomam o centro"
+                    if "White seizes" in text:
+                        return "As brancas tomam o centro"
+                    return None  # o segundo comentario falha
+
+                translation_worker.translate_text = flaky_translate
+                translation_worker.messagebox.showinfo = (
+                    lambda title, msg, *a, **k: dialogs.append(("info", title, msg))
+                )
+                translation_worker.messagebox.showwarning = (
+                    lambda title, msg, *a, **k: dialogs.append(("warning", title, msg))
+                )
+
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+            finally:
+                translation_worker.translate_text = original_translate_text
+                translation_worker.messagebox.showinfo = original_showinfo
+                translation_worker.messagebox.showwarning = original_showwarning
+
+            # O usuario precisa ser avisado, nao receber um "Concluido" limpo.
+            self.assertEqual(len(dialogs), 1)
+            kind, title, message = dialogs[0]
+            self.assertEqual(kind, "warning")
+            self.assertIn("falha", title.lower())
+            self.assertIn("Falharam: 1", message)
+
+            # O log precisa registrar a falha e nomear o arquivo afetado.
+            log = "\n".join(app.logs)
+            self.assertIn("[FALHA]", log)
+            self.assertIn("Comentarios que falharam: 1", log)
+            self.assertIn("game.pgn", log)
+
+            # Garantia T3: o comentario que falhou fica no idioma original.
+            output_text = (tmp_path / "game-BR.pgn").read_text(encoding="utf-8")
+            self.assertIn("{As brancas tomam o centro}", output_text)
+            self.assertIn("{Black responds}", output_text)
+
+    def test_run_translation_reports_clean_success_when_nothing_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n1. e4 {White starts}\n',
+                encoding="utf-8",
+            )
+
+            app = FakeApp(tmp_path / "cache.db")
+            dialogs = []
+
+            original_translate_text = translation_worker.translate_text
+            original_showinfo = translation_worker.messagebox.showinfo
+            original_showwarning = translation_worker.messagebox.showwarning
+            try:
+                translation_worker.translate_text = lambda text, *a, **k: "As brancas comecam"
+                translation_worker.messagebox.showinfo = (
+                    lambda title, msg, *a, **k: dialogs.append(("info", title, msg))
+                )
+                translation_worker.messagebox.showwarning = (
+                    lambda title, msg, *a, **k: dialogs.append(("warning", title, msg))
+                )
+
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+            finally:
+                translation_worker.translate_text = original_translate_text
+                translation_worker.messagebox.showinfo = original_showinfo
+                translation_worker.messagebox.showwarning = original_showwarning
+
+            self.assertEqual([d[0] for d in dialogs], ["info"])
+            self.assertIn("Falharam: 0", dialogs[0][2])
 
     def test_run_translation_applies_cleanup_rules_before_api_call(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1556,13 +3322,17 @@ class GlossaryTests(unittest.TestCase):
         self.assertEqual(find_glossary_suggestions(text, substitutions), [])
 
         text = "for branca brancas joga, as brancas joga"
+        # Garantia S3: as sugestoes vem da mais especifica para a mais generica,
+        # que e a ordem em que serao aplicadas. Assim uma regra curta nao consome
+        # o trecho que uma regra longa pretendia casar, e o corte por
+        # max_suggestions descarta as genericas, nao as especificas.
         self.assertEqual(
             find_glossary_suggestions(text, substitutions),
             [
-                ("for", "para"),
-                ("branca", "brancas"),
-                ("brancas joga", "brancas jogam"),
                 (", as brancas joga", ", as brancas jogam"),
+                ("brancas joga", "brancas jogam"),
+                ("branca", "brancas"),
+                ("for", "para"),
             ],
         )
         self.assertEqual(find_glossary_matches("Cavaleiro", "cavaleiro"), [(0, 9)])
@@ -1576,6 +3346,324 @@ class GlossaryTests(unittest.TestCase):
             apply_all_substitutions("forma for branca", [("for", "para"), ("branca", "brancas")]),
             "forma para brancas",
         )
+
+    def test_specific_rule_wins_over_generic_rule_regardless_of_file_order(self):
+        # Garantia S3: a regra curta nao pode consumir o texto que a longa casaria.
+        rules = [
+            ("verificação", "xeque"),
+            ("da verificação intermediária", "do xeque intermediário"),
+        ]
+        text = "Ele saiu da verificação intermediária com vantagem."
+
+        self.assertEqual(
+            apply_all_substitutions(text, rules),
+            "Ele saiu do xeque intermediário com vantagem.",
+        )
+        # Inverter a ordem no arquivo nao pode mudar o resultado.
+        self.assertEqual(
+            apply_all_substitutions(text, list(reversed(rules))),
+            "Ele saiu do xeque intermediário com vantagem.",
+        )
+
+        # Caso real do glossario: 'Cavaleiros' nao pode encobrir a regra completa.
+        chess_rules = [
+            ("Cavaleiros", "Cavalos"),
+            ("Jogo dos Três Cavaleiros", "Partida dos Três Cavalos"),
+        ]
+        self.assertEqual(
+            apply_all_substitutions("Jogo dos Três Cavaleiros é classico", chess_rules),
+            "Partida dos Três Cavalos é classico",
+        )
+
+        # Quem precisar da ordem literal do arquivo continua podendo pedi-la.
+        self.assertEqual(
+            apply_all_substitutions(text, rules, order_by_specificity=False),
+            "Ele saiu da xeque intermediária com vantagem.",
+        )
+
+    def test_replaced_text_is_frozen_against_contradictory_rules(self):
+        # Caso real do glossario: duas regras que se desfazem uma a outra.
+        rules = [
+            ("Rei das brancas estão", "Rei das brancas está"),
+            ("brancas está", "brancas estão"),
+        ]
+        # A regra especifica entrega o que declarou; a generica nao reverte.
+        self.assertEqual(
+            apply_all_substitutions("Rei das brancas estão", rules),
+            "Rei das brancas está",
+        )
+        # E o resultado nao depende da ordem em que foram digitadas no arquivo.
+        self.assertEqual(
+            apply_all_substitutions("Rei das brancas estão", list(reversed(rules))),
+            "Rei das brancas está",
+        )
+        # A regra generica continua valendo onde a especifica nao alcanca.
+        self.assertEqual(
+            apply_all_substitutions("As brancas está bem", rules),
+            "As brancas estão bem",
+        )
+        # O encadeamento antigo continua disponivel para quem precisar.
+        self.assertEqual(
+            apply_all_substitutions(
+                "Rei das brancas estão", rules, protect_replacements=False
+            ),
+            "Rei das brancas estão",
+        )
+
+    def test_ordering_cache_never_changes_the_result(self):
+        """Item 2.10: a ordenacao virou memorizada — nao pode mudar nada.
+
+        S3 depende inteiramente desta ordem. Um cache que devolva a lista errada,
+        ou que se deixe corromper por quem mutar o resultado, quebra a garantia
+        de forma dificil de perceber: as regras continuam sendo aplicadas, so que
+        na ordem errada.
+        """
+        regras = [
+            ("verificacao", "xeque"),
+            ("da verificacao intermediaria", "do xeque intermediario"),
+            ("torre", "roque"),
+            ("rei", "rei"),
+        ]
+        outras = [("a", "b"), ("ccc", "d")]
+
+        esperado = [
+            ("da verificacao intermediaria", "do xeque intermediario"),
+            ("verificacao", "xeque"),
+            ("torre", "roque"),
+            ("rei", "rei"),
+        ]
+        self.assertEqual(order_rules_by_specificity(regras), esperado)
+        # Segunda chamada: agora vem do cache.
+        self.assertEqual(order_rules_by_specificity(regras), esperado)
+        # Uma lista diferente nao pode receber o resultado da anterior.
+        self.assertEqual(
+            order_rules_by_specificity(outras),
+            [("ccc", "d"), ("a", "b")],
+        )
+        self.assertEqual(order_rules_by_specificity(regras), esperado)
+
+        # Mutar o resultado nao pode contaminar a proxima chamada.
+        devolvido = order_rules_by_specificity(regras)
+        devolvido.append(("intruso", "x"))
+        devolvido[0] = ("trocado", "y")
+        self.assertEqual(order_rules_by_specificity(regras), esperado)
+
+        # Uma lista com o MESMO conteudo, mas objeto diferente, e equivalente.
+        self.assertEqual(order_rules_by_specificity(list(regras)), esperado)
+
+        # E o conteudo e o que decide: mudar uma regra muda a ordem.
+        # O padrao precisa ser mais longo que os 28 caracteres de
+        # "da verificacao intermediaria" para assumir o primeiro lugar.
+        mais_longa = ("uma regra com o padrao bem mais longo que os outros", "x")
+        alteradas = list(regras)
+        alteradas[2] = mais_longa
+        self.assertGreater(len(mais_longa[0]), len("da verificacao intermediaria"))
+        self.assertEqual(order_rules_by_specificity(alteradas)[0], mais_longa)
+
+    def test_order_rules_by_specificity_is_stable_for_equal_lengths(self):
+        rules = [("aa", "1"), ("bb", "2"), ("cccc", "3"), ("dd", "4")]
+        self.assertEqual(
+            order_rules_by_specificity(rules),
+            [("cccc", "3"), ("aa", "1"), ("bb", "2"), ("dd", "4")],
+        )
+
+    def test_glossary_matches_never_overlap(self):
+        # Garantia S1: nenhum caractere fora de um match pode desaparecer.
+        for text, orig, new, expected in (
+            ("de de de", "de de", "de", "de de"),
+            ("com com com", "com com", "com", "com com"),
+            ("em em em", "em em", "em", "em em"),
+        ):
+            matches = find_glossary_matches(text, orig)
+            for (_, first_end), (second_start, _) in zip(matches, matches[1:]):
+                self.assertLessEqual(first_end, second_start)
+            self.assertEqual(apply_all_substitutions(text, [(orig, new)]), expected)
+
+        # Duas ocorrencias realmente separadas continuam sendo substituidas.
+        self.assertEqual(
+            apply_all_substitutions("de de x de de", [("de de", "de")]),
+            "de x de",
+        )
+
+    def test_glossary_matching_survives_characters_whose_lowercase_grows(self):
+        # Garantia S2: len('İ'.lower()) == 2; os indices tem de ser do texto original.
+        self.assertEqual(len("İ".lower()), 2)
+
+        text = "İstanbul rook attack"
+        matches = find_glossary_matches(text, "rook")
+        self.assertEqual(len(matches), 1)
+        start, end = matches[0]
+        self.assertEqual(text[start:end], "rook")
+        self.assertEqual(
+            apply_all_substitutions(text, [("rook", "torre")]),
+            "İstanbul torre attack",
+        )
+
+        # Regra que comeca com caractere nao-alfanumerico nao pode comer vizinhos.
+        self.assertEqual(
+            apply_all_substitutions("İ a -fileira, ok", [("-fileira", "-coluna")]),
+            "İ a -coluna, ok",
+        )
+
+    def test_delete_by_pair_removes_the_chosen_entry_even_with_duplicates(self):
+        # Garantia S6: excluir por indice quebra quando a lista exibida e
+        # deduplicada e a exclusao opera sobre a lista completa do arquivo.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            glossary_db = tmp_path / "glossario.db"
+
+            save_glossary_entries(
+                [("a", "b"), ("a", "b"), ("king", "rei"), ("queen", "dama")],
+                str(glossary),
+                create_backup=False,
+                db_path=str(glossary_db),
+            )
+
+            def pares(deduplicate):
+                return [
+                    glossary_entry_pair(entry)
+                    for entry in load_glossary_entry_details(
+                        str(glossary), deduplicate=deduplicate, prefer_db=False
+                    )
+                ]
+
+            # A duplicata faz as duas listas terem tamanhos diferentes: e a
+            # condicao que provocava a exclusao errada.
+            self.assertEqual(len(pares(False)), 4)
+            self.assertEqual(len(pares(True)), 3)
+
+            result = delete_glossary_entry_by_pair(
+                "king", "rei", str(glossary), backup_dir=None
+            )
+            self.assertIsNotNone(result)
+            self.assertEqual(result["removed"], ("king", "rei"))
+
+            restante = pares(False)
+            self.assertNotIn(("king", "rei"), restante)
+            # Nada mais pode ter sumido junto.
+            self.assertEqual(restante, [("a", "b"), ("a", "b"), ("queen", "dama")])
+
+            # Par inexistente nao altera o arquivo e sinaliza com None.
+            self.assertIsNone(
+                delete_glossary_entry_by_pair(
+                    "nao", "existe", str(glossary), backup_dir=None
+                )
+            )
+            self.assertEqual(pares(False), restante)
+
+    def test_entries_are_stored_without_edge_whitespace(self):
+        # Um espaco no fim do padrao e consumido pelo casamento mas nao devolvido
+        # pela substituicao, colando duas palavras no texto final.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            glossary_db = tmp_path / "glossario.db"
+
+            save_glossary_entries(
+                [("rook", "torre")],
+                str(glossary),
+                create_backup=False,
+                db_path=str(glossary_db),
+            )
+
+            add_glossary_entry(
+                " a-coluna ", " coluna a ", str(glossary), backup_dir=None
+            )
+
+            pares = [
+                glossary_entry_pair(entry)
+                for entry in load_glossary_entry_details(
+                    str(glossary), deduplicate=False, prefer_db=False
+                )
+            ]
+            self.assertIn(("a-coluna", "coluna a"), pares)
+            for orig, new in pares:
+                self.assertEqual(orig, orig.strip())
+                self.assertEqual(new, new.strip())
+
+            # E o efeito pratico: a regra normalizada nao cola as palavras.
+            self.assertEqual(
+                apply_all_substitutions(
+                    "na a-coluna aberta", [("a-coluna", "coluna a")]
+                ),
+                "na coluna a aberta",
+            )
+            # Comportamento antigo, para deixar o defeito explicito no teste.
+            self.assertEqual(
+                apply_all_substitutions(
+                    "na a-coluna aberta", [(" a-coluna ", " coluna a")]
+                ),
+                "na coluna aaberta",
+            )
+
+    def test_validation_lookup_matches_full_scan(self):
+        # O indice existe por desempenho; nao pode mudar o resultado.
+        entries = [
+            ("rook", "torre"),
+            ("Rook", "Torre"),
+            ("pawn", "peão"),
+            ("rook", "torre de rei"),
+            ("queen", "dama"),
+        ]
+        lookup = build_glossary_lookup(entries)
+
+        casos = [
+            ("rook", "torre"),          # duplicata exata
+            ("rook", "outra coisa"),    # mesmo original, substituicao diferente
+            ("queen", "dama"),          # duplicata
+            ("bishop", "bispo"),        # inedito
+            ("Rook", "Torre"),          # sensivel a caixa
+            ("", "vazio"),              # original vazio
+        ]
+        for orig, new in casos:
+            for current_index in (None, 0, 3):
+                self.assertEqual(
+                    validate_glossary_entry(
+                        orig, new, entries, current_index=current_index
+                    ),
+                    validate_glossary_entry(
+                        orig,
+                        new,
+                        current_index=current_index,
+                        existing_lookup=lookup,
+                    ),
+                    f"divergiu em {orig!r}->{new!r} (current_index={current_index})",
+                )
+
+    def test_csv_import_analysis_detects_duplicates_within_the_same_file(self):
+        # A deduplicacao interna passou a usar um set; o resultado tem de ser
+        # o mesmo de antes, inclusive para linhas repetidas dentro do CSV.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            save_glossary_entries(
+                [("rook", "torre")],
+                str(glossary),
+                create_backup=False,
+                db_path=str(tmp_path / "glossario.db"),
+            )
+
+            csv_path = tmp_path / "import.csv"
+            csv_path.write_text(
+                "original,replacement,type\n"
+                "rook,torre,suggestion\n"          # ja existe -> duplicata
+                "knight,cavalo,suggestion\n"       # nova
+                "knight,cavalo,suggestion\n"       # repetida no proprio CSV
+                "bishop,,suggestion\n"             # invalida
+                "pawn,peão,suggestion\n",          # nova
+                encoding="utf-8-sig",
+            )
+
+            stats = analyze_glossary_csv_import(str(glossary), str(csv_path))
+            self.assertEqual(stats["total_rows"], 5)
+            self.assertEqual(stats["inserted"], 2)
+            self.assertEqual(stats["duplicates"], 2)
+            self.assertEqual(stats["invalid"], 1)
+            self.assertEqual(
+                [(o, n) for o, n, _t in stats["entries"]],
+                [("knight", "cavalo"), ("pawn", "peão")],
+            )
 
     def test_glossary_is_independent_from_translation_database(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1755,6 +3843,2245 @@ class GlossaryTests(unittest.TestCase):
                 load_glossary_entries(result["safety_backup_path"]),
                 [("current", "atual")],
             )
+
+
+def _stamp(moment):
+    return moment.strftime("%Y%m%d-%H%M%S")
+
+
+class BackupRetentionSelectionTests(unittest.TestCase):
+    """Politica de retencao de `backups/` (roadmap 1.2). Funcoes puras."""
+
+    NOW = datetime(2026, 7, 25, 12, 0, 0)
+
+    def _glossary_names(self, count, start=None, step=timedelta(minutes=1)):
+        """`count` backups do glossario, do mais novo para o mais velho."""
+        start = start or self.NOW
+        return [
+            f"Substituicoes-{_stamp(start - step * index)}.txt"
+            for index in range(count)
+        ]
+
+    def test_backup_timestamp_reads_the_name_not_the_mtime(self):
+        self.assertEqual(
+            backup_timestamp("Substituicoes-20260725-143012.txt"),
+            datetime(2026, 7, 25, 14, 30, 12),
+        )
+        self.assertEqual(
+            backup_timestamp("traducoes-backup-20260725-143012-2.db"),
+            datetime(2026, 7, 25, 14, 30, 12),
+        )
+        self.assertEqual(
+            backup_timestamp("/qualquer/pasta/Substituicoes-20260725-143012.txt"),
+            datetime(2026, 7, 25, 14, 30, 12),
+        )
+
+    def test_backup_timestamp_rejects_names_without_a_valid_stamp(self):
+        for name in [
+            "Substituicoes.txt",
+            "anotacoes.txt",
+            "Substituicoes-2026072-143012.txt",
+            # No formato certo, mas nao e uma data: mes 13, e hora 99.
+            "Substituicoes-20261325-143012.txt",
+            "Substituicoes-20260725-996012.txt",
+        ]:
+            with self.subTest(name=name):
+                self.assertIsNone(backup_timestamp(name))
+
+    def test_family_filter_separates_glossary_from_database(self):
+        glossary = "Substituicoes-20260725-143012.txt"
+        database = "traducoes-backup-20260725-143012.db"
+
+        self.assertTrue(is_backup_of_family(glossary, "Substituicoes-", ".txt"))
+        self.assertFalse(is_backup_of_family(glossary, "traducoes-backup-", ".db"))
+        self.assertTrue(is_backup_of_family(database, "traducoes-backup-", ".db"))
+        self.assertFalse(is_backup_of_family(database, "Substituicoes-", ".txt"))
+
+    def test_family_filter_ignores_files_without_a_stamp(self):
+        # Um arquivo que o usuario tenha deixado em backups/ nao pertence a
+        # familia nenhuma, mesmo casando com prefixo e extensao.
+        self.assertFalse(
+            is_backup_of_family("Substituicoes-antigo.txt", "Substituicoes-", ".txt")
+        )
+
+    def test_count_rule_keeps_only_the_newest(self):
+        names = self._glossary_names(10)
+        doomed = select_backups_to_delete(
+            names, keep_count=4, max_age_days=None, now=self.NOW
+        )
+
+        self.assertEqual(sorted(doomed), sorted(names[4:]))
+        survivors = [name for name in names if name not in doomed]
+        self.assertEqual(survivors, names[:4])
+
+    def test_count_rule_is_a_no_op_below_the_limit(self):
+        names = self._glossary_names(4)
+        self.assertEqual(
+            select_backups_to_delete(
+                names, keep_count=30, max_age_days=None, now=self.NOW
+            ),
+            [],
+        )
+
+    def test_age_rule_deletes_the_old_ones(self):
+        # 0d, 30d, 60d, 90d, 120d, 150d de idade. Corte em 45 dias.
+        names = self._glossary_names(6, step=timedelta(days=30))
+        doomed = select_backups_to_delete(
+            names,
+            keep_count=None,
+            max_age_days=45,
+            keep_minimum=0,
+            now=self.NOW,
+        )
+
+        self.assertEqual(sorted(doomed), sorted(names[2:]))
+
+    def test_age_rule_never_empties_the_folder(self):
+        """Piso `keep_minimum`: uma pasta parada ha meses mantem os mais novos.
+
+        Sem o piso, abrir o programa depois de um ano sem uso apagaria todos os
+        backups existentes antes de criar o primeiro novo.
+        """
+        names = self._glossary_names(6, step=timedelta(days=30))
+        doomed = select_backups_to_delete(
+            names,
+            keep_count=None,
+            max_age_days=1,
+            keep_minimum=3,
+            now=self.NOW,
+        )
+
+        self.assertEqual(sorted(doomed), sorted(names[3:]))
+        self.assertEqual([name for name in names if name not in doomed], names[:3])
+
+    def test_protected_backup_survives_any_limit(self):
+        names = self._glossary_names(5)
+        newest = names[0]
+        doomed = select_backups_to_delete(
+            names,
+            keep_count=1,
+            max_age_days=1,
+            keep_minimum=0,
+            now=self.NOW + timedelta(days=400),
+            protected=(newest,),
+        )
+
+        self.assertNotIn(newest, doomed)
+        self.assertEqual(sorted(doomed), sorted(names[1:]))
+
+    def test_protected_path_matches_by_basename(self):
+        names = self._glossary_names(3)
+        doomed = select_backups_to_delete(
+            names,
+            keep_count=1,
+            max_age_days=None,
+            now=self.NOW,
+            protected=(f"/outra/pasta/{names[2]}",),
+        )
+
+        self.assertEqual(doomed, [names[1]])
+
+    def test_undated_files_are_never_selected(self):
+        names = self._glossary_names(3) + ["anotacoes.txt", "Substituicoes.txt"]
+        doomed = select_backups_to_delete(
+            names, keep_count=1, max_age_days=None, now=self.NOW
+        )
+
+        self.assertNotIn("anotacoes.txt", doomed)
+        self.assertNotIn("Substituicoes.txt", doomed)
+
+    def test_same_second_backups_are_ordered_by_the_uniqueness_suffix(self):
+        """`_unique_path` desempata com "-1", "-2", na ordem de criacao.
+
+        Comparar os nomes como texto inverteria os tres: "." e maior que "-",
+        entao o arquivo SEM sufixo (o primeiro criado, o mais antigo) passaria
+        por mais novo e sobreviveria no lugar do mais recente.
+        """
+        stamp = _stamp(self.NOW)
+        oldest = f"Substituicoes-{stamp}.txt"
+        middle = f"Substituicoes-{stamp}-1.txt"
+        newest = f"Substituicoes-{stamp}-2.txt"
+
+        self.assertEqual(uniqueness_suffix(oldest), 0)
+        self.assertEqual(uniqueness_suffix(newest), 2)
+
+        doomed = select_backups_to_delete(
+            [oldest, middle, newest], keep_count=1, max_age_days=None, now=self.NOW
+        )
+
+        self.assertEqual(sorted(doomed), sorted([oldest, middle]))
+
+
+class BackupRetentionDiskTests(unittest.TestCase):
+    """`prune_backups` e a integracao com quem cria os backups."""
+
+    NOW = datetime(2026, 7, 25, 12, 0, 0)
+
+    def _seed(self, directory, name, content="x"):
+        path = Path(directory) / name
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_prune_removes_only_the_requested_family(self):
+        """O bug que a separacao por familia evita.
+
+        `backups/` guarda as copias do glossario e do banco juntas. Sem o
+        filtro, salvar o glossario 30 vezes levaria todos os backups do banco
+        junto — perda de dados numa operacao que so mexia em texto.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            glossary = [
+                self._seed(
+                    tmp,
+                    f"Substituicoes-{_stamp(self.NOW - timedelta(minutes=i))}.txt",
+                )
+                for i in range(5)
+            ]
+            database = [
+                self._seed(
+                    tmp,
+                    f"traducoes-backup-{_stamp(self.NOW - timedelta(minutes=i))}.db",
+                )
+                for i in range(5)
+            ]
+            manual = self._seed(tmp, "leia-me.txt")
+
+            removed = prune_glossary_backups(
+                tmp, "Substituicoes", keep_count=2, max_age_days=None, now=self.NOW
+            )
+
+            self.assertEqual(len(removed), 3)
+            self.assertTrue(all(path.exists() for path in database))
+            self.assertTrue(manual.exists())
+            self.assertTrue(all(path.exists() for path in glossary[:2]))
+            self.assertFalse(any(path.exists() for path in glossary[2:]))
+
+    def test_prune_tolerates_a_missing_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "backups")
+            self.assertEqual(prune_backups(missing, "Substituicoes-", ".txt"), [])
+
+    def test_prune_ignores_subdirectories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = Path(tmp) / f"Substituicoes-{_stamp(self.NOW)}.txt"
+            nested.mkdir()
+
+            removed = prune_backups(
+                tmp, "Substituicoes-", ".txt", keep_count=1, max_age_days=None
+            )
+
+            self.assertEqual(removed, [])
+            self.assertTrue(nested.exists())
+
+    def test_create_glossary_backup_applies_retention_and_keeps_the_new_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            glossary.write_text("substituicoes = [('a', 'b')]\n", encoding="utf-8")
+            backup_dir = tmp_path / "backups"
+            backup_dir.mkdir()
+
+            # Datas recentes, para isolar a regra de quantidade da de idade.
+            recent = datetime.now()
+            seeded = [
+                self._seed(
+                    backup_dir,
+                    f"Substituicoes-{_stamp(recent - timedelta(minutes=i + 1))}.txt",
+                )
+                for i in range(35)
+            ]
+
+            created = Path(
+                create_glossary_backup(str(glossary), backup_dir=str(backup_dir))
+            )
+
+            survivors = sorted(backup_dir.glob("Substituicoes-*.txt"))
+            self.assertEqual(len(survivors), GLOSSARY_BACKUP_KEEP_COUNT)
+            self.assertTrue(created.exists())
+            # Ficaram o novo e os 29 mais recentes; sairam os 6 mais velhos.
+            self.assertTrue(all(path.exists() for path in seeded[:29]))
+            self.assertFalse(any(path.exists() for path in seeded[29:]))
+
+    def test_create_glossary_backup_can_skip_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            glossary.write_text("substituicoes = [('a', 'b')]\n", encoding="utf-8")
+            backup_dir = tmp_path / "backups"
+            backup_dir.mkdir()
+            old = self._seed(backup_dir, "Substituicoes-20200101-000000.txt")
+
+            create_glossary_backup(
+                str(glossary), backup_dir=str(backup_dir), prune=False
+            )
+
+            self.assertTrue(old.exists())
+
+    def test_restore_does_not_prune_the_backup_being_restored(self):
+        """A limpeza roda entre o backup de seguranca e a leitura da origem.
+
+        Sem proteger o arquivo escolhido, restaurar um backup antigo poderia
+        apaga-lo no exato instante anterior a le-lo.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            glossary = tmp_path / "Substituicoes.txt"
+            glossary.write_text(
+                "substituicoes = [('current', 'atual')]\n", encoding="utf-8"
+            )
+            backup_dir = tmp_path / "backups"
+            backup_dir.mkdir()
+
+            chosen = backup_dir / "Substituicoes-20200101-000000.txt"
+            chosen.write_text(
+                "substituicoes = [('backup', 'copia')]\n", encoding="utf-8"
+            )
+
+            result = restore_glossary_from_backup(
+                str(glossary),
+                str(chosen),
+                safety_backup_dir=str(backup_dir),
+                timestamp="20260101-120000",
+            )
+
+            self.assertTrue(chosen.exists())
+            self.assertTrue(Path(result["safety_backup_path"]).exists())
+            self.assertEqual(load_glossary_entries(str(glossary)), [("backup", "copia")])
+
+    def test_database_backup_retention_does_not_touch_glossary_backups(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "traducoes.db"
+            conn = initialize_database(str(db_path))
+            conn.close()
+            backup_dir = tmp_path / "backups"
+            backup_dir.mkdir()
+
+            recent = datetime.now()
+            glossary_backups = [
+                self._seed(
+                    backup_dir,
+                    f"Substituicoes-{_stamp(recent - timedelta(minutes=i + 1))}.txt",
+                )
+                for i in range(5)
+            ]
+            seeded = [
+                self._seed(
+                    backup_dir,
+                    f"traducoes-backup-{_stamp(recent - timedelta(minutes=i + 1))}.db",
+                )
+                for i in range(15)
+            ]
+
+            create_database_backup(str(db_path), backup_dir=str(backup_dir))
+
+            self.assertEqual(
+                len(list(backup_dir.glob("traducoes-backup-*.db"))),
+                DATABASE_BACKUP_KEEP_COUNT,
+            )
+            self.assertTrue(all(path.exists() for path in glossary_backups))
+            self.assertTrue(all(path.exists() for path in seeded[:9]))
+
+
+class StartupCleanupTests(unittest.TestCase):
+    """Item 1.4: a retencao precisa alcancar o que ja esta no disco.
+
+    `prune_glossary_backups` so era chamada de dentro de `create_glossary_backup`
+    — isto e, como efeito de criar um backup novo. Enquanto ninguem salvasse o
+    glossario, nada era avaliado: dois dias depois de a politica existir, a pasta
+    do projeto ainda tinha 663 arquivos e 228 MB.
+    """
+
+    def _criar(self, pasta, nome, dias_atras=0):
+        carimbo = (datetime.now() - timedelta(days=dias_atras)).strftime("%Y%m%d-%H%M%S")
+        # Carimbos distintos por arquivo, para a ordenacao ser deterministica.
+        caminho = pasta / nome.format(carimbo=carimbo)
+        caminho.write_text("x", encoding="utf-8")
+        return caminho
+
+    def test_startup_cleanup_reaches_files_nobody_touched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            backups = base / "backups"
+            logs = base / "logs"
+            backups.mkdir()
+            logs.mkdir()
+
+            # Mais backups de glossario que o limite, todos ja existentes: e o
+            # cenario que a chamada antiga nunca alcancava.
+            for dia in range(GLOSSARY_BACKUP_KEEP_COUNT + 12):
+                self._criar(backups, "Substituicoes-{carimbo}.txt", dias_atras=dia)
+            for dia in range(DATABASE_BACKUP_KEEP_COUNT + 5):
+                self._criar(backups, "traducoes-backup-{carimbo}.db", dias_atras=dia)
+            for dia in range(6):
+                self._criar(logs, "traducao-{carimbo}.log", dias_atras=dia)
+
+            # Arquivos que o usuario colocou ali: nao tem carimbo, nao saem.
+            (backups / "anotacoes.txt").write_text("meu", encoding="utf-8")
+            (logs / "importante.log").write_text("meu", encoding="utf-8")
+            # E o formato ANTIGO de nome de log, que tambem nao deve ser tocado.
+            antigo = logs / "traducao_20250101_120000.log"
+            antigo.write_text("antigo", encoding="utf-8")
+
+            removidos = app_actions.prune_generated_files(str(base))
+
+            self.assertEqual(len(removidos["glossario"]), 12)
+            self.assertEqual(len(removidos["banco"]), 5)
+            self.assertEqual(removidos["logs"], [], "6 logs estao abaixo do limite")
+
+            restantes = {p.name for p in backups.iterdir()}
+            self.assertIn("anotacoes.txt", restantes)
+            self.assertEqual(
+                sum(1 for n in restantes if n.startswith("Substituicoes-")),
+                GLOSSARY_BACKUP_KEEP_COUNT,
+            )
+            self.assertEqual(
+                sum(1 for n in restantes if n.startswith("traducoes-backup-")),
+                DATABASE_BACKUP_KEEP_COUNT,
+            )
+
+            logs_restantes = {p.name for p in logs.iterdir()}
+            self.assertIn("importante.log", logs_restantes)
+            self.assertIn(
+                antigo.name,
+                logs_restantes,
+                "log no formato antigo nao casa com o padrao e nao pode ser removido",
+            )
+
+    def test_logs_above_the_limit_are_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            logs = base / "logs"
+            logs.mkdir()
+            (base / "backups").mkdir()
+
+            for dia in range(LOG_KEEP_COUNT + 7):
+                self._criar(logs, "traducao-{carimbo}.log", dias_atras=dia)
+
+            removidos = app_actions.prune_generated_files(str(base))
+
+            self.assertEqual(len(removidos["logs"]), 7)
+            self.assertEqual(len(list(logs.iterdir())), LOG_KEEP_COUNT)
+
+    def test_missing_folders_are_not_an_error(self):
+        """Primeira execucao: nem `backups/` nem `logs/` existem ainda."""
+        with tempfile.TemporaryDirectory() as tmp:
+            removidos = app_actions.prune_generated_files(tmp)
+        self.assertEqual(removidos, {"glossario": [], "banco": [], "logs": []})
+
+    def test_the_new_log_name_matches_the_retention_pattern(self):
+        """O nome gerado por `start_translation` precisa casar com a politica.
+
+        Se o formato do nome e o do `_TIMESTAMP_RE` divergirem, a retencao de
+        logs vira silenciosamente um no-op — o modo de falha mais chato
+        possivel, porque tudo continua "funcionando".
+        """
+        nome = f"traducao-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+        self.assertTrue(is_backup_of_family(nome, "traducao-", ".log"))
+        self.assertIsNotNone(backup_timestamp(nome))
+
+        antigo = f"traducao_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        self.assertFalse(
+            is_backup_of_family(antigo, "traducao-", ".log"),
+            "o formato antigo precisa continuar fora do alcance da limpeza",
+        )
+
+
+class GlossaryErrorChannelTests(unittest.TestCase):
+    """Garantia S5: falha de carga do glossario chega ate a interface."""
+
+    def setUp(self):
+        self.reported = []
+        self.previous = set_glossary_error_handler(self.reported.append)
+        self.addCleanup(set_glossary_error_handler, self.previous)
+        self.addCleanup(clear_glossary_error)
+        clear_glossary_error()
+
+    def test_malformed_file_reports_instead_of_failing_silently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            glossary = Path(tmp) / "Substituicoes.txt"
+            glossary.write_text("substituicoes = [('a', ", encoding="utf-8")
+
+            entries = call_quietly(load_substitutions, str(glossary))
+
+            self.assertEqual(entries, [])
+            self.assertEqual(len(self.reported), 1)
+            self.assertIn("Substituicoes.txt", self.reported[0])
+            self.assertIn("NÃO serão aplicadas", self.reported[0])
+            self.assertEqual(last_glossary_error(), self.reported[0])
+
+    def test_missing_file_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "Substituicoes.txt")
+
+            self.assertEqual(call_quietly(load_substitutions, missing), [])
+            self.assertEqual(len(self.reported), 1)
+            self.assertIn("não encontrado", self.reported[0].lower())
+
+    def test_successful_load_clears_the_previous_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            glossary = Path(tmp) / "Substituicoes.txt"
+            glossary.write_text("substituicoes = [('a', ", encoding="utf-8")
+            call_quietly(load_substitutions, str(glossary))
+            self.assertIsNotNone(last_glossary_error())
+
+            glossary.write_text("substituicoes = [('a', 'b')]\n", encoding="utf-8")
+            self.assertEqual(
+                call_quietly(load_substitutions, str(glossary)), [("a", "b")]
+            )
+            self.assertIsNone(last_glossary_error())
+
+    def test_a_broken_handler_never_escapes(self):
+        def explode(_message):
+            raise RuntimeError("handler quebrado")
+
+        set_glossary_error_handler(explode)
+        # Nao pode levantar: reportar um erro nao pode virar um erro pior.
+        call_quietly(report_glossary_error, "falha de teste")
+        self.assertEqual(last_glossary_error(), "falha de teste")
+
+    def test_without_a_handler_the_message_is_still_recorded(self):
+        set_glossary_error_handler(None)
+        call_quietly(report_glossary_error, "sem interface")
+        self.assertEqual(last_glossary_error(), "sem interface")
+
+
+class GlossaryFailureUiTests(unittest.TestCase):
+    """O handler que a janela principal registra (`app_actions`)."""
+
+    def setUp(self):
+        self.app = FakeApp(":memory:")
+        shown = []
+        self.shown = shown
+
+        class FakeMessagebox:
+            @staticmethod
+            def showerror(title, message, **kwargs):
+                shown.append((title, message))
+
+        previous = app_actions.messagebox
+        app_actions.messagebox = FakeMessagebox
+        self.addCleanup(setattr, app_actions, "messagebox", previous)
+
+    def test_failure_reaches_both_the_log_and_a_dialog(self):
+        app_actions.report_glossary_failure(self.app, "arquivo quebrado")
+
+        self.assertTrue(any("arquivo quebrado" in line for line in self.app.logs))
+        self.assertEqual(len(self.shown), 1)
+        self.assertIn("arquivo quebrado", self.shown[0][1])
+
+    def test_the_same_failure_opens_only_one_dialog(self):
+        """A carga se repete a cada recarga; um modal por vez travaria o uso."""
+        for _ in range(5):
+            app_actions.report_glossary_failure(self.app, "arquivo quebrado")
+
+        self.assertEqual(len(self.shown), 1)
+        self.assertEqual(
+            len([line for line in self.app.logs if "arquivo quebrado" in line]), 5
+        )
+
+    def test_a_different_failure_opens_a_new_dialog(self):
+        app_actions.report_glossary_failure(self.app, "primeira falha")
+        app_actions.report_glossary_failure(self.app, "segunda falha")
+
+        self.assertEqual(len(self.shown), 2)
+
+    def test_startup_load_degrades_instead_of_killing_the_window(self):
+        """Sem isso, um `Substituicoes.txt` quebrado impedia o programa de abrir."""
+
+        def explode():
+            raise ValueError("arquivo invalido")
+
+        previous = app_actions.load_interactive_substitutions
+        app_actions.load_interactive_substitutions = explode
+        self.addCleanup(
+            setattr, app_actions, "load_interactive_substitutions", previous
+        )
+        previous_handler = set_glossary_error_handler(
+            lambda message: app_actions.report_glossary_failure(self.app, message)
+        )
+        self.addCleanup(set_glossary_error_handler, previous_handler)
+
+        entries = call_quietly(app_actions.load_interactive_glossary, self.app)
+
+        self.assertEqual(entries, [])
+        self.assertEqual(len(self.shown), 1)
+        self.assertIn("arquivo invalido", self.shown[0][1])
+
+
+class GlossaryEntryLocationTests(unittest.TestCase):
+    """Roadmap 3.4 / garantia S6: operar pela entrada, nao pela posicao."""
+
+    ENTRIES = [
+        ("rook", "torre", GLOSSARY_RULE_SUGGESTION),
+        ("queen", "dama", GLOSSARY_RULE_SUGGESTION),
+        ("pawn", "peao", GLOSSARY_RULE_AUTOMATIC),
+    ]
+
+    def _write(self, directory, entries):
+        path = Path(directory) / "Substituicoes.txt"
+        save_glossary_entries(entries, str(path), create_backup=False, sync_db=False)
+        return path
+
+    def test_finds_the_entry_regardless_of_position(self):
+        self.assertEqual(
+            find_glossary_entry_index(self.ENTRIES, ("queen", "dama", "suggestion")),
+            1,
+        )
+
+    def test_missing_entry_returns_none(self):
+        self.assertIsNone(
+            find_glossary_entry_index(self.ENTRIES, ("bishop", "bispo", "suggestion"))
+        )
+
+    def test_type_participates_in_the_match(self):
+        # Mesmo par, tipo diferente: nao e a mesma entrada.
+        self.assertIsNone(
+            find_glossary_entry_index(self.ENTRIES, ("pawn", "peao", "suggestion"))
+        )
+        self.assertEqual(
+            find_glossary_entry_index(
+                self.ENTRIES, ("pawn", "peao", "suggestion"), match_type=False
+            ),
+            2,
+        )
+
+    def test_hint_decides_between_exact_duplicates(self):
+        """Com duplicatas identicas, vale a que estava na tela."""
+        entries = [
+            ("a", "b", GLOSSARY_RULE_SUGGESTION),
+            ("x", "y", GLOSSARY_RULE_SUGGESTION),
+            ("a", "b", GLOSSARY_RULE_SUGGESTION),
+        ]
+        alvo = ("a", "b", GLOSSARY_RULE_SUGGESTION)
+
+        self.assertEqual(find_glossary_entry_index(entries, alvo, index_hint=2), 2)
+        self.assertEqual(find_glossary_entry_index(entries, alvo, index_hint=0), 0)
+        # Palpite invalido ou apontando para outra coisa: cai na busca.
+        self.assertEqual(find_glossary_entry_index(entries, alvo, index_hint=1), 0)
+        self.assertEqual(find_glossary_entry_index(entries, alvo, index_hint=99), 0)
+        self.assertEqual(find_glossary_entry_index(entries, alvo, index_hint="nao"), 0)
+
+    def test_update_by_entry_survives_an_external_insertion(self):
+        """O bug do item 3.4, reproduzido.
+
+        A janela guarda a posicao de "queen" (1) no carregamento. O outro
+        editor insere uma regra no inicio do arquivo. Salvar por posicao
+        gravaria por cima de "queen" — que agora esta em 2 — destruindo a
+        entrada vizinha sem aviso.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self.ENTRIES)
+            posicao_no_carregamento = 1
+
+            # Alteracao externa: uma entrada nova no inicio do arquivo.
+            deslocado = [("bishop", "bispo", GLOSSARY_RULE_SUGGESTION)] + list(
+                self.ENTRIES
+            )
+            save_glossary_entries(
+                deslocado, str(path), create_backup=False, sync_db=False
+            )
+
+            result = update_glossary_entry_by_entry(
+                ("queen", "dama", GLOSSARY_RULE_SUGGESTION),
+                "queen",
+                "rainha",
+                path=str(path),
+                index_hint=posicao_no_carregamento,
+                backup_dir=str(Path(tmp) / "backups"),
+            )
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result["index"], 2)
+            self.assertEqual(
+                load_glossary_entry_details(str(path), deduplicate=False),
+                [
+                    ("bishop", "bispo", GLOSSARY_RULE_SUGGESTION),
+                    ("rook", "torre", GLOSSARY_RULE_SUGGESTION),
+                    ("queen", "rainha", GLOSSARY_RULE_SUGGESTION),
+                    ("pawn", "peao", GLOSSARY_RULE_AUTOMATIC),
+                ],
+            )
+
+    def test_positional_update_is_what_used_to_corrupt_the_neighbour(self):
+        """Contraprova: a funcao antiga, no mesmo cenario, grava na errada."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self.ENTRIES)
+            deslocado = [("bishop", "bispo", GLOSSARY_RULE_SUGGESTION)] + list(
+                self.ENTRIES
+            )
+            save_glossary_entries(
+                deslocado, str(path), create_backup=False, sync_db=False
+            )
+
+            update_glossary_entry(
+                1,
+                "queen",
+                "rainha",
+                path=str(path),
+                backup_dir=str(Path(tmp) / "backups"),
+            )
+
+            entradas = load_glossary_entry_details(str(path), deduplicate=False)
+            # "rook" foi destruida e "queen" continua intacta: a entrada errada.
+            self.assertEqual(entradas[1], ("queen", "rainha", GLOSSARY_RULE_SUGGESTION))
+            self.assertIn(("queen", "dama", GLOSSARY_RULE_SUGGESTION), entradas)
+            self.assertNotIn(("rook", "torre", GLOSSARY_RULE_SUGGESTION), entradas)
+
+    def test_update_by_entry_refuses_when_the_entry_is_gone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self.ENTRIES)
+            sem_queen = [e for e in self.ENTRIES if e[0] != "queen"]
+            save_glossary_entries(
+                sem_queen, str(path), create_backup=False, sync_db=False
+            )
+
+            result = update_glossary_entry_by_entry(
+                ("queen", "dama", GLOSSARY_RULE_SUGGESTION),
+                "queen",
+                "rainha",
+                path=str(path),
+                index_hint=1,
+                backup_dir=str(Path(tmp) / "backups"),
+            )
+
+            self.assertIsNone(result)
+            # Nada foi gravado: o arquivo continua exatamente como estava.
+            self.assertEqual(
+                load_glossary_entry_details(str(path), deduplicate=False), sem_queen
+            )
+
+    def test_update_by_entry_normalizes_on_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self.ENTRIES)
+
+            result = update_glossary_entry_by_entry(
+                ("rook", "torre", GLOSSARY_RULE_SUGGESTION),
+                "  rook  ",
+                "  torre alta  ",
+                path=str(path),
+                backup_dir=str(Path(tmp) / "backups"),
+            )
+
+            self.assertEqual(result["index"], 0)
+            self.assertEqual(
+                load_glossary_entry_details(str(path), deduplicate=False)[0],
+                ("rook", "torre alta", GLOSSARY_RULE_SUGGESTION),
+            )
+
+    def test_update_by_entry_keeps_the_type_when_none_is_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self.ENTRIES)
+
+            update_glossary_entry_by_entry(
+                ("pawn", "peao", GLOSSARY_RULE_AUTOMATIC),
+                "pawn",
+                "peao livre",
+                path=str(path),
+                backup_dir=str(Path(tmp) / "backups"),
+            )
+
+            self.assertEqual(
+                load_glossary_entry_details(str(path), deduplicate=False)[2],
+                ("pawn", "peao livre", GLOSSARY_RULE_AUTOMATIC),
+            )
+
+    def test_delete_by_pair_can_target_the_type_and_the_duplicate(self):
+        entries = [
+            ("a", "b", GLOSSARY_RULE_SUGGESTION),
+            ("a", "b", GLOSSARY_RULE_AUTOMATIC),
+            ("a", "b", GLOSSARY_RULE_SUGGESTION),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, entries)
+
+            removed = delete_glossary_entry_by_pair(
+                "a",
+                "b",
+                path=str(path),
+                rule_type=GLOSSARY_RULE_SUGGESTION,
+                index_hint=2,
+                backup_dir=str(Path(tmp) / "backups"),
+            )
+
+            self.assertEqual(removed["index"], 2)
+            self.assertEqual(
+                load_glossary_entry_details(str(path), deduplicate=False),
+                entries[:2],
+            )
+
+    def test_delete_by_pair_without_a_type_still_matches_only_the_pair(self):
+        """Comportamento antigo preservado para quem so conhece o par."""
+        entries = [
+            ("x", "y", GLOSSARY_RULE_AUTOMATIC),
+            ("a", "b", GLOSSARY_RULE_SUGGESTION),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, entries)
+
+            removed = delete_glossary_entry_by_pair(
+                "x", "y", path=str(path), backup_dir=str(Path(tmp) / "backups")
+            )
+
+            self.assertEqual(removed["index"], 0)
+            self.assertEqual(
+                load_glossary_entry_details(str(path), deduplicate=False), entries[1:]
+            )
+
+    def test_delete_by_pair_returns_none_for_a_missing_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self.ENTRIES)
+
+            self.assertIsNone(
+                delete_glossary_entry_by_pair(
+                    "bishop",
+                    "bispo",
+                    path=str(path),
+                    backup_dir=str(Path(tmp) / "backups"),
+                )
+            )
+            self.assertEqual(
+                load_glossary_entry_details(str(path), deduplicate=False),
+                list(self.ENTRIES),
+            )
+
+
+class GlossaryConflictTests(unittest.TestCase):
+    """Roadmap 1.5 / garantia S9: em cada conflito, qual regra esta valendo.
+
+    Dois padroes identicos empatam em comprimento, entao `order_rules_by_specificity`
+    desempata pela ordem do arquivo e o congelamento de S4 impede a segunda de
+    rever o trecho: vence quem foi digitado primeiro. A interface nao dizia isso,
+    e as duas regras apareciam lado a lado com o mesmo aspecto.
+    """
+
+    def aplicada(self, rules, texto):
+        """A substituicao que o programa de fato produz para `texto`."""
+        return apply_all_substitutions(texto, rules)
+
+    def test_the_announced_winner_is_the_one_actually_applied(self):
+        """O teste central: o que o editor anuncia e o que o texto recebe.
+
+        Anunciar um vencedor que nao e o aplicado seria pior do que nao anunciar
+        nada, entao a afirmacao e verificada contra `apply_all_substitutions`, e
+        nao contra outra copia da mesma regra de ordenacao.
+        """
+        for posicao_vencedora, regras in enumerate(
+            [
+                [("torre", "rook"), ("torre", "castle")],
+                [("torre", "castle"), ("torre", "rook")],
+            ]
+        ):
+            with self.subTest(ordem=posicao_vencedora):
+                entradas = [
+                    (orig, new, GLOSSARY_RULE_SUGGESTION) for orig, new in regras
+                ]
+                conflitos = glossario.glossary_conflicts(entradas)
+
+                self.assertEqual(sorted(conflitos), [0, 1])
+                for info in conflitos.values():
+                    for contexto in info["contexts"]:
+                        self.assertEqual(contexto["winner"], 0)
+
+                # A ordem do arquivo decide: invertida, o resultado muda junto.
+                esperado = regras[0][1]
+                self.assertEqual(self.aplicada(regras, "a torre avanca"), f"a {esperado} avanca")
+
+    def test_the_loser_is_told_it_never_applies(self):
+        entradas = [
+            ("as Pretas", "das pretas", GLOSSARY_RULE_AUTOMATIC),
+            ("as Pretas", "as pretas", GLOSSARY_RULE_AUTOMATIC),
+        ]
+        conflitos = glossario.glossary_conflicts(entradas)
+
+        vencedora = glossario.describe_glossary_conflict(entradas, 0, conflitos)
+        perdedora = glossario.describe_glossary_conflict(entradas, 1, conflitos)
+
+        self.assertIn("vence esta regra", vencedora)
+        self.assertNotIn("nunca é aplicada", vencedora)
+        self.assertIn("#1", perdedora)
+        self.assertIn("das pretas", perdedora)
+        self.assertIn("nunca é aplicada", perdedora)
+
+        # Uma regra automatica e carregada em dois contextos (as automaticas e as
+        # sugestoes do editor) e vence nos dois. Nomear os dois seria repetir a
+        # mesma frase com rotulos diferentes.
+        self.assertNotIn("regras automáticas", vencedora)
+
+    def test_a_rule_that_loses_in_the_editor_can_still_win_elsewhere(self):
+        """O caso real de `'/\\'`, e o erro que ele pegou.
+
+        A regra automatica vem depois da de sugestao, entao perde no editor, que
+        carrega as duas. Mas na aplicacao das regras automaticas ela e a unica
+        daquele padrao — e la ela e aplicada. Dizer "nunca e aplicada" seria
+        falso, e era o que a primeira versao desta mensagem dizia.
+        """
+        entradas = [
+            ("/\\", "com a ideia de", GLOSSARY_RULE_SUGGESTION),
+            ("/\\", "Com a ideia de", GLOSSARY_RULE_AUTOMATIC),
+        ]
+        conflitos = glossario.glossary_conflicts(entradas)
+        automatica = glossario.describe_glossary_conflict(entradas, 1, conflitos)
+
+        self.assertIn("regras automáticas", automatica)
+        self.assertIn("sugestões do editor", automatica)
+        self.assertNotIn("nunca é aplicada", automatica)
+
+        # E a contraprova pelo comportamento, nao pela mensagem.
+        pares = [(orig, new) for orig, new, _tipo in entradas]
+        self.assertEqual(self.aplicada(pares, "1. e4 /\\"), "1. e4 com a ideia de")
+        so_automaticas = glossario.filter_glossary_entries_by_type(
+            entradas, GLOSSARY_RULE_AUTOMATIC
+        )
+        self.assertEqual(self.aplicada(so_automaticas, "1. e4 /\\"), "1. e4 Com a ideia de")
+
+    def test_exact_duplicates_are_not_a_conflict(self):
+        """Duplicata e redundancia, nao disputa — e ja tem aviso proprio."""
+        entradas = [
+            ("torre", "rook", GLOSSARY_RULE_SUGGESTION),
+            ("torre", "rook", GLOSSARY_RULE_SUGGESTION),
+        ]
+        self.assertEqual(glossario.glossary_conflicts(entradas), {})
+
+    def test_rules_never_loaded_together_do_not_conflict(self):
+        """Limpeza roda antes da API; sugestao, no editor. Nunca no mesmo texto."""
+        entradas = [
+            ("torre", "", GLOSSARY_RULE_CLEANUP),
+            ("torre", "rook", GLOSSARY_RULE_SUGGESTION),
+        ]
+        self.assertEqual(glossario.glossary_conflicts(entradas), {})
+
+    def test_keeping_one_rule_removes_only_the_rules_that_competed(self):
+        entradas = [
+            ("torre", "", GLOSSARY_RULE_CLEANUP),
+            ("torre", "rook", GLOSSARY_RULE_SUGGESTION),
+            ("torre", "castle", GLOSSARY_RULE_SUGGESTION),
+            ("dama", "queen", GLOSSARY_RULE_SUGGESTION),
+        ]
+        restantes = glossario.resolve_glossary_conflict(entradas, 2)
+
+        self.assertEqual(
+            restantes,
+            [
+                ("torre", "", GLOSSARY_RULE_CLEANUP),
+                ("torre", "castle", GLOSSARY_RULE_SUGGESTION),
+                ("dama", "queen", GLOSSARY_RULE_SUGGESTION),
+            ],
+            "a regra de limpeza nunca competiu e nao pode sair junto",
+        )
+        # Resolvido de verdade: o glossario que sobra nao tem mais disputa.
+        self.assertEqual(glossario.glossary_conflicts(restantes), {})
+
+    def test_resolving_a_rule_without_conflict_writes_nothing(self):
+        entradas = [("torre", "rook", GLOSSARY_RULE_SUGGESTION)]
+        self.assertIsNone(glossario.resolve_glossary_conflict(entradas, 0))
+        self.assertEqual(glossario.describe_glossary_conflict(entradas, 0), "")
+
+    def test_the_real_glossary_has_no_undecided_conflict(self):
+        """O `Substituicoes.txt` versionado nao tem disputa pendente.
+
+        Eram dois conflitos quando 1.5 foi aberto e quatro quando ele foi
+        resolvido — dois entraram no meio do caminho, sem que ninguem notasse,
+        porque nada os vigiava. Os quatro foram decididos (ver ROADMAP 1.5); este
+        teste existe para que o quinto quebre a suite em vez de aparecer numa
+        medicao daqui a um ano.
+
+        Falhar aqui nao e defeito de codigo: e uma regra nova disputando um
+        padrao com uma antiga. A saida diz quais sao, e a decisao e de quem
+        editou o glossario — o botao "Manter esta" resolve cada uma.
+        """
+        path = Path(__file__).resolve().parent.parent / "Substituicoes.txt"
+        if not path.exists():  # pragma: no cover - checkout sem o glossario
+            self.skipTest("Substituicoes.txt nao esta neste checkout")
+
+        entradas = load_glossary_entry_details(str(path), deduplicate=False)
+        conflitos = glossario.glossary_conflicts(entradas)
+
+        relatorio = "\n".join(
+            "  " + glossario.describe_glossary_conflict(entradas, index, conflitos)
+            for index in sorted(conflitos)
+        )
+        self.assertEqual(
+            conflitos,
+            {},
+            f"conflito novo no glossario, decida qual regra fica:\n{relatorio}",
+        )
+
+
+class RowIndexForIdTests(unittest.TestCase):
+    """Roadmap 3.3: reencontrar a linha pelo id apos a lista ser recarregada."""
+
+    ROWS = [
+        (10, "orig a", "trad a", 0),
+        (11, "orig b", "trad b", 0),
+        (12, "orig c", "trad c", 1),
+    ]
+
+    def test_finds_the_row_by_id(self):
+        self.assertEqual(row_index_for_id(self.ROWS, 10), 0)
+        self.assertEqual(row_index_for_id(self.ROWS, 11), 1)
+        self.assertEqual(row_index_for_id(self.ROWS, 12), 2)
+
+    def test_the_id_wins_over_the_fallback(self):
+        # E o ponto do item 3.3: a posicao antiga esta errada, o id nao.
+        self.assertEqual(row_index_for_id(self.ROWS, 12, fallback=0), 2)
+
+    def test_reload_that_drops_a_row_keeps_the_target(self):
+        """O cenario exato do bug.
+
+        A lista tinha [A, B, C] e o clique foi em B (posicao 1). Gravar removeu
+        A do filtro "Avisos QA", entao a lista virou [B, C] e a posicao 1 agora
+        e C. Pelo id, B continua sendo B.
+        """
+        antes = self.ROWS
+        clicada = 1
+        alvo = antes[clicada][0]
+
+        depois = [row for row in antes if row[0] != 10]
+
+        self.assertEqual(depois[clicada][0], 12, "a posicao antiga aponta para C")
+        self.assertEqual(row_index_for_id(depois, alvo, fallback=clicada), 0)
+
+    def test_missing_id_falls_back_to_the_neighbour(self):
+        self.assertEqual(row_index_for_id(self.ROWS, 999, fallback=1), 1)
+
+    def test_fallback_is_clamped_to_the_current_list(self):
+        # A lista encolheu entre o clique e a leitura.
+        self.assertEqual(row_index_for_id(self.ROWS[:2], 999, fallback=5), 1)
+        self.assertEqual(row_index_for_id(self.ROWS, 999, fallback=-3), 0)
+
+    def test_empty_list_has_nothing_to_select(self):
+        self.assertIsNone(row_index_for_id([], 10, fallback=0))
+        self.assertIsNone(row_index_for_id([], None))
+
+    def test_none_id_uses_the_fallback(self):
+        self.assertEqual(row_index_for_id(self.ROWS, None, fallback=2), 2)
+        self.assertEqual(row_index_for_id(self.ROWS, None, fallback=99), 2)
+
+    def test_first_match_wins(self):
+        duplicadas = [(7, "a", "b", 0), (7, "c", "d", 0)]
+        self.assertEqual(row_index_for_id(duplicadas, 7), 0)
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, payload=None, raise_on_json=False):
+        self.status_code = status_code
+        self._payload = payload
+        self._raise_on_json = raise_on_json
+
+    def json(self):
+        if self._raise_on_json:
+            raise ValueError("resposta nao e JSON")
+        return self._payload
+
+
+class FakeSession:
+    """Devolve respostas roteirizadas e conta as requisicoes."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls = []
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append({"url": url, "params": params, "timeout": timeout})
+        item = self.script.pop(0) if self.script else FakeResponse(200, [[["", ""]]])
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class RetryBackoffTests(unittest.TestCase):
+    """Roadmap 7.2: a espera entre tentativas cresce, e reage a 429.
+
+    Era `random.uniform(0.3, 2.2)` fixo entre as tres tentativas. Contra 429 isso
+    e quase o mesmo que nao esperar: se o servidor pediu para desacelerar, a
+    terceira tentativa chegava tao cedo quanto a primeira.
+
+    O jitter e sorteado, entao comparar duas esperas reais seria instavel — as
+    faixas de tentativas vizinhas se sobrepoem. Aqui o fator e fixado; a
+    integracao logo abaixo confere que a espera real cai dentro da faixa.
+    """
+
+    def espera(self, attempt, status=None, jitter=1.0):
+        return translation_api.retry_delay_seconds(attempt, status, jitter=jitter)
+
+    def test_the_wait_doubles_at_each_attempt(self):
+        base = translation_api.RETRY_BASE_SECONDS
+        self.assertEqual(self.espera(1, 503), base)
+        self.assertEqual(self.espera(2, 503), base * 2)
+        self.assertEqual(self.espera(3, 503), base * 4)
+
+    def test_a_rate_limit_waits_longer_than_a_server_error(self):
+        """429 e 5xx tem causas diferentes e merecem esperas diferentes."""
+        for attempt in (1, 2, 3):
+            with self.subTest(attempt=attempt):
+                self.assertGreater(self.espera(attempt, 429), self.espera(attempt, 503))
+
+    def test_the_wait_is_capped(self):
+        self.assertEqual(
+            self.espera(40, 429), translation_api.RETRY_MAX_SECONDS
+        )
+
+    def test_a_network_error_uses_the_server_error_pace(self):
+        """Sem resposta nao ha status; a espera nao pode virar zero nem explodir."""
+        self.assertEqual(self.espera(1, None), translation_api.RETRY_BASE_SECONDS)
+
+    def test_the_jitter_is_multiplicative(self):
+        """Duas execucoes que tomem 429 juntas precisam se espalhar em proporcao.
+
+        Um jitter aditivo de fracoes de segundo nao separa esperas de 8 s; um
+        multiplicativo separa.
+        """
+        cheio = self.espera(3, 429, jitter=None)
+        alvo = min(
+            translation_api.RETRY_BASE_429_SECONDS * 4,
+            translation_api.RETRY_MAX_SECONDS,
+        )
+        menor, maior = translation_api.RETRY_JITTER
+        self.assertGreaterEqual(cheio, alvo * menor)
+        self.assertLessEqual(cheio, alvo * maior)
+
+
+class RequestPacerTests(unittest.TestCase):
+    """Roadmap 7.2: o intervalo normal reage ao que a API responde.
+
+    O retry conserta a requisicao que falhou, nao a causa: esgotadas as
+    tentativas o comentario falha igual. Um 429 e o unico sinal confiavel de que
+    o ritmo esta alto demais, e o intervalo das requisicoes SEGUINTES e o unico
+    lugar onde esse sinal pode ser usado.
+    """
+
+    def pacer(self, **kwargs):
+        return translation_api.RequestPacer(**kwargs)
+
+    def test_at_rest_it_behaves_exactly_like_before(self):
+        """Sem 429, o intervalo e o sorteio de sempre — multiplicador 1."""
+        pacer = self.pacer()
+        self.assertEqual(pacer.multiplier, 1.0)
+        menor, maior = pacer.base_range
+        for _ in range(50):
+            self.assertGreaterEqual(pacer.next_delay(), menor)
+            self.assertLessEqual(pacer.next_delay(), maior)
+
+    def test_the_first_rate_limit_lifts_the_pace_off_the_floor(self):
+        pacer = self.pacer()
+        pacer.record_rate_limited()
+        self.assertEqual(pacer.multiplier, pacer.first_multiplier)
+        self.assertGreater(pacer.next_delay(), min(pacer.base_range))
+
+    def test_repeated_rate_limits_keep_slowing_down_up_to_a_ceiling(self):
+        pacer = self.pacer()
+        anteriores = []
+        for _ in range(10):
+            pacer.record_rate_limited()
+            anteriores.append(pacer.multiplier)
+
+        self.assertEqual(anteriores[1], anteriores[0] * pacer.growth)
+        self.assertEqual(anteriores[-1], pacer.maximum, "sem teto, o ritmo some")
+        self.assertEqual(sorted(anteriores), anteriores, "o ritmo nunca acelera aqui")
+
+    def test_a_clean_streak_is_needed_before_speeding_up_again(self):
+        pacer = self.pacer()
+        pacer.record_rate_limited()
+        alto = pacer.multiplier
+
+        for _ in range(pacer.clean_streak - 1):
+            pacer.record_success()
+        self.assertEqual(pacer.multiplier, alto, "acelerou antes da sequencia limpa")
+
+        pacer.record_success()
+        self.assertEqual(pacer.multiplier, max(1.0, alto * pacer.decay))
+
+    def test_a_rate_limit_resets_the_clean_streak(self):
+        """Meia sequencia limpa seguida de 429 nao pode contar como progresso."""
+        pacer = self.pacer()
+        pacer.record_rate_limited()
+        for _ in range(pacer.clean_streak - 1):
+            pacer.record_success()
+
+        pacer.record_rate_limited()
+        alto = pacer.multiplier
+        pacer.record_success()
+        self.assertEqual(pacer.multiplier, alto)
+
+    def test_the_pace_never_goes_below_the_original_interval(self):
+        pacer = self.pacer()
+        pacer.record_rate_limited()
+        for _ in range(pacer.clean_streak * 40):
+            pacer.record_success()
+
+        self.assertEqual(pacer.multiplier, 1.0)
+        self.assertLessEqual(pacer.next_delay(), max(pacer.base_range))
+
+
+class TranslateTextChunkTests(unittest.TestCase):
+    """Retry/backoff da camada de rede (item 5 do ROADMAP).
+
+    Nenhum destes testes toca a rede: a sessao HTTP e injetada.
+    """
+
+    OK_PAYLOAD = [[["Bom dia", "Good morning"], [" mundo", " world"]]]
+
+    def setUp(self):
+        # O backoff real dorme ate 2,2 s por tentativa — 4,4 s por teste que
+        # esgota as tentativas. Aqui so registramos que dormiu.
+        #
+        # `translation_api.time` E o modulo padrao, entao isto troca
+        # `time.sleep` globalmente enquanto o teste roda. E aceitavel porque a
+        # suite e sequencial e o `addCleanup` devolve o original mesmo se o
+        # teste falhar no meio.
+        self.sleeps = []
+        self.previous_sleep = translation_api.time.sleep
+        translation_api.time.sleep = self.sleeps.append
+        self.addCleanup(
+            setattr, translation_api.time, "sleep", self.previous_sleep
+        )
+        self.logs = []
+
+    def translate(self, script, text="Good morning world"):
+        session = FakeSession(script)
+        result = translation_api.translate_text_chunk(
+            text, "pt", self.logs.append, session=session
+        )
+        return result, session
+
+    def test_success_joins_the_segments(self):
+        result, session = self.translate([FakeResponse(200, self.OK_PAYLOAD)])
+
+        self.assertEqual(result, "Bom dia mundo")
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(self.sleeps, [], "nao dorme quando acerta de primeira")
+
+    def test_request_carries_only_the_text(self):
+        """Garantia W1: nada alem do texto a traduzir sai daqui."""
+        _result, session = self.translate([FakeResponse(200, self.OK_PAYLOAD)], "abc")
+
+        params = session.calls[0]["params"]
+        self.assertEqual(params["q"], "abc")
+        self.assertEqual(params["tl"], "pt")
+        self.assertEqual(set(params) - {"client", "sl", "tl", "dt", "q"}, set())
+
+    def test_empty_segments_are_skipped(self):
+        payload = [[["Um", "One"], None, ["", ""], [" dois", " two"]]]
+        result, _session = self.translate([FakeResponse(200, payload)])
+
+        self.assertEqual(result, "Um dois")
+
+    def test_retryable_status_is_retried_three_times(self):
+        result, session = self.translate([FakeResponse(503) for _ in range(3)])
+
+        self.assertIsNone(result)
+        self.assertEqual(len(session.calls), 3)
+        # Dorme entre as tentativas, nao depois da ultima.
+        self.assertEqual(len(self.sleeps), 2)
+
+    def test_retryable_then_success(self):
+        result, session = self.translate(
+            [FakeResponse(429), FakeResponse(200, self.OK_PAYLOAD)]
+        )
+
+        self.assertEqual(result, "Bom dia mundo")
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(len(self.sleeps), 1)
+
+    def test_every_retryable_status_is_retried(self):
+        for status in (429, 500, 502, 503, 504):
+            with self.subTest(status=status):
+                self.sleeps.clear()
+                result, session = self.translate(
+                    [FakeResponse(status), FakeResponse(200, self.OK_PAYLOAD)]
+                )
+                self.assertEqual(result, "Bom dia mundo")
+                self.assertEqual(len(session.calls), 2)
+
+    def test_other_statuses_fail_immediately(self):
+        for status in (400, 401, 403, 404):
+            with self.subTest(status=status):
+                self.sleeps.clear()
+                result, session = self.translate([FakeResponse(status)])
+                self.assertIsNone(result)
+                self.assertEqual(len(session.calls), 1, "nao pode insistir")
+                self.assertEqual(self.sleeps, [])
+
+    def test_network_error_is_retried(self):
+        result, session = self.translate(
+            [
+                translation_api.requests.RequestException("timeout"),
+                translation_api.requests.RequestException("timeout"),
+                FakeResponse(200, self.OK_PAYLOAD),
+            ]
+        )
+
+        self.assertEqual(result, "Bom dia mundo")
+        self.assertEqual(len(session.calls), 3)
+
+    def test_network_error_exhausted_returns_none(self):
+        result, session = self.translate(
+            [translation_api.requests.RequestException("timeout") for _ in range(3)]
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(len(session.calls), 3)
+        self.assertTrue(any("tentativa 3/3" in line for line in self.logs))
+
+    def test_unexpected_payload_fails_without_retrying(self):
+        """Uma resposta 200 ilegivel nao melhora tentando de novo."""
+        result, session = self.translate([FakeResponse(200, raise_on_json=True)])
+
+        self.assertIsNone(result)
+        self.assertEqual(len(session.calls), 1)
+        self.assertTrue(any("inesperada" in line.lower() for line in self.logs))
+
+    def test_failure_is_always_logged(self):
+        """Garantia T2: falha nunca passa em silencio."""
+        self.translate([FakeResponse(500) for _ in range(3)])
+        self.assertTrue(self.logs)
+        self.assertTrue(all("[ERRO API]" in line for line in self.logs))
+
+    def test_each_wait_falls_inside_its_attempt_window(self):
+        """A espera real e sorteada, mas dentro da faixa daquela tentativa."""
+        self.translate([FakeResponse(503) for _ in range(3)])
+
+        self.assertEqual(len(self.sleeps), 2)
+        menor, maior = translation_api.RETRY_JITTER
+        for indice, dormiu in enumerate(self.sleeps):
+            attempt = indice + 1
+            alvo = min(
+                translation_api.RETRY_BASE_SECONDS * (2 ** indice),
+                translation_api.RETRY_MAX_SECONDS,
+            )
+            with self.subTest(tentativa=attempt):
+                self.assertGreaterEqual(dormiu, alvo * menor)
+                self.assertLessEqual(dormiu, alvo * maior)
+
+    def test_a_rate_limit_slows_the_following_requests(self):
+        """O 429 precisa sair daqui e mudar o ritmo, nao so a proxima tentativa."""
+        pacer = translation_api.RequestPacer()
+        session = FakeSession([FakeResponse(429), FakeResponse(200, self.OK_PAYLOAD)])
+
+        resultado = translation_api.translate_text_chunk(
+            "Good morning world", "pt", self.logs.append, session=session, pacer=pacer
+        )
+
+        self.assertEqual(resultado, "Bom dia mundo")
+        self.assertEqual(pacer.rate_limited, 1)
+        self.assertGreater(pacer.multiplier, 1.0)
+
+    def test_a_server_error_does_not_change_the_pace(self):
+        """503 e problema do servidor, nao ritmo alto demais. Sao coisas distintas."""
+        pacer = translation_api.RequestPacer()
+        session = FakeSession([FakeResponse(503), FakeResponse(200, self.OK_PAYLOAD)])
+
+        translation_api.translate_text_chunk(
+            "Good morning world", "pt", self.logs.append, session=session, pacer=pacer
+        )
+
+        self.assertEqual(pacer.rate_limited, 0)
+        self.assertEqual(pacer.multiplier, 1.0)
+
+    def test_an_unreadable_200_does_not_count_as_a_clean_request(self):
+        """Uma 200 ilegivel nao e sinal de que o ritmo esta bom."""
+        pacer = translation_api.RequestPacer()
+        pacer.record_rate_limited()
+        pacer.clean_run = pacer.clean_streak - 1
+
+        translation_api.translate_text_chunk(
+            "x",
+            "pt",
+            self.logs.append,
+            session=FakeSession([FakeResponse(200, raise_on_json=True)]),
+            pacer=pacer,
+        )
+
+        self.assertEqual(pacer.clean_run, pacer.clean_streak - 1)
+
+    def test_the_pacer_is_optional(self):
+        """A camada de rede continua utilizavel sem ele."""
+        resultado, _session = self.translate([FakeResponse(200, self.OK_PAYLOAD)])
+        self.assertEqual(resultado, "Bom dia mundo")
+
+    def test_works_without_a_logger(self):
+        session = FakeSession([FakeResponse(404)])
+        self.assertIsNone(
+            translation_api.translate_text_chunk("x", "pt", None, session=session)
+        )
+
+
+class TranslateTextTests(unittest.TestCase):
+    """A camada acima: divisao em partes e cancelamento."""
+
+    def setUp(self):
+        self.previous = translation_api.translate_text_chunk
+        self.addCleanup(
+            setattr, translation_api, "translate_text_chunk", self.previous
+        )
+
+    def test_one_failed_chunk_fails_the_whole_text(self):
+        """Garantia T3: nao se monta uma traducao pela metade."""
+        chamadas = []
+
+        def fake(chunk, _lang, _log=None, session=None, pacer=None):
+            chamadas.append(chunk)
+            return None if len(chamadas) == 2 else "ok"
+
+        translation_api.translate_text_chunk = fake
+        texto = ("Frase. " * 2000).strip()
+        self.assertGreater(len(split_text_for_translation(texto)), 1)
+
+        self.assertIsNone(translation_api.translate_text(texto, "pt"))
+
+    def test_cancel_flag_stops_before_the_next_request(self):
+        chamadas = []
+        flag = threading.Event()
+
+        def fake(chunk, _lang, _log=None, session=None, pacer=None):
+            chamadas.append(chunk)
+            flag.set()
+            return "ok"
+
+        translation_api.translate_text_chunk = fake
+        texto = ("Frase. " * 2000).strip()
+
+        self.assertIsNone(
+            translation_api.translate_text(texto, "pt", cancel_flag=flag)
+        )
+        self.assertEqual(len(chamadas), 1, "parou apos o primeiro pedaco")
+
+
+class CaseAdjustedReplacementTests(unittest.TestCase):
+    """Propagacao de caixa do texto encontrado para a substituicao."""
+
+    def test_all_caps_matched_text_uppercases_the_replacement(self):
+        self.assertEqual(case_adjusted_replacement("ROOK", "torre"), "TORRE")
+
+    def test_leading_capital_capitalizes_the_replacement(self):
+        self.assertEqual(case_adjusted_replacement("Rook", "torre"), "Torre")
+
+    def test_lowercase_is_left_alone(self):
+        self.assertEqual(case_adjusted_replacement("rook", "torre"), "torre")
+
+    def test_only_the_first_letter_changes(self):
+        # Nao pode virar "Torre Alta": a substituicao decide o resto.
+        self.assertEqual(case_adjusted_replacement("Rook", "torre alta"), "Torre alta")
+
+    def test_a_single_capital_letter_counts_as_all_caps(self):
+        self.assertEqual(case_adjusted_replacement("R", "torre"), "TORRE")
+
+    def test_text_without_letters_does_not_change_anything(self):
+        # Sem letras nao ha caixa a propagar; decidir por "tudo maiusculo"
+        # transformaria "1-0" em substituicao gritada.
+        self.assertEqual(case_adjusted_replacement("1-0", "vitoria"), "vitoria")
+        self.assertEqual(case_adjusted_replacement("...", "reticencias"), "reticencias")
+
+    def test_leading_symbol_uses_the_first_letter(self):
+        self.assertEqual(case_adjusted_replacement("-Rook", "torre"), "Torre")
+        self.assertEqual(case_adjusted_replacement("-rook", "torre"), "torre")
+
+    def test_mixed_case_is_left_alone(self):
+        self.assertEqual(case_adjusted_replacement("rOOk", "torre"), "torre")
+
+    def test_empty_inputs_are_safe(self):
+        self.assertEqual(case_adjusted_replacement("", "torre"), "torre")
+        self.assertEqual(case_adjusted_replacement("ROOK", ""), "")
+        self.assertIsNone(case_adjusted_replacement("ROOK", None))
+
+    def test_accented_letters_follow_the_same_rule(self):
+        self.assertEqual(case_adjusted_replacement("ÁRVORE", "tree"), "TREE")
+        self.assertEqual(case_adjusted_replacement("Árvore", "tree"), "Tree")
+
+
+class ReadGlossaryCsvTests(unittest.TestCase):
+    """Leitura do CSV de importacao do glossario."""
+
+    def write_csv(self, directory, content, encoding="utf-8-sig"):
+        path = Path(directory) / "entrada.csv"
+        path.write_text(content, encoding=encoding, newline="")
+        return str(path)
+
+    def test_reads_the_exported_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_csv(
+                tmp,
+                "original,replacement,type\r\nrook,torre,suggestion\r\npawn,peao,automatic\r\n",
+            )
+
+            self.assertEqual(
+                read_glossary_csv(path),
+                [
+                    ("rook", "torre", GLOSSARY_RULE_SUGGESTION),
+                    ("pawn", "peao", GLOSSARY_RULE_AUTOMATIC),
+                ],
+            )
+
+    def test_round_trip_with_the_exporter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "saida.csv")
+            entries = [
+                ("rook", "torre", GLOSSARY_RULE_SUGGESTION),
+                ("pawn", "peão", GLOSSARY_RULE_AUTOMATIC),
+            ]
+            export_glossary_csv(path, entries)
+
+            self.assertEqual(read_glossary_csv(path), entries)
+
+    def test_accepts_the_portuguese_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_csv(
+                tmp, "Original,Substituição,Tipo\r\nrook,torre,limpeza\r\n"
+            )
+
+            self.assertEqual(
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_CLEANUP)]
+            )
+
+    def test_headers_are_matched_ignoring_case_and_spaces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_csv(
+                tmp, "  ORIGINAL ,  Replacement  \r\nrook,torre\r\n"
+            )
+
+            self.assertEqual(
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION)]
+            )
+
+    def test_missing_type_column_defaults_to_suggestion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_csv(tmp, "original,replacement\r\nrook,torre\r\n")
+
+            self.assertEqual(
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION)]
+            )
+
+    def test_unknown_type_falls_back_to_suggestion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_csv(
+                tmp, "original,replacement,type\r\nrook,torre,inventado\r\n"
+            )
+
+            self.assertEqual(
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION)]
+            )
+
+    def test_values_are_stripped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_csv(
+                tmp, "original,replacement\r\n  rook  ,  torre  \r\n"
+            )
+
+            self.assertEqual(
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION)]
+            )
+
+    def test_missing_required_column_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_csv(tmp, "original,tipo\r\nrook,suggestion\r\n")
+
+            with self.assertRaises(ValueError):
+                read_glossary_csv(path)
+
+    def test_empty_file_yields_no_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(read_glossary_csv(self.write_csv(tmp, "")), [])
+
+    def test_header_only_yields_no_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_csv(tmp, "original,replacement,type\r\n")
+            self.assertEqual(read_glossary_csv(path), [])
+
+    def test_bom_does_not_leak_into_the_first_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_csv(
+                tmp, "original,replacement\r\nrook,torre\r\n", encoding="utf-8-sig"
+            )
+            # Sem tratar o BOM, o primeiro campo viria como "﻿original" e a
+            # coluna obrigatoria pareceria ausente.
+            self.assertEqual(len(read_glossary_csv(path)), 1)
+
+    def test_accents_survive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write_csv(
+                tmp, "original,replacement\r\ncheck,xeque à descoberta\r\n"
+            )
+
+            self.assertEqual(read_glossary_csv(path)[0][1], "xeque à descoberta")
+
+
+class WorkerFallbackHarness:
+    """Roda `run_translation` com a rede substituida por uma funcao do teste.
+
+    Fica separado do `TestCase` porque duas classes precisam dele (B2 e C3) e
+    herdar de uma classe de teste faria os testes da outra rodarem duas vezes.
+    """
+
+    PGN = (
+        '[Event "Test"]\n\n'
+        "1. e4 {First comment here} e5 {Second comment here} "
+        "2. Nf3 {Third comment here}\n"
+    )
+    COMMENTS = ["First comment here", "Second comment here", "Third comment here"]
+
+    def run_worker(self, tmp_path, translate):
+        pgn = tmp_path / "game.pgn"
+        pgn.write_text(self.PGN, encoding="utf-8")
+        app = FakeApp(tmp_path / "cache.db")
+
+        originals = (
+            translation_worker.translate_text,
+            translation_worker.messagebox.showinfo,
+            translation_worker.messagebox.showwarning,
+        )
+        try:
+            translation_worker.translate_text = translate
+            translation_worker.messagebox.showinfo = lambda *_a, **_k: None
+            translation_worker.messagebox.showwarning = lambda *_a, **_k: None
+            translation_worker.run_translation(app, str(pgn), "pt", False)
+        finally:
+            (
+                translation_worker.translate_text,
+                translation_worker.messagebox.showinfo,
+                translation_worker.messagebox.showwarning,
+            ) = originals
+
+        return app, pgn
+
+    def stored(self, db_path):
+        conn = sqlite3.connect(str(db_path))
+        try:
+            return dict(
+                conn.execute(
+                    "SELECT original_comment, translated_comment FROM comments"
+                ).fetchall()
+            )
+        finally:
+            conn.close()
+
+
+class FailedRunWorkerTests(unittest.TestCase):
+    """Roadmap 7.3: o worker anota o que ficou devendo, e reprocessa so isso."""
+
+    PGN_A = '[Event "A"]\n\n1. e4 {Comentario do arquivo A} e5\n'
+    PGN_B = '[Event "B"]\n\n1. d4 {Comentario do arquivo B} d5\n'
+
+    def roda(self, tmp_path, translate, only_files=None, cancelar=False):
+        app = FakeApp(tmp_path / "cache.db")
+        if cancelar:
+            app.cancel_flag.set()
+
+        originais = (
+            translation_worker.translate_text,
+            translation_worker.messagebox.showinfo,
+            translation_worker.messagebox.showwarning,
+        )
+        try:
+            translation_worker.translate_text = translate
+            translation_worker.messagebox.showinfo = lambda *_a, **_k: None
+            translation_worker.messagebox.showwarning = lambda *_a, **_k: None
+            translation_worker.run_translation(
+                app, str(tmp_path), "pt", False, only_files=only_files
+            )
+        finally:
+            (
+                translation_worker.translate_text,
+                translation_worker.messagebox.showinfo,
+                translation_worker.messagebox.showwarning,
+            ) = originais
+        return app
+
+    def escreve_pgns(self, tmp_path):
+        (tmp_path / "a.pgn").write_text(self.PGN_A, encoding="utf-8")
+        (tmp_path / "b.pgn").write_text(self.PGN_B, encoding="utf-8")
+        return str(tmp_path / "a.pgn"), str(tmp_path / "b.pgn")
+
+    def so_o_arquivo_a_falha(self, text, *_args, **_kwargs):
+        return None if "arquivo A" in text else f"[{text}]"
+
+    def test_the_cache_holds_only_what_these_files_need(self):
+        """Roadmap 2.9: o worker nao traz o idioma inteiro para a memoria.
+
+        Nada quebra se ele trouxer — o resultado e o mesmo —, so que carrega
+        195 mil traducoes (74 MB) para processar uma pasta com algumas dezenas.
+        Por isso o teste olha o CONTEUDO do cache, e nao a saida da traducao.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self.escreve_pgns(tmp_path)
+
+            # Traducoes de outros arquivos, que esta execucao nao vai consultar.
+            conn = initialize_database(str(tmp_path / "cache.db"))
+            cur = conn.cursor()
+            for i in range(50):
+                save_translation(cur, f"comentario de outro arquivo {i}", f"t{i}", "pt")
+            conn.commit()
+            conn.close()
+
+            app = self.roda(tmp_path, lambda text, *_a, **_k: f"[{text}]")
+
+            intrusos = [
+                chave for chave in app.translation_cache
+                if chave.startswith("comentario de outro arquivo")
+            ]
+            self.assertEqual(
+                intrusos, [], "o cache trouxe traducoes que estes arquivos nao usam"
+            )
+            self.assertIn("Comentario do arquivo A", app.translation_cache)
+
+    def test_a_run_with_failures_records_only_the_guilty_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            caminho_a, _caminho_b = self.escreve_pgns(tmp_path)
+
+            self.roda(tmp_path, self.so_o_arquivo_a_falha)
+
+            registro = failed_runs.load_failed_run()
+            self.assertIsNotNone(registro, "nada foi anotado")
+            self.assertEqual(registro["files"], [caminho_a])
+            self.assertEqual(registro["target_language"], "pt")
+            self.assertEqual(registro["failed_count"], 1)
+
+    def test_a_clean_run_erases_a_previous_record(self):
+        """Senao o botao ofereceria para sempre uma lista ja resolvida."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self.escreve_pgns(tmp_path)
+
+            self.roda(tmp_path, self.so_o_arquivo_a_falha)
+            self.assertIsNotNone(failed_runs.load_failed_run())
+
+            self.roda(tmp_path, lambda text, *_a, **_k: f"[{text}]")
+            self.assertIsNone(failed_runs.load_failed_run())
+
+    def test_a_run_canceled_midway_does_not_replace_the_record(self):
+        """Os arquivos ainda nao visitados nao foram avaliados.
+
+        Gravar a lista parcial por cima da anterior perderia o que ela ja sabia.
+
+        O cancelamento acontece **no meio**, com um arquivo ja traduzido — que e
+        o caso que importa. Cancelar antes de comecar nao exerce nada: o worker
+        retorna na primeira checagem e nem chega perto do registro. Foi o que a
+        verificacao por mutacao mostrou sobre a primeira versao deste teste.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self.escreve_pgns(tmp_path)
+
+            self.roda(tmp_path, self.so_o_arquivo_a_falha)
+            antes = failed_runs.load_failed_run()
+            self.assertIsNotNone(antes)
+
+            app = FakeApp(tmp_path / "cache.db")
+
+            def cancela_no_meio(text, *_args, **_kwargs):
+                app.cancel_flag.set()
+                return f"[{text}]"
+
+            originais = (
+                translation_worker.translate_text,
+                translation_worker.messagebox.showinfo,
+                translation_worker.messagebox.showwarning,
+            )
+            try:
+                translation_worker.translate_text = cancela_no_meio
+                translation_worker.messagebox.showinfo = lambda *_a, **_k: None
+                translation_worker.messagebox.showwarning = lambda *_a, **_k: None
+                translation_worker.run_translation(app, str(tmp_path), "pt", False)
+            finally:
+                (
+                    translation_worker.translate_text,
+                    translation_worker.messagebox.showinfo,
+                    translation_worker.messagebox.showwarning,
+                ) = originais
+
+            self.assertTrue(
+                any("cancelada" in linha.lower() for linha in app.logs),
+                "a execucao precisava ter sido cancelada de verdade",
+            )
+            self.assertEqual(failed_runs.load_failed_run(), antes)
+
+    def test_only_files_leaves_the_other_files_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            caminho_a, _caminho_b = self.escreve_pgns(tmp_path)
+            pedidos = []
+
+            def translate(text, *_args, **_kwargs):
+                pedidos.append(text)
+                return f"[{text}]"
+
+            self.roda(tmp_path, translate, only_files=[caminho_a])
+
+            juntos = " ".join(pedidos)
+            self.assertIn("arquivo A", juntos)
+            self.assertNotIn("arquivo B", juntos, "abriu um arquivo que nao devia nada")
+
+    def test_reprocessing_the_recorded_file_clears_the_record(self):
+        """O ciclo completo: falhou, foi anotado, reprocessou, sumiu da lista."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self.escreve_pgns(tmp_path)
+
+            self.roda(tmp_path, self.so_o_arquivo_a_falha)
+            registro = failed_runs.load_failed_run()
+            self.assertIsNotNone(registro)
+
+            self.roda(
+                tmp_path,
+                lambda text, *_a, **_k: f"[{text}]",
+                only_files=registro["files"],
+            )
+
+            self.assertIsNone(failed_runs.load_failed_run())
+
+    def test_a_generated_output_name_is_not_filtered_out_of_the_retry(self):
+        """`collect_pgn_files` descarta nomes com sufixo de idioma.
+
+        Um PGN de origem que por acaso se chame "algo-BR.pgn" sairia da lista
+        justamente por ter falhado antes. A lista explicita nao passa por esse
+        filtro.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            caminho = tmp_path / "estudo-BR.pgn"
+            caminho.write_text(self.PGN_A, encoding="utf-8")
+            pedidos = []
+
+            def translate(text, *_args, **_kwargs):
+                pedidos.append(text)
+                return f"[{text}]"
+
+            self.roda(tmp_path, translate, only_files=[str(caminho)])
+
+            self.assertTrue(pedidos, "o arquivo foi descartado pelo filtro de sufixo")
+
+
+class BatchFallbackTests(WorkerFallbackHarness, unittest.TestCase):
+    """Garantia B2: desalinhamento do lote -> traducao individual.
+
+    Era o ultimo caminho do worker sem teste. E o que impede o pior defeito
+    possivel do programa: atribuir a traducao de um comentario a outro.
+    """
+
+    def test_misaligned_batch_falls_back_to_one_by_one(self):
+        chamadas = []
+
+        def translate(text, *_args, **_kwargs):
+            chamadas.append(text)
+            if " ||| " in text:
+                # Devolve MENOS partes que o esperado: o lote esta desalinhado.
+                return "so uma parte"
+            return f"[{text}]"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _pgn = self.run_worker(tmp_path, translate)
+
+            gravadas = self.stored(tmp_path / "cache.db")
+
+        # Cada comentario recebeu a SUA traducao, nao a de outro.
+        for comentario in self.COMMENTS:
+            self.assertEqual(gravadas.get(comentario), f"[{comentario}]")
+
+        # Uma requisicao do lote + uma por comentario.
+        self.assertEqual(len(chamadas), 1 + len(self.COMMENTS))
+        self.assertTrue(any(" ||| " in c for c in chamadas), "o lote foi tentado")
+        self.assertTrue(
+            any("individualmente" in linha for linha in app.logs),
+            "a queda para o modo individual devia aparecer no log",
+        )
+
+    def test_extra_parts_also_trigger_the_fallback(self):
+        """Partes a mais e tao desalinhado quanto partes a menos."""
+
+        def translate(text, *_args, **_kwargs):
+            if " ||| " in text:
+                return " ||| ".join(f"parte{i}" for i in range(len(self.COMMENTS) + 2))
+            return f"[{text}]"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self.run_worker(tmp_path, translate)
+            gravadas = self.stored(tmp_path / "cache.db")
+
+        for comentario in self.COMMENTS:
+            self.assertEqual(gravadas.get(comentario), f"[{comentario}]")
+
+    def test_aligned_batch_does_not_fall_back(self):
+        """Contraprova: alinhado, resolve tudo numa requisicao so."""
+        chamadas = []
+
+        def translate(text, *_args, **_kwargs):
+            chamadas.append(text)
+            if " ||| " in text:
+                partes = text.split(" ||| ")
+                return " ||| ".join(f"[{p}]" for p in partes)
+            return f"[{text}]"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _pgn = self.run_worker(tmp_path, translate)
+            gravadas = self.stored(tmp_path / "cache.db")
+
+        for comentario in self.COMMENTS:
+            self.assertEqual(gravadas.get(comentario), f"[{comentario}]")
+        self.assertEqual(len(chamadas), 1, "nao devia traduzir de novo um por um")
+        self.assertFalse(any("individualmente" in linha for linha in app.logs))
+
+    def test_failure_in_the_fallback_keeps_the_original_text(self):
+        """Garantias T2/T3: o que falhou fica no idioma original e e reportado."""
+
+        def translate(text, *_args, **_kwargs):
+            if " ||| " in text:
+                return "desalinhado"
+            if text == "Second comment here":
+                return None
+            return f"[{text}]"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, pgn = self.run_worker(tmp_path, translate)
+            gravadas = self.stored(tmp_path / "cache.db")
+            gerado = list(tmp_path.glob("*-BR.pgn"))
+            self.assertTrue(gerado, "o PGN traduzido devia ter sido gerado")
+            # Lido aqui dentro: o diretorio temporario some ao sair do `with`.
+            conteudo = gerado[0].read_text(encoding="utf-8")
+
+        self.assertNotIn("Second comment here", gravadas)
+        self.assertEqual(gravadas.get("First comment here"), "[First comment here]")
+        self.assertIn("{Second comment here}", conteudo, "o que falhou fica no original")
+        self.assertIn("{[First comment here]}", conteudo)
+        self.assertTrue(any("ATENCAO" in linha for linha in app.logs))
+
+
+def escrita_disponivel(db_path, espera_ms=2000):
+    """True se OUTRA conexao consegue pegar o lock de escrita agora.
+
+    `BEGIN IMMEDIATE` + `ROLLBACK`: pega o lock e devolve sem alterar nada. E a
+    pergunta que o editor faz implicitamente toda vez que grava uma traducao
+    enquanto o worker esta rodando.
+
+    A espera curta e proposital. Em producao o `busy_timeout` e 30 s; aqui, uma
+    regressao que volte a segurar o lock deve falhar em 2 s, e nao arrastar o
+    teste por meio minuto.
+    """
+    conn = sqlite3.connect(str(db_path), timeout=espera_ms / 1000)
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {espera_ms}")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.rollback()
+        return True
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        conn.close()
+
+
+class ConcurrentDatabaseAccessTests(unittest.TestCase):
+    """Garantia C3: o editor nunca e bloqueado pelo worker.
+
+    Toda a suite roda uma coisa de cada vez, e por isso nao encostava nesta
+    classe de defeito: o editor e o worker usam o MESMO `traducoes.db`, cada um
+    com sua conexao.
+
+    O que trava e a ESCRITA, nao a leitura. Duas conexoes nunca escrevem ao mesmo
+    tempo — nem em WAL —, entao uma transacao aberta no worker bloqueia o
+    "Salvar" do editor pelos 30 s do `busy_timeout` e depois falha. O caso real
+    esta em `FallbackTransactionTests`, que reproduz o cenario ponta a ponta.
+
+    A leitura simultanea, testada aqui, e a metade barata do problema: mesmo sem
+    WAL o leitor so espera durante o commit do escritor. Os testes desta classe
+    fixam o modo do arquivo e o fato de que ler durante uma escrita aberta
+    funciona — nao pretendem provar que sem WAL isso quebraria, porque nao
+    quebraria de forma confiavel.
+    """
+
+    def _semear(self, db_path):
+        conn = initialize_database(str(db_path))
+        cursor = conn.cursor()
+        for indice in range(20):
+            save_translation(cursor, f"comentario {indice}", f"traducao {indice}", "pt")
+        conn.commit()
+        conn.close()
+
+    def _com_escrita_aberta(self, db_path, durante, abrir=None):
+        """Roda `durante()` enquanto uma thread mantem uma escrita aberta.
+
+        Reproduz o estado do worker: transacao de escrita iniciada e ainda nao
+        comitada. O `durante()` roda na thread principal, como o callback do Tk.
+
+        `abrir` existe por causa da contraprova: `initialize_database` forca WAL
+        em toda conexao, e o `journal_mode` e propriedade do ARQUIVO. Usa-lo do
+        lado escritor desfaria o `PRAGMA journal_mode = DELETE` que a
+        contraprova acabou de aplicar, e o cenario antigo nunca seria
+        reproduzido.
+        """
+        if abrir is None:
+            abrir = lambda caminho: initialize_database(str(caminho))
+
+        pronto = threading.Event()
+        solte = threading.Event()
+        falha = []
+
+        def escritor():
+            try:
+                conn = abrir(db_path)
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "INSERT INTO comments (original_comment, translated_comment,"
+                    " target_language) VALUES ('novo', 'novo', 'pt')"
+                )
+                pronto.set()
+                solte.wait(30)
+                conn.commit()
+                conn.close()
+            except Exception as exc:  # pragma: no cover - falha de infra do teste
+                falha.append(exc)
+                pronto.set()
+
+        thread = threading.Thread(target=escritor)
+        thread.start()
+        try:
+            self.assertTrue(pronto.wait(30), "a escrita concorrente nao comecou")
+            self.assertFalse(falha, f"a thread escritora falhou: {falha}")
+            return durante()
+        finally:
+            solte.set()
+            thread.join(30)
+
+    def test_open_database_puts_the_file_in_wal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = initialize_database(str(Path(tmp) / "cache.db"))
+            try:
+                modo = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            finally:
+                conn.close()
+        self.assertEqual(modo.lower(), "wal")
+
+    def test_the_editor_reads_while_the_worker_holds_an_open_write(self):
+        """O caso real: clicar numa linha do editor durante uma traducao."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._semear(db_path)
+
+            def leitura_do_editor():
+                leitor = initialize_database(str(db_path))
+                # Producao espera 30 s antes de desistir. Aqui a espera e curta
+                # para que uma regressao falhe rapido, em vez de travar a suite.
+                leitor.execute("PRAGMA busy_timeout = 2000")
+                comeco = time.perf_counter()
+                try:
+                    linhas = fetch_review_rows_page(leitor.cursor(), "pt", limit=10)
+                finally:
+                    leitor.close()
+                return len(linhas), time.perf_counter() - comeco
+
+            quantas, decorrido = self._com_escrita_aberta(db_path, leitura_do_editor)
+
+        self.assertEqual(quantas, 10)
+        self.assertLess(
+            decorrido,
+            1.0,
+            "a leitura devia ser imediata, nao esperar pelo lock do worker",
+        )
+
+    def test_a_second_writer_is_blocked_no_matter_the_journal_mode(self):
+        """O mecanismo que C3 tem de contornar, fixado como teste.
+
+        E facil supor que WAL resolve tudo. Nao resolve isto: WAL desacopla
+        leitor de escritor, nunca escritor de escritor. Enquanto o worker
+        mantiver transacao aberta, o "Salvar" do editor espera e falha — e a
+        unica saida e o worker nao manter a transacao aberta.
+
+        Se este teste um dia passar a falhar, e porque alguem mudou o modo do
+        banco achando que isso dispensa o commit por comentario do worker. Nao
+        dispensa.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._semear(db_path)
+
+            modo = initialize_database(str(db_path))
+            try:
+                self.assertEqual(
+                    modo.execute("PRAGMA journal_mode").fetchone()[0].lower(),
+                    "wal",
+                    "o cenario abaixo vale justamente COM o WAL ligado",
+                )
+            finally:
+                modo.close()
+
+            livre = self._com_escrita_aberta(
+                db_path,
+                lambda: escrita_disponivel(db_path, espera_ms=500),
+            )
+
+        self.assertFalse(
+            livre,
+            "escritor concorrente devia ser barrado mesmo em WAL",
+        )
+
+
+class ApiFailureTests(WorkerFallbackHarness, unittest.TestCase):
+    """Garantia B3: falha da API nao e desalinhamento, e nao se trata igual.
+
+    O fallback individual era acionado pelas duas causas. Quando a causa era a
+    API nao responder, ele repetia comentario a comentario uma requisicao que ja
+    tinha gastado 3 tentativas — e cada repeticao gastava outras 3, com ate 30 s
+    de timeout cada. Um lote de 40 comentarios contra um endpoint pendurado
+    levava perto de uma hora para terminar com os 40 falhando do mesmo jeito.
+    """
+
+    def test_a_batch_the_api_did_not_answer_is_not_retried_one_by_one(self):
+        chamadas = []
+
+        def translate(text, *_args, **_kwargs):
+            chamadas.append(text)
+            return None  # a API nao respondeu
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _pgn = self.run_worker(tmp_path, translate)
+            gravadas = self.stored(tmp_path / "cache.db")
+            gerados = list(tmp_path.glob("*-BR.pgn"))
+
+        # UMA requisicao (a do lote), e nao uma por comentario.
+        self.assertEqual(
+            len(chamadas),
+            1,
+            f"a API foi chamada {len(chamadas)} vezes; devia ser so a do lote",
+        )
+        self.assertIn(" ||| ", chamadas[0])
+
+        # T2/T3: nada inventado, tudo contabilizado e dito.
+        self.assertEqual(gravadas, {})
+        self.assertTrue(
+            any("[FALHA] A API nao respondeu" in linha for linha in app.logs),
+            "a falha da chamada precisa aparecer no log — era o unico caminho mudo",
+        )
+        self.assertTrue(any("ATENCAO" in linha for linha in app.logs))
+        self.assertFalse(
+            gerados,
+            "sem nenhuma traducao, nao ha PGN de saida a gerar",
+        )
+        self.assertTrue(
+            any("Nenhum arquivo de saida foi gerado" in linha for linha in app.logs),
+            "mandar 'reprocesse os arquivos gerados' sem arquivo gerado e mentira",
+        )
+
+    def test_misalignment_still_falls_back_one_by_one(self):
+        """B2 nao mudou: se a resposta VEIO, o fallback continua valendo."""
+        chamadas = []
+
+        def translate(text, *_args, **_kwargs):
+            chamadas.append(text)
+            if " ||| " in text:
+                return "so uma parte"
+            return f"[{text}]"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _pgn = self.run_worker(tmp_path, translate)
+            gravadas = self.stored(tmp_path / "cache.db")
+
+        self.assertEqual(len(chamadas), 1 + len(self.COMMENTS))
+        for comentario in self.COMMENTS:
+            self.assertEqual(gravadas.get(comentario), f"[{comentario}]")
+        self.assertTrue(any("individualmente" in linha for linha in app.logs))
+
+    def test_the_circuit_breaker_stops_after_consecutive_dead_batches(self):
+        """Sem disjuntor, um endpoint fora arrasta a execucao por horas."""
+        pgn_longo = '[Event "Test"]\n\n'
+        comentarios = []
+        for indice in range(12):
+            # Comentarios grandes o bastante para render varios lotes.
+            texto = f"Comment number {indice} " + "x" * (BATCH_MAX_CHARS // 2)
+            comentarios.append(texto)
+            pgn_longo += f"{indice + 1}. e4 {{{texto}}} "
+
+        chamadas = []
+
+        def translate(text, *_args, **_kwargs):
+            chamadas.append(text)
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(pgn_longo, encoding="utf-8")
+            app = FakeApp(tmp_path / "cache.db")
+
+            originais = (
+                translation_worker.translate_text,
+                translation_worker.messagebox.showinfo,
+                translation_worker.messagebox.showwarning,
+            )
+            try:
+                translation_worker.translate_text = translate
+                translation_worker.messagebox.showinfo = lambda *_a, **_k: None
+                translation_worker.messagebox.showwarning = lambda *_a, **_k: None
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+            finally:
+                (
+                    translation_worker.translate_text,
+                    translation_worker.messagebox.showinfo,
+                    translation_worker.messagebox.showwarning,
+                ) = originais
+
+        self.assertGreater(
+            len(comentarios),
+            translation_worker.MAX_CONSECUTIVE_FAILED_BATCHES,
+            "o PGN precisa render mais lotes que o limite do disjuntor",
+        )
+        self.assertEqual(
+            len(chamadas),
+            translation_worker.MAX_CONSECUTIVE_FAILED_BATCHES,
+            "parou depois do limite, e nao no fim da lista",
+        )
+        self.assertTrue(any("[ABORTADO]" in linha for linha in app.logs))
+        self.assertTrue(
+            any("INTERROMPIDA" in linha for linha in app.logs),
+            "o resumo precisa dizer que a execucao nao terminou normalmente",
+        )
+
+
+class FallbackTransactionTests(WorkerFallbackHarness, unittest.TestCase):
+    """Garantia C3: o fallback individual nao segura o lock atravessando a rede.
+
+    O primeiro `save_translation` do fallback abre a transacao de escrita. Antes,
+    o `commit` so vinha no fim do lote — entao a transacao atravessava TODAS as
+    chamadas de rede restantes. Num lote de 40 comentarios a ~1 s por
+    requisicao, sao mais de 40 s de lock retido, acima do `busy_timeout` de 30 s
+    do editor.
+    """
+
+    def test_the_individual_fallback_never_holds_a_write_across_the_network(self):
+        sondas = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+
+            def translate(text, *_args, **_kwargs):
+                if " ||| " in text:
+                    return "desalinhado"
+                # Este ponto E a chamada de rede. Se o worker estiver segurando
+                # a transacao aqui, o editor esta travado agora.
+                sondas.append((text, escrita_disponivel(db_path)))
+                return f"[{text}]"
+
+            self.run_worker(tmp_path, translate)
+            gravadas = self.stored(db_path)
+
+        # As sondas depois da primeira sao as que importam: nelas ja houve pelo
+        # menos uma gravacao, entao a transacao estaria aberta.
+        self.assertEqual(len(sondas), len(self.COMMENTS))
+        travadas = [texto for texto, livre in sondas if not livre]
+        self.assertEqual(
+            travadas,
+            [],
+            "o banco estava travado durante a chamada de rede destes comentarios",
+        )
+        # E o fallback continua fazendo o que B2 exige.
+        for comentario in self.COMMENTS:
+            self.assertEqual(gravadas.get(comentario), f"[{comentario}]")
 
 
 if __name__ == "__main__":
