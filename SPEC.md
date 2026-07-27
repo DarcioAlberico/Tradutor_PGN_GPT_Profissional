@@ -35,6 +35,7 @@ Todos os caminhos sao resolvidos a partir do diretorio de `sys.argv[0]`
 | `comments_fts` (dentro do `traducoes.db`) | Indice de busca FTS5, mantido por gatilhos (R8) | Nao |
 | `Substituicoes.txt` | Fonte de verdade do glossario | Sim |
 | `glossario.db` | Indice SQLite derivado do `Substituicoes.txt` | Nao |
+| `glossario.db` (`schema_version`) | Marca do esquema; um banco de versao anterior e reconstruido do arquivo | — |
 | `pgn_tradutor_pro_settings.json` | Estado da UI e rascunhos de edicao | Nao |
 | `backups/` | Copias automaticas do glossario e do banco, com retencao (S8) | Nao |
 | `logs/` | Log por execucao de traducao (`traducao-<carimbo>.log`), com retencao | Nao |
@@ -232,13 +233,34 @@ conhecida. A mesma mensagem nao reabre o dialogo por alguns segundos, para que u
 callback periodico que falhe sempre nao encha a tela; passada essa janela, quem
 tentar de novo e avisado de novo.
 
-Rodam fora da thread da interface, com progresso e cancelamento: a traducao (que
-tem tambem pausa), a normalizacao de metadados e a aplicacao das regras
-automaticas. Cancelar a aplicacao das regras faz `rollback` — o banco fica como
-estava, nunca com parte das traducoes alteradas.
+**Nenhuma operacao longa roda no callback do botao.** Ficam fora da thread da
+interface, com barra de progresso: a traducao (que tem tambem pausa), a
+normalizacao de metadados, a aplicacao das regras automaticas, o backup e a
+restauracao do banco, e a importacao e a exportacao de CSV.
 
-Ainda rodam no proprio callback do Tk: backup, restauracao e importacao de CSV
-(ROADMAP 2.7).
+**Desistir no meio nao deixa lixo**, e o que isso exige e diferente em cada uma:
+
+| operacao | ao cancelar |
+|---|---|
+| regras automaticas, importacao de CSV | `rollback`: o banco fica como estava |
+| backup do banco | a copia parcial e apagada |
+| exportacao de CSV | o arquivo parcial e apagado |
+| restauracao do banco | **nao aceita cancelamento** |
+
+Um `.db` cortado no meio e um banco incompleto com cara de backup, e o proximo
+"Restaurar backup" o ofereceria na lista; um CSV cortado abre, tem cabecalho e
+linhas validas, e nada nele denuncia que esta pela metade. Por isso os dois sao
+removidos.
+
+O backup criado **antes** de uma importacao de CSV permanece mesmo se ela for
+cancelada: e uma copia valida, e apaga-la seria destruir o unico registro de que
+a operacao chegou a comecar.
+
+A restauracao e a excecao porque o destino da copia e o **banco de trabalho**:
+interrompe-la o deixaria incompleto, e nao ha o recurso de apagar o que foi
+escrito. Oferecer um botao que nao pode ser honrado seria pior do que nao
+oferecer — o usuario clicaria achando que parou. A confirmacao avisa disso antes
+de comecar.
 
 ---
 
@@ -246,23 +268,40 @@ Ainda rodam no proprio callback do Tk: backup, restauracao e importacao de CSV
 
 ### 4.1 Formato
 
-`Substituicoes.txt` contem uma atribuicao Python com uma lista de pares,
-lida com `ast.literal_eval` (nunca `exec`):
+`Substituicoes.txt` contem uma atribuicao Python com uma lista de tuplas, lida
+com `ast.literal_eval` (nunca `exec`). Cada regra tem de dois a quatro campos —
+`(original, substituicao, tipo, prioridade)` — e **cada campo so e escrito quando
+tem algo a dizer**:
 
 ```python
 substituicoes = [
-    ('rook', 'torre'),
+    ('rook', 'torre'),                     # tipo suggestion, prioridade 0
     ('Queen', 'Dama'),
+    ('== EndSquare ==', '', 'cleanup'),    # outro tipo
+    ('torre', 'castle', 'suggestion', 1),  # com prioridade
 ]
 ```
 
-Comentarios de linha marcam o tipo da regra. Tipos:
+O que faltar assume o padrao, entao um arquivo escrito por uma versao anterior
+continua valendo sem conversao. O inverso tambem importa: o arquivo tem milhares
+de linhas e e versionado, e escrever os quatro campos em todas transformaria uma
+decisao tomada em duas regras num diff do arquivo inteiro.
+
+Tipos:
 
 | Tipo | Quando e aplicado | Revisao humana |
 |---|---|---|
 | `cleanup` | Antes de enviar para a API | Nao |
 | `automatic` | Na resposta da API e em massa no banco | Nao |
 | `suggestion` | Oferecido no editor, aplicado a pedido | Sim |
+
+Um tipo ou uma prioridade que o programa nao entenda vira o padrao, em vez de
+erro: o arquivo e editavel a mao e sobrevive a versoes do programa, e uma regra
+mal escrita nao pode desligar as outras milhares na carga.
+
+O CSV de importacao/exportacao tem as mesmas quatro colunas (`original`,
+`replacement`, `type`, `priority`), e a leitura aceita a ausencia das duas
+ultimas — um CSV de tres colunas, ou montado numa planilha, continua importavel.
 
 ### 4.2 Semantica de casamento
 
@@ -598,6 +637,17 @@ leia uma garantia acima como mais ampla do que ela e.
 
 **Estrutura**
 
+- Quem vence um conflito e decidido em **dois lugares**: `glossary_conflicts`,
+  para anunciar, e `order_rules_by_specificity`, para aplicar. Se os dois
+  divergirem, a janela aponta uma regra e o texto recebe outra — pior do que nao
+  anunciar nada. Nao ha um criterio unico compartilhado; o que ha e um teste que
+  confere o vencedor anunciado contra o texto que `apply_all_substitutions`
+  produz de fato.
+- `glossario.db` e um cache derivado, e um cache pode ficar velho de um jeito que
+  o `mtime` do arquivo nao denuncia: uma coluna nova entra com o valor padrao
+  para todas as regras. Por isso ele carrega uma marca de esquema
+  (`schema_version`) e e reconstruido a partir do `Substituicoes.txt` quando ela
+  nao bate. Toda coluna acrescentada tem de subir essa marca.
 
 ---
 
