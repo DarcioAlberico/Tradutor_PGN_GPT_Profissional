@@ -1,14 +1,12 @@
 # Roadmap — PGN Tradutor Pro
 
-Melhorias pendentes, em ordem de prioridade. Cada item traz o motivo, o impacto
-medido (quando ha medicao) e o criterio de pronto.
+Registro das melhorias do programa. Cada item traz o motivo, o impacto medido
+(quando ha medicao) e como a correcao foi verificada — inclusive quando a
+verificacao mostrou que a analise estava errada, caso em que o erro fica no
+proprio item.
 
-Concluido ate aqui: correcao de codificacao (E1/E2/G2), falhas de traducao
-reportadas (T2), ordem e congelamento das regras do glossario (S1-S4), exclusao
-por par (S6), historico na traducao certa (R3), rascunhos preservados (R4),
-gravacao apenas por acao do usuario (R1), falha de carga visivel (S5),
-retencao de `backups/` (S8) e o vencedor de cada conflito a vista (S9). Ver
-[SPEC.md](SPEC.md).
+**Nada pendente no momento.** As garantias que os testes protegem estao na
+[SPEC.md](SPEC.md), secao 8; ela e a lista que vale, e nao uma copia aqui.
 
 **Revisao de 2026-07-27.** Os itens 1.4, 1.5, 2.7 a 2.10 e as secoes 6, 7 e 8
 sao novos. Sairam de uma analise do codigo inteiro com o banco real (195.607
@@ -28,6 +26,38 @@ que o programa nao produz. Quem descobriu foi a tentativa de transformar a
 medicao em teste — ela nao reproduziu. O relato do erro ficou no proprio item,
 porque a conclusao certa (o que trava e a escrita) so faz sentido ao lado da
 errada.
+
+**Segunda rodada do mesmo dia.** Entraram 3.5, 2.11, 5.1 e a parte 2 do 1.5.
+**Os quatro ja estavam anotados em algum lugar** — nenhum foi descoberto agora —,
+e o tema da rodada e o que aconteceu com essas anotacoes. Em tres, a nota existia
+e **dizia menos do que o problema era**:
+
+| o que a nota dizia | o que era |
+|---|---|
+| "11 de 25 funcoes de `app_actions` aparecem em algum teste" (5.1) | aparecer nao e ser exercitada: **cinco** eram chamadas |
+| "agora que `background_task` existe, migra-los e mecanico" (2.7 -> 2.11) | cada operacao deixa um lixo diferente ao ser cancelada, e ligar as tres expos um defeito do proprio 2.7 |
+| a assimetria dos dois editores, anotada na skill como armadilha de uso | era divida estrutural — o item 3.1 inteiro, no outro editor, e sem estar no ROADMAP |
+
+No quarto (1.5 parte 2) a nota estava certa e foi **ignorada**: ela dizia "so
+depois que mostrar o vencedor estiver em uso e ficar claro que nao basta", e esse
+periodo de uso nao houve. Foi feito por decisao de seguir adiante. Isso esta dito
+no item, e nao dissolvido no meio do relato.
+
+**Trinta e sete mutacoes nesta rodada, e tres delas nao quebraram nada** — ou
+seja, tres testes meus nao testavam nada. Os tres pelo mesmo motivo de fundo, que
+so ficou obvio depois de aparecer duas vezes: **o cenario do teste usava o valor
+padrao, e com ele a producao quebrada e indistinguivel da correta.**
+
+- Afirmar que um botao esta habilitado **sem nunca te-lo desabilitado** (5.1):
+  remover o `reset_buttons` nao muda nada, porque ele ja estava habilitado.
+- Digitar uma prioridade invalida numa regra que ja valia **zero** (1.5): gravar
+  "zero por engano" reproduz o arquivo anterior.
+- Atualizar uma entrada de prioridade **zero** tendo a linha-base tambem em zero
+  (1.5): comparar a prioridade acerta por coincidencia.
+
+Em todos, o teste passava com a producao certa e com a errada — que e a
+definicao de nao proteger nada. A correcao foi a mesma nos tres: partir de um
+valor que nao seja o padrao.
 
 ---
 
@@ -1308,7 +1338,7 @@ falham.
 
 ---
 
-## 5. Cobertura de testes — EM ANDAMENTO (72 -> 366 testes)
+## 5. Cobertura de testes — CONCLUIDO (72 -> 396 testes)
 
 **A premissa deste item estava errada.** Ele dizia que testar
 `open_translation_editor` / `open_glossary_editor` "so e viavel depois de 3.1".
@@ -1384,7 +1414,7 @@ coisa alguma, porque o teste afirmava que os botoes estavam habilitados **sem
 nunca te-los desabilitado**. Os dois testes passaram a montar antes o estado que
 `normalize_pgn_metadata` deixa de verdade; a mesma mutacao agora falha nos dois.
 
-**Falta:**
+**As tres lacunas que este item listava, e o que aconteceu com elas:**
 
 - ~~Nenhum teste exercita duas partes do programa ao mesmo tempo.~~ **FEITO**
   (2026-07-27): `ConcurrentDatabaseAccessTests` e `FallbackTransactionTests`
