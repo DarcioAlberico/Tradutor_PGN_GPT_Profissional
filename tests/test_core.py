@@ -1,3 +1,4 @@
+import csv
 import io
 import sqlite3
 import sys
@@ -113,11 +114,13 @@ from tradutor_pgn.review_quality import (
     row_has_quality_warning,
     summarize_quality_warnings,
 )
+from tradutor_pgn.background_task import BackgroundTask, TaskCanceled
 from tradutor_pgn.db_tools import (
     analyze_database_automatic_rules,
     analyze_translations_csv_import,
     apply_database_automatic_rules,
     create_database_backup,
+    export_translations_to_csv,
     format_automatic_rule_examples,
     format_quality_stats,
     import_translations_from_csv,
@@ -1520,6 +1523,67 @@ class CallbackErrorReportingTests(unittest.TestCase):
         self.assertTrue(logs)
 
 
+class SynchronousProgress:
+    """Substitui `run_with_progress` rodando o trabalho na hora.
+
+    O `run_with_progress` de verdade abre um `CTkToplevel` e sobe uma thread que
+    so devolve o resultado por `root.after` — o que exige display e um
+    `mainloop()` rodando. Os testes abaixo verificam a ORQUESTRACAO das
+    operacoes de banco (o que e chamado, em que ordem, o que acontece ao
+    cancelar), e nada disso e sobre a thread.
+
+    O substituto e fiel no que importa: chama o trabalho com um
+    `BackgroundTask` de verdade e despacha para `on_success`/`on_error`/
+    `on_cancel` pelo mesmo criterio do original. E registra cada chamada, que e
+    o que permite exigir que uma operacao passe por aqui — se alguem devolver o
+    trabalho para dentro do callback do Tk, a lista fica vazia.
+    """
+
+    def __init__(self, cancelar=False):
+        self.chamadas = []
+        self.cancelar = cancelar
+
+    def install(self, testcase, modulo):
+        testcase.addCleanup(setattr, modulo, "run_with_progress", modulo.run_with_progress)
+        modulo.run_with_progress = self
+
+    def __call__(
+        self,
+        parent,
+        title,
+        work,
+        on_success=None,
+        on_error=None,
+        on_cancel=None,
+        message="Processando...",
+        allow_cancel=True,
+    ):
+        self.chamadas.append({"title": title, "message": message, "allow_cancel": allow_cancel})
+
+        task = BackgroundTask()
+        if self.cancelar:
+            task.cancel()
+
+        try:
+            resultado = work(task)
+        except TaskCanceled:
+            if on_cancel is not None:
+                on_cancel(None)
+            return task
+        except Exception as exc:
+            if on_error is not None:
+                on_error(exc)
+            return task
+
+        destino = on_cancel if task.cancelado() else on_success
+        if destino is not None:
+            destino(resultado)
+        return task
+
+    def titles(self):
+        return [c["title"] for c in self.chamadas]
+
+
 class CsvImportSingleReadTests(unittest.TestCase):
     """Roadmap 2.10: previa e aplicacao leem o CSV uma vez so.
 
@@ -1589,7 +1653,9 @@ class CsvImportSingleReadTests(unittest.TestCase):
                 leituras.append(caminho)
                 return original(caminho)
 
-            app = types.SimpleNamespace(output_db=str(db_path), translation_cache={})
+            app = types.SimpleNamespace(
+                output_db=str(db_path), translation_cache={}, root=None
+            )
             patches = [
                 (db_tools, "_read_translation_csv_rows", contando),
                 (db_tools, "filedialog", types.SimpleNamespace(
@@ -1603,6 +1669,10 @@ class CsvImportSingleReadTests(unittest.TestCase):
                 self.addCleanup(setattr, modulo, nome, getattr(modulo, nome))
                 setattr(modulo, nome, novo)
 
+            # A importacao passou a rodar fora da thread do Tk (item 2.11), e
+            # `run_with_progress` precisa de display e `mainloop`. O que este
+            # teste afirma — quantas vezes o CSV e lido — nao mudou.
+            SynchronousProgress().install(self, db_tools)
             db_tools.import_csv(app)
 
             self.assertEqual(len(leituras), 1, f"o CSV foi lido {len(leituras)} vezes")
@@ -3843,6 +3913,336 @@ class GlossaryTests(unittest.TestCase):
                 load_glossary_entries(result["safety_backup_path"]),
                 [("current", "atual")],
             )
+
+
+class DatabaseToolsBackgroundTests(unittest.TestCase):
+    """Item 2.11: backup, restauracao e CSV saem do callback do Tk.
+
+    O `background_task` foi criado em 2.7 e ficou servindo so a aplicacao de
+    regras automaticas. Estas quatro operacoes continuavam rodando dentro do
+    proprio callback do botao: sem progresso, sem cancelamento e com a janela
+    parada — o backup do banco real leva 0,4 s, mas a exportacao do CSV leva
+    1,1 s e a importacao depende do tamanho do arquivo.
+
+    O que estes testes fixam nao e o tempo: e que a operacao PASSA pela thread
+    de trabalho e que desistir no meio nao deixa lixo para tras.
+    """
+
+    LINHAS = 1200
+
+    def _semear(self, db_path, linhas=None):
+        linhas = self.LINHAS if linhas is None else linhas
+        conn = initialize_database(str(db_path))
+        cursor = conn.cursor()
+        for indice in range(linhas):
+            save_translation(cursor, f"orig {indice}", f"trad {indice}", "pt")
+        conn.commit()
+        conn.close()
+        return linhas
+
+    def _app(self, db_path):
+        return types.SimpleNamespace(
+            output_db=str(db_path), translation_cache={}, root=None
+        )
+
+    def _silencia_dialogos(self):
+        vistos = []
+        self.addCleanup(setattr, db_tools, "messagebox", db_tools.messagebox)
+        db_tools.messagebox = types.SimpleNamespace(
+            askyesno=lambda titulo, msg, **_kw: vistos.append(("askyesno", titulo)) or True,
+            showinfo=lambda titulo, msg, **_kw: vistos.append(("info", titulo)),
+            showerror=lambda titulo, msg, **_kw: vistos.append(("error", titulo)),
+        )
+        return vistos
+
+    def _escolhe_arquivo(self, caminho):
+        self.addCleanup(setattr, db_tools, "filedialog", db_tools.filedialog)
+        db_tools.filedialog = types.SimpleNamespace(
+            asksaveasfilename=lambda **_kw: str(caminho),
+            askopenfilename=lambda **_kw: str(caminho),
+        )
+
+    # ------------------------------------------------ as quatro saem da UI
+
+    def test_the_four_operations_go_through_the_worker_thread(self):
+        """O item inteiro em um teste: nenhuma delas trabalha no callback.
+
+        Devolver qualquer uma para dentro do callback do Tk nao quebra nada
+        visivel — ela continua funcionando, so que travando a janela. Por isso a
+        exigencia e explicita: cada uma tem de ter passado pelo
+        `run_with_progress`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            self._semear(db_path, 20)
+            csv_path = base / "saida.csv"
+            self._silencia_dialogos()
+            app = self._app(db_path)
+
+            progresso = SynchronousProgress()
+            progresso.install(self, db_tools)
+
+            self._escolhe_arquivo(csv_path)
+            db_tools.export_csv(app)
+            db_tools.backup_database(app)
+            db_tools.import_csv(app)                  # previa + aplicacao
+
+            backup = next(iter((base / "backups").glob("*.db")))
+            self._escolhe_arquivo(backup)
+            db_tools.restore_database(app)
+
+            self.assertEqual(
+                progresso.titles(),
+                [
+                    "Exportar CSV",
+                    "Backup do Banco de Dados",
+                    "Importar CSV",
+                    "Importar CSV",
+                    "Restaurar Banco de Dados",
+                ],
+            )
+
+    def test_restoring_does_not_offer_a_cancel_it_cannot_honor(self):
+        """Interromper a copia deixaria o banco de trabalho pela metade.
+
+        Oferecer o botao e ignora-lo seria pior do que nao oferecer: o usuario
+        clicaria achando que parou, e a copia seguiria substituindo o banco.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            self._semear(db_path, 10)
+            backup = create_database_backup(str(db_path), backup_dir=str(base / "b"))
+
+            self._silencia_dialogos()
+            self._escolhe_arquivo(backup)
+            progresso = SynchronousProgress()
+            progresso.install(self, db_tools)
+
+            db_tools.restore_database(self._app(db_path))
+
+            self.assertEqual([c["allow_cancel"] for c in progresso.chamadas], [False])
+
+    # ------------------------------------------------ exportacao
+
+    def test_exporting_reports_progress_and_writes_every_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            linhas = self._semear(db_path)
+            destino = base / "saida.csv"
+
+            # Bloco pequeno para haver mais de um: com o de producao (5.000) as
+            # 1.200 linhas sairiam numa tacada e o teste nao veria a progressao.
+            self.addCleanup(setattr, db_tools, "EXPORT_CHUNK", db_tools.EXPORT_CHUNK)
+            db_tools.EXPORT_CHUNK = 500
+
+            progresso = []
+            escritas = export_translations_to_csv(
+                str(db_path), str(destino), progress_callback=lambda f, t: progresso.append((f, t))
+            )
+
+            self.assertEqual(escritas, linhas)
+            with open(destino, encoding="utf-8-sig", newline="") as f:
+                gravadas = list(csv.reader(f))
+            self.assertEqual(len(gravadas), linhas + 1, "faltou o cabecalho ou uma linha")
+            self.assertEqual(gravadas[0], db_tools.EXPORT_CSV_HEADERS)
+
+            self.assertTrue(progresso, "nenhum progresso reportado")
+            self.assertEqual(progresso[0], (0, linhas), "o total nao foi anunciado no inicio")
+            self.assertEqual(progresso[-1], (linhas, linhas))
+
+    def test_canceling_the_export_leaves_no_half_written_file(self):
+        """Um CSV cortado no meio abre, tem cabecalho e linhas validas.
+
+        Deixa-lo em disco depois de um "Cancelar" seria oferecer um arquivo que
+        mente sobre o que tem — e o usuario nao teria como saber.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            self._semear(db_path)
+            destino = base / "saida.csv"
+
+            with self.assertRaises(TaskCanceled):
+                export_translations_to_csv(
+                    str(db_path), str(destino), should_cancel=lambda: True
+                )
+
+            self.assertFalse(destino.exists(), "o CSV pela metade ficou em disco")
+
+    # ------------------------------------------------ backup
+
+    def test_backing_up_reports_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            self._semear(db_path)
+
+            progresso = []
+            caminho = create_database_backup(
+                str(db_path),
+                backup_dir=str(base / "backups"),
+                progress_callback=lambda f, t: progresso.append((f, t)),
+            )
+
+            self.assertTrue(Path(caminho).exists())
+            self.assertTrue(progresso, "a copia nao reportou progresso nenhum")
+            feito, total = progresso[-1]
+            self.assertEqual(feito, total, "a ultima medida nao fecha em 100%")
+
+    def test_canceling_the_backup_removes_the_partial_copy(self):
+        """Senao o proximo "Restaurar backup" ofereceria o arquivo incompleto."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            self._semear(db_path)
+            backup_dir = base / "backups"
+
+            with self.assertRaises(TaskCanceled):
+                create_database_backup(
+                    str(db_path), backup_dir=str(backup_dir), should_cancel=lambda: True
+                )
+
+            self.assertEqual(
+                list(backup_dir.glob("*.db")), [], "sobrou um backup incompleto"
+            )
+
+    # ------------------------------------------------ restauracao
+
+    def test_restoring_reports_progress_by_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            self._semear(db_path, 10)
+            backup = create_database_backup(str(db_path), backup_dir=str(base / "b"))
+
+            self._semear(db_path, 5)  # o banco muda depois da copia
+            progresso = []
+            resultado = restore_database_from_backup(
+                str(db_path),
+                backup,
+                safety_backup_dir=str(base / "seguranca"),
+                progress_callback=lambda f, t: progresso.append((f, t)),
+            )
+
+            self.assertTrue(Path(resultado["safety_backup_path"]).exists())
+            self.assertEqual(progresso, [(0, 3), (1, 3), (2, 3), (3, 3)])
+
+    # ------------------------------------------------ importacao
+
+    def test_canceling_the_import_leaves_the_database_untouched(self):
+        """Cancelar faz `rollback`: nada aplicado, nao metade aplicado."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            initialize_database(str(db_path)).close()
+            csv_path = base / "entrada.csv"
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                escritor = csv.writer(f)
+                escritor.writerow(["original_comment", "translated_comment", "target_language"])
+                for indice in range(600):
+                    escritor.writerow([f"orig {indice}", f"trad {indice}", "pt"])
+
+            # Desiste depois do primeiro bloco: com `True` desde o inicio, a
+            # primeira checagem acontece na linha 200 e o teste nao provaria que
+            # o que ja tinha sido gravado foi desfeito.
+            chamadas = []
+
+            def desiste():
+                chamadas.append(1)
+                return len(chamadas) > 1
+
+            with self.assertRaises(TaskCanceled):
+                import_translations_from_csv(
+                    str(db_path),
+                    str(csv_path),
+                    create_backup=False,
+                    should_cancel=desiste,
+                )
+
+            conn = initialize_database(str(db_path))
+            total = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+            conn.close()
+            self.assertEqual(total, 0, "o cancelamento deixou linhas gravadas")
+
+    def test_importing_reports_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            initialize_database(str(db_path)).close()
+            csv_path = base / "entrada.csv"
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                escritor = csv.writer(f)
+                escritor.writerow(["original_comment", "translated_comment", "target_language"])
+                for indice in range(450):
+                    escritor.writerow([f"orig {indice}", f"trad {indice}", "pt"])
+
+            progresso = []
+            stats = import_translations_from_csv(
+                str(db_path),
+                str(csv_path),
+                create_backup=False,
+                progress_callback=lambda f, t: progresso.append((f, t)),
+            )
+
+            self.assertEqual(stats["inserted"], 450)
+            self.assertIn((450, 450), progresso, "o fim nao foi reportado")
+            self.assertTrue(
+                all(total == 450 for _feito, total in progresso),
+                "o total mudou no meio do caminho",
+            )
+
+    # ------------------------------------------------ o cancelamento vira cancelamento
+
+    def test_canceling_the_automatic_rules_is_not_reported_as_an_error(self):
+        """`AutomaticRulesCanceled` chegava ao `run_with_progress` como falha.
+
+        `database.py` nao pode conhecer o `background_task` — aquele modulo
+        importa Tk, e manter o banco livre disso e o que permite testa-lo sem
+        display. Sem a traducao no meio, quem clicava em "Cancelar" durante
+        "Aplicar automaticas" recebia um dialogo de ERRO dizendo que a operacao
+        falhou, e nao a confirmacao de que nada foi alterado.
+
+        Passa pelo fluxo de verdade, e nao pelo `_cancelable` direto: o que
+        pode se perder e a chamada, nao o helper.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_path = base / "cache.db"
+            self._semear(db_path, 10)
+
+            vistos = self._silencia_dialogos()
+            SynchronousProgress().install(self, db_tools)
+
+            self.addCleanup(
+                setattr, db_tools, "load_automatic_substitutions",
+                db_tools.load_automatic_substitutions,
+            )
+            db_tools.load_automatic_substitutions = lambda: [("rainha", "dama")]
+
+            self.addCleanup(
+                setattr, db_tools, "analyze_database_automatic_rules",
+                db_tools.analyze_database_automatic_rules,
+            )
+
+            def desistiu(*_a, **_kw):
+                raise AutomaticRulesCanceled()
+
+            db_tools.analyze_database_automatic_rules = desistiu
+
+            recebidos = []
+            db_tools.apply_automatic_rules_to_database(
+                self._app(db_path), on_finish=recebidos.append
+            )
+
+            self.assertEqual(
+                [tipo for tipo, _titulo in vistos],
+                ["info"],
+                f"o cancelamento nao virou aviso de cancelamento: {vistos}",
+            )
+            self.assertEqual(recebidos, [None])
 
 
 def _stamp(moment):

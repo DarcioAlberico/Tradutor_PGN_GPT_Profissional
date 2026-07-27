@@ -15,9 +15,65 @@ from .database import (
     set_translation_verified_by_id,
 )
 from .backup_retention import prune_database_backups
-from .background_task import run_with_progress
+from .background_task import TaskCanceled, run_with_progress
+from .database import AutomaticRulesCanceled
 from .glossario import apply_automatic_substitutions, load_automatic_substitutions
 from .review_quality import summarize_quality_warnings
+
+
+# Paginas por passo da copia do SQLite. E o intervalo entre duas chances de
+# reportar progresso ou de desistir: menor da uma barra mais fluida e mais
+# chamadas de callback. 2048 paginas sao ~8 MB, que num banco de 80 MB dao ~10
+# atualizacoes.
+BACKUP_PAGES_PER_STEP = 2048
+
+# Linhas por bloco na exportacao. O `csv.writerows` continua recebendo um bloco
+# inteiro de uma vez — escrever linha a linha em Python custaria a economia que
+# o item 2.9 conquistou.
+EXPORT_CHUNK = 5000
+
+# Linhas entre duas verificacoes de cancelamento na importacao.
+IMPORT_PROGRESS_EVERY = 200
+
+
+def _cancelable(work):
+    """Traduz o cancelamento das funcoes de banco para o do `background_task`.
+
+    `database.py` sinaliza desistencia com `AutomaticRulesCanceled` e nao pode
+    conhecer o `background_task` — aquele modulo importa Tk, e manter o banco
+    livre disso e o que permite testa-lo sem display.
+
+    Sem esta traducao a excecao chega ao `run_with_progress` como uma falha
+    qualquer, e quem clicou em "Cancelar" recebe um dialogo de ERRO dizendo que
+    a operacao falhou. Era o que acontecia com "Aplicar automaticas".
+    """
+    def wrapper(task):
+        try:
+            return work(task)
+        except AutomaticRulesCanceled:
+            raise TaskCanceled() from None
+
+    return wrapper
+
+
+def _copy_database(source_conn, target_conn, progress_callback=None, should_cancel=None):
+    """Copia um banco no outro pela API de backup online do SQLite.
+
+    Nao e `shutil.copy` de proposito: em WAL o arquivo `.db` sozinho nao contem
+    as transacoes que ainda estao no `-wal` (ver 6.2). A API de backup ve o
+    banco logico e resolve isso.
+
+    `pages=` existe para poder reportar progresso e aceitar um cancelamento no
+    meio: sem ele a copia e uma unica chamada que so retorna no fim.
+    """
+    def passo(_status, remaining, total):
+        if should_cancel is not None and should_cancel():
+            raise TaskCanceled()
+        if progress_callback is not None and total:
+            progress_callback(total - remaining, total)
+
+    source_conn.backup(target_conn, pages=BACKUP_PAGES_PER_STEP, progress=passo)
+    target_conn.commit()
 
 
 def _unique_backup_path(backup_dir, stem, timestamp):
@@ -30,7 +86,15 @@ def _unique_backup_path(backup_dir, stem, timestamp):
     return backup_path
 
 
-def create_database_backup(db_path, backup_dir=None, timestamp=None, prune=True, protect=()):
+def create_database_backup(
+    db_path,
+    backup_dir=None,
+    timestamp=None,
+    prune=True,
+    protect=(),
+    progress_callback=None,
+    should_cancel=None,
+):
     source_path = Path(db_path)
     if backup_dir is None:
         backup_dir = source_path.parent / "backups"
@@ -44,8 +108,15 @@ def create_database_backup(db_path, backup_dir=None, timestamp=None, prune=True,
     source_conn = initialize_database(str(source_path))
     target_conn = sqlite3.connect(str(backup_path))
     try:
-        source_conn.backup(target_conn)
-        target_conn.commit()
+        _copy_database(source_conn, target_conn, progress_callback, should_cancel)
+    except BaseException:
+        # A copia interrompida no meio e um banco incompleto com cara de
+        # backup. Apagar e obrigatorio: o proximo "Restaurar backup" ofereceria
+        # este arquivo na lista como qualquer outro.
+        target_conn.close()
+        source_conn.close()
+        backup_path.unlink(missing_ok=True)
+        raise
     finally:
         target_conn.close()
         source_conn.close()
@@ -86,27 +157,50 @@ def validate_restore_source(backup_path):
         conn.close()
 
 
-def restore_database_from_backup(db_path, backup_path, safety_backup_dir=None):
+def restore_database_from_backup(
+    db_path,
+    backup_path,
+    safety_backup_dir=None,
+    progress_callback=None,
+):
+    """Substitui o banco atual pelo backup, com uma copia de seguranca antes.
+
+    Nao aceita cancelamento, e a razao esta na terceira etapa: interromper a
+    copia no meio deixaria o banco de trabalho como um arquivo incompleto — e
+    aqui nao ha o recurso do `create_database_backup`, que simplesmente apaga o
+    que escreveu pela metade. O que da para desistir e antes de comecar.
+    """
     target_path = Path(db_path)
     backup_path = Path(backup_path)
     if target_path.resolve() == backup_path.resolve():
         raise ValueError("O backup selecionado e o banco atual sao o mesmo arquivo")
 
+    # Tres etapas de peso parecido; o progresso e por etapa, e nao por pagina,
+    # porque so a ultima sabe dizer quantas paginas tem.
+    if progress_callback is not None:
+        progress_callback(0, 3)
     validate_restore_source(backup_path)
+
+    if progress_callback is not None:
+        progress_callback(1, 3)
     safety_backup_path = create_database_backup(
         target_path,
         backup_dir=safety_backup_dir,
         protect=(backup_path,),
     )
 
+    if progress_callback is not None:
+        progress_callback(2, 3)
     source_conn = sqlite3.connect(str(backup_path))
     target_conn = sqlite3.connect(str(target_path))
     try:
-        source_conn.backup(target_conn)
-        target_conn.commit()
+        _copy_database(source_conn, target_conn)
     finally:
         target_conn.close()
         source_conn.close()
+
+    if progress_callback is not None:
+        progress_callback(3, 3)
 
     migrated_conn = initialize_database(str(target_path))
     try:
@@ -198,17 +292,36 @@ def _existing_translation(cursor, original_comment, target_language):
     ).fetchone()
 
 
-def analyze_translations_csv_import(db_path, csv_path, csv_rows=None):
+def _report_import_progress(stats, total, progress_callback, should_cancel):
+    """Progresso e cancelamento das duas passagens do CSV, no mesmo ritmo."""
+    lidas = stats["total_rows"]
+    if should_cancel is not None and lidas % IMPORT_PROGRESS_EVERY == 0 and should_cancel():
+        raise TaskCanceled()
+    if progress_callback is not None and (
+        lidas % IMPORT_PROGRESS_EVERY == 0 or lidas == total
+    ):
+        progress_callback(lidas, total)
+
+
+def analyze_translations_csv_import(
+    db_path,
+    csv_path,
+    csv_rows=None,
+    progress_callback=None,
+    should_cancel=None,
+):
     """Previa da importacao. `csv_rows` evita reler o arquivo (ROADMAP 2.10)."""
     if csv_rows is None:
         csv_rows = _read_translation_csv_rows(csv_path)
     stats = _empty_import_stats()
+    total = len(csv_rows)
 
     conn = initialize_database(db_path)
     try:
         cursor = conn.cursor()
         for raw_row in csv_rows:
             stats["total_rows"] += 1
+            _report_import_progress(stats, total, progress_callback, should_cancel)
             row = _normalize_import_row(raw_row)
             original = row["original_comment"]
             translated = row["translated_comment"]
@@ -244,12 +357,19 @@ def import_translations_from_csv(
     create_backup=True,
     backup_dir=None,
     csv_rows=None,
+    progress_callback=None,
+    should_cancel=None,
 ):
     """Aplica a importacao. `csv_rows` evita reler o arquivo (ROADMAP 2.10).
 
     Reaproveitar as linhas da previa nao e so economia: e o que garante que o
     usuario confirmou exatamente o que sera gravado. Lendo duas vezes, um arquivo
     alterado entre a previa e o "Sim" aplicaria numeros diferentes dos exibidos.
+
+    Cancelar faz `rollback`: o banco fica como estava, e nao com metade das
+    linhas do CSV aplicadas. O backup criado antes da importacao permanece —
+    e uma copia valida, e apaga-lo seria destruir o unico registro de que a
+    operacao chegou a comecar.
     """
     if csv_rows is None:
         csv_rows = _read_translation_csv_rows(csv_path)
@@ -259,12 +379,14 @@ def import_translations_from_csv(
         backup_path = create_database_backup(db_path, backup_dir=backup_dir)
 
     stats = _empty_import_stats(backup_path)
+    total = len(csv_rows)
 
     conn = initialize_database(db_path)
     try:
         cursor = conn.cursor()
         for raw_row in csv_rows:
             stats["total_rows"] += 1
+            _report_import_progress(stats, total, progress_callback, should_cancel)
             row = _normalize_import_row(raw_row)
             original = row["original_comment"]
             translated = row["translated_comment"]
@@ -304,6 +426,70 @@ def import_translations_from_csv(
         conn.close()
 
     return stats
+
+
+EXPORT_CSV_HEADERS = [
+    "original_comment",
+    "translated_comment",
+    "target_language",
+    "verified",
+    "created_at",
+    "updated_at",
+    "verified_at",
+]
+
+
+def export_translations_to_csv(
+    db_path,
+    save_path,
+    progress_callback=None,
+    should_cancel=None,
+):
+    """Escreve o CSV de traducoes. Devolve quantas linhas sairam.
+
+    Estava embutida no callback do botao, entao exportar as 195.607 linhas
+    congelava a janela por ~1,1 s sem nenhum sinal de vida. Extraida, ela roda
+    na thread de trabalho e nao conhece widget nenhum.
+
+    A leitura continua em blocos e o `csv.writerows` continua recebendo o bloco
+    inteiro (ROADMAP 2.9): trocar por um laco Python linha a linha para ter onde
+    checar o cancelamento devolveria o custo que aquele item tirou. O bloco e o
+    lugar de checar.
+    """
+    conn = initialize_database(db_path)
+    try:
+        cursor = conn.cursor()
+        total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+        if progress_callback is not None:
+            progress_callback(0, total)
+
+        escritas = 0
+        try:
+            with open(save_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(EXPORT_CSV_HEADERS)
+
+                rows = fetch_export_rows(cursor)
+                while True:
+                    if should_cancel is not None and should_cancel():
+                        raise TaskCanceled()
+                    bloco = rows.fetchmany(EXPORT_CHUNK)
+                    if not bloco:
+                        break
+                    writer.writerows(bloco)
+                    escritas += len(bloco)
+                    if progress_callback is not None:
+                        progress_callback(escritas, total)
+        except BaseException:
+            # Um CSV cortado no meio nao se distingue de um completo: ele abre,
+            # tem cabecalho e linhas validas. Deixa-lo em disco depois de um
+            # "Cancelar" seria oferecer um arquivo que mente sobre o que tem.
+            Path(save_path).unlink(missing_ok=True)
+            raise
+    finally:
+        conn.close()
+
+    return escritas
 
 
 def analyze_database_automatic_rules(
@@ -502,7 +688,7 @@ def apply_automatic_rules_to_database(
         run_with_progress(
             janela,
             "Aplicando regras automaticas",
-            trabalho,
+            _cancelable(trabalho),
             on_success=aplicado,
             on_error=falhou,
             on_cancel=cancelado,
@@ -551,7 +737,7 @@ def apply_automatic_rules_to_database(
     run_with_progress(
         janela,
         "Substituicoes automaticas",
-        analisar,
+        _cancelable(analisar),
         on_success=analisado,
         on_error=falhou,
         on_cancel=cancelado,
@@ -616,44 +802,68 @@ def show_db_stats(app):
             conn.close()
 
 
-def export_csv(app):
-    conn = None
-    try:
-        save_path = filedialog.asksaveasfilename(
-            title="Salvar CSV de traducoes",
-            defaultextension=".csv",
-            filetypes=[("Arquivos CSV", "*.csv"), ("Todos os arquivos", "*.*")]
+def _database_task_callbacks(app, titulo, erro_prefixo, on_finish=None):
+    """Os tres desfechos de uma operacao de banco, iguais para as quatro.
+
+    `on_finish(resultado)` existe pelo mesmo motivo do
+    `apply_automatic_rules_to_database`: a operacao virou assincrona, entao quem
+    precisa do resultado nao pode mais receber um `return`. Recebe `None`
+    quando deu errado ou o usuario desistiu.
+    """
+    def falhou(erro):
+        messagebox.showerror("Erro", f"{erro_prefixo}\n{erro}")
+        if on_finish is not None:
+            on_finish(None)
+
+    def cancelado(_valor=None):
+        messagebox.showinfo(titulo, "Operacao cancelada.")
+        if on_finish is not None:
+            on_finish(None)
+
+    return falhou, cancelado
+
+
+def export_csv(app, on_finish=None):
+    save_path = filedialog.asksaveasfilename(
+        title="Salvar CSV de traducoes",
+        defaultextension=".csv",
+        filetypes=[("Arquivos CSV", "*.csv"), ("Todos os arquivos", "*.*")],
+    )
+    if not save_path:
+        return
+
+    falhou, cancelado = _database_task_callbacks(
+        app, "Exportar CSV", "Erro ao exportar CSV:", on_finish
+    )
+
+    def trabalho(task):
+        return export_translations_to_csv(
+            app.output_db,
+            save_path,
+            progress_callback=task.report,
+            should_cancel=task.cancelado,
         )
-        if not save_path:
-            return
 
-        conn = initialize_database(app.output_db)
-        cursor = conn.cursor()
-        rows = fetch_export_rows(cursor)
+    def exportado(linhas):
+        messagebox.showinfo(
+            "Exportar CSV",
+            f"CSV exportado com sucesso ({linhas} linhas):\n{save_path}",
+        )
+        if on_finish is not None:
+            on_finish(linhas)
 
-        with open(save_path, 'w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "original_comment",
-                "translated_comment",
-                "target_language",
-                "verified",
-                "created_at",
-                "updated_at",
-                "verified_at",
-            ])
-            writer.writerows(rows)
-
-        messagebox.showinfo("Exportar CSV", f"CSV exportado com sucesso:\n{save_path}")
-
-    except Exception as e:
-        messagebox.showerror("Erro", f"Erro ao exportar CSV:\n{e}")
-    finally:
-        if conn is not None:
-            conn.close()
+    run_with_progress(
+        app.root,
+        "Exportar CSV",
+        trabalho,
+        on_success=exportado,
+        on_error=falhou,
+        on_cancel=cancelado,
+        message="Escrevendo as traducoes no arquivo...",
+    )
 
 
-def import_csv(app):
+def import_csv(app, on_finish=None):
     csv_path = filedialog.askopenfilename(
         title="Selecionar CSV de traducoes",
         filetypes=[("Arquivos CSV", "*.csv"), ("Todos os arquivos", "*.*")],
@@ -661,13 +871,60 @@ def import_csv(app):
     if not csv_path:
         return
 
+    falhou, cancelado = _database_task_callbacks(
+        app, "Importar CSV", "Erro ao importar CSV:", on_finish
+    )
+
     try:
         # Lido uma vez so: a previa e a aplicacao trabalham sobre as MESMAS
         # linhas, entao o que o usuario confirma e o que e gravado (ROADMAP 2.10).
+        # Fica aqui, e nao na thread, porque e o unico passo barato — o custo do
+        # CSV esta nas duas varreduras do banco, nao em ler o arquivo.
         csv_rows = _read_translation_csv_rows(csv_path)
-        preview = analyze_translations_csv_import(
-            app.output_db, csv_path, csv_rows=csv_rows
+    except Exception as exc:
+        falhou(exc)
+        return
+
+    def aplicar():
+        def trabalho(task):
+            return import_translations_from_csv(
+                app.output_db,
+                csv_path,
+                csv_rows=csv_rows,
+                progress_callback=task.report,
+                should_cancel=task.cancelado,
+            )
+
+        def importado(stats):
+            if hasattr(app, "translation_cache"):
+                app.translation_cache.clear()
+            messagebox.showinfo(
+                "Importar CSV",
+                (
+                    "CSV importado com sucesso.\n\n"
+                    f"Linhas lidas: {stats['total_rows']}\n"
+                    f"Novas: {stats['inserted']}\n"
+                    f"Vazias preenchidas: {stats['filled_empty']}\n"
+                    f"Sem alteracao: {stats['unchanged']}\n"
+                    f"Ignoradas: {stats['skipped']}\n"
+                    f"Verificadas aplicadas: {stats['verified_applied']}\n\n"
+                    f"Backup criado em:\n{stats['backup_path']}"
+                ),
+            )
+            if on_finish is not None:
+                on_finish(stats)
+
+        run_with_progress(
+            app.root,
+            "Importar CSV",
+            trabalho,
+            on_success=importado,
+            on_error=falhou,
+            on_cancel=cancelado,
+            message=f"Gravando {len(csv_rows)} linha(s) no banco...",
         )
+
+    def analisado(preview):
         confirmed = messagebox.askyesno(
             "Importar CSV",
             (
@@ -684,42 +941,63 @@ def import_csv(app):
             ),
         )
         if not confirmed:
+            if on_finish is not None:
+                on_finish(None)
             return
+        aplicar()
 
-        stats = import_translations_from_csv(
-            app.output_db, csv_path, csv_rows=csv_rows
+    def analisar(task):
+        return analyze_translations_csv_import(
+            app.output_db,
+            csv_path,
+            csv_rows=csv_rows,
+            progress_callback=task.report,
+            should_cancel=task.cancelado,
         )
-        if hasattr(app, "translation_cache"):
-            app.translation_cache.clear()
-        messagebox.showinfo(
-            "Importar CSV",
-            (
-                "CSV importado com sucesso.\n\n"
-                f"Linhas lidas: {stats['total_rows']}\n"
-                f"Novas: {stats['inserted']}\n"
-                f"Vazias preenchidas: {stats['filled_empty']}\n"
-                f"Sem alteracao: {stats['unchanged']}\n"
-                f"Ignoradas: {stats['skipped']}\n"
-                f"Verificadas aplicadas: {stats['verified_applied']}\n\n"
-                f"Backup criado em:\n{stats['backup_path']}"
-            ),
+
+    run_with_progress(
+        app.root,
+        "Importar CSV",
+        analisar,
+        on_success=analisado,
+        on_error=falhou,
+        on_cancel=cancelado,
+        message=f"Conferindo {len(csv_rows)} linha(s) do arquivo...",
+    )
+
+
+def backup_database(app, on_finish=None):
+    falhou, cancelado = _database_task_callbacks(
+        app, "Backup do Banco de Dados", "Erro ao criar backup do banco:", on_finish
+    )
+
+    def trabalho(task):
+        return create_database_backup(
+            app.output_db,
+            progress_callback=task.report,
+            should_cancel=task.cancelado,
         )
-    except Exception as e:
-        messagebox.showerror("Erro", f"Erro ao importar CSV:\n{e}")
 
-
-def backup_database(app):
-    try:
-        backup_path = create_database_backup(app.output_db)
+    def pronto(backup_path):
         messagebox.showinfo(
             "Backup do Banco de Dados",
             f"Backup criado com sucesso:\n{backup_path}",
         )
-    except Exception as e:
-        messagebox.showerror("Erro", f"Erro ao criar backup do banco:\n{e}")
+        if on_finish is not None:
+            on_finish(backup_path)
+
+    run_with_progress(
+        app.root,
+        "Backup do Banco de Dados",
+        trabalho,
+        on_success=pronto,
+        on_error=falhou,
+        on_cancel=cancelado,
+        message="Copiando o banco...",
+    )
 
 
-def restore_database(app):
+def restore_database(app, on_finish=None):
     backup_path = filedialog.askopenfilename(
         title="Selecionar backup do banco",
         filetypes=[("Bancos SQLite", "*.db"), ("Todos os arquivos", "*.*")],
@@ -732,14 +1010,26 @@ def restore_database(app):
         (
             "Restaurar este backup vai substituir o banco atual.\n"
             "Um backup de seguranca sera criado antes da restauracao.\n\n"
+            "A restauracao nao pode ser interrompida no meio.\n\n"
             "Deseja continuar?"
         ),
     )
     if not confirmed:
         return
 
-    try:
-        result = restore_database_from_backup(app.output_db, backup_path)
+    falhou, _cancelado = _database_task_callbacks(
+        app,
+        "Restaurar Banco de Dados",
+        "Erro ao restaurar backup do banco:",
+        on_finish,
+    )
+
+    def trabalho(task):
+        return restore_database_from_backup(
+            app.output_db, backup_path, progress_callback=task.report
+        )
+
+    def restaurado(result):
         if hasattr(app, "translation_cache"):
             app.translation_cache.clear()
         messagebox.showinfo(
@@ -749,5 +1039,18 @@ def restore_database(app):
                 f"Backup de seguranca criado em:\n{result['safety_backup_path']}"
             ),
         )
-    except Exception as e:
-        messagebox.showerror("Erro", f"Erro ao restaurar backup do banco:\n{e}")
+        if on_finish is not None:
+            on_finish(result)
+
+    # `allow_cancel=False`: ver `restore_database_from_backup`. Oferecer o botao
+    # e ignora-lo seria pior do que nao oferecer — o usuario clicaria achando
+    # que parou, e a copia seguiria substituindo o banco de trabalho.
+    run_with_progress(
+        app.root,
+        "Restaurar Banco de Dados",
+        trabalho,
+        on_success=restaurado,
+        on_error=falhou,
+        message="Restaurando o banco (nao interrompa)...",
+        allow_cancel=False,
+    )

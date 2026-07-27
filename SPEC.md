@@ -555,8 +555,13 @@ leia uma garantia acima como mais ampla do que ela e.
 
 **Concorrencia**
 
-- Backup, restauracao e importacao de CSV ainda rodam na thread da interface,
-  sem progresso nem cancelamento. (ROADMAP 2.7)
+- A restauracao do banco nao pode ser cancelada depois de comecar: interromper a
+  copia deixaria o banco de trabalho como um arquivo incompleto. O que da para
+  desistir e antes de comecar, na confirmacao. (ROADMAP 2.11)
+- A barra de progresso pode demorar a sair do lugar em operacoes limitadas por
+  CPU: a thread de trabalho segura o GIL entre dois relatos, e a atualizacao so
+  chega quando a thread da interface e escalonada. A janela responde e o
+  "Cancelar" funciona; o que atrasa e o numero. (ROADMAP 2.11)
 
 **Desempenho e escala**
 

@@ -444,6 +444,9 @@ dois nao podem sair da mesma execucao.
 **O que ainda trava a interface:** backup, restauracao e importacao de CSV. Sao
 mais rapidos (o backup do banco de 80 MB leva 0,4 s), mas usam o mesmo callback
 sincrono; agora que `background_task` existe, migra-los e mecanico.
+**Feito no item 2.11** — e nao era so mecanico: cada uma deixa um lixo diferente
+ao ser cancelada, e ligar as tres expos um defeito deste item aqui (o
+cancelamento chegava a interface como erro).
 
 ### 2.8 Com busca ativa, cada interacao do editor varre a tabela inteira — CONCLUIDO (2026-07-27)
 
@@ -720,6 +723,90 @@ depois da confirmacao. Ganhou `analysis=`, pela mesma razao.
 Os testes trocam o CSV **entre** a previa e a aplicacao e exigem que o gravado
 seja o que foi confirmado; um terceiro conta as leituras no fluxo real da
 interface. Conferido por mutacao nas quatro formas de regredir.
+
+### 2.11 Backup, restauracao e CSV ainda travavam a interface — CONCLUIDO (2026-07-27)
+
+O `background_task.py` foi criado em 2.7 exatamente para isto, e ficou dois dias
+servindo so a aplicacao de regras automaticas. O proprio 2.7 fechou dizendo que
+migrar as outras "e mecanico", e a SPEC listava a pendencia em "Limites
+conhecidos". As quatro continuavam rodando dentro do callback do botao:
+`backup_database`, `restore_database`, `import_csv` e `export_csv`.
+
+**O tempo nunca foi o argumento principal**, e vale ser preciso porque ele e
+pequeno. Medido no banco real (195.607 traducoes, 81 MB), sobre uma copia:
+
+| operacao | antes | agora | atualizacoes de progresso |
+|---|---|---|---|
+| backup do banco | 396 ms | 397 ms | 13 |
+| exportar CSV (41 MB) | 1079 ms | 1062 ms | 41 |
+
+O ganho e o outro: durante esse tempo a janela ficava parada, sem dizer o que
+estava acontecendo e sem forma de desistir — e a importacao de um CSV grande nao
+tem teto nenhum. Os arquivos gerados sao **identicos** aos de antes (conferido
+byte a byte pelo tamanho e pelo conteudo em teste).
+
+**A copia do SQLite passou a ser em blocos.** `Connection.backup(..., pages=,
+progress=)` existe justamente para isso: sem `pages` a copia e uma chamada so
+que retorna no fim, sem lugar para reportar nem para desistir. `BACKUP_PAGES_PER_STEP
+= 2048` (~8 MB) da 13 atualizacoes num banco de 81 MB e custa 1 ms no total.
+
+**A exportacao continua entregando blocos inteiros ao `csv.writerows`.** Trocar
+por um laco Python linha a linha — que seria o jeito obvio de ter onde checar o
+cancelamento — devolveria o custo que o item 2.9 tirou. O bloco e o lugar de
+checar. O preco medido disso e 5,7 MB de pico contra ~0,3 MB do `writerows`
+direto: e um bloco de 5.000 linhas residente, constante, e nao a tabela inteira
+que 2.9 removeu (102 MB).
+
+**Desistir nao pode deixar lixo, e cada operacao deixa um lixo diferente:**
+
+- **Backup cancelado** apaga a copia parcial. Um `.db` cortado no meio e um banco
+  incompleto com cara de backup — o proximo "Restaurar backup" o ofereceria na
+  lista como qualquer outro.
+- **Exportacao cancelada** apaga o CSV parcial. Ele abre, tem cabecalho e linhas
+  validas: nada nele denuncia que esta pela metade.
+- **Importacao cancelada** faz `rollback` (o mesmo que 2.7 ja fazia). O backup
+  criado antes da importacao **permanece** — e uma copia valida, e apaga-lo seria
+  destruir o unico registro de que a operacao chegou a comecar.
+- **Restauracao nao oferece cancelamento** (`allow_cancel=False`). Aqui nao ha o
+  recurso dos outros tres: o destino da copia e o banco de trabalho, e
+  interrompe-la no meio o deixaria incompleto. Oferecer o botao e ignora-lo seria
+  pior do que nao oferecer — o usuario clicaria achando que parou. A confirmacao
+  passou a dizer isso antes de comecar.
+
+**Um defeito do proprio 2.7 apareceu ao ligar as outras tres.** `database.py`
+sinaliza desistencia com `AutomaticRulesCanceled` e nao pode conhecer o
+`background_task` — aquele modulo importa Tk, e e essa separacao que permite
+testar o banco sem display. So que ninguem traduzia uma coisa na outra: a excecao
+chegava ao `run_with_progress` como uma falha qualquer, e **quem clicava em
+"Cancelar" durante "Aplicar automaticas" recebia um dialogo de ERRO** dizendo que
+a operacao falhou, em vez da confirmacao de que nada foi alterado. Corrigido com
+`_cancelable`, uma linha em cada um dos dois pontos de entrada.
+
+**Conferido por mutacao**, sete maneiras de desfazer o item, cada uma pega pelo
+teste correspondente: a copia voltando a ser uma chamada so, o CSV pela metade
+ficando em disco, o backup pela metade ficando em disco, a restauracao voltando a
+oferecer "Cancelar", o cancelamento das regras automaticas voltando a virar erro,
+a importacao parando de olhar o cancelamento, e a exportacao voltando para dentro
+do callback do Tk.
+
+O teste que segura o item inteiro e
+`test_the_four_operations_go_through_the_worker_thread`: devolver qualquer uma
+delas para o callback do Tk nao quebra nada visivel — ela continua funcionando, so
+que travando a janela —, entao a exigencia precisa ser explicita.
+
+**Verificado tambem na janela de verdade**, que e o unico lugar onde a barra
+existe: exportar o banco real mostra "115.000 de 195.607" com barra determinada e
+o botao "Cancelar"; clicar nele produz "Operacao cancelada." e **nenhum CSV em
+disco**.
+
+**Uma ressalva medida, e nao suposta.** Em operacoes limitadas por CPU a barra
+demora a sair do lugar: a thread de trabalho segura o GIL entre dois relatos, e a
+atualizacao so aparece quando a thread da interface e escalonada. Amostrando a
+barra a cada 80 ms durante a exportacao, ela ficou indeterminada por ~1,8 s e
+depois subiu de 0 a 0,92 normalmente. O laco de eventos rodou o tempo todo (35
+voltas em 3 s), entao a janela responde e o "Cancelar" funciona desde o primeiro
+instante; o que atrasa e o numero. Isso vale igualmente para o 2.7, que ja estava
+assim. Ficou registrado em "Limites conhecidos".
 
 ---
 
