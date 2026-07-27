@@ -4,7 +4,8 @@ Aplicacao CustomTkinter para traduzir comentarios de arquivos PGN, com cache em
 SQLite e glossario de substituicoes.
 
 O comportamento esperado do sistema e as garantias que os testes protegem estao
-em [SPEC.md](SPEC.md). As melhorias planejadas estao em [ROADMAP.md](ROADMAP.md).
+em [SPEC.md](SPEC.md). O [ROADMAP.md](ROADMAP.md) registra as melhorias, feitas e
+pendentes, com o motivo de cada decisao e as medicoes que a sustentam.
 
 ## Requisitos
 
@@ -37,6 +38,10 @@ Execute os testes automatizados:
 uv run python -m unittest discover -s .\tests
 ```
 
+Parte da suite abre as janelas de verdade e clica nos widgets (o editor de
+traducoes, o de glossario e a janela principal). Onde nao houver display, essas
+classes sao puladas e o restante roda normalmente.
+
 > Se `uv run` reclamar de um Python inexistente (`No Python at ...`), o `.venv`
 > ficou apontando para uma instalacao removida. Apague a pasta `.venv` e rode
 > `uv sync` de novo.
@@ -62,7 +67,32 @@ derivado, reconstruido a partir dele. Cada regra tem um tipo:
 Regras escritas inteiramente em minusculas casam sem diferenciar maiusculas;
 qualquer maiuscula torna a regra sensivel a caixa. Na aplicacao em cascata, a
 regra de padrao mais longo tem precedencia, para que uma regra generica nao
-encubra uma especifica (ver garantia S3 na [SPEC.md](SPEC.md)).
+encubra uma especifica (garantia S3 na [SPEC.md](SPEC.md)).
+
+Cada regra pode ainda declarar uma **prioridade** inteira, zero por padrao: a
+maior e aplicada primeiro, e so entre prioridades iguais o comprimento volta a
+decidir (garantia S10). Ela existe porque a especificidade e derivada do texto —
+sem prioridade, adiantar uma regra exige alongar o padrao, isto e, mudar o que
+ela casa para mudar quando ela roda.
+
+No arquivo cada regra e uma tupla de dois a quatro campos, e cada campo so
+aparece quando tem algo a dizer:
+
+```python
+substituicoes = [
+    ('rook', 'torre'),                     # sugestao, prioridade 0
+    ('== EndSquare ==', '', 'cleanup'),    # outro tipo
+    ('torre', 'castle', 'suggestion', 1),  # com prioridade
+]
+```
+
+Um `Substituicoes.txt` de uma versao anterior continua valendo: o que faltar
+assume o padrao. O mesmo vale para o CSV, cuja coluna `priority` e opcional na
+leitura.
+
+Quando duas regras disputam o mesmo padrao, o editor diz qual delas o programa
+aplica e oferece duas saidas: **Priorizar esta**, que a poe na frente sem apagar
+nada, e **Manter esta**, que remove as concorrentes do arquivo.
 
 ## Arquivos principais
 
@@ -73,13 +103,17 @@ encubra uma especifica (ver garantia S3 na [SPEC.md](SPEC.md)).
 - `tradutor_pgn/app_actions.py`: acoes da interface, controle da traducao e atalhos para ferramentas.
 - `tradutor_pgn/app_config.py`: constantes compartilhadas do projeto.
 - `tradutor_pgn/background_task.py`: executa operacoes longas fora da thread da interface, com progresso e cancelamento.
+- `tradutor_pgn/backup_retention.py`: politica de retencao de `backups/` e `logs/`, com a decisao separada da remocao.
 - `tradutor_pgn/database.py`: inicializacao, conexao e cache do SQLite.
-- `tradutor_pgn/db_tools.py`: estatisticas, backup/restauracao e exportacao CSV.
+- `tradutor_pgn/db_tools.py`: estatisticas, backup/restauracao, importacao/exportacao CSV e aplicacao das regras automaticas — todas em segundo plano.
 - `tradutor_pgn/edit_window.py`: janela de revisao e edicao de traducoes.
 - `tradutor_pgn/editor_common.py`: logica pura compartilhada pelas duas janelas de edicao (geometria, paginacao, preview).
 - `tradutor_pgn/editor_text.py`: busca e substituicao de texto no editor.
+- `tradutor_pgn/editor_widgets.py`: pecas de interface compartilhadas pelas duas janelas (mensagens, linhas da lista, divisor, gravacao das configuracoes).
+- `tradutor_pgn/failed_runs.py`: registro dos arquivos que ficaram devendo, para reprocessar so eles.
 - `tradutor_pgn/glossario.py`: leitura e aplicacao do glossario.
 - `tradutor_pgn/glossary_editor.py`: janela dedicada para manter o glossario persistente.
+- `tradutor_pgn/history_window.py`: subjanela com o historico de alteracoes de uma traducao.
 - `tradutor_pgn/main_window.py`: montagem da janela principal.
 - `tradutor_pgn/pgn_spellcheck.py`: normalizacao opcional de metadados PGN com `spelling.ssp`.
 - `tradutor_pgn/pgn_utils.py`: leitura, escrita, encoding e manipulacao de arquivos PGN.
@@ -88,7 +122,9 @@ encubra uma especifica (ver garantia S3 na [SPEC.md](SPEC.md)).
 - `tradutor_pgn/translation_api.py`: chamadas de traducao e divisao de comentarios longos.
 - `tradutor_pgn/translation_worker.py`: orquestracao do processamento em segundo plano.
 - `tradutor_pgn/window_utils.py`: utilitarios de janela.
-- `Substituicoes.txt`: pares de substituicao usados na revisao.
+- `tests/`: suite automatizada; `tests/gui_harness.py` traz o sandbox de caminhos e o silenciamento de dialogos que os testes de janela compartilham.
+- `.claude/skills/run-tradutor-pgn/`: ferramenta para abrir e dirigir o app sem interacao manual (inclusive o worker de traducao, sem abrir janela) e capturar telas.
+- `Substituicoes.txt`: as regras do glossario (original, substituicao e, quando ha, tipo e prioridade).
 - `glossario.db`: indice SQLite local do glossario, recriado/sincronizado a partir de `Substituicoes.txt`.
 - `traducoes.db`: cache local de traducoes.
 - `backups/`, `logs/`: gerados em tempo de execucao, nao versionados.
