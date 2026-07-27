@@ -13,3 +13,6 @@ traducoes.db-journal
 spelling_ssp/
 backups/
 logs/
+
+# Capturas do driver da skill de execucao: efemeras, refeitas a cada rodada.
+.claude/skills/*/capturas/
