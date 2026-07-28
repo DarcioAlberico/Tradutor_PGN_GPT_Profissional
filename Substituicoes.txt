@@ -7060,4 +7060,5 @@ substituicoes = [
     ('dá às pretas', 'dão às pretas'),
     ('Defesa de Petroff', 'Defesa Petroff', 'automatic'),
     ('variante do Petroff', 'variante da Petroff', 'automatic'),
+    ('O Dragão Siciliano', 'A Siciliana Dragão', 'automatic'),
 ]
