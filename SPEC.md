@@ -43,7 +43,7 @@ gravavel.
 | `pgn_tradutor_pro_settings.json` | Estado da UI e rascunhos de edicao | Nao |
 | `backups/` | Copias automaticas do glossario e do banco, com retencao (S8) | Nao |
 | `logs/` | Log por execucao de traducao (`traducao-<carimbo>.log`), com retencao | Nao |
-| `spelling_ssp/spelling.ssp` | Dicionario externo de nomes proprios (opcional) | Nao |
+| `spelling_ssp/spelling.ssp` | Dicionario de nomes proprios do "Normalizar PGN" | Sim |
 
 O `pgn_tradutor_pro_settings.json` guarda tambem a lista de arquivos que ficaram
 com comentarios sem traduzir na ultima execucao, usada pelo "Reprocessar Falhas"

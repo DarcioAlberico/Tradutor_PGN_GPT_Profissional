@@ -1,0 +1,11 @@
+# `core.autocrlf=true` nesta maquina: sem esta regra o git converteria as quebras
+# de linha do dicionario ao gravar o clone, e o arquivo deixaria de ser byte a
+# byte o que foi testado. Nao e cosmetico — `parse_spelling_file` faz
+# `rstrip("\n")`, entao com CRLF sobraria um `\r` no fim de cada linha lida.
+#
+# `binary` = `-text -diff`: sem conversao de quebra de linha e sem tentar
+# calcular diff de 29 MB de dados.
+spelling_ssp/spelling.ssp binary
+
+# O indice do glossario e um SQLite versionado: convertido, corromperia.
+glossario.db binary

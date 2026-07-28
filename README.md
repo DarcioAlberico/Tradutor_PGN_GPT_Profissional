@@ -56,7 +56,7 @@ python -m pip install pyinstaller
 python -m PyInstaller --noconfirm .\PGN_Tradutor_Pro.spec
 ```
 
-Sai em `dist\PGN_Tradutor_Pro\` (~47 MB). **A pasta ainda nao esta completa**: o
+Sai em `dist\PGN_Tradutor_Pro\` (~77 MB). **A pasta ainda nao esta completa**: o
 programa precisa do glossario ao lado do executavel.
 
 ```powershell
@@ -68,6 +68,18 @@ O `Substituicoes.txt` e obrigatorio — sem ele o programa abre, avisa que esta 
 regras e traduz sem glossario (garantia S5). O `glossario.db` e opcional: e um
 indice derivado, e sem ele a primeira carga o reconstroi (~110 ms em vez de
 ~16 ms).
+
+O `spelling.ssp` **nao** entra nessa copia: ele ja vai embutido, em
+`_internal\spelling_ssp\`, e o "Normalizar PGN" funciona sem preparo nenhum na
+maquina de destino. A diferenca de tratamento nao e de tamanho, e de como cada
+arquivo e localizado — o glossario sai de `sys.argv[0]` (ao lado do `.exe`) e o
+dicionario sai de `__file__` (dentro do pacote). Estar embutido nao o congela: o
+build e onedir, entao o arquivo esta em disco e da para troca-lo por uma edicao
+mais nova das classificacoes sem reconstruir.
+
+Se o `spelling_ssp\spelling.ssp` nao existir na hora do build, o PyInstaller
+avisa e segue: o executavel sai sem o dicionario e so o "Normalizar PGN" fica
+sem funcionar.
 
 **Nao copie o `traducoes.db`.** Sao 80 MB de cache de traducoes desta maquina; o
 programa cria o dele vazio na primeira execucao.
@@ -91,11 +103,16 @@ descompactar e executar — nao ha instalador nem dependencia externa.
 ## Normalizacao de metadados PGN
 
 O botao `Normalizar PGN` corrige apenas metadados PGN (`White`, `Black`, `Site`,
-`Event` e `Round`) usando um arquivo externo opcional em
-`spelling_ssp/spelling.ssp`. Comentarios, lances e variantes nao sao alterados.
+`Event` e `Round`) usando o dicionario em `spelling_ssp/spelling.ssp`.
+Comentarios, lances e variantes nao sao alterados.
 
-Os arquivos corrigidos sao gravados ao lado do original com o sufixo
-`-NORM.pgn`. O arquivo `spelling.ssp` nao e versionado neste repositorio.
+Os arquivos corrigidos sao gravados ao lado do original com o sufixo `-NORM.pgn`.
+
+O `spelling.ssp` **vem com o projeto** (29 MB, ~513 mil nomes de jogadores, mais
+sedes, eventos e rodadas), e por isso o botao funciona sem preparo — inclusive no
+executavel, onde ele vai embutido. E um arquivo de terceiros: o spellcheck do
+Scid, com as classificacoes FIDE de abril de 2024. Trocar por uma edicao mais
+nova e substituir o arquivo; carrega-lo custa ~1,1 s, uma vez por uso do botao.
 
 ## Glossario
 

@@ -18,11 +18,39 @@ empacotar. Se algum dia deixar de valer, o sintoma e o programa abrir com o
 glossario vazio e gravar os dados do usuario numa pasta temporaria.
 """
 
+import os
+
 from PyInstaller.utils.hooks import collect_all
 
 # O customtkinter carrega temas (`.json`) e assets em tempo de execucao, entao
 # nao basta trazer o modulo: sem os dados a janela abre sem estilo, ou nem abre.
 datas, binaries, hiddenimports = collect_all("customtkinter")
+
+# O dicionario do "Normalizar PGN" (~29 MB), embutido para o botao funcionar sem
+# preparo nenhum na maquina de destino.
+#
+# **Este vai para dentro do pacote, e o `Substituicoes.txt` nao** — a diferenca
+# nao e de tamanho, e de como cada um e localizado. O glossario sai de
+# `sys.argv[0]`, que aponta para o lado do `.exe`; o `spelling.ssp` sai de
+# `__file__` (ver `DEFAULT_SPELLING_PATH`), que sob PyInstaller aponta para
+# dentro do `_internal`. Cada arquivo vai aonde o programa de fato o procura, e
+# isso foi verificado com uma sonda, e nao deduzido.
+#
+# Ficar em `_internal\spelling_ssp\` nao o torna intocavel: o build e onedir,
+# entao o arquivo esta em disco e da para troca-lo por uma versao mais nova das
+# classificacoes sem reconstruir nada.
+SPELLING = os.path.join("spelling_ssp", "spelling.ssp")
+if os.path.exists(SPELLING):
+    datas += [(SPELLING, "spelling_ssp")]
+else:
+    # Nao aborta: o `spelling.ssp` nao e versionado, entao um clone limpo nao o
+    # tem, e o resto do programa nao depende dele. O aviso existe para que a
+    # ausencia seja uma decisao vista, e nao um botao que falha na maquina do
+    # usuario final.
+    print(
+        f"AVISO: {SPELLING} nao encontrado. O executavel sai sem o dicionario, "
+        'e o botao "Normalizar PGN" vai falhar dizendo que o arquivo nao existe.'
+    )
 
 # O unico import condicional do programa (`try: import chardet`, em pgn_utils).
 # A analise estatica o encontra; fica declarado porque o modo de falha e

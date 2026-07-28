@@ -12,7 +12,6 @@ __pycache__/
 *.db-shm
 pgn_tradutor_pro_settings.json
 traducoes.db-journal
-spelling_ssp/
 backups/
 logs/
 
