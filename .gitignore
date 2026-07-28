@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.db
+# O indice do glossario e versionado; o cache de traducoes (80 MB) nao.
+!glossario.db
 *.db-journal
 # Arquivos auxiliares do WAL (ver open_database, garantia C3): ficam ao lado do
 # banco enquanto ele esta aberto.
