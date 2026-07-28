@@ -723,12 +723,12 @@ def glossary_conflicts(entries):
     """Regras que disputam o mesmo padrao, e qual delas o programa aplica.
 
     Duas regras com o mesmo `orig` e substituicoes diferentes nao empatam: uma
-    delas vence sempre, e a outra nunca dispara. Quem decide e
-    `order_rules_by_specificity`, que ordena por prioridade explicita (garantia
-    S10) e depois por comprimento do padrao (garantia S3) — como os padroes em
-    conflito sao identicos por definicao, o comprimento empata sempre, e o que
-    sobra e a prioridade e, sem ela, a ordem do arquivo. O congelamento de S4
-    impede que a seguinte reveja o trecho.
+    delas vence sempre, e a outra nunca dispara. Quem decide e `_rule_sort_key`,
+    a mesma funcao que ordena as regras na hora de aplicar: prioridade explicita
+    (garantia S10), depois comprimento do padrao (garantia S3) e, por fim, a
+    ordem do arquivo. Como os padroes em conflito sao identicos por definicao, o
+    comprimento empata sempre, e o que separa e a prioridade e, sem ela, a
+    posicao. O congelamento de S4 impede que a seguinte reveja o trecho.
 
     O vencedor e **por contexto**: uma regra automatica e uma de sugestao com o
     mesmo padrao competem no editor (que carrega as duas), mas na aplicacao das
@@ -753,24 +753,33 @@ def glossary_conflicts(entries):
     indices_by_pattern = {}
     rule_types = []
     replacements = []
-    priorities = []
+    rules = []
     for index, entry in enumerate(entries):
         orig, new = glossary_entry_pair(entry)
         rule_types.append(glossary_entry_type(entry))
         replacements.append(new)
-        priorities.append(glossary_entry_priority(entry))
+        rules.append(_as_rule(entry))
         if orig:
             indices_by_pattern.setdefault(orig, []).append(index)
 
     def vencedor(members):
-        """A regra que `order_rules_by_specificity` poria na frente.
+        """A regra que a aplicacao poe na frente — perguntando a ela.
 
-        Os padroes sao identicos por definicao, entao o comprimento nao separa
-        nada aqui: sobram a prioridade e a posicao no arquivo, nessa ordem. Se
-        este criterio divergir do de la, a janela anuncia um vencedor que nao e
-        o aplicado — que e pior do que nao anunciar nenhum.
+        Os dois passos sao os mesmos da producao, e nao uma imitacao deles:
+        `_as_rule` e a conversao que `filter_glossary_entries_by_type` faz ao
+        carregar o glossario, e `_specificity_order` e o criterio que
+        `order_rules_by_specificity` usa para aplicar. Aqui nao ha uma segunda
+        leitura do que "prioridade e ordem do arquivo" significam — se houvesse,
+        ela poderia divergir e a janela anunciaria um vencedor que o texto nunca
+        recebe.
+
+        As posicoes passadas sao as **do contexto**, ja filtrado por tipo, que e
+        a forma como a lista chega na aplicacao. Filtrar preserva a ordem
+        relativa, entao o vencedor entre estes membros e o mesmo que sairia da
+        lista inteira — e quem garante isso agora e a ordenacao compartilhada, e
+        nao um comentario dizendo que os dois criterios coincidem.
         """
-        return min(members, key=lambda index: (-priorities[index], index))
+        return members[_specificity_order([rules[index] for index in members])[0]]
 
     conflicts = {}
     for pattern, indices in indices_by_pattern.items():
@@ -1567,6 +1576,40 @@ def rule_priority(rule):
     return GLOSSARY_PRIORITY_DEFAULT
 
 
+def _rule_sort_key(rule, position):
+    """O criterio da disputa: prioridade, comprimento do padrao, ordem do arquivo.
+
+    Existe uma vez so, e e por isso que ele e uma funcao em vez de um `key=`
+    escrito na chamada. Duas partes do programa precisam desta mesma resposta —
+    `order_rules_by_specificity`, para **aplicar**, e `glossary_conflicts`, para
+    **anunciar** qual regra do conflito esta valendo — e enquanto cada uma tinha
+    a sua copia, bastava mexer numa para a janela apontar uma regra e o texto
+    receber outra. Uma mensagem errada e crivel e pior do que mensagem nenhuma.
+
+    - `-prioridade` primeiro (garantia S10): a intencao declarada decide antes
+      do texto.
+    - `-comprimento` depois (garantia S3): a regra mais especifica roda antes,
+      senao a curta consome o trecho que a longa pretendia casar.
+    - `posicao` por ultimo: desempate deterministico, que preserva a ordem em
+      que o autor escreveu.
+    """
+    return (-rule_priority(rule), -len(str(rule[0])), position)
+
+
+def _specificity_order(rules):
+    """As posicoes de `rules` na ordem em que as regras disputam o texto.
+
+    Devolve posicoes, e nao as regras ordenadas: `glossary_conflicts` precisa
+    saber **qual entrada** venceu, e duas regras podem ser identicas em conteudo
+    (uma duplicata exata ao lado de uma terceira que diverge). A regra devolvida
+    seria ambigua nesse caso; a posicao nunca e.
+    """
+    return sorted(
+        range(len(rules)),
+        key=lambda position: _rule_sort_key(rules[position], position),
+    )
+
+
 def _ordered_rules_cache_key(rules):
     """Chave estavel para o cache de ordenacao, ou `None` se nao der para gerar.
 
@@ -1619,20 +1662,17 @@ def order_rules_by_specificity(rules):
     O desempate mantém a ordem original do arquivo, para que o resultado seja
     determinístico e a intenção do autor seja preservada entre regras de mesmo
     tamanho.
+
+    O critério em si está em `_rule_sort_key`, e não aqui: `glossary_conflicts`
+    precisa da mesma resposta para anunciar quem vence, e as duas perguntam à
+    mesma função. Mexer na ordem de aplicação muda o que a janela anuncia, na
+    mesma edição.
     """
     chave = _ordered_rules_cache_key(rules)
     if chave is not None and chave in _ordered_rules_cache:
         return list(_ordered_rules_cache[chave])
 
-    ordenadas = [
-        rule for _, _, _, rule in sorted(
-            (
-                (-rule_priority(rule), -len(str(rule[0])), index, rule)
-                for index, rule in enumerate(rules)
-            ),
-            key=lambda item: (item[0], item[1], item[2]),
-        )
-    ]
+    ordenadas = [rules[position] for position in _specificity_order(rules)]
 
     if chave is not None:
         if len(_ordered_rules_cache) >= _ORDERED_RULES_CACHE_MAX:

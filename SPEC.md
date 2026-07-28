@@ -377,6 +377,12 @@ Duplicata exata nao e conflito: e redundancia, e ja tem aviso proprio. O filtro
 "Conflitos" e a contagem do rodape usam a mesma avaliacao da mensagem, entao a
 lista mostra exatamente as regras para as quais a janela sabe dizer quem vence.
 
+O anuncio nao imita o criterio da aplicacao: ele **usa** o criterio da aplicacao.
+Anunciar e aplicar chamam a mesma ordenacao, sobre a mesma conversao de entrada
+em regra, de modo que uma mudanca na ordem em que as regras disputam o texto
+muda o que a janela diz na mesma edicao. Enquanto eram dois codigos, o que
+mantinha os dois juntos era so um teste comparando os resultados.
+
 **Garantia S5 — falha de carga e visivel.** Se o `Substituicoes.txt` estiver
 malformado, o usuario e avisado no log da janela e num dialogo. O sistema nunca
 opera em silencio com o glossario vazio, e um arquivo quebrado nunca impede o
@@ -594,7 +600,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | S6 | Editar/excluir atinge a entrada correta | Bug: indice obsoleto grava na vizinha |
 | S7 | Entradas sem espaco nas pontas | Bug: 48 regras colavam palavras |
 | S8 | Retencao so apaga backup, da familia certa | Risco da limpeza automatica |
-| S9 | A interface diz qual regra do conflito vence | Bug: regras iguais lado a lado, sem dizer qual dispara |
+| S9 | A interface diz qual regra do conflito vence, pelo mesmo criterio que a aplica | Bug: regras iguais lado a lado, sem dizer qual dispara |
 | S10 | Prioridade explicita decide antes do comprimento | Limite: adiantar uma regra exigia alongar o padrao |
 | R1 | Gravacao so por acao do usuario | Bug: navegar reescreve o banco |
 | R5 | Navegar custa O(pagina) | Perf: paginacao anulada por varredura |
@@ -637,12 +643,6 @@ leia uma garantia acima como mais ampla do que ela e.
 
 **Estrutura**
 
-- Quem vence um conflito e decidido em **dois lugares**: `glossary_conflicts`,
-  para anunciar, e `order_rules_by_specificity`, para aplicar. Se os dois
-  divergirem, a janela aponta uma regra e o texto recebe outra — pior do que nao
-  anunciar nada. Nao ha um criterio unico compartilhado; o que ha e um teste que
-  confere o vencedor anunciado contra o texto que `apply_all_substitutions`
-  produz de fato.
 - `glossario.db` e um cache derivado, e um cache pode ficar velho de um jeito que
   o `mtime` do arquivo nao denuncia: uma coluna nova entra com o valor padrao
   para todas as regras. Por isso ele carrega uma marca de esquema

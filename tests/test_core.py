@@ -5448,6 +5448,63 @@ class GlossaryConflictTests(unittest.TestCase):
         """A substituicao que o programa de fato produz para `texto`."""
         return apply_all_substitutions(texto, rules)
 
+    def vencedores(self, entradas):
+        """Os indices que a janela anuncia como vencedores, em todo contexto."""
+        conflitos = glossario.glossary_conflicts(entradas)
+        return {
+            contexto["winner"]
+            for info in conflitos.values()
+            for contexto in info["contexts"]
+        }
+
+    def test_the_announcement_follows_a_change_in_the_application_order(self):
+        """A prova de que o criterio e um so, e nao dois que hoje coincidem.
+
+        Os outros testes desta classe exigem que anuncio e aplicacao concordem —
+        e concordariam tambem com **duas copias** do mesmo criterio, que era o
+        estado anterior. O que separa os dois casos e mexer no criterio uma vez
+        so e exigir que os dois lados virem juntos.
+
+        A inversao usada aqui e do desempate por ordem do arquivo, que e
+        justamente o termo que decide entre padroes identicos. Com o criterio
+        duplicado, `order_rules_by_specificity` obedeceria e `glossary_conflicts`
+        continuaria anunciando o antigo vencedor — a divergencia que a SPEC
+        listava como limite conhecido.
+        """
+        entradas = [
+            ("torre", "rook", GLOSSARY_RULE_SUGGESTION),
+            ("torre", "castle", GLOSSARY_RULE_SUGGESTION),
+        ]
+        regras = [(orig, new) for orig, new, _tipo in entradas]
+
+        # Linha de base: vence a primeira do arquivo, e o texto recebe 'rook'.
+        self.assertEqual(self.vencedores(entradas), {0})
+        self.assertEqual(self.aplicada(regras, "a torre avanca"), "a rook avanca")
+
+        original = glossario._rule_sort_key
+
+        def desempate_invertido(rule, position):
+            prioridade, comprimento, posicao = original(rule, position)
+            return (prioridade, comprimento, -posicao)
+
+        # O cache guarda a ordem, nao o criterio: sem limpa-lo, a aplicacao
+        # devolveria a ordem calculada antes da troca e o teste passaria por
+        # motivo errado.
+        def restaurar():
+            glossario._rule_sort_key = original
+            glossario._ordered_rules_cache.clear()
+
+        self.addCleanup(restaurar)
+        glossario._rule_sort_key = desempate_invertido
+        glossario._ordered_rules_cache.clear()
+
+        self.assertEqual(
+            self.vencedores(entradas),
+            {1},
+            "o anuncio nao seguiu o criterio da aplicacao: ha uma copia dele",
+        )
+        self.assertEqual(self.aplicada(regras, "a torre avanca"), "a castle avanca")
+
     def test_the_announced_winner_is_the_one_actually_applied(self):
         """O teste central: o que o editor anuncia e o que o texto recebe.
 

@@ -59,6 +59,15 @@ Em todos, o teste passava com a producao certa e com a errada — que e a
 definicao de nao proteger nada. A correcao foi a mesma nos tres: partir de um
 valor que nao seja o padrao.
 
+**Terceira rodada do mesmo dia: so o 3.6**, e ele nao saiu de uma medicao nem de
+um bug — saiu de ler a secao 9 da SPEC procurando o que ainda descrevia um
+defeito em vez de uma escolha. Sobrou um: o vencedor do conflito calculado em
+dois lugares. **O item nao muda comportamento nenhum** (conferido em 19.667
+grupos sorteados, zero divergencias), e por isso ele so existe se o teste que o
+acompanha souber distinguir "os dois concordam" de "os dois sao o mesmo" — que e
+a distincao que o teste antigo nao fazia, e a razao de o problema ter
+sobrevivido a duas rodadas de revisao com a suite verde.
+
 ---
 
 ## 1. Higiene do glossario
@@ -1291,6 +1300,83 @@ driver devolve `GlossaryEditor` em vez do `Toplevel`, e a secao "e diferente, e
 mais dificil" saiu. Os helpers de arvore ficaram, com o motivo dito: eles servem
 para conferir o que esta na **tela**, e nao para alcancar um metodo — um metodo
 diz o que o programa acha, um widget diz o que o usuario ve.
+
+### 3.6 O vencedor do conflito era decidido em dois lugares — CONCLUIDO (2026-07-27)
+
+Ultimo item da secao 9 da SPEC que descrevia um defeito latente em vez de uma
+escolha. Quem vence uma disputa de glossario era calculado duas vezes:
+`order_rules_by_specificity` ordenava por `(-prioridade, -comprimento, posicao)`
+para **aplicar**, e `glossary_conflicts` tinha a sua propria linha,
+`min(members, key=(-prioridade, indice))`, para **anunciar**. Divergir ali nao da
+erro: a janela aponta uma regra e o texto recebe outra, e a mensagem errada e
+crivel porque tem a mesma cara da certa.
+
+**O item nao corrige comportamento nenhum, e isso precisa ficar dito.** As duas
+copias concordam hoje, e concordam por um motivo real: `glossary_conflicts`
+agrupa por `orig` exato, entao os padroes de um grupo sao identicos, o termo do
+comprimento empata sempre e as duas expressoes se reduzem a mesma. Conferido em
+19.667 grupos gerados com prioridades, tipos e tamanhos sorteados — **zero
+divergencias**. O que muda e que a coincidencia deixou de depender desse
+argumento.
+
+**A correcao.** `_rule_sort_key` passou a ser o criterio, uma vez so, e
+`_specificity_order` devolve as posicoes na ordem da disputa. `glossary_conflicts`
+nao imita mais a aplicacao: converte as entradas com `_as_rule` — a mesma
+conversao que `filter_glossary_entries_by_type` faz ao carregar — e pergunta a
+`_specificity_order` quem vem primeiro. Os dois passos passaram a ser os da
+producao, e nao imitacoes deles.
+
+Devolver **posicoes**, e nao as regras ordenadas, e o que torna isso possivel:
+duas regras podem ser identicas em conteudo (uma duplicata exata ao lado de uma
+terceira que diverge), e o anuncio precisa saber qual **entrada** venceu.
+
+**O teste antigo nao servia para este item, e vale entender por que.**
+`test_the_announced_winner_is_the_one_actually_applied` compara o vencedor
+anunciado com o que `apply_all_substitutions` produz — e passa igualmente com
+duas copias corretas do criterio, que era o estado anterior. Ele protege o
+resultado, nao a unificacao.
+
+O teste novo mexe no criterio **uma vez** e exige que os dois lados virem juntos:
+troca `_rule_sort_key` por uma versao com o desempate de posicao invertido e
+afirma que o anuncio e o texto passam a apontar a segunda regra. Ele precisa
+limpar `_ordered_rules_cache`, porque o cache guarda a ordem e nao o criterio —
+sem isso passaria pelo motivo errado.
+
+Conferido por mutacao, que aqui e literalmente desfazer o item: reintroduzindo o
+`min(...)` dentro de `glossary_conflicts`, dos 10 testes da classe **so o novo
+falha**, dizendo o que houve.
+
+```
+AssertionError: Items in the first set but not the second: 0
+Items in the second set but not the first: 1
+  : o anuncio nao seguiu o criterio da aplicacao: ha uma copia dele
+```
+
+Os outros nove passando e a medida exata do que faltava: a concordancia estava
+protegida, a origem unica nao estava.
+
+Uma segunda mutacao cobre a outra metade, a conversao: trocando `_as_rule` por
+`(orig, new)` — que descarta a prioridade — quem acusa e o teste de S10 que ja
+existia.
+
+**Nao houve custo, houve ganho.** A ordenacao das 7.006 regras de sugestao
+reais, com o cache frio, medida 20 vezes:
+
+| | mediana | min |
+|---|---|---|
+| antes (chave montada inline, com a regra na tupla) | 4,48 ms | 4,40 ms |
+| depois (`sorted` sobre as posicoes) | **3,62 ms** | 3,57 ms |
+
+A versao antiga montava tuplas de quatro elementos carregando a propria regra e
+depois reordenava por uma fatia delas; a nova ordena inteiros. O caminho do
+editor tambem nao piorou: `glossary_conflicts` sobre o glossario real custa
+13,1 ms, e com 200 disputas de tres regras injetadas (600 indices em disputa)
+vai a 15,5 ms — a diferenca acompanha as 600 entradas a mais, e nao o numero de
+grupos ordenados.
+
+**Garantia S9 (reforcada):** *a interface diz qual regra do conflito vence, pelo
+mesmo criterio que a aplica.* Nao ha mais um segundo lugar onde "prioridade e
+ordem do arquivo" sao interpretadas.
 
 ---
 
