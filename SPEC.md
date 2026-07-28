@@ -26,7 +26,10 @@ variantes.
 ## 2. Componentes e artefatos em disco
 
 Todos os caminhos sao resolvidos a partir do diretorio de `sys.argv[0]`
-(o diretorio do `PGN_Tradutor_Pro.py`).
+(o diretorio do `PGN_Tradutor_Pro.py`). Empacotado com PyInstaller, `sys.argv[0]`
+e o caminho do proprio `.exe` — e nao a pasta temporaria de extracao —, entao os
+artefatos abaixo ficam ao lado do executavel, e a pasta dele precisa ser
+gravavel.
 
 | Artefato | Papel | Versionado |
 |---|---|---|

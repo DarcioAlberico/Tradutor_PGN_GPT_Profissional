@@ -18,3 +18,9 @@ logs/
 
 # Capturas do driver da skill de execucao: efemeras, refeitas a cada rodada.
 .claude/skills/*/capturas/
+
+# Saida do PyInstaller. A receita (`PGN_Tradutor_Pro.spec`) e versionada; o
+# resultado dela, nao — sao 47 MB de binarios reconstruiveis com um comando, e
+# especificos da plataforma que rodou o build.
+build/
+dist/

@@ -46,6 +46,48 @@ classes sao puladas e o restante roda normalmente.
 > ficou apontando para uma instalacao removida. Apague a pasta `.venv` e rode
 > `uv sync` de novo.
 
+## Executavel (rodar sem Python instalado)
+
+Gera um `.exe` para Windows que roda em maquinas sem Python. A receita esta em
+[PGN_Tradutor_Pro.spec](PGN_Tradutor_Pro.spec), com o motivo de cada decisao:
+
+```powershell
+python -m pip install pyinstaller
+python -m PyInstaller --noconfirm .\PGN_Tradutor_Pro.spec
+```
+
+Sai em `dist\PGN_Tradutor_Pro\` (~47 MB). **A pasta ainda nao esta completa**: o
+programa precisa do glossario ao lado do executavel.
+
+```powershell
+copy .\Substituicoes.txt .\dist\PGN_Tradutor_Pro\
+copy .\glossario.db      .\dist\PGN_Tradutor_Pro\
+```
+
+O `Substituicoes.txt` e obrigatorio — sem ele o programa abre, avisa que esta sem
+regras e traduz sem glossario (garantia S5). O `glossario.db` e opcional: e um
+indice derivado, e sem ele a primeira carga o reconstroi (~110 ms em vez de
+~16 ms).
+
+**Nao copie o `traducoes.db`.** Sao 80 MB de cache de traducoes desta maquina; o
+programa cria o dele vazio na primeira execucao.
+
+Distribua a pasta inteira, compactada. Para instalar noutra maquina, basta
+descompactar e executar — nao ha instalador nem dependencia externa.
+
+### O que saber antes de distribuir
+
+- **Os dados ficam ao lado do `.exe`.** `traducoes.db`, `backups\` e `logs\` sao
+  criados na pasta do executavel, entao ela precisa ser gravavel — instalar em
+  `C:\Program Files` sem permissao de escrita quebra a gravacao. Uma pasta no
+  perfil do usuario ou num pendrive funciona.
+- **O executavel nao e assinado.** O SmartScreen do Windows vai avisar na
+  primeira execucao ("Windows protegeu o computador" -> "Mais informacoes" ->
+  "Executar assim mesmo"), e alguns antivirus marcam executaveis do PyInstaller
+  por heuristica. Assinar exige um certificado de codigo pago.
+- **E especifico de Windows x64**, porque o PyInstaller empacota para a
+  plataforma em que roda. Para outra plataforma, o build tem de acontecer nela.
+
 ## Normalizacao de metadados PGN
 
 O botao `Normalizar PGN` corrige apenas metadados PGN (`White`, `Black`, `Site`,
