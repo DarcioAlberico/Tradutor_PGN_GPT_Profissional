@@ -26,7 +26,8 @@ import customtkinter as ctk
 
 from gui_harness import GuiTestCase
 from tradutor_pgn import app as app_module
-from tradutor_pgn import app_actions, edit_window, glossary_editor
+from tradutor_pgn import app_actions, app_config, edit_window, glossary_editor
+from tradutor_pgn import main_window
 from tradutor_pgn.backup_retention import is_backup_of_family, prune_log_files
 from tradutor_pgn.failed_runs import load_failed_run, save_failed_run
 
@@ -674,6 +675,103 @@ class StartupCleanupTests(MainWindowTestCase):
 
         self.assertTrue(self.esperar_log("[LIMPEZA] Falhou"))
         self.assertTrue(self.app.root.winfo_exists(), "a janela morreu")
+
+
+class CreditsFooterTests(MainWindowTestCase):
+    """Os creditos no rodape da janela principal.
+
+    Um rotulo que **parece** um link mas nao abre nada e pior do que texto
+    simples: ele promete uma acao e nao entrega, e a falha e silenciosa. Por isso
+    o teste central aqui e o clique, e nao o texto.
+    """
+
+    def labels(self):
+        return [
+            (w.cget("text") or "")
+            for w in self.walk()
+            if isinstance(w, ctk.CTkLabel)
+        ]
+
+    def test_the_window_credits_the_authors_and_the_repository(self):
+        textos = " | ".join(self.labels())
+
+        self.assertIn(app_config.APP_AUTHORS, textos)
+        self.assertIn(app_config.APP_REPOSITORY_URL, textos)
+
+    def test_clicking_the_link_opens_the_repository(self):
+        """O que separa um link de um texto azul.
+
+        O clique e gerado no `Label` **interno**, e nao no `CTkLabel`. Um
+        `CTkLabel` e um frame com um canvas e um label dentro, e `CTkLabel.bind`
+        instala o handler nesses dois filhos — que sao os que ficam debaixo do
+        ponteiro do usuario. Gerar o evento no frame externo nao dispara nada, e
+        a primeira versao deste teste falhou por isso: ela media o proprio
+        engano, e nao o link.
+        """
+        abertos = []
+        self.patch(main_window.webbrowser, "open", abertos.append)
+
+        # `event_generate` so entrega para widget **mapeado**, e o `setUp` deixa
+        # a janela em `withdraw()`. Sem isto o evento e descartado em silencio e
+        # o teste afirma que o link nao funciona — o que ele nao sabe distinguir
+        # de um link realmente quebrado.
+        self.root.deiconify()
+        self.addCleanup(self.root.withdraw)
+        self.pump()
+
+        sob_o_ponteiro = [
+            filho
+            for filho in self.app.repository_link.winfo_children()
+            if isinstance(filho, tk.Label)
+        ]
+        self.assertTrue(sob_o_ponteiro, "o CTkLabel nao tem label interno")
+
+        sob_o_ponteiro[0].event_generate("<Button-1>")
+        self.pump()
+
+        self.assertEqual(abertos, [app_config.APP_REPOSITORY_URL])
+
+    def test_the_link_says_it_is_clickable(self):
+        """O cursor e a unica pista de que aquilo responde ao clique."""
+        self.assertEqual(self.app.repository_link.cget("cursor"), "hand2")
+
+    def test_the_footer_actually_reaches_the_screen(self):
+        """O defeito que estes testes pegaram de verdade.
+
+        A primeira versao empacotava o rodape **depois** do log, que leva
+        `expand=True`. O packer do Tk entrega a cavidade restante ao log, e o
+        rodape fica com altura zero: existe como widget, responde a `cget`, e
+        nao aparece na tela — sem erro nenhum.
+
+        Afirmar que o rotulo existe nao pega isso, e foi por isso que o teste do
+        clique falhou primeiro: `event_generate` so entrega para widget mapeado.
+        Aqui a exigencia fica explicita, em vez de depender desse efeito.
+        """
+        self.root.deiconify()
+        self.addCleanup(self.root.withdraw)
+        self.pump()
+
+        link = self.app.repository_link
+        self.assertTrue(link.winfo_ismapped(), "o rodape nao chegou a tela")
+        self.assertGreater(link.winfo_height(), 1, "o rodape ficou com altura zero")
+
+    def test_the_footer_is_below_the_log(self):
+        """Rodape e uma posicao, e nao so um conjunto de rotulos.
+
+        A ordem do `pack` resolve a visibilidade e o `side=BOTTOM` resolve o
+        lugar — sao coisas diferentes, e uma mutacao mostrou isso: tirando so o
+        `side`, o rodape continua visivel e sobe para cima do log, o que os
+        outros testes desta classe aceitam sem reclamar.
+        """
+        self.root.deiconify()
+        self.addCleanup(self.root.withdraw)
+        self.pump()
+
+        self.assertGreater(
+            self.app.repository_link.winfo_rooty(),
+            self.app.log_text.winfo_rooty(),
+            "o rodape ficou acima do log",
+        )
 
 
 if __name__ == "__main__":

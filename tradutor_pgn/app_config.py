@@ -1,3 +1,9 @@
+# Creditos, exibidos no rodape da janela principal. Ficam aqui, e nao soltos no
+# layout, porque sao a mesma informacao que o README e o `pyproject.toml`
+# carregam: quando mudarem, muda num lugar.
+APP_AUTHORS = "Darcio Alberico e Claude.ai"
+APP_REPOSITORY_URL = "https://github.com/DarcioAlberico/Tradutor_PGN_GPT_Profissional"
+
 LANGUAGE_OUTPUT_SUFFIXES = {
     "pt": "BR",
     "en": "EN",

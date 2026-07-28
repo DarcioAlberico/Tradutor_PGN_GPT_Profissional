@@ -1,6 +1,9 @@
 import tkinter as tk
+import webbrowser
 
 import customtkinter as ctk
+
+from .app_config import APP_AUTHORS, APP_REPOSITORY_URL
 
 
 LANGUAGES = [
@@ -33,6 +36,52 @@ def create_section(parent, title):
     content = ctk.CTkFrame(section, fg_color="transparent")
     content.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
     return section, content
+
+
+def open_repository(_event=None):
+    """Abre o repositorio no navegador padrao.
+
+    Recebe e ignora o evento porque e ligada a um `<Button-1>`, e nao a um
+    `command`. Se `webbrowser` falhar (uma maquina sem navegador associado), a
+    excecao sobe e vira dialogo pelo relator de callbacks (garantia C3) — o que
+    e melhor do que um clique que silenciosamente nao faz nada.
+    """
+    webbrowser.open(APP_REPOSITORY_URL)
+
+
+def create_credits_footer(parent):
+    """Rodape com autoria e link do repositorio.
+
+    Fica no rodape, e nao num botao "Sobre": e informacao que se le uma vez e
+    nao se procura de novo, entao ocupar uma celula da grade de "Ferramentas" —
+    ao lado de acoes que o usuario usa toda hora — trocaria o lugar certo pelo
+    lugar visivel.
+
+    O link e um `CTkLabel` com `cursor="hand2"`, e nao um `CTkButton`: parece o
+    que e (um endereco), e nao compete visualmente com os botoes de acao logo
+    acima.
+    """
+    footer = ctk.CTkFrame(parent, fg_color="transparent")
+
+    fonte = ctk.CTkFont(size=11)
+    ctk.CTkLabel(
+        footer,
+        text=f"PGN Tradutor Pro  ·  {APP_AUTHORS}  ·  ",
+        font=fonte,
+        text_color=("gray45", "gray60"),
+    ).pack(side=tk.LEFT)
+
+    link = ctk.CTkLabel(
+        footer,
+        text=APP_REPOSITORY_URL,
+        font=fonte,
+        text_color=("#1f6aa5", "#5aa9e6"),
+        cursor="hand2",
+    )
+    link.pack(side=tk.LEFT)
+    link.bind("<Button-1>", open_repository)
+
+    return footer, link
 
 
 def setup_main_ui(app):
@@ -150,6 +199,15 @@ def setup_main_ui(app):
         ],
         columns=4,
     )
+
+    # O rodape e empacotado ANTES do log, ancorado embaixo. A ordem nao e
+    # estetica: o packer do Tk distribui na ordem em que recebe, e o log leva
+    # `expand=True` — ele toma toda a cavidade restante, e quem vier depois fica
+    # com altura zero. Empacotado assim, o rodape reserva a faixa dele e o log
+    # expande no que sobra. Com a ordem ingenua o rodape existe, nao e mapeado, e
+    # some da tela sem erro nenhum.
+    footer, app.repository_link = create_credits_footer(main_frame)
+    footer.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
 
     log_section, log_frame = create_section(main_frame, "Log de Processamento")
     log_section.pack(fill=tk.BOTH, expand=True)

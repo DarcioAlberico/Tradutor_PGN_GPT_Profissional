@@ -213,7 +213,7 @@ bloqueia o terminal e não dá handle nenhum sobre o app.
 python -m unittest discover -s tests
 ```
 
-400 testes, ~75 s. Os de `test_editor_windows.py` e `test_main_window.py` abrem
+405 testes, ~80 s. Os de `test_editor_windows.py` e `test_main_window.py` abrem
 janelas de verdade — os editores e a janela principal — e são pulados onde não
 houver display. O harness comum deles (gate de display, silenciamento de
 diálogos, sandbox de caminhos) está em `tests/gui_harness.py`.
@@ -239,6 +239,25 @@ Todos custaram tempo nesta sessão.
 - **`event_generate` NÃO entrega alguns atalhos sem um widget com foco.**
   `<Control-f>` é um deles; `<Control-s>` chega. Um teste de atalho sem
   `focus_set()` passa sem exercitar nada. `Driver.key()` já foca antes.
+
+- **`event_generate` também não entrega para widget não-mapeado.** É o mesmo
+  problema pela outra ponta, e mais traiçoeiro: o `GuiTestCase` deixa a raiz em
+  `withdraw()`, e um clique gerado ali é descartado em silêncio. O teste então
+  afirma que o widget não reagiu — e não sabe distinguir isso de um widget
+  realmente quebrado. Quem testa clique precisa de `root.deiconify()` antes (e
+  `addCleanup(root.withdraw)` depois).
+
+- **`CTkLabel.bind()` liga nos filhos, não no `CTkLabel`.** Um `CTkLabel` é um
+  frame com um `CTkCanvas` e um `Label` dentro; o `bind` instala o handler nos
+  dois, que são os que ficam sob o ponteiro. `event_generate` no `CTkLabel`
+  externo não dispara nada. Para clicar como o usuário clica, mire o `Label`
+  interno (`[f for f in lbl.winfo_children() if isinstance(f, tk.Label)]`).
+
+- **`pack` com `expand=True` engole quem vier depois.** O packer distribui na
+  ordem em que recebe: um irmão empacotado após um `fill=BOTH, expand=True` fica
+  com altura zero, não é mapeado, e some da tela **sem erro nenhum**. Rodapés e
+  barras de status vão empacotados ANTES, com `side=tk.BOTTOM`. Afirmar que o
+  widget existe não pega isso; só `winfo_ismapped()` pega.
 
 - **`messagebox` bloqueia para sempre.** `run_translation` tem um
   `except Exception` que chama `showerror`; num driver isso trava o processo
