@@ -125,6 +125,6 @@ nada, e **Manter esta**, que remove as concorrentes do arquivo.
 - `tests/`: suite automatizada; `tests/gui_harness.py` traz o sandbox de caminhos e o silenciamento de dialogos que os testes de janela compartilham.
 - `.claude/skills/run-tradutor-pgn/`: ferramenta para abrir e dirigir o app sem interacao manual (inclusive o worker de traducao, sem abrir janela) e capturar telas.
 - `Substituicoes.txt`: as regras do glossario (original, substituicao e, quando ha, tipo e prioridade).
-- `glossario.db`: indice SQLite local do glossario, recriado/sincronizado a partir de `Substituicoes.txt`.
+- `glossario.db`: indice SQLite do glossario, derivado do `Substituicoes.txt`. E versionado para que um clone ja abra com o indice pronto, e ele proprio guarda de qual arquivo veio (caminho relativo e hash do conteudo), de modo que reconstroi sozinho assim que as regras mudam.
 - `traducoes.db`: cache local de traducoes.
 - `backups/`, `logs/`: gerados em tempo de execucao, nao versionados.

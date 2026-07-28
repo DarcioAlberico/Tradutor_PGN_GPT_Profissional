@@ -1,5 +1,6 @@
 import csv
 import io
+import os
 import sqlite3
 import sys
 import types
@@ -5267,6 +5268,114 @@ class GlossaryPriorityTests(unittest.TestCase):
 
             self.assertEqual(
                 glossary_entry_priority(entradas[0]), 3, "leu a prioridade do cache velho"
+            )
+
+    def _clonar(self, origem, destino):
+        """O que um `git clone` faz com os dois arquivos, e so isso.
+
+        Copia o conteudo para outra pasta e da ao `Substituicoes.txt` uma data
+        nova — o git nao guarda `mtime`, entao o arquivo baixado tem sempre a
+        hora do checkout, e nunca a de quem o gravou.
+        """
+        destino.mkdir(parents=True, exist_ok=True)
+        for nome in ("Substituicoes.txt", "glossario.db"):
+            (destino / nome).write_bytes((origem / nome).read_bytes())
+        outra_data = os.path.getmtime(origem / "Substituicoes.txt") + 86400
+        os.utime(destino / "Substituicoes.txt", (outra_data, outra_data))
+
+    def test_the_cached_index_survives_a_clone(self):
+        """A razao de versionar o `glossario.db` (ROADMAP 3.7).
+
+        As marcas antigas nao sobreviviam ao clone: o `source_path` era absoluto,
+        entao mudar de pasta ja bastava para divergir, e o `source_mtime` era a
+        data do arquivo, que o checkout reescreve. As duas acusavam diferenca
+        onde nao havia, e o cache versionado era descartado e reconstruido em
+        toda maquina — o oposto do que versiona-lo pretende.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            original = base / "original"
+            original.mkdir()
+            save_glossary_entries(
+                [("queen", "dama", GLOSSARY_RULE_SUGGESTION, 3)],
+                str(original / "Substituicoes.txt"),
+                create_backup=False,
+                db_path=str(original / "glossario.db"),
+            )
+
+            clone = base / "outra-pasta" / "projeto"
+            self._clonar(original, clone)
+
+            self.assertFalse(
+                glossario._glossary_database_needs_sync(
+                    str(clone / "Substituicoes.txt"), str(clone / "glossario.db")
+                ),
+                "o cache clonado foi descartado: as marcas nao viajaram",
+            )
+
+            # E o conteudo continua certo, com a prioridade que so o cache valido
+            # entrega sem reconstruir.
+            entradas = load_glossary_entry_details(
+                str(clone / "Substituicoes.txt"), db_path=str(clone / "glossario.db")
+            )
+            self.assertEqual(glossary_entry_priority(entradas[0]), 3)
+
+    def test_a_changed_glossary_still_invalidates_the_cache(self):
+        """A outra metade: a marca nova nao pode ser frouxa.
+
+        Trocar o `mtime` pelo hash so vale se o hash ainda acusar o que o `mtime`
+        acusava. Sem esta, "nunca reconstruir" passaria no teste de cima.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            path = base / "Substituicoes.txt"
+            db_path = base / "glossario.db"
+            save_glossary_entries(
+                [("queen", "dama", GLOSSARY_RULE_SUGGESTION, 3)],
+                str(path),
+                create_backup=False,
+                db_path=str(db_path),
+            )
+
+            self.assertFalse(
+                glossario._glossary_database_needs_sync(str(path), str(db_path))
+            )
+
+            path.write_text(
+                "substituicoes = [\n    ('rook', 'torre'),\n]\n", encoding="utf-8"
+            )
+
+            self.assertTrue(
+                glossario._glossary_database_needs_sync(str(path), str(db_path)),
+                "o glossario mudou e o cache continuou valendo",
+            )
+
+    def test_rewriting_the_same_content_does_not_invalidate_the_cache(self):
+        """O ganho de lado do hash, que o `mtime` nao dava.
+
+        A gravacao do glossario e atomica (arquivo temporario + troca), entao o
+        `mtime` muda mesmo quando o conteudo e identico — e o cache era refeito
+        por nada. O hash olha o que importa.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            path = base / "Substituicoes.txt"
+            db_path = base / "glossario.db"
+            save_glossary_entries(
+                [("queen", "dama", GLOSSARY_RULE_SUGGESTION, 3)],
+                str(path),
+                create_backup=False,
+                db_path=str(db_path),
+            )
+
+            conteudo = path.read_bytes()
+            path.write_bytes(conteudo)
+            futuro = os.path.getmtime(path) + 3600
+            os.utime(path, (futuro, futuro))
+
+            self.assertFalse(
+                glossario._glossary_database_needs_sync(str(path), str(db_path)),
+                "reconstruiu por causa da data, com o conteudo igual",
             )
 
     def test_the_csv_carries_the_priority_and_tolerates_its_absence(self):

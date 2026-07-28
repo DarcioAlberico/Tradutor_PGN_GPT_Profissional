@@ -5,6 +5,7 @@ import ast
 import csv
 from datetime import datetime
 from functools import lru_cache
+import hashlib
 import os
 import re
 import shutil
@@ -32,11 +33,15 @@ GLOSSARY_DB_FILENAME = "glossario.db"
 # por causa de uma decisao tomada em quatro delas.
 GLOSSARY_PRIORITY_DEFAULT = 0
 
-# Sobe quando o `glossario.db` ganha coluna. Um banco gravado por uma versao
-# anterior tem de ser reconstruido a partir do arquivo, e nao apenas alterado:
-# a coluna nova entraria com o valor padrao para todas as regras, sem que o
-# `mtime` do `Substituicoes.txt` tivesse mudado para acusar a diferenca.
-GLOSSARY_DB_SCHEMA_VERSION = 2
+# Sobe quando o `glossario.db` ganha coluna, e tambem quando muda o significado
+# das marcas que dizem de onde ele veio. Um banco gravado por uma versao anterior
+# tem de ser reconstruido a partir do arquivo, e nao apenas alterado: a coluna
+# nova entraria com o valor padrao para todas as regras, sem que nada no
+# `Substituicoes.txt` tivesse mudado para acusar a diferenca.
+#
+# 3: `source_path` passou a ser relativo ao banco e `source_mtime` deu lugar a
+# `source_hash`, para que o cache sobreviva a um clone (ROADMAP 3.7).
+GLOSSARY_DB_SCHEMA_VERSION = 3
 
 
 # ============================================================================
@@ -258,10 +263,51 @@ def _ensure_parent_dir(path):
         os.makedirs(directory, exist_ok=True)
 
 
-def _source_mtime(path):
+def _source_fingerprint(path):
+    """Impressao do **conteudo** do glossario, para saber se o cache ainda vale.
+
+    Era o `mtime`, e o `mtime` nao sobrevive a um clone: o git nao guarda data de
+    modificacao, entao o `Substituicoes.txt` recem baixado recebe a hora do
+    checkout e o `glossario.db` versionado ao lado dele seria descartado na
+    primeira carga — reconstruido do zero em toda maquina, que e o oposto de
+    versiona-lo.
+
+    O hash responde a pergunta que de fato importa — "este banco foi construido a
+    partir deste arquivo?" — e a resposta e a mesma em qualquer maquina. Ele
+    tambem e mais exato que o `mtime` para o caso oposto: reescrever o arquivo com
+    o mesmo conteudo (o que uma gravacao atomica faz) mudava o `mtime` e forcava
+    uma reconstrucao que nao mudava nada.
+    """
     if not os.path.exists(path):
         return ""
-    return str(os.path.getmtime(path))
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        for bloco in iter(lambda: f.read(65536), b""):
+            hasher.update(bloco)
+    return hasher.hexdigest()
+
+
+def _relative_source_path(source_path, db_path):
+    """O caminho do glossario visto da pasta do banco, com `/` como separador.
+
+    Absoluto, ele so valia na maquina que gravou: bastava o projeto estar em
+    outra pasta para os caminhos diferirem e o cache ser reconstruido. Relativo
+    ao proprio banco, os dois viajam juntos — e como eles ficam lado a lado na
+    raiz do projeto, na pratica isto e `Substituicoes.txt`.
+
+    O separador vira `/` porque o banco e versionado e pode ser lido em outro
+    sistema, onde `os.sep` e outro. Se os dois estiverem em unidades diferentes
+    do Windows nao existe caminho relativo: ai o absoluto e o melhor disponivel,
+    e o comportamento antigo volta — restrito a esse caso.
+    """
+    try:
+        relativo = os.path.relpath(
+            os.path.abspath(source_path),
+            os.path.dirname(os.path.abspath(db_path)),
+        )
+    except ValueError:
+        return os.path.abspath(source_path).replace(os.sep, "/")
+    return relativo.replace(os.sep, "/")
 
 
 def _deduplicate_entries(entries):
@@ -416,8 +462,12 @@ def sync_glossary_database(entries, db_path=None, source_path=None):
         _set_glossary_metadata(conn, "entry_count", len(entries))
         _set_glossary_metadata(conn, "schema_version", GLOSSARY_DB_SCHEMA_VERSION)
         if source_path is not None:
-            _set_glossary_metadata(conn, "source_path", os.path.abspath(source_path))
-            _set_glossary_metadata(conn, "source_mtime", _source_mtime(source_path))
+            # Relativo e por conteudo: as duas marcas precisam valer num clone,
+            # senao o `glossario.db` versionado e descartado ao ser aberto.
+            _set_glossary_metadata(
+                conn, "source_path", _relative_source_path(source_path, db_path)
+            )
+            _set_glossary_metadata(conn, "source_hash", _source_fingerprint(source_path))
         _set_glossary_metadata(conn, "synced_at", now)
         conn.commit()
     finally:
@@ -491,7 +541,7 @@ def _glossary_database_needs_sync(path, db_path):
     try:
         count = conn.execute("SELECT COUNT(*) FROM glossary_entries").fetchone()[0]
         source_path = _get_glossary_metadata(conn, "source_path")
-        source_mtime = _get_glossary_metadata(conn, "source_mtime")
+        source_hash = _get_glossary_metadata(conn, "source_hash")
         schema = _get_glossary_metadata(conn, "schema_version")
     finally:
         conn.close()
@@ -503,11 +553,11 @@ def _glossary_database_needs_sync(path, db_path):
         # novas. O `ALTER TABLE` acima cria a coluna com o padrao, e sem esta
         # checagem o banco continuaria valendo como cache: as regras seriam
         # lidas com prioridade zero enquanto o arquivo diz outra coisa. Errado,
-        # e em silencio — e o `mtime` do arquivo nao mudou para acusar.
+        # e em silencio — nada no arquivo mudou para acusar.
         return True
-    if source_path and os.path.abspath(source_path) != os.path.abspath(path):
+    if source_path and source_path != _relative_source_path(path, db_path):
         return True
-    return source_mtime != _source_mtime(path)
+    return source_hash != _source_fingerprint(path)
 
 
 def rebuild_glossary_database(path=None, db_path=None):

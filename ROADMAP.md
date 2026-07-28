@@ -59,6 +59,13 @@ Em todos, o teste passava com a producao certa e com a errada — que e a
 definicao de nao proteger nada. A correcao foi a mesma nos tres: partir de um
 valor que nao seja o padrao.
 
+**Quarta rodada: o 3.7**, e ele veio de uma decisao do usuario — versionar o
+`glossario.db` — que **nao funcionava sozinha**. As marcas que dizem de onde o
+banco veio eram um caminho absoluto e um `mtime`, e as duas divergem em qualquer
+clone: o indice versionado seria descartado e reconstruido em toda maquina. O
+item e o que faltava para a decisao valer, e o tema dele e esse: uma mudanca de
+configuracao que so tem efeito depois que o codigo aceita a nova situacao.
+
 **Terceira rodada do mesmo dia: so o 3.6**, e ele nao saiu de uma medicao nem de
 um bug — saiu de ler a secao 9 da SPEC procurando o que ainda descrevia um
 defeito em vez de uma escolha. Sobrou um: o vencedor do conflito calculado em
@@ -1377,6 +1384,74 @@ grupos ordenados.
 **Garantia S9 (reforcada):** *a interface diz qual regra do conflito vence, pelo
 mesmo criterio que a aplica.* Nao ha mais um segundo lugar onde "prioridade e
 ordem do arquivo" sao interpretadas.
+
+### 3.7 O `glossario.db` versionado nao sobrevivia ao clone — CONCLUIDO (2026-07-27)
+
+O `glossario.db` passou a ser versionado (antes o `.gitignore` o excluia junto
+com o `traducoes.db`, pelo padrao `*.db`). A ideia e que um clone ja abra com o
+indice pronto, em vez de reconstrui-lo do `Substituicoes.txt` na primeira carga.
+
+**Versiona-lo sozinho nao entregava isso**, e o motivo estava nas duas marcas que
+o banco guarda para dizer de onde veio:
+
+| marca | o que era | por que nao sobrevive |
+|---|---|---|
+| `source_path` | `C:\Python Course\...\Substituicoes.txt` | absoluto: outra pasta ja diverge |
+| `source_mtime` | `1785184475.31` | o git nao guarda `mtime`; o arquivo clonado tem a hora do checkout |
+
+`_glossary_database_needs_sync` compara as duas, e **as duas divergiam em
+qualquer clone**. O cache versionado era descartado e reconstruido em toda
+maquina — exatamente o que versiona-lo pretendia evitar. Medido copiando os dois
+arquivos para outra pasta e dando ao `.txt` uma data nova, que e o que um
+checkout faz:
+
+```
+clone em outra pasta, mtime novo -> reconstruir? True
+carga no clone: 113 ms
+```
+
+**A correcao.** `source_path` passou a ser relativo ao proprio banco
+(`_relative_source_path`), com `/` como separador porque o arquivo e versionado e
+pode ser lido em outro sistema; e o `source_mtime` deu lugar a `source_hash`, o
+sha256 do conteudo (`_source_fingerprint`). As duas respondem a mesma pergunta —
+"este banco foi construido a partir deste arquivo?" — de um jeito que vale em
+qualquer maquina. O `schema_version` subiu para 3, porque o significado das
+marcas mudou e um banco antigo tem de ser reconstruido.
+
+```
+clone em outra pasta, mtime novo -> reconstruir? False
+carga no clone: 16 ms
+```
+
+**7x mais rapido na primeira carga de um clone**, que era o ponto.
+
+**O hash tambem e mais exato que o `mtime` no sentido oposto.** A gravacao do
+glossario e atomica (arquivo temporario + troca), entao o `mtime` mudava mesmo
+quando o conteudo era identico, e o cache era refeito por nada. Tem teste
+proprio.
+
+**Custo.** Ler 324 KB a cada checagem em vez de um `stat`: 0,277 ms contra
+0,028 ms, medianas de 50 medicoes. A checagem inteira custa ~1,3 ms, e a carga
+que ela evita custa 113 ms.
+
+**Conferido por mutacao, uma marca de cada vez** — o que importava era que cada
+metade fosse protegida sozinha, e nao que "algum teste falha":
+
+| mutacao | quem acusa |
+|---|---|
+| `source_path` volta a ser absoluto | `..._survives_a_clone`: "o cache clonado foi descartado" |
+| `source_hash` volta a ser o `mtime` | o mesmo, **e** `..._rewriting_the_same_content...` |
+| o hash vira constante ("nunca reconstruir") | `..._still_invalidates_the_cache`: "o glossario mudou e o cache continuou valendo" |
+
+A terceira e a que impede a correcao de virar um cache que nunca expira — sem
+ela, "sempre valido" passaria no teste do clone.
+
+**Um tropeco meu no meio, que custou refazer o trabalho.** Para reverter a
+segunda mutacao usei `git checkout tradutor_pgn/glossario.py`, e o arquivo tinha
+as mudancas deste item ainda nao commitadas: o comando desfez a mutacao **e** o
+item. Reverter mutacao com o mesmo comando que descarta trabalho nao commitado so
+e seguro depois do commit; antes dele, o certo e desfazer a edicao pelo caminho
+inverso.
 
 ---
 

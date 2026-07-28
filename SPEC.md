@@ -34,8 +34,9 @@ Todos os caminhos sao resolvidos a partir do diretorio de `sys.argv[0]`
 | `traducoes.db` (`PRAGMA user_version`) | Versao do schema; migracao so roda quando desatualizada | — |
 | `comments_fts` (dentro do `traducoes.db`) | Indice de busca FTS5, mantido por gatilhos (R8) | Nao |
 | `Substituicoes.txt` | Fonte de verdade do glossario | Sim |
-| `glossario.db` | Indice SQLite derivado do `Substituicoes.txt` | Nao |
+| `glossario.db` | Indice SQLite derivado do `Substituicoes.txt` | Sim |
 | `glossario.db` (`schema_version`) | Marca do esquema; um banco de versao anterior e reconstruido do arquivo | — |
+| `glossario.db` (`source_path`, `source_hash`) | De qual arquivo ele veio: caminho relativo ao proprio banco e hash do conteudo | — |
 | `pgn_tradutor_pro_settings.json` | Estado da UI e rascunhos de edicao | Nao |
 | `backups/` | Copias automaticas do glossario e do banco, com retencao (S8) | Nao |
 | `logs/` | Log por execucao de traducao (`traducao-<carimbo>.log`), com retencao | Nao |
@@ -644,10 +645,18 @@ leia uma garantia acima como mais ampla do que ela e.
 **Estrutura**
 
 - `glossario.db` e um cache derivado, e um cache pode ficar velho de um jeito que
-  o `mtime` do arquivo nao denuncia: uma coluna nova entra com o valor padrao
-  para todas as regras. Por isso ele carrega uma marca de esquema
-  (`schema_version`) e e reconstruido a partir do `Substituicoes.txt` quando ela
-  nao bate. Toda coluna acrescentada tem de subir essa marca.
+  a data do arquivo nao denuncia: uma coluna nova entra com o valor padrao para
+  todas as regras. Por isso ele carrega uma marca de esquema (`schema_version`) e
+  e reconstruido a partir do `Substituicoes.txt` quando ela nao bate. **Toda
+  coluna acrescentada tem de subir essa marca** — e tambem toda mudanca no
+  significado de `source_path` ou `source_hash`, que e como o banco diz de onde
+  veio.
+- O cache e versionado, entao as marcas de origem precisam valer em outra
+  maquina: `source_path` e relativo ao proprio banco e `source_hash` e o conteudo
+  do arquivo, nao a data dele. Um caminho absoluto ou um `mtime` fariam o clone
+  reconstruir o indice na primeira carga, que e o que versiona-lo pretende
+  evitar. O preco e ler o `Substituicoes.txt` a cada checagem em vez de um
+  `stat`: 0,28 ms contra 0,03 ms, dentro de uma checagem que custa ~1,3 ms.
 
 ---
 
