@@ -5,8 +5,14 @@ import threading
 import tkinter as tk
 
 from . import app_actions
+from .app_config import LANGUAGE_NAMES
 from .glossario import set_glossary_error_handler
 from .main_window import setup_main_ui
+from .settings import (
+    load_settings,
+    read_main_window_settings,
+    write_main_window_settings,
+)
 from .window_utils import bring_window_to_front, install_callback_error_reporter
 
 
@@ -18,13 +24,19 @@ class PGNTranslatorApp:
         self.root.minsize(900, 600)
         bring_window_to_front(self.root, maximize=True)
 
-        # Variáveis principais
-        self.source_path = tk.StringVar()
-        self.target_language = tk.StringVar(value="pt")
-        # Vazio e "detectar automaticamente", que e o que o programa sempre fez
-        # (`sl=auto`). Quem nao mexer no seletor continua exatamente onde estava.
-        self.source_language = tk.StringVar(value="")
-        self.process_subdirs = tk.BooleanVar(value=True)
+        # Variáveis principais, restauradas do que a sessao anterior escolheu.
+        #
+        # O idioma de ORIGEM e a razao de isto existir. Ele e a escolha que mais
+        # muda o resultado — decide o `sl=` da API e liga a correcao das letras
+        # dos lances (P3) —, e o padrao dele, "Detectar", e justamente o valor
+        # que deixa as duas desligadas. Resetar a cada abertura significa que
+        # esquecer um clique custa uma execucao inteira traduzida no escuro, e o
+        # programa nao teria como avisar depois: o resultado parece pronto.
+        escolhas = read_main_window_settings(load_settings(), LANGUAGE_NAMES)
+        self.source_path = tk.StringVar(value=escolhas["source_path"])
+        self.target_language = tk.StringVar(value=escolhas["target_language"])
+        self.source_language = tk.StringVar(value=escolhas["source_language"])
+        self.process_subdirs = tk.BooleanVar(value=escolhas["process_subdirs"])
         self.is_processing = False
         self.log_queue = queue.Queue()
 
@@ -62,6 +74,14 @@ class PGNTranslatorApp:
         # Atualização do log
         self.update_log()
 
+        # Depois da restauracao acima. **Hoje a ordem nao muda nada** — ligado
+        # antes, o `trace` gravaria de volta exatamente o que acabou de ser
+        # lido —, e uma mutacao mostrou isso; a primeira versao deste comentario
+        # dizia que a ordem evitava um problema atual, e nao evita. Ela existe
+        # para o dia em que a leitura ganhar qualquer normalizacao: ai o laco
+        # passaria a gravar o valor normalizado por cima do que o usuario tinha.
+        self._remember_choices()
+
         # Retencao de `backups/` e `logs/` (garantia S8). Roda aqui, e nao so
         # quando um backup novo e criado, senao quem parar de editar o glossario
         # fica com a pilha inteira para sempre. Numa thread: sao centenas de
@@ -73,6 +93,37 @@ class PGNTranslatorApp:
     # ============================
     def setup_ui(self):
         setup_main_ui(self)
+
+    def _remember_choices(self):
+        """Grava as escolhas da janela assim que elas mudam.
+
+        No clique, e nao ao iniciar uma traducao: quem escolhe o idioma e fecha o
+        programa sem traduzir escolheu do mesmo jeito, e perder isso reproduz em
+        menor escala o problema que a persistencia veio resolver.
+
+        Uma falha de disco aqui nao pode derrubar um clique de radio — lembrar a
+        escolha e conveniencia, e a traducao continua usando o que esta na tela.
+        """
+        def gravar(*_args):
+            try:
+                write_main_window_settings(
+                    {
+                        "source_language": self.source_language.get(),
+                        "target_language": self.target_language.get(),
+                        "process_subdirs": bool(self.process_subdirs.get()),
+                        "source_path": self.source_path.get(),
+                    }
+                )
+            except OSError:
+                pass
+
+        for variavel in (
+            self.source_language,
+            self.target_language,
+            self.process_subdirs,
+            self.source_path,
+        ):
+            variavel.trace_add("write", gravar)
 
     # ============================
     #   SELEÇÃO DE ARQUIVOS

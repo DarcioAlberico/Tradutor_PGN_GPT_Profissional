@@ -171,6 +171,10 @@ from tradutor_pgn.glossary_editor import (
     sort_glossary_indices,
 )
 from tradutor_pgn.settings import (
+    MAIN_WINDOW_DEFAULTS,
+    MAIN_WINDOW_KEY,
+    read_main_window_settings,
+    write_main_window_settings,
     clear_editor_draft,
     get_editor_draft,
     load_settings,
@@ -10047,6 +10051,137 @@ class FixMoveNotationToolTests(unittest.TestCase):
         self.assertIn("Traducoes que serao alteradas: 2", pergunta)
         self.assertIn("A torre Rf8 segura.", pergunta)
         self.assertIn("A torre Tf8 segura.", pergunta)
+
+# ===========================================================================
+# A janela principal lembra o que foi escolhido
+# ===========================================================================
+
+
+class MainWindowSettingsTests(unittest.TestCase):
+    """A leitura e a gravacao das escolhas, sem abrir janela.
+
+    A parte que da para errar aqui e a validacao: o arquivo e JSON editavel a
+    mao e sobrevive a versoes do programa, entao ele pode trazer qualquer coisa.
+    """
+
+    IDIOMAS = {"pt", "en", "es"}
+
+    def test_an_empty_file_gives_the_defaults(self):
+        self.assertEqual(
+            read_main_window_settings({}, self.IDIOMAS), MAIN_WINDOW_DEFAULTS
+        )
+
+    def test_it_reads_back_what_was_stored(self):
+        guardado = {
+            MAIN_WINDOW_KEY: {
+                "source_language": "en",
+                "target_language": "es",
+                "process_subdirs": False,
+                "source_path": "C:/partidas",
+            }
+        }
+        self.assertEqual(
+            read_main_window_settings(guardado, self.IDIOMAS),
+            {
+                "source_language": "en",
+                "target_language": "es",
+                "process_subdirs": False,
+                "source_path": "C:/partidas",
+            },
+        )
+
+    def test_detect_survives_next_to_a_non_default_target(self):
+        """A string vazia e "Detectar", uma escolha legitima.
+
+        O que este teste protege e a SECAO: guardar "Detectar" nao pode fazer o
+        resto dela ser descartado. Ele **nao** distingue tratar a string vazia
+        como valor de trata-la como ausente — o padrao tambem e vazio, entao as
+        duas leituras dao no mesmo. Isso esta dito no codigo, junto da guarda.
+        """
+        guardado = {MAIN_WINDOW_KEY: {"source_language": "", "target_language": "es"}}
+        valores = read_main_window_settings(guardado, self.IDIOMAS)
+
+        self.assertEqual(valores["source_language"], "")
+        self.assertEqual(valores["target_language"], "es")
+
+    def test_a_language_the_program_no_longer_offers_falls_back(self):
+        """Um seletor nao pode ficar num estado que ele nao sabe exibir."""
+        guardado = {
+            MAIN_WINDOW_KEY: {"source_language": "ja", "target_language": "ja"}
+        }
+        valores = read_main_window_settings(guardado, self.IDIOMAS)
+
+        self.assertEqual(valores["source_language"], "")
+        self.assertEqual(valores["target_language"], "pt")
+
+    def test_junk_of_the_wrong_type_falls_back(self):
+        guardado = {
+            MAIN_WINDOW_KEY: {
+                "source_language": 7,
+                "target_language": None,
+                "process_subdirs": "sim",
+                "source_path": ["/a"],
+            }
+        }
+        self.assertEqual(
+            read_main_window_settings(guardado, self.IDIOMAS), MAIN_WINDOW_DEFAULTS
+        )
+
+    def test_a_section_that_is_not_a_dict_falls_back(self):
+        self.assertEqual(
+            read_main_window_settings({MAIN_WINDOW_KEY: "nada"}, self.IDIOMAS),
+            MAIN_WINDOW_DEFAULTS,
+        )
+
+    def test_a_path_that_no_longer_exists_is_still_offered(self):
+        """Pode ser um pendrive que ainda nao foi plugado.
+
+        Apagar o caminho por isso seria pior do que oferece-lo: quem valida a
+        existencia e o "Iniciar Traducao", que ja o fazia e diz o que houve.
+        """
+        guardado = {MAIN_WINDOW_KEY: {"source_path": "E:/nao-existe/partidas"}}
+        self.assertEqual(
+            read_main_window_settings(guardado, self.IDIOMAS)["source_path"],
+            "E:/nao-existe/partidas",
+        )
+
+    def test_writing_does_not_touch_the_editor_drafts(self):
+        """Garantia R4, e e o motivo de a gravacao passar por `update_settings`.
+
+        Os rascunhos das janelas de edicao vivem no MESMO arquivo. Gravar o
+        snapshot inteiro daqui apagaria o que elas escreveram desde que este
+        processo abriu — e o usuario so descobriria ao perder uma edicao.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            caminho = str(Path(tmp) / "settings.json")
+            save_settings(
+                {
+                    "editor_drafts": {"chave": {"text": "rascunho vivo"}},
+                    "editor": {"font_size": 15},
+                },
+                caminho,
+            )
+
+            write_main_window_settings({"source_language": "en"}, caminho)
+
+            disco = load_settings(caminho)
+            self.assertEqual(
+                disco["editor_drafts"], {"chave": {"text": "rascunho vivo"}}
+            )
+            self.assertEqual(disco["editor"], {"font_size": 15})
+            self.assertEqual(disco[MAIN_WINDOW_KEY]["source_language"], "en")
+
+    def test_writing_twice_keeps_the_fields_it_was_not_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            caminho = str(Path(tmp) / "settings.json")
+            write_main_window_settings(
+                {"source_language": "en", "target_language": "pt"}, caminho
+            )
+            write_main_window_settings({"source_path": "C:/x"}, caminho)
+
+            guardado = load_settings(caminho)[MAIN_WINDOW_KEY]
+            self.assertEqual(guardado["source_language"], "en")
+            self.assertEqual(guardado["source_path"], "C:/x")
 
 if __name__ == "__main__":
     unittest.main()

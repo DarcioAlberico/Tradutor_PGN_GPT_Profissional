@@ -2822,3 +2822,56 @@ O editor buscava `source_language` e `target_language` em `fetch_translation_by_
 exibia. Com "Origem: Todos" ativo a lista mistura pares de proposito, e nada na
 tela dizia de qual deles vinha o texto em revisao. A barra de status passou a
 nomea-lo, e o dado que ja estava sendo lido finalmente chega a algum lugar.
+
+---
+
+## 12. A janela principal esquecia a escolha que mais importa — CONCLUIDO (2026-07-29)
+
+Nada na janela principal era lembrado: idioma de origem, idioma de destino,
+caminho e "processar subdiretorios" voltavam ao padrao a cada abertura.
+
+Para tres deles isso e so incomodo. Para o **idioma de origem** e outra coisa, e a
+assimetria e o item: ele decide o `sl=` da API e **liga a correcao das letras dos
+lances** (P3), e o padrao dele — "Detectar" — e exatamente o valor que deixa as
+duas desligadas. Ou seja, o campo que mais muda o resultado voltava sozinho para
+a posicao que desliga a qualidade.
+
+E o modo de falha e silencioso: uma execucao feita assim nao acusa nada. O PGN
+sai, o banco enche, e o `Rd1` que devia ser `Td1` so aparece para quem for ler o
+comentario mais tarde — provavelmente jogando.
+
+O gatilho foi o usuario dizer que ia recomecar o banco do zero. Uma retraducao de
+201 mil comentarios com o seletor no padrao produziria de novo, de uma vez, todo o
+problema que as secoes 10 e 11 acabaram de resolver.
+
+**Grava no clique, e nao ao iniciar a traducao.** Quem escolhe o idioma e fecha o
+programa sem traduzir escolheu do mesmo jeito, e perder isso reproduziria o mesmo
+problema em menor escala. A gravacao passa por `update_settings` (rele o disco
+antes de escrever) porque os rascunhos das janelas de edicao vivem no mesmo
+arquivo — garantia R4, e o defeito que ela impede e o usuario perder uma edicao
+por ter clicado num radio na outra janela.
+
+A validacao da leitura e a parte que da para errar, e por isso ela e uma funcao
+pura: o arquivo e JSON editavel a mao e sobrevive a versoes do programa. Um idioma
+que saiu da lista, um tipo errado ou a secao inteira corrompida caem no padrao, em
+vez de deixar um seletor num estado que ele nao sabe exibir.
+
+**Duas das dez mutacoes sobreviveram, e as duas eram comentarios meus que
+afirmavam demais** — nenhuma era teste faltando:
+
+- *Ligar a gravacao antes da restauracao.* Eu tinha escrito que a ordem evita o
+  programa escrever de volta o que acabou de ler. Evita — e isso hoje **nao muda
+  nada**, porque o que seria escrito e identico ao que foi lido. A ordem vale para
+  o dia em que a leitura ganhar qualquer normalizacao.
+- *A string vazia como valor valido.* O `origem == ""` e explicito de proposito,
+  mas o padrao tambem e vazio: recusar a string vazia cairia no mesmo lugar. Ele
+  vale pelo dia em que o padrao mudar, e porque sem ele um leitor conclui, errado,
+  que "Detectar" nao pode ser lembrado.
+
+Nos dois casos a guarda ficou — sao baratas e protegem um futuro — e o comentario
+passou a dizer o que ela e: precaucao, e nao mecanismo. E a terceira vez nesta
+ROADMAP que uma mutacao sobrevivente acusa um comentario em vez de um teste, e
+vale como criterio: **quando a mutacao passa, a primeira suspeita e o que o codigo
+diz de si mesmo.**
+
+**Garantia M1 (nova):** *a janela principal reabre no que foi escolhido.*

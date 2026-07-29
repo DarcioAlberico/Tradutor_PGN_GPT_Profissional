@@ -161,3 +161,75 @@ def clear_editor_draft(settings, db_path, target_language, comment_id):
     if not isinstance(drafts, dict):
         return False
     return drafts.pop(editor_draft_key(db_path, target_language, comment_id), None) is not None
+
+
+MAIN_WINDOW_KEY = "main_window"
+
+MAIN_WINDOW_DEFAULTS = {
+    "source_language": "",
+    "target_language": "pt",
+    "process_subdirs": True,
+    "source_path": "",
+}
+
+
+def read_main_window_settings(settings, known_languages):
+    """As escolhas da janela principal, validadas contra os idiomas que existem.
+
+    O arquivo e JSON editavel a mao e sobrevive a versoes do programa, entao um
+    idioma que o programa nao oferece mais nao pode deixar o seletor num estado
+    invalido — ele cai no padrao, como todo campo desconhecido do glossario.
+
+    Pura de proposito: quem decide o que e valido nao precisa de Tk nem de
+    disco, e a validacao e a parte que da para errar.
+    """
+    guardado = settings.get(MAIN_WINDOW_KEY)
+    if not isinstance(guardado, dict):
+        return dict(MAIN_WINDOW_DEFAULTS)
+
+    valores = dict(MAIN_WINDOW_DEFAULTS)
+
+    origem = guardado.get("source_language")
+    # A string vazia e "Detectar", um valor legitimo e nao um campo ausente. O
+    # `origem == ""` e explicito de proposito, e **hoje ele nao muda o
+    # resultado**: o padrao tambem e vazio, entao recusar a string vazia cairia
+    # no mesmo lugar. Vale pelo dia em que o padrao mudar — e porque um leitor
+    # que veja so `origem in known_languages` conclui, errado, que "Detectar"
+    # nao pode ser lembrado.
+    if isinstance(origem, str) and (origem == "" or origem in known_languages):
+        valores["source_language"] = origem
+
+    destino = guardado.get("target_language")
+    if isinstance(destino, str) and destino in known_languages:
+        valores["target_language"] = destino
+
+    subdirs = guardado.get("process_subdirs")
+    if isinstance(subdirs, bool):
+        valores["process_subdirs"] = subdirs
+
+    caminho = guardado.get("source_path")
+    if isinstance(caminho, str):
+        # Nao se checa existencia aqui: o caminho pode estar num pendrive que
+        # ainda nao foi plugado, e apaga-lo por isso seria pior do que
+        # oferece-lo. Quem valida e o "Iniciar Traducao", que ja o fazia.
+        valores["source_path"] = caminho
+
+    return valores
+
+
+def write_main_window_settings(values, path=None):
+    """Grava as escolhas relendo o disco antes (garantia R4).
+
+    As janelas de edicao guardam rascunhos no MESMO arquivo. Gravar o snapshot
+    inteiro daqui apagaria o que elas escreveram desde que este processo abriu —
+    que e exatamente o defeito que R4 existe para impedir.
+    """
+    def mutator(settings):
+        guardado = settings.get(MAIN_WINDOW_KEY)
+        if not isinstance(guardado, dict):
+            guardado = {}
+            settings[MAIN_WINDOW_KEY] = guardado
+        guardado.update(values)
+        return guardado
+
+    return update_settings(mutator, path)

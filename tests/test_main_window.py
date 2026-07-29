@@ -26,7 +26,7 @@ import customtkinter as ctk
 
 from gui_harness import GuiTestCase
 from tradutor_pgn import app as app_module
-from tradutor_pgn import app_actions, app_config, confirm_dialog, edit_window
+from tradutor_pgn import app_actions, app_config, confirm_dialog, edit_window, settings
 from tradutor_pgn import glossary_editor
 from tradutor_pgn import main_window
 from tradutor_pgn.backup_retention import is_backup_of_family, prune_log_files
@@ -1045,6 +1045,97 @@ class TypedConfirmationDialogTests(MainWindowTestCase):
             botao.invoke()
 
         self.assertFalse(self.abrir(roteiro))
+
+class RememberedChoicesTests(MainWindowTestCase):
+    """A janela reabre no que a sessao anterior escolheu.
+
+    O idioma de ORIGEM e a razao de isto existir: ele decide o `sl=` da API e
+    liga a correcao das letras dos lances, e o padrao dele — "Detectar" — e
+    justamente o valor que deixa as duas desligadas. Uma execucao feita no
+    escuro nao denuncia nada: o resultado parece pronto.
+    """
+
+    def reabrir(self):
+        """Fecha a janela atual e abre outra sobre o mesmo sandbox."""
+        self._fecha_log_da_execucao()
+        self.app.root.update()
+        for widget in list(self.root.winfo_children()):
+            widget.destroy()
+        self.app = app_module.PGNTranslatorApp(self.root)
+        self.root.withdraw()
+        self.pump()
+        return self.app
+
+    def test_the_source_language_survives_a_restart(self):
+        self.app.source_language.set("en")
+        self.pump()
+
+        self.assertEqual(self.reabrir().source_language.get(), "en")
+
+    def test_every_choice_survives_together(self):
+        self.app.source_language.set("es")
+        self.app.target_language.set("fr")
+        self.app.process_subdirs.set(False)
+        self.app.source_path.set(str(self.base / "partidas"))
+        self.pump()
+
+        novo = self.reabrir()
+
+        self.assertEqual(novo.source_language.get(), "es")
+        self.assertEqual(novo.target_language.get(), "fr")
+        self.assertFalse(novo.process_subdirs.get())
+        self.assertEqual(novo.source_path.get(), str(self.base / "partidas"))
+
+    def test_detect_is_remembered_as_a_choice(self):
+        """Voltar para "Detectar" e uma decisao, e nao a ausencia de uma.
+
+        Guardada so a escolha "nao vazia", quem tivesse marcado ingles uma vez
+        nunca mais conseguiria voltar ao padrao pelo seletor.
+        """
+        self.app.source_language.set("en")
+        self.pump()
+        self.reabrir()
+
+        self.app.source_language.set("")
+        self.pump()
+
+        self.assertEqual(self.reabrir().source_language.get(), "")
+
+    def test_a_file_edited_from_outside_wins_on_reopening(self):
+        """A janela le o disco na abertura, e nao um estado seu de antes.
+
+        O arquivo de configuracoes e JSON e o usuario pode edita-lo — ou outra
+        instancia do programa pode te-lo mudado. O que abre depois obedece ao
+        que esta la.
+        """
+        self.app.source_language.set("en")
+        self.pump()
+
+        settings.save_settings(
+            dict(
+                settings.load_settings(),
+                **{settings.MAIN_WINDOW_KEY: {"source_language": "es"}},
+            )
+        )
+        novo = self.reabrir()
+
+        self.assertEqual(novo.source_language.get(), "es")
+
+    def test_the_editor_drafts_are_not_lost(self):
+        """Garantia R4: os rascunhos vivem no mesmo arquivo."""
+        settings.update_settings(
+            lambda disco: disco.__setitem__(
+                "editor_drafts", {"chave": {"text": "rascunho vivo"}}
+            )
+        )
+
+        self.app.source_language.set("de")
+        self.pump()
+
+        self.assertEqual(
+            settings.load_settings()["editor_drafts"],
+            {"chave": {"text": "rascunho vivo"}},
+        )
 
 if __name__ == "__main__":
     unittest.main()

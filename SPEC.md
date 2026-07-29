@@ -48,7 +48,25 @@ gravavel.
 
 O `pgn_tradutor_pro_settings.json` guarda tambem a lista de arquivos que ficaram
 com comentarios sem traduzir na ultima execucao, usada pelo "Reprocessar Falhas"
-(garantia T4).
+(garantia T4), e as escolhas da janela principal (garantia M1).
+
+**Garantia M1 — a janela principal reabre no que foi escolhido.** Idioma de
+origem, idioma de destino, caminho e "processar subdiretorios" sao gravados
+quando mudam e restaurados na abertura.
+
+O idioma de ORIGEM e a razao de isto existir. Ele e a escolha que mais muda o
+resultado — decide o `sl=` da API e liga a correcao das letras dos lances (P3) —,
+e o padrao dele, "Detectar", e justamente o valor que deixa as duas desligadas.
+Resetando a cada abertura, esquecer um clique custa uma execucao inteira
+traduzida no escuro, e nada denuncia isso depois: o PGN gerado parece pronto.
+
+A gravacao passa por `update_settings`, que rele o disco imediatamente antes de
+escrever: os rascunhos das janelas de edicao vivem no mesmo arquivo (garantia
+R4). Um valor que o programa nao reconhece mais — um idioma que saiu da lista,
+um tipo errado, a secao inteira corrompida — cai no padrao em vez de deixar um
+seletor num estado que ele nao sabe exibir. O caminho salvo **nao** e conferido
+contra o disco: ele pode estar num pendrive que ainda nao foi plugado, e quem
+valida a existencia e o "Iniciar Traducao", que ja o fazia.
 
 ---
 
@@ -838,6 +856,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | N1 | So as cinco tags mudam; lances, variantes e comentarios saem identicos | Risco: a lista de tags vivia em dois lugares |
 | C1 | Trabalho pesado roda fora da thread do Tk, e a resposta volta nela | Bug: "Aplicar automaticas" segurava a janela por 38 s |
 | C3 | Nenhuma transacao de escrita atravessa uma chamada de rede, e um lock vira mensagem | Bug: worker travava o "Salvar" do editor por um lote inteiro |
+| M1 | A janela principal reabre no que foi escolhido | Risco: "Detectar" volta sozinho e desliga a correcao de lances sem avisar |
 
 ---
 
