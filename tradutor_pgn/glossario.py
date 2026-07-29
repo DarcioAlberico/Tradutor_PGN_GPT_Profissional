@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import sys
 
+from .app_config import LANGUAGE_NAMES
 from .backup_retention import prune_glossary_backups
 
 
@@ -24,14 +25,37 @@ GLOSSARY_RULE_TYPES = (
     GLOSSARY_RULE_CLEANUP,
     GLOSSARY_RULE_AUTOMATIC,
 )
-GLOSSARY_CSV_HEADERS = ["original", "replacement", "type", "priority"]
+GLOSSARY_CSV_HEADERS = ["original", "replacement", "type", "priority", "lang"]
 GLOSSARY_DB_FILENAME = "glossario.db"
+GLOSSARY_SEED_FILENAME = "Substituicoes-semente.txt"
 
 # Prioridade explicita (ROADMAP 1.5, parte 2). Zero e "sem opiniao", e e o valor
 # de toda regra que nao foi tocada — por isso o formato do arquivo so escreve o
 # campo quando ele nao e zero: um glossario de 7 mil regras nao muda de tamanho
 # por causa de uma decisao tomada em quatro delas.
 GLOSSARY_PRIORITY_DEFAULT = 0
+
+# ============================================================================
+# Escopo de idioma (garantia S11, ROADMAP 15)
+#
+# O escopo nomeia **o idioma de DESTINO** para o qual a regra vale — `'pt'` —, ou
+# o par inteiro quando o erro e daquela traducao especifica — `'en>pt'`. Vazio
+# vale para todo par, que e o comportamento que o programa sempre teve.
+#
+# **Destino, e nao "o idioma do texto que a regra le".** A segunda leitura e mais
+# bonita (uma regra de limpeza le o comentario original, que esta no idioma de
+# ORIGEM) e e uma armadilha: um arquivo que declara `escopo = 'pt'` para as
+# milhares de regras que corrigem portugues desligaria, em silencio, todas as
+# regras de limpeza numa execucao en -> pt. Uniforme e sem excecao por tipo e o
+# que se pode explicar em uma frase.
+GLOSSARY_SCOPE_ALL = ""
+# Como se ESCREVE "vale para todo par" numa regra, quando o arquivo declara um
+# padrao. Sem isto nao haveria como dizer "esta e a excecao global" — a ausencia
+# do campo passou a significar "herda o padrao".
+GLOSSARY_SCOPE_ANY = "*"
+GLOSSARY_SCOPE_SEPARATOR = ">"
+# Nomes aceitos para o padrao do arquivo.
+GLOSSARY_SCOPE_VARIABLES = {"escopo", "escopo_padrao", "scope", "default_scope"}
 
 # Sobe quando o `glossario.db` ganha coluna, e tambem quando muda o significado
 # das marcas que dizem de onde ele veio. Um banco gravado por uma versao anterior
@@ -41,7 +65,8 @@ GLOSSARY_PRIORITY_DEFAULT = 0
 #
 # 3: `source_path` passou a ser relativo ao banco e `source_mtime` deu lugar a
 # `source_hash`, para que o cache sobreviva a um clone (ROADMAP 3.7).
-GLOSSARY_DB_SCHEMA_VERSION = 3
+# 4: coluna `scope`, e o padrao do arquivo guardado como metadado (ROADMAP 15).
+GLOSSARY_DB_SCHEMA_VERSION = 4
 
 
 # ============================================================================
@@ -135,6 +160,29 @@ def _read_substitution_assignment(code, path):
                 return value
 
     raise ValueError("Variável 'substituições' ou 'substituicoes' não encontrada.")
+
+
+def _read_default_scope(code, path):
+    """O `escopo = 'pt'` do arquivo, ou `''` quando ele nao declara nenhum.
+
+    Declarar o escopo uma vez para o arquivo inteiro e o que evita escrever
+    `, 'pt'` em cinco mil e setecentas regras. O argumento e o mesmo que fez o
+    formato omitir tipo e prioridade quando eles sao o padrao: **o arquivo e
+    versionado**, e uma decisao tomada uma vez nao pode virar um diff de todas as
+    linhas. Aqui ele pesa mais, porque o acervo inteiro tem o mesmo escopo e as
+    excecoes sao seis regras de notacao.
+
+    Um arquivo sem a declaracao continua valendo exatamente como antes: sem
+    padrao, escopo vazio, toda regra vale para todo par.
+    """
+    tree = ast.parse(code, filename=path)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id in GLOSSARY_SCOPE_VARIABLES:
+                return normalize_glossary_scope(ast.literal_eval(node.value))
+    return GLOSSARY_SCOPE_ALL
 
 
 # Como o tipo pode estar escrito no arquivo, que e editado a mao. O masculino
@@ -251,6 +299,84 @@ def _entry_priority(item):
     return GLOSSARY_PRIORITY_DEFAULT
 
 
+def normalize_glossary_scope(value):
+    """O escopo como texto canonico: `''`, `'pt'` ou `'en>pt'`.
+
+    `'*'` vira `''` — as duas grafias dizem "todo par", e uma delas existe so
+    porque a ausencia do campo passou a significar "herda o padrao do arquivo".
+
+    Um codigo que o programa nao conhece **e preservado como esta**, e nao
+    degradado para "todo par". Degradar aqui seria o oposto do que a intencao
+    diz: quem escreveu `'ptt'` quis restringir, e transformar isso em "vale para
+    todos" espalharia a regra em vez de limita-la. A regra simplesmente nao casa
+    par nenhum, e a carga avisa (mesma escolha da garantia S13).
+    """
+    texto = "" if value is None else str(value).strip()
+    if not texto or texto == GLOSSARY_SCOPE_ANY:
+        return GLOSSARY_SCOPE_ALL
+    if GLOSSARY_SCOPE_SEPARATOR in texto:
+        origem, destino = texto.split(GLOSSARY_SCOPE_SEPARATOR, 1)
+        origem = origem.strip()
+        destino = destino.strip()
+        if origem == GLOSSARY_SCOPE_ANY:
+            origem = ""
+        if destino == GLOSSARY_SCOPE_ANY:
+            destino = ""
+        if not origem and not destino:
+            return GLOSSARY_SCOPE_ALL
+        return f"{origem}{GLOSSARY_SCOPE_SEPARATOR}{destino}"
+    return texto
+
+
+def scope_languages(scope):
+    """`(origem, destino)` exigidos por um escopo; `''` onde ele nao exige."""
+    scope = normalize_glossary_scope(scope)
+    if not scope:
+        return "", ""
+    if GLOSSARY_SCOPE_SEPARATOR in scope:
+        origem, destino = scope.split(GLOSSARY_SCOPE_SEPARATOR, 1)
+        return origem, destino
+    return "", scope
+
+
+def scope_matches(scope, source_language=None, target_language=None):
+    """A regra vale para este par de idiomas (garantia S11)?
+
+    `target_language=None` significa "ninguem declarou par", e ai nada e
+    filtrado: e o comportamento de antes desta versao, e o que mantem de pe
+    todo chamador que nao passa idioma.
+
+    Um escopo que exige idioma de ORIGEM nao casa uma execucao em "Detectar" —
+    sem a declaracao nao ha como afirmar que o original esta em ingles, e
+    aplicar a regra seria um palpite. E a mesma escolha da correcao de lances
+    (garantia P3), pela mesma razao.
+    """
+    origem_exigida, destino_exigido = scope_languages(scope)
+    if not origem_exigida and not destino_exigido:
+        return True
+    if target_language is None:
+        return True
+    if destino_exigido and destino_exigido != (target_language or ""):
+        return False
+    if origem_exigida and origem_exigida != (source_language or ""):
+        return False
+    return True
+
+
+def _entry_scope(item):
+    """O escopo declarado na entrada, ou `None` quando ela nao declara.
+
+    `None` e diferente de `''`: o primeiro herda o padrao do arquivo, o segundo
+    e a excecao global escrita com `'*'`.
+    """
+    if isinstance(item, dict):
+        bruto = item.get("scope", item.get("lang", None))
+        return None if bruto is None else normalize_glossary_scope(bruto)
+    if isinstance(item, (list, tuple)) and len(item) >= 5:
+        return normalize_glossary_scope(item[4])
+    return None
+
+
 def _normalize_entries(entries):
     normalized = []
     for item in entries:
@@ -261,14 +387,29 @@ def _normalize_entries(entries):
     return normalized
 
 
-def _normalize_detailed_entries(entries):
+def _normalize_detailed_entries(entries, default_scope=GLOSSARY_SCOPE_ALL):
+    """Entradas na forma canonica `(orig, new, tipo, prioridade, escopo)`.
+
+    `default_scope` e o padrao declarado pelo arquivo, herdado por toda regra
+    que nao traz o quinto campo. Sem ele — o caso de todo chamador que so tem
+    entradas na mao — o escopo herdado e "todo par", que e o comportamento de
+    antes desta versao.
+    """
+    default_scope = normalize_glossary_scope(default_scope)
     normalized = []
     for item in entries:
         pair = _entry_pair(item)
         if pair is not None:
             orig, new = pair
+            escopo = _entry_scope(item)
             normalized.append(
-                (str(orig), str(new), _entry_rule_type(item), _entry_priority(item))
+                (
+                    str(orig),
+                    str(new),
+                    _entry_rule_type(item),
+                    _entry_priority(item),
+                    default_scope if escopo is None else escopo,
+                )
             )
     return normalized
 
@@ -285,17 +426,46 @@ def glossary_entry_priority(entry):
     return _entry_priority(entry)
 
 
-def _serialize_entries(entries):
+def glossary_entry_scope(entry, default_scope=GLOSSARY_SCOPE_ALL):
+    escopo = _entry_scope(entry)
+    return normalize_glossary_scope(default_scope) if escopo is None else escopo
+
+
+def _serialize_entries(entries, default_scope=GLOSSARY_SCOPE_ALL):
     """Escreve o `Substituicoes.txt`, com o campo mais curto que basta.
 
     Cada campo so aparece quando tem algo a dizer: o tipo quando nao e sugestao,
-    a prioridade quando nao e zero. Nao e economia de bytes — e que o arquivo
-    tem 7 mil linhas e e versionado: escrever `, 0` em todas elas transformaria
-    a decisao tomada em quatro regras num diff de 7 mil linhas.
+    a prioridade quando nao e zero, o escopo quando difere do padrao do arquivo.
+    Nao e economia de bytes — e que o arquivo tem milhares de linhas e e
+    versionado: escrever `, 0` em todas elas transformaria a decisao tomada em
+    quatro regras num diff de milhares de linhas.
+
+    O escopo tem um degrau a mais por causa disso. Ele e declarado uma vez, no
+    alto do arquivo, e cada regra so o escreve para **discordar** — `'*'` quando
+    a excecao e valer para todo par, o codigo do idioma quando e outro. Sem esse
+    degrau, scopar o acervo existente para `'pt'` reescreveria todas as linhas.
+
+    Os campos anteriores voltam a aparecer quando um posterior e escrito: uma
+    tupla nao tem como pular posicao.
     """
-    lines = ["substituicoes = [\n"]
-    for orig, new, rule_type, priority in _normalize_detailed_entries(entries):
-        if priority != GLOSSARY_PRIORITY_DEFAULT:
+    default_scope = normalize_glossary_scope(default_scope)
+    lines = []
+    if default_scope:
+        lines.append(
+            "# Escopo padrao deste arquivo: toda regra vale para este destino,\n"
+            "# menos as que declararem outro no quinto campo ('*' = todo par).\n"
+            f"escopo = {default_scope!r}\n\n"
+        )
+    lines.append("substituicoes = [\n")
+    for orig, new, rule_type, priority, scope in _normalize_detailed_entries(
+        entries, default_scope=default_scope
+    ):
+        if scope != default_scope:
+            escrito = scope or GLOSSARY_SCOPE_ANY
+            lines.append(
+                f"    ({orig!r}, {new!r}, {rule_type!r}, {priority!r}, {escrito!r}),\n"
+            )
+        elif priority != GLOSSARY_PRIORITY_DEFAULT:
             lines.append(f"    ({orig!r}, {new!r}, {rule_type!r}, {priority!r}),\n")
         elif rule_type == GLOSSARY_RULE_SUGGESTION:
             lines.append(f"    ({orig!r}, {new!r}),\n")
@@ -398,7 +568,9 @@ def _load_glossary_entry_details_from_file(path, deduplicate=True):
         return []
 
     with open(path, "r", encoding="utf-8") as f:
-        raw_items = _read_substitution_assignment(f.read(), path)
+        conteudo = f.read()
+    raw_items = _read_substitution_assignment(conteudo, path)
+    default_scope = _read_default_scope(conteudo, path)
 
     # Aqui, e nao no `glossario.db`: o banco guarda tipos ja normalizados, entao
     # o que estava mal escrito no arquivo nao existe mais quando ele e lido.
@@ -414,11 +586,57 @@ def _load_glossary_entry_details_from_file(path, deduplicate=True):
             f"Os tipos validos sao {', '.join(GLOSSARY_RULE_TYPES)}."
         )
 
-    entries = _normalize_detailed_entries(raw_items)
+    entries = _normalize_detailed_entries(raw_items, default_scope=default_scope)
+
+    # Um escopo com idioma que o programa nao conhece nao casa par nenhum: a
+    # regra fica muda. Avisar e a mesma escolha de S13 — degradar para "vale para
+    # todos" espalharia a regra em vez de limita-la, que e o oposto do pedido.
+    desconhecidos_escopo = unknown_scope_languages(entries)
+    if desconhecidos_escopo:
+        report_glossary_error(
+            f"Escopo de idioma desconhecido no glossario, e a regra nao sera "
+            f"aplicada a par nenhum: "
+            f"{', '.join(repr(valor) for valor in desconhecidos_escopo[:5])}."
+        )
+
     if deduplicate:
         entries = _deduplicate_entries(entries)
 
     return entries
+
+
+def glossary_default_scope(path=None):
+    """O escopo padrao declarado pelo arquivo de glossario.
+
+    Lido do texto, e nao do `glossario.db`: o indice guarda o escopo ja resolvido
+    em cada regra, entao o padrao ali seria apenas informativo. Quem precisa dele
+    e a gravacao, que tem de reescrever o arquivo com a mesma declaracao que
+    encontrou.
+    """
+    if path is None:
+        path = _default_substitutions_path()
+    if not os.path.exists(path):
+        return GLOSSARY_SCOPE_ALL
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return _read_default_scope(f.read(), path)
+    except (OSError, SyntaxError, ValueError):
+        # A carga das regras ja reporta um arquivo malformado; aqui basta nao
+        # inventar um escopo.
+        return GLOSSARY_SCOPE_ALL
+
+
+def unknown_scope_languages(entries):
+    """Codigos de idioma usados em escopos que o programa nao conhece."""
+    conhecidos = set(LANGUAGE_NAMES)
+    desconhecidos = []
+    vistos = set()
+    for entry in entries:
+        for codigo in scope_languages(glossary_entry_scope(entry)):
+            if codigo and codigo not in conhecidos and codigo not in vistos:
+                vistos.add(codigo)
+                desconhecidos.append(codigo)
+    return desconhecidos
 
 
 def initialize_glossary_database(db_path=None):
@@ -436,6 +654,7 @@ def initialize_glossary_database(db_path=None):
             replacement_text TEXT NOT NULL,
             rule_type TEXT NOT NULL DEFAULT 'suggestion',
             priority INTEGER NOT NULL DEFAULT 0,
+            scope TEXT NOT NULL DEFAULT '',
             position INTEGER NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -458,6 +677,16 @@ def initialize_glossary_database(db_path=None):
             """
             ALTER TABLE glossary_entries
             ADD COLUMN priority INTEGER NOT NULL DEFAULT 0
+            """
+        )
+    if "scope" not in cols:
+        # A coluna entra vazia em todas as regras, que e "vale para todo par" —
+        # o comportamento anterior. O `schema_version` e o que forca a
+        # reconstrucao a partir do texto, onde os escopos de verdade estao.
+        conn.execute(
+            """
+            ALTER TABLE glossary_entries
+            ADD COLUMN scope TEXT NOT NULL DEFAULT ''
             """
         )
     conn.execute(
@@ -520,15 +749,16 @@ def sync_glossary_database(entries, db_path=None, source_path=None):
                 replacement_text,
                 rule_type,
                 priority,
+                scope,
                 position,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
-                (orig, new, rule_type, priority, index, now, now)
-                for index, (orig, new, rule_type, priority) in enumerate(entries)
+                (orig, new, rule_type, priority, scope, index, now, now)
+                for index, (orig, new, rule_type, priority, scope) in enumerate(entries)
             ],
         )
         _set_glossary_metadata(conn, "entry_count", len(entries))
@@ -586,7 +816,7 @@ def load_glossary_entry_details_from_db(db_path=None, deduplicate=True):
     try:
         rows = conn.execute(
             """
-            SELECT original_text, replacement_text, rule_type, priority
+            SELECT original_text, replacement_text, rule_type, priority, scope
             FROM glossary_entries
             ORDER BY position, id
             """
@@ -594,8 +824,16 @@ def load_glossary_entry_details_from_db(db_path=None, deduplicate=True):
     finally:
         conn.close()
 
+    # O escopo vem ja RESOLVIDO do banco: o padrao do arquivo foi aplicado na
+    # sincronizacao, entao aqui nao ha nada a herdar.
     entries = [
-        (row[0], row[1], _normalize_rule_type(row[2]), normalize_glossary_priority(row[3]))
+        (
+            row[0],
+            row[1],
+            _normalize_rule_type(row[2]),
+            normalize_glossary_priority(row[3]),
+            normalize_glossary_scope(row[4]),
+        )
         for row in rows
     ]
     if deduplicate:
@@ -746,9 +984,16 @@ def save_glossary_entries(
             timestamp=timestamp,
         )
 
+    # O padrao de escopo do arquivo e PRESERVADO: ele foi lido do texto antes de
+    # sobrescrever, e volta na mesma declaracao. Sem isto, a primeira gravacao
+    # pela janela apagaria o `escopo = 'pt'` e transformaria as milhares de
+    # regras portuguesas em regras globais — de novo o problema que S11 resolve,
+    # agora causado por salvar uma entrada.
+    default_scope = glossary_default_scope(path)
+
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(_serialize_entries(entries))
+        f.write(_serialize_entries(entries, default_scope=default_scope))
     os.replace(tmp_path, path)
 
     if sync_db and (db_path is not None or _is_default_substitutions_path(path)):
@@ -781,6 +1026,7 @@ def validate_glossary_entry(
     current_index=None,
     rule_type=None,
     existing_lookup=None,
+    scope=None,
 ):
     """Retorna avisos de validação para uma entrada do glossário.
 
@@ -801,6 +1047,13 @@ def validate_glossary_entry(
         warnings.append("Texto original igual à substituição.")
     if "\n" in orig or "\r" in orig or "\n" in new or "\r" in new:
         warnings.append("Entradas não podem conter quebras de linha.")
+
+    # Um escopo com idioma desconhecido nao casa par nenhum: a regra fica muda.
+    # E o pior tipo de erro para uma regra de glossario, porque ela continua na
+    # lista com cara de valida.
+    for codigo in scope_languages(scope):
+        if codigo and codigo not in LANGUAGE_NAMES:
+            warnings.append(f"Idioma de escopo desconhecido: {codigo!r}.")
 
     if existing_lookup is None and existing_entries is not None:
         existing_lookup = build_glossary_lookup(existing_entries)
@@ -839,6 +1092,24 @@ GLOSSARY_RULE_CONTEXTS = (
         (GLOSSARY_RULE_SUGGESTION, GLOSSARY_RULE_AUTOMATIC),
     ),
 )
+
+
+def scopes_overlap(a, b):
+    """Existe algum par de idiomas em que as duas regras sejam aplicadas juntas?
+
+    Duas regras que nunca se encontram nao disputam nada — e o mesmo raciocinio
+    de `GLOSSARY_RULE_CONTEXTS`, agora para idioma em vez de tipo: uma regra de
+    destino `'pt'` e outra de destino `'it'` sao carregadas em execucoes
+    diferentes, entao acusa-las de conflito seria descrever uma briga que nao
+    acontece. Escopo vazio vale para todo par e por isso cruza com todos.
+    """
+    a_origem, a_destino = scope_languages(a)
+    b_origem, b_destino = scope_languages(b)
+    if a_origem and b_origem and a_origem != b_origem:
+        return False
+    if a_destino and b_destino and a_destino != b_destino:
+        return False
+    return True
 
 
 def _rule_subsumes(orig_winner, orig_other):
@@ -920,12 +1191,14 @@ def glossary_conflicts(entries):
     rule_types = []
     replacements = []
     patterns = []
+    scopes = []
     rules = []
     for index, entry in enumerate(entries):
         orig, new = glossary_entry_pair(entry)
         patterns.append(orig)
         rule_types.append(glossary_entry_type(entry))
         replacements.append(new)
+        scopes.append(glossary_entry_scope(entry))
         rules.append(_as_rule(entry))
         if orig:
             indices_by_key.setdefault(orig.casefold(), []).append(index)
@@ -960,6 +1233,8 @@ def glossary_conflicts(entries):
         perdas = {}
         for posicao, index in enumerate(ordenados):
             for anterior in ordenados[:posicao]:
+                if not scopes_overlap(scopes[anterior], scopes[index]):
+                    continue
                 if not _rule_subsumes(patterns[anterior], patterns[index]):
                     continue
                 produzido = case_adjusted_replacement(
@@ -1020,6 +1295,10 @@ def glossary_conflicts(entries):
                     for context in contextos
                     if context["disputed"]
                     for membro in context["members"]
+                    # So quem de fato cruza com esta regra: remover uma de outro
+                    # destino nao a faria vencer, e apagaria a decisao que valia
+                    # numa execucao que nem estava em disputa.
+                    if scopes_overlap(scopes[membro], scopes[index])
                 }
                 or {index}
             )
@@ -1130,8 +1409,8 @@ def promote_glossary_rule(entries, index, conflicts=None):
     nova = max(maior + 1, glossary_entry_priority(detalhadas[index]) + 1)
 
     resultado = list(detalhadas)
-    orig, new, rule_type, _antiga = resultado[index]
-    resultado[index] = (orig, new, rule_type, nova)
+    orig, new, rule_type, _antiga, escopo = resultado[index]
+    resultado[index] = (orig, new, rule_type, nova, escopo)
     return resultado
 
 
@@ -1166,7 +1445,8 @@ def normalize_glossary_text(value):
 
 
 def add_glossary_entry(
-    orig, new, path=None, backup_dir=None, timestamp=None, rule_type=None, priority=None
+    orig, new, path=None, backup_dir=None, timestamp=None, rule_type=None, priority=None,
+    scope=None,
 ):
     entries = load_glossary_entry_details(path, deduplicate=False)
     entry = (
@@ -1174,12 +1454,17 @@ def add_glossary_entry(
         normalize_glossary_text(new),
         _normalize_rule_type(rule_type),
         normalize_glossary_priority(priority),
+        # `None` herda o padrao do arquivo, que e o que uma entrada nova quer
+        # dizer quando ninguem opinou: um glossario declarado `escopo = 'pt'`
+        # nao pode ganhar regras globais por omissao.
+        glossary_default_scope(path) if scope is None else normalize_glossary_scope(scope),
     )
     # A prioridade fica de fora da checagem de duplicata: a mesma regra com
     # outra prioridade continua sendo a mesma regra, e inseri-la de novo daria
     # duas linhas identicas disputando entre si — exatamente o problema que a
-    # prioridade existe para resolver.
-    if entry[:3] in [item[:3] for item in entries]:
+    # prioridade existe para resolver. O escopo, ao contrario, ENTRA: a mesma
+    # regra para outro idioma de destino e outra regra.
+    if entry[:3] + entry[4:] in [item[:3] + item[4:] for item in entries]:
         return {"status": "unchanged", "backup_path": None, "entries": len(entries)}
 
     entries.append(entry)
@@ -1194,7 +1479,7 @@ def add_glossary_entry(
 
 def update_glossary_entry(
     index, orig, new, path=None, backup_dir=None, timestamp=None, rule_type=None,
-    priority=None,
+    priority=None, scope=None,
 ):
     entries = load_glossary_entry_details(path, deduplicate=False)
     index = int(index)
@@ -1211,6 +1496,12 @@ def update_glossary_entry(
         glossary_entry_priority(entries[index])
         if priority is None
         else normalize_glossary_priority(priority),
+        # Idem para o escopo, e aqui o cuidado e maior: a entrada carrega o
+        # escopo JA RESOLVIDO, entao deixar de passa-lo perderia uma excecao
+        # explicita (`'*'` num arquivo que declara `escopo = 'pt'`).
+        glossary_entry_scope(entries[index])
+        if scope is None
+        else normalize_glossary_scope(scope),
     )
     result = save_glossary_entries(
         entries,
@@ -1251,7 +1542,7 @@ def find_glossary_entry_index(entries, target, index_hint=None, match_type=True)
         return None
 
     def key(entry):
-        orig, new, rule_type, _priority = entry
+        orig, new, rule_type = entry[0], entry[1], entry[2]
         pair = (normalize_glossary_text(orig), normalize_glossary_text(new))
         return pair + (rule_type,) if match_type else pair
 
@@ -1283,6 +1574,7 @@ def update_glossary_entry_by_entry(
     rule_type=None,
     index_hint=None,
     priority=None,
+    scope=None,
 ):
     """Atualiza a entrada que ainda for igual a `previous`.
 
@@ -1309,6 +1601,9 @@ def update_glossary_entry_by_entry(
         glossary_entry_priority(entries[index])
         if priority is None
         else normalize_glossary_priority(priority),
+        glossary_entry_scope(entries[index])
+        if scope is None
+        else normalize_glossary_scope(scope),
     )
     result = save_glossary_entries(
         entries,
@@ -1436,6 +1731,15 @@ def read_glossary_csv(csv_path):
             normalized_fields.get("priority")
             or normalized_fields.get("prioridade")
         )
+        # Idem para o escopo: um CSV de antes desta versao importa com escopo
+        # vazio, isto e, valendo para todo par — como as regras dele sempre
+        # valeram.
+        scope_field = (
+            normalized_fields.get("lang")
+            or normalized_fields.get("scope")
+            or normalized_fields.get("idioma")
+            or normalized_fields.get("escopo")
+        )
         if not original_field or not replacement_field:
             raise ValueError("CSV precisa conter colunas original e replacement.")
 
@@ -1448,6 +1752,9 @@ def read_glossary_csv(csv_path):
                     _normalize_rule_type(row.get(type_field) if type_field else None),
                     normalize_glossary_priority(
                         row.get(priority_field) if priority_field else None
+                    ),
+                    normalize_glossary_scope(
+                        row.get(scope_field) if scope_field else None
                     ),
                 )
             )
@@ -1786,44 +2093,217 @@ def expand_square_placeholder(rule):
     ]
 
 
-def _rules_from_entries(entries, allowed_types):
-    """Entradas -> regras aplicaveis, filtradas por tipo e com `@casa@` expandido."""
+# ============================================================================
+# Dicionario-semente (garantia S15, ROADMAP 15.2)
+#
+# O programa passa a VIR COM terminologia enxadristica, num arquivo proprio
+# versionado junto com o codigo. Ele nao se mistura com o `Substituicoes.txt` do
+# usuario no disco, e por duas razoes: atualizar a semente nao pode tocar o
+# arquivo dele, e o que ele escreveu tem de continuar sendo dele.
+#
+# As regras da semente sao todas **ingles -> idioma de destino**, escopadas. E a
+# direcao segura: um padrao em ingles nao casa texto portugues, italiano ou
+# russo, entao nenhuma regra da semente pode corromper o que ja funciona. E o
+# modo de falha que elas cobrem foi medido — no banco real, 263 traducoes em que
+# o tradutor deixou "White"/"Black" em ingles.
+# ============================================================================
+
+
+def _default_seed_path():
+    """A semente vive ao lado do MODULO, e nao do executavel.
+
+    E a mesma distincao que o README explica para o `spelling.ssp`: o
+    `Substituicoes.txt` sai de `sys.argv[0]` porque e do usuario e ele precisa
+    poder editar; a semente sai de `__file__` porque vem com o programa. Sob
+    PyInstaller isso a poe dentro de `_internal`, junto do pacote, onde ela nao
+    corre risco de ser confundida com o glossario de quem usa.
+    """
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), GLOSSARY_SEED_FILENAME)
+
+
+@lru_cache(maxsize=4)
+def _load_seed_entries(path):
+    """Entradas da semente, com cache: ela nao muda entre execucoes do programa."""
+    if not path or not os.path.exists(path):
+        return ()
+    try:
+        return tuple(_load_glossary_entry_details_from_file(path, deduplicate=True))
+    except (OSError, SyntaxError, ValueError) as exc:
+        # A semente e conveniencia: um defeito nela nao pode impedir o programa
+        # de usar o glossario do usuario. Mas tambem nao pode ser silencioso —
+        # ela vem com o programa, entao o defeito e nosso.
+        report_glossary_error(f"Erro ao ler o dicionario-semente: {exc}")
+        return ()
+
+
+def load_seed_entries(path=None):
+    return list(_load_seed_entries(path or _default_seed_path()))
+
+
+def _seed_rules_for(
+    user_entries,
+    allowed_types,
+    source_language=None,
+    target_language=None,
+    seed_path=None,
+):
+    """Regras da semente que sobrevivem ao glossario do usuario (garantia S15).
+
+    Uma regra da semente e **descartada** quando o usuario tem uma regra com o
+    mesmo padrao no mesmo escopo: ele ja decidiu, e a semente e o palpite
+    generico. A comparacao e por `casefold`, e nao por texto exato, pela licao da
+    garantia S12 — uma semente escrita em minusculas engoliria a versao
+    capitalizada do usuario sem que nada dissesse.
+
+    As que sobram entram DEPOIS das dele, entao entre padroes de mesmo
+    comprimento e prioridade a ordem do arquivo continua dando a palavra final a
+    quem editou o glossario.
+    """
+    seed = _load_seed_entries(seed_path or _default_seed_path())
+    if not seed:
+        return []
+
+    do_usuario = {
+        (glossary_entry_pair(entry)[0].casefold(), glossary_entry_scope(entry))
+        for entry in _normalize_detailed_entries(user_entries)
+    }
+
     regras = []
-    for entry in _normalize_detailed_entries(entries):
-        if glossary_entry_type(entry) in allowed_types:
-            regras.extend(expand_square_placeholder(_as_rule(entry)))
+    for entry in _normalize_detailed_entries(seed):
+        if glossary_entry_type(entry) not in allowed_types:
+            continue
+        escopo = glossary_entry_scope(entry)
+        if not scope_matches(escopo, source_language, target_language):
+            continue
+        padrao = glossary_entry_pair(entry)[0]
+        if (padrao.casefold(), escopo) in do_usuario:
+            continue
+        # Tambem cede quando o usuario escreveu a regra sem escopo: uma decisao
+        # dele que vale para todo par vence a semente do par especifico.
+        if (padrao.casefold(), GLOSSARY_SCOPE_ALL) in do_usuario:
+            continue
+        regras.extend(expand_square_placeholder(_as_rule(entry)))
     return regras
 
 
-def filter_glossary_entries_by_type(entries, rule_type):
-    return _rules_from_entries(entries, {_normalize_rule_type(rule_type)})
+def _rules_from_entries(
+    entries,
+    allowed_types,
+    source_language=None,
+    target_language=None,
+):
+    """Entradas -> regras aplicaveis.
+
+    Filtra por tipo e por **par de idiomas** (garantia S11), e expande `@casa@`.
+    Sem par declarado (`target_language=None`) nada e filtrado por escopo, que e
+    o comportamento de antes desta versao.
+    """
+    regras = []
+    for entry in _normalize_detailed_entries(entries):
+        if glossary_entry_type(entry) not in allowed_types:
+            continue
+        if not scope_matches(
+            glossary_entry_scope(entry), source_language, target_language
+        ):
+            continue
+        regras.extend(expand_square_placeholder(_as_rule(entry)))
+    return regras
 
 
-def load_cleanup_substitutions(path=None):
-    return filter_glossary_entries_by_type(
-        load_glossary_entry_details(path),
-        GLOSSARY_RULE_CLEANUP,
-    )
-
-
-def load_suggestion_substitutions(path=None):
-    return filter_glossary_entries_by_type(
-        load_glossary_entry_details(path),
-        GLOSSARY_RULE_SUGGESTION,
-    )
-
-
-def load_automatic_substitutions(path=None):
-    return filter_glossary_entries_by_type(
-        load_glossary_entry_details(path),
-        GLOSSARY_RULE_AUTOMATIC,
-    )
-
-
-def load_interactive_substitutions(path=None):
+def filter_glossary_entries_by_type(
+    entries,
+    rule_type,
+    source_language=None,
+    target_language=None,
+):
     return _rules_from_entries(
-        load_glossary_entry_details(path),
+        entries,
+        {_normalize_rule_type(rule_type)},
+        source_language=source_language,
+        target_language=target_language,
+    )
+
+
+def _load_rules(
+    path,
+    allowed_types,
+    source_language=None,
+    target_language=None,
+    seed_path=None,
+):
+    """Regras do glossario do usuario mais as da semente, nesta ordem.
+
+    A ordem e a garantia S15: as do usuario vem primeiro, entao entre padroes de
+    mesmo comprimento e prioridade a decisao dele e que vale. Para padrao
+    identico a semente e descartada antes de chegar aqui.
+    """
+    entries = load_glossary_entry_details(path)
+    regras = _rules_from_entries(
+        entries,
+        allowed_types,
+        source_language=source_language,
+        target_language=target_language,
+    )
+    regras.extend(
+        _seed_rules_for(
+            entries,
+            allowed_types,
+            source_language=source_language,
+            target_language=target_language,
+            seed_path=seed_path,
+        )
+    )
+    return regras
+
+
+def load_cleanup_substitutions(
+    path=None, source_language=None, target_language=None, seed_path=None
+):
+    return _load_rules(
+        path,
+        {GLOSSARY_RULE_CLEANUP},
+        source_language=source_language,
+        target_language=target_language,
+        seed_path=seed_path,
+    )
+
+
+def load_suggestion_substitutions(
+    path=None, source_language=None, target_language=None, seed_path=None
+):
+    return _load_rules(
+        path,
+        {GLOSSARY_RULE_SUGGESTION},
+        source_language=source_language,
+        target_language=target_language,
+        seed_path=seed_path,
+    )
+
+
+def load_automatic_substitutions(
+    path=None, source_language=None, target_language=None, seed_path=None
+):
+    return _load_rules(
+        path,
+        {GLOSSARY_RULE_AUTOMATIC},
+        source_language=source_language,
+        target_language=target_language,
+        seed_path=seed_path,
+    )
+
+
+def load_interactive_substitutions(
+    path=None,
+    source_language=None,
+    target_language=None,
+    seed_path=None,
+):
+    return _load_rules(
+        path,
         {GLOSSARY_RULE_SUGGESTION, GLOSSARY_RULE_AUTOMATIC},
+        source_language=source_language,
+        target_language=target_language,
+        seed_path=seed_path,
     )
 
 

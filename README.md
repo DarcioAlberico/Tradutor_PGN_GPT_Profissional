@@ -138,10 +138,13 @@ No arquivo cada regra e uma tupla de dois a quatro campos, e cada campo so
 aparece quando tem algo a dizer:
 
 ```python
+escopo = 'pt'                              # padrao do arquivo (opcional)
+
 substituicoes = [
-    ('rook', 'torre'),                     # sugestao, prioridade 0
+    ('rook', 'torre'),                     # sugestao, prioridade 0, escopo 'pt'
     ('== EndSquare ==', '', 'cleanup'),    # outro tipo
     ('torre', 'castle', 'suggestion', 1),  # com prioridade
+    ('×', 'x', 'automatic', 0, '*'),       # excecao: vale para todo idioma
     ('@casa@-torre', 'torre de @casa@'),   # vale pelas 64 casas
 ]
 ```
@@ -156,6 +159,42 @@ no arquivo e 64 regras na aplicacao (`a1-torre`, ... `h8-torre`). As regras que
 saem dela sao literais, exatamente as que voce escreveria a mao — nao ha
 expressao regular envolvida. Quem manda e o padrao: sem `@casa@` nele, a regra
 vale como esta. O editor de glossario mostra e edita a linha com o placeholder.
+
+## Escopo de idioma
+
+Uma regra que corrige portugues nao deve alcancar uma traducao para o italiano —
+`('movimento', 'lance')` transformava `il movimento` em `il lance`. O **escopo**
+resolve isso: ele nomeia o idioma de **destino** para o qual a regra vale
+(`'pt'`), ou o par inteiro quando o erro e daquela traducao especifica
+(`'en>pt'`).
+
+Como o acervo inteiro costuma ter o mesmo escopo, ele e declarado **uma vez** no
+alto do arquivo (`escopo = 'pt'`), e o quinto campo de cada regra existe apenas
+para discordar: `'*'` quando a excecao e valer para todo idioma, um codigo
+quando e outro. Um `Substituicoes.txt` sem a declaracao continua valendo como
+sempre — sem escopo, toda regra vale para todo par.
+
+O escopo aparece no editor de glossario, no campo `Idioma:`, e no rotulo de cada
+regra que o declara. No CSV e a coluna `lang`, opcional na leitura.
+
+## Dicionario-semente
+
+O programa **vem com** terminologia enxadristica propria, em
+`tradutor_pgn/Substituicoes-semente.txt`: 232 regras cobrindo 41 termos do
+nucleo (pecas, xeque, mate, roque, cravada, garfo, coluna, fileira, fases,
+estrutura de peoes) para os sete idiomas de destino.
+
+Todas vao de **ingles para o destino**, porque essa e a direcao que nao pode
+causar dano: um padrao em ingles nao casa texto portugues ou italiano. Elas
+cobrem o caso mais comum de todos — o tradutor automatico simplesmente nao
+traduziu o termo. E todas sao `suggestion`, oferecidas no editor e aplicadas a
+pedido.
+
+**O seu glossario sempre vence.** Uma regra sua com o mesmo texto encontrado, no
+mesmo escopo (ou sem escopo nenhum), descarta a regra correspondente da semente.
+Os dois arquivos tambem nao se misturam no disco: o seu fica ao lado do
+executavel, a semente fica dentro do pacote do programa e e substituida quando
+ele e atualizado — nunca o contrario.
 
 Quando duas regras disputam o mesmo padrao, o editor diz qual delas o programa
 aplica e oferece duas saidas: **Priorizar esta**, que a poe na frente sem apagar
@@ -193,7 +232,8 @@ nada, e **Manter esta**, que remove as concorrentes do arquivo.
 - `tradutor_pgn/window_utils.py`: utilitarios de janela.
 - `tests/`: suite automatizada; `tests/gui_harness.py` traz o sandbox de caminhos e o silenciamento de dialogos que os testes de janela compartilham.
 - `.claude/skills/run-tradutor-pgn/`: ferramenta para abrir e dirigir o app sem interacao manual (inclusive o worker de traducao, sem abrir janela) e capturar telas.
-- `Substituicoes.txt`: as regras do glossario (original, substituicao e, quando ha, tipo e prioridade).
+- `Substituicoes.txt`: as regras do glossario do usuario (original, substituicao e, quando ha, tipo, prioridade e escopo de idioma).
+- `tradutor_pgn/Substituicoes-semente.txt`: a terminologia que vem com o programa, escopada por idioma de destino. Nunca sobrepoe o `Substituicoes.txt`.
 - `glossario.db`: indice SQLite do glossario, derivado do `Substituicoes.txt`. E versionado para que um clone ja abra com o indice pronto, e ele proprio guarda de qual arquivo veio (caminho relativo e hash do conteudo), de modo que reconstroi sozinho assim que as regras mudam.
 - `traducoes.db`: cache local de traducoes, uma linha por (comentario, idioma de origem, idioma de destino).
 - `backups/`, `logs/`: gerados em tempo de execucao, nao versionados.

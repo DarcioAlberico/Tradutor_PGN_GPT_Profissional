@@ -219,6 +219,10 @@ class TranslationEditor:
         self.build_suggestion_pane()
         self.build_status_bar()
         self.connect_events()
+        # Depois de `build_list_pane`, que cria os seletores de origem e destino:
+        # o recorte do glossario depende dos dois (garantia S11).
+        self.glossary = self.load_scoped_interactive_glossary()
+        self.automatic_glossary = self.load_scoped_automatic_glossary()
         self.load_first_page()
 
     def build_state(self):
@@ -266,8 +270,11 @@ class TranslationEditor:
             # deliberada altera o banco (garantia R1 da SPEC.md).
             "auto_only": False,
         }
+        # O glossario desta janela e o recorte do PAR dela (garantia S11), e nao
+        # o do app: a lista do app e o arquivo inteiro. Carregado depois de
+        # `self.lang` e dos seletores existirem — ver `scoped_languages`.
         self.glossary = self.app.glossary_substitutions
-        self.automatic_glossary = load_automatic_substitutions()
+        self.automatic_glossary = []
         self.current_suggestions = []
         self.suggestion_buttons = []
         self.search_text = tk.StringVar(master=self.win, value="")
@@ -1348,6 +1355,12 @@ class TranslationEditor:
             self.lang = novo_destino
             self.win.title(f"Editar traduções ({self.lang})")
 
+        # O par tambem decide QUAIS regras do glossario existem (garantia S11),
+        # entao trocar de filtro troca as sugestoes oferecidas. Sem isto, a
+        # janela continuaria propondo a terminologia do par anterior.
+        self.glossary = self.load_scoped_interactive_glossary()
+        self.automatic_glossary = self.load_scoped_automatic_glossary()
+
         self.state.page_index = 0
         self.clear_current()
         self.reload_rows()
@@ -2266,10 +2279,35 @@ class TranslationEditor:
         pop.columnconfigure(1, weight=1)
         pop.rowconfigure(1, weight=1)
 
+    def scoped_languages(self):
+        """O par que decide quais regras do glossario existem nesta janela.
+
+        O destino e o da janela; a origem sai do filtro, e `None` ali significa
+        "Todos" — que para o escopo (garantia S11) e o mesmo que nao declarar:
+        uma regra que exige `en>pt` nao pode ser aplicada a uma lista que mistura
+        origens, porque ela nao vale para todas as linhas dela.
+        """
+        return self.selected_source_language() or "", self.lang
+
+    def load_scoped_automatic_glossary(self):
+        origem, destino = self.scoped_languages()
+        return load_automatic_substitutions(
+            source_language=origem, target_language=destino
+        )
+
+    def load_scoped_interactive_glossary(self):
+        origem, destino = self.scoped_languages()
+        return load_interactive_substitutions(
+            source_language=origem, target_language=destino
+        )
+
     def reload_glossary(self, show_feedback=True):
-        self.glossary = load_interactive_substitutions()
-        self.automatic_glossary = load_automatic_substitutions()
-        self.app.glossary_substitutions = self.glossary
+        self.glossary = self.load_scoped_interactive_glossary()
+        self.automatic_glossary = self.load_scoped_automatic_glossary()
+        # A lista do app fica SEM escopo de proposito: ela e o glossario inteiro,
+        # e quem a le e a contagem do "Zerar Glossario" — que precisa dizer
+        # quantas regras existem, e nao quantas valem para o par desta janela.
+        self.app.glossary_substitutions = load_interactive_substitutions()
         self.refresh_suggestions()
         if show_feedback:
             self.show_message(f"Glossário atualizado: {len(self.glossary)} entradas")
@@ -2278,9 +2316,12 @@ class TranslationEditor:
         if not self.win.winfo_exists():
             self.unregister_glossary_callback()
             return
-        self.glossary = list(updated_entries)
-        self.automatic_glossary = load_automatic_substitutions()
-        self.app.glossary_substitutions = self.glossary
+        # `updated_entries` vem do editor de glossario e nao tem escopo aplicado:
+        # ele edita o arquivo inteiro. O que esta janela oferece e o recorte do
+        # par dela, entao a lista dela e recarregada com filtro.
+        self.app.glossary_substitutions = list(updated_entries)
+        self.glossary = self.load_scoped_interactive_glossary()
+        self.automatic_glossary = self.load_scoped_automatic_glossary()
         self.refresh_suggestions()
         self.show_message(f"Glossário atualizado: {len(self.glossary)} entradas")
 

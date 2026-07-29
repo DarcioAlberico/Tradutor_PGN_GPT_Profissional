@@ -47,15 +47,17 @@ from tradutor_pgn.glossario import (
 )
 
 
-def com_prioridade(entries, priority=0):
-    """Entradas de tres campos como o arquivo as devolve: com a prioridade.
+def com_prioridade(entries, priority=0, scope=""):
+    """Entradas de tres campos como o arquivo as devolve: com prioridade e escopo.
 
-    A entrada detalhada ganhou um quarto campo no item 1.5 parte 2. Nos testes
-    cujo assunto nao e a prioridade, escrever `, 0` em cada tupla so acrescenta
-    ruido — mas apaga-la da comparacao esconderia uma prioridade mexida por
-    engano.
+    A entrada detalhada ganhou um quarto campo no item 1.5 parte 2 e um quinto na
+    secao 15. Nos testes cujo assunto nao e nenhum dos dois, escrever `, 0, ""`
+    em cada tupla so acrescenta ruido — mas apaga-los da comparacao esconderia um
+    deles mexido por engano.
     """
-    return [(orig, new, rule_type, priority) for orig, new, rule_type in entries]
+    return [
+        (orig, new, rule_type, priority, scope) for orig, new, rule_type in entries
+    ]
 
 
 class FakeApp:
@@ -355,8 +357,8 @@ class GlossaryEditorTests(EditorWindowTestCase):
         self.set_text(self.texts()[1], "rainha")
         self.click(self.button("Salvar"))
 
-        self.assertIn(("queen", "rainha", "suggestion", 0), self.entries_on_disk())
-        self.assertIn(("rook", "torre", "suggestion", 0), self.entries_on_disk())
+        self.assertIn(("queen", "rainha", "suggestion", 0, ""), self.entries_on_disk())
+        self.assertIn(("rook", "torre", "suggestion", 0, ""), self.entries_on_disk())
 
     def test_saving_survives_an_external_insertion(self):
         """O bug do item 3.4.
@@ -372,9 +374,9 @@ class GlossaryEditorTests(EditorWindowTestCase):
         self.click(self.button("Salvar"))
 
         entradas = self.entries_on_disk()
-        self.assertIn(("rook", "torre", "suggestion", 0), entradas, "gravou por cima da vizinha")
-        self.assertIn(("queen", "rainha", "suggestion", 0), entradas)
-        self.assertNotIn(("queen", "dama", "suggestion", 0), entradas)
+        self.assertIn(("rook", "torre", "suggestion", 0, ""), entradas, "gravou por cima da vizinha")
+        self.assertIn(("queen", "rainha", "suggestion", 0, ""), entradas)
+        self.assertNotIn(("queen", "dama", "suggestion", 0, ""), entradas)
 
     def test_deleting_survives_an_external_insertion(self):
         self.click(self.row_for("queen"))
@@ -383,8 +385,8 @@ class GlossaryEditorTests(EditorWindowTestCase):
         self.click(self.button("Excluir"))
 
         entradas = self.entries_on_disk()
-        self.assertIn(("rook", "torre", "suggestion", 0), entradas, "excluiu a vizinha")
-        self.assertNotIn(("queen", "dama", "suggestion", 0), entradas)
+        self.assertIn(("rook", "torre", "suggestion", 0, ""), entradas, "excluiu a vizinha")
+        self.assertNotIn(("queen", "dama", "suggestion", 0, ""), entradas)
 
     def test_saving_an_entry_removed_elsewhere_writes_nothing(self):
         self.click(self.row_for("rook"))
@@ -475,9 +477,9 @@ class GlossaryConflictEditorTests(EditorWindowTestCase):
         self.click(self.button("Manter esta"))
 
         entradas = self.entries_on_disk()
-        self.assertIn(("torre", "castle", "suggestion", 0), entradas)
-        self.assertNotIn(("torre", "rook", "suggestion", 0), entradas)
-        self.assertIn(("dama", "queen", "suggestion", 0), entradas, "levou junto quem nao disputava")
+        self.assertIn(("torre", "castle", "suggestion", 0, ""), entradas)
+        self.assertNotIn(("torre", "rook", "suggestion", 0, ""), entradas)
+        self.assertIn(("dama", "queen", "suggestion", 0, ""), entradas, "levou junto quem nao disputava")
 
         # Resolvido tambem na tela: nao sobra aviso de conflito nenhum.
         self.assertEqual(self.conflict_text(), "")
@@ -534,8 +536,8 @@ class GlossaryPriorityEditorTests(EditorWindowTestCase):
 
         self.click(self.button("Salvar"))
 
-        self.assertIn(("torre", "castle", "suggestion", 3), self.entries_on_disk())
-        self.assertIn(("torre", "rook", "suggestion", 0), self.entries_on_disk())
+        self.assertIn(("torre", "castle", "suggestion", 3, ""), self.entries_on_disk())
+        self.assertIn(("torre", "rook", "suggestion", 0, ""), self.entries_on_disk())
 
     def test_an_invalid_priority_never_reaches_the_file(self):
         """Cair para zero em silencio gravaria uma decisao que ninguem tomou.
@@ -549,7 +551,9 @@ class GlossaryPriorityEditorTests(EditorWindowTestCase):
         self.editor.priority_text.set("5")
         self.editor.mark_dirty()
         self.click(self.button("Salvar"))
-        self.assertIn(("torre", "castle", "suggestion", 5), self.entries_on_disk())
+        self.assertIn(
+            ("torre", "castle", "suggestion", 5, ""), self.entries_on_disk()
+        )
         antes = self.entries_on_disk()
 
         self.editor.priority_text.set("alta")
@@ -602,8 +606,8 @@ class GlossaryPriorityEditorTests(EditorWindowTestCase):
 
         entradas = self.entries_on_disk()
         self.assertEqual(len(entradas), 3, "a promocao apagou uma regra")
-        self.assertIn(("torre", "rook", "suggestion", 0), entradas)
-        self.assertIn(("torre", "castle", "suggestion", 1), entradas)
+        self.assertIn(("torre", "rook", "suggestion", 0, ""), entradas)
+        self.assertIn(("torre", "castle", "suggestion", 1, ""), entradas)
         self.assertNotIn("nunca é aplicada", self.conflict_text())
 
     def test_promoting_the_winner_says_there_is_nothing_to_do(self):
@@ -755,11 +759,11 @@ class GlossaryEditorMethodCoverageTests(EditorWindowTestCase):
         self.click(self.button("Salvar como nova"))
 
         entradas = self.entries_on_disk()
-        self.assertIn(("bishop", "bispo", "suggestion", 0), entradas)
+        self.assertIn(("bishop", "bispo", "suggestion", 0, ""), entradas)
         self.assertIsNotNone(self.editor.state.selected_index, "nao reencontrou o que gravou")
         self.assertEqual(
             entradas[self.editor.state.selected_index],
-            ("bishop", "bispo", "suggestion", 0),
+            ("bishop", "bispo", "suggestion", 0, ""),
         )
 
     # ------------------------------------------------ fechar
@@ -821,6 +825,15 @@ class TranslationEditorMethodCoverageTests(EditorWindowTestCase):
         conn.commit()
         conn.close()
 
+        # No ARQUIVO, e nao so em `app.glossary_substitutions`: a janela carrega
+        # o recorte do par dela (garantia S11), entao a regra tem de existir onde
+        # ela procura. Injetar so na lista do app deixava de valer quando o
+        # editor passou a filtrar por idioma.
+        save_glossary_entries(
+            [("bispo", "alfil")],
+            path=glossario._default_substitutions_path(),
+            create_backup=False,
+        )
         self.app.glossary_substitutions = [("bispo", "alfil")]
         # A conversao em classe deu isto de graca: o `open_translation_editor`
         # devolve a instancia, entao o teste alcanca os metodos direto, sem
@@ -922,10 +935,24 @@ class TranslationEditorMethodCoverageTests(EditorWindowTestCase):
         self.editor.delete_suggestion_from_glossary("nao existe", "nada")
 
     def test_the_glossary_change_callback_refreshes_the_suggestions(self):
+        """O callback avisa que o arquivo mudou; a lista sai do DISCO.
+
+        O editor de glossario grava antes de chamar, e o que esta janela precisa
+        e o recorte do par dela (garantia S11) — que a lista passada no callback
+        nao tem, porque aquela e o arquivo inteiro. Por isso o teste grava a regra
+        nova e confere que ela chegou pela recarga, e nao pelo argumento.
+        """
         self.editor.select_index(0)
+        save_glossary_entries(
+            [("torre", "roque")],
+            path=glossario._default_substitutions_path(),
+            create_backup=False,
+        )
         self.editor.on_glossary_editor_change([("torre", "roque")])
         self.pump()
+
         self.assertEqual(self.editor.glossary, [("torre", "roque")])
+        self.assertEqual(self.app.glossary_substitutions, [("torre", "roque")])
 
     # ------------------------------------------------ navegacao e atalhos
 

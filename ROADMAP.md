@@ -5,9 +5,9 @@ Registro das melhorias do programa. Cada item traz o motivo, o impacto medido
 verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
-**Pendentes: as secoes 15 a 20**, da revisao de 2026-07-29 (as secoes 13 e 14
-foram concluidas no mesmo dia). As garantias que os testes ja protegem estao na
-[SPEC.md](SPEC.md), secao 9; as que as secoes pendentes prometem estao
+**Pendentes: as secoes 16 a 20**, da revisao de 2026-07-29 (as secoes 13, 14 e
+15 foram concluidas no mesmo dia). As garantias que os testes ja protegem estao
+na [SPEC.md](SPEC.md), secao 9; as que as secoes pendentes prometem estao
 declaradas na secao 11 da SPEC, e cada uma so migra para a 9 quando o item
 correspondente estiver pronto e tiver teste que falhe sem a correcao.
 
@@ -3607,7 +3607,7 @@ O que fica de fora desta secao, dito para nao ser lido como pronto:
 
 ---
 
-## 15. O glossario nao sabe para que lingua traduz — PENDENTE
+## 15. O glossario nao sabe para que lingua traduz — CONCLUIDO (2026-07-29)
 
 A SPEC sempre declarou o limite ("o glossario nao e por par de idiomas", secao
 10); o que a revisao acrescentou e a **prova de que ele ja custa caro**. As 147
@@ -3633,43 +3633,176 @@ e o glossario atende 1,5.
 ### 15.1 Escopo de idioma como quinto campo
 
 Cada regra ganha um escopo opcional — o idioma de **destino** a que ela se
-aplica (`'pt'`), ou par completo quando importar (`'en>pt'`) —, quinto campo da
-tupla, ausente = vale para todos, exatamente o padrao de retrocompatibilidade
-do quarto campo (prioridade): um `Substituicoes.txt` antigo continua valendo, e
-cada campo so e escrito quando tem algo a dizer. No CSV, coluna `lang`,
-opcional na leitura. A aplicacao filtra pelo par ativo da execucao (worker) ou
-da janela (editor); o editor de glossario mostra e edita o campo e ganha o
-filtro correspondente.
+aplica (`'pt'`), ou o par completo quando o erro e daquela traducao especifica
+(`'en>pt'`) —, quinto campo da tupla. No CSV, coluna `lang`, opcional na
+leitura. A aplicacao filtra pelo par ativo da execucao (worker) ou da janela
+(editor); o editor de glossario mostra, edita e valida o campo.
 
-A migracao do acervo atual e uma decisao de curadoria simples: as regras
-pt -> pt e en -> pt existentes recebem escopo `pt` em massa (e o dano do
-exemplo acima desaparece), as poucas globais de notacao (`('×','x')`,
-`('O-O','0-0')`) ficam sem escopo de proposito.
+**O plano dizia "ausente = vale para todos", e implementar mostrou que isso nao
+bastava.** Escopar as 5.900 regras portuguesas exigiria escrever `, 'pt'` em
+cada uma — um diff do arquivo inteiro, que e exatamente o que o formato foi
+desenhado para evitar. O argumento esta escrito no proprio serializador desde o
+item 1.5: *"o arquivo tem milhares de linhas e e versionado, e escrever `, 0` em
+todas transformaria a decisao tomada em quatro regras num diff de milhares de
+linhas."* Aqui ele pesa mais, porque o acervo inteiro tem o mesmo escopo e as
+excecoes sao dezenove regras de notacao.
 
-**Garantia planejada S11** — *regra com escopo de idioma so e aplicada no seu
-par.* Sem escopo, comportamento de hoje — e nada muda para quem nao usar o
-campo.
+Entao o arquivo passou a poder **declarar o escopo uma vez**:
+
+```python
+escopo = 'pt'
+substituicoes = [
+    ('movimento', 'lance', 'automatic'),        # herda 'pt'
+    ('×', 'x', 'automatic', 0, '*'),            # excecao: todo par
+    ('bishop', 'alfiere', 'suggestion', 0, 'it'),
+]
+```
+
+O campo por regra continua existindo e passa a significar **discordar do
+padrao** — `'*'` quando a excecao e valer para todo par, um codigo quando e outro
+idioma. A ausencia deixou de ser "todos" e virou "herda"; num arquivo sem a
+declaracao, herdar e justamente "todos", entao **um `Substituicoes.txt` de antes
+desta versao continua valendo sem uma linha alterada** (ha teste). O `'*'` existe
+por causa dessa mudanca: sem ele nao haveria como escrever a excecao global.
+
+**A migracao do acervo custou 23 insercoes e 19 remocoes** num arquivo de 5.921
+linhas: uma linha de declaracao e o `'*'` nas dezenove regras que sao notacao e
+nao lingua (`('×','x')`, `('O-O','0-0')`, `('OO','0-0')`, as correcoes de caixa
+de lance como `('NH5','Nh5')`). Medido depois:
+
+| destino | regras carregadas | `'Il movimento della torre'` |
+|---|---|---|
+| it | 19 -> **60** (as globais + a semente) | intacto (antes: `Il lance della torre`) |
+| es | 19 -> 60 | intacto |
+| pt | 7.144 | `O lance da torre`, como sempre |
+
+**Uma armadilha que quase entrou, e vale mais que o item.** Meu primeiro desenho
+fazia o escopo nomear *"o idioma do texto que a regra le"* — origem para as
+regras de limpeza (que leem o comentario original), destino para as demais. E
+mais elegante e teria sido um defeito silencioso grave: um arquivo que declara
+`escopo = 'pt'` desligaria **todas as 50 regras de limpeza** numa execucao
+en -> pt, porque a origem nao e portuguesa. O escopo nomeia o destino, sem
+excecao por tipo, e o preco declarado e que nao ha como escopar uma limpeza por
+idioma de origem — nenhuma das 50 precisa, porque lixo de conversao nao tem
+lingua.
+
+**Garantia S11 (nova)** — *regra com escopo de idioma so e aplicada no seu par.*
+Sem escopo, comportamento de sempre; sem par declarado no chamador, nada e
+filtrado.
+
+### 15.1.1 O que o escopo mudou no detector de conflitos
+
+Duas regras para destinos diferentes **nunca sao carregadas juntas**, entao
+acusa-las de conflito seria descrever uma briga que nao acontece. `scopes_overlap`
+entrou como o irmao de `GLOSSARY_RULE_CONTEXTS`: aquele separa por tipo, este por
+idioma, e o raciocinio e o mesmo. Escopo vazio cruza com todos, e ai o conflito
+volta a valer — uma regra global de fato alcanca o par da outra.
+
+Isso importa mais do que parece agora: sem ele, a semente da 15.2 acusaria 232
+conflitos falsos no primeiro dia, um por termo em cada idioma.
 
 ### 15.2 Dicionarios-semente por idioma
 
-Com o escopo existindo, o programa pode finalmente **vir com** dicionarios: um
-nucleo curado de terminologia enxadristica por destino — pecas, conceitos
-(cravada, garfo, espeto, afogamento, roque), nomes de abertura, simbolos — como
-regras com escopo, embarcadas num arquivo proprio (`Substituicoes-semente.txt`
-ou equivalente), carregadas junto com as do usuario mas **marcadas de onde
-vieram**. Duas decisoes de seguranca:
+Com o escopo existindo, o programa passou a **vir com** terminologia:
+`tradutor_pgn/Substituicoes-semente.txt`, **232 regras** cobrindo 41 termos do
+nucleo enxadristico — pecas, os dois lados, xeque/mate/afogado/roque/empate,
+geografia do tabuleiro (casa, coluna, fileira, alas), taticas (cravada, garfo,
+espeto, sacrificio, xeque descoberto), fases, estrutura de peoes e avaliacao.
 
-- a semente **nunca vence** uma regra do usuario para o mesmo padrao no mesmo
-  escopo — o usuario ja decidiu, e a semente e o palpite generico;
-- a semente e versionada com o programa e atualizavel sem tocar no
-  `Substituicoes.txt` do usuario — os dois arquivos nao se misturam no disco.
+| destino | regras da semente |
+|---|---|
+| pt, es, de, it | 41 cada |
+| fr | 38 |
+| ru | 30 |
 
-O conteudo inicial ja esta levantado: as ~30 ausencias da secao 14.8 para os 7
-destinos, mais as correcoes recorrentes do Google medidas no banco (16). E o
-"implementar dicionarios" do pedido do usuario, na forma que o programa ja
-sabe carregar.
+**Todas vao de INGLES para o destino**, e a escolha nao e de conveniencia: um
+padrao em ingles nao casa texto portugues, italiano ou russo, entao nenhuma
+regra da semente pode corromper o que ja funciona — que e exatamente o defeito
+das cinco regras removidas em 14.3. E o caso que elas resolvem foi **medido**: no
+banco real ha 263 traducoes em que o tradutor simplesmente nao traduziu
+"White"/"Black". "O tradutor deixou em ingles" e o modo de falha mais comum que
+existe, e o unico que da para cobrir sem observar a saida de cada par.
 
-**Garantia planejada S15** — *a semente nunca sobrepoe uma regra do usuario.*
+**Todas sao `suggestion`**, oferecidas no editor e aplicadas a pedido. A semente
+e um palpite generico sobre a terminologia de quem usa, e aplicar palpite sem
+ninguem ver e o que a secao 14 passou uma revisao inteira consertando. O preco
+declarado: para quem traduz para o italiano, a semente ajuda na revisao e nao na
+passagem automatica.
+
+**Faltam termos de proposito.** As lacunas do russo e do frances sao onde eu nao
+tinha certeza da forma consagrada (*skewer* em russo, *outpost* em frances). Uma
+lacuna e melhor do que uma regra errada, e a secao 14 acabou de medir o preco de
+adivinhar — o glossario do usuario e o lugar de corrigir, e ele sempre vence.
+
+Tres decisoes de seguranca, as duas primeiras do plano e a terceira que
+implementar acrescentou:
+
+- **A semente nunca vence uma regra do usuario** para o mesmo padrao no mesmo
+  escopo. A comparacao e por `casefold`, e nao por texto exato, pela licao de
+  S12: uma semente em minusculas engoliria a versao capitalizada do usuario sem
+  que nada dissesse. E uma regra dele **sem escopo** tambem vence a semente do
+  par especifico — quem escreveu "sempre assim" decidiu mais do que a semente
+  palpita. As que sobram entram **depois** das dele, entao entre padroes de
+  mesmo comprimento a ordem do arquivo continua dando a ele a palavra final.
+- **Os dois arquivos nao se misturam no disco.** O `Substituicoes.txt` sai de
+  `sys.argv[0]` (ao lado do executavel, onde o usuario edita); a semente sai de
+  `__file__` (dentro do pacote, em `_internal\tradutor_pgn\` no build). E a
+  mesma distincao do `spelling.ssp`, pelo mesmo motivo, e o `.spec` foi
+  atualizado junto. Atualizar o programa troca a semente e nao toca no
+  glossario de quem usa.
+- **Um defeito na semente nao desliga o glossario do usuario.** A leitura dela
+  degrada para "sem semente" e **avisa** pelo canal de S5 — ela vem com o
+  programa, entao o defeito e nosso, e o silencio seria pior. Ha teste com uma
+  semente ilegivel.
+
+**Garantia S15 (nova)** — *a semente nunca sobrepoe uma regra do usuario.*
+
+### 15.3 O que a verificacao fixou
+
+Vinte e quatro testes novos. Os que mais importam sao os dois que fixam a razao
+da secao existir: a regra portuguesa **nao alcanca mais o italiano**, e um
+`Substituicoes.txt` sem a declaracao de escopo continua valendo sem uma linha
+alterada. Junto: o round-trip do escopo pelo arquivo, pelo banco e pelo CSV; que
+gravar uma entrada preserva o `escopo = 'pt'` do arquivo (sem isso a primeira
+gravacao pela janela devolveria todas as regras ao estado global); que uma
+entrada nova herda o padrao; que um idioma de escopo desconhecido avisa e deixa a
+regra muda em vez de espalha-la; e as cinco de S15.
+
+**O alargamento da entrada de quatro para cinco campos custou ~45 ajustes de
+teste**, e vale registrar por que eles nao foram escondidos atras de um
+adaptador: a entrada detalhada e uma tupla de largura fixa desde que ela existe,
+e foi assim que o quarto campo (prioridade) entrou no item 1.5. Um quinto campo
+opcional em algum canal paralelo deixaria a "entrada normalizada" sem parte dos
+dados dela, que e pior do que a churn.
+
+O helper `com_prioridade` dos testes ganhou o escopo junto, com o mesmo
+argumento que o criou: nos testes cujo assunto nao e escopo, escrever `, ""` em
+cada tupla so acrescenta ruido — mas apagar o campo da comparacao esconderia um
+escopo mexido por engano.
+
+**Um sandbox novo no `setUpModule`:** o caminho da semente. Ela **existe** no
+repositorio e e mesclada em toda carga de regras, entao sem desliga-la qualquer
+teste que compare a lista exata de regras veria a terminologia embutida junto —
+uma falha que nao tem nada a ver com o que o teste afirma. Quem exercita a
+semente passa `seed_path` explicitamente. E o mesmo padrao do sandbox do
+glossario, criado no item 4 pela mesma razao.
+
+O que fica de fora, dito para nao ser lido como pronto:
+
+- **O escopo nao alcanca o idioma de ORIGEM numa regra de limpeza** — ver a
+  armadilha em 15.1. Nenhuma das 50 precisa; se um dia precisar, a forma
+  `'en>'` ja existe no parser e o que falta e decidir o que ela significa para
+  `cleanup`.
+- **A semente nao aparece no editor de glossario.** Ele edita o arquivo do
+  usuario, e a semente nao esta la — entao as regras dela chegam como sugestao
+  sem linha correspondente na lista, e "Excluir do glossario" numa delas cai no
+  caminho de "entrada nao encontrada" (garantia S6: nada e gravado, e o usuario
+  e avisado). Mostra-la como leitura apenas, marcada, e trabalho de interface
+  que esta secao nao fez.
+- **O `filtro por escopo` na lista do editor nao entrou.** O idioma aparece no
+  rotulo de cada regra que o declara, o que resolve ver; filtrar por ele e um
+  segmento novo na barra e ficou para quando um glossario de verdade tiver mais
+  de um idioma dentro.
 
 ---
 

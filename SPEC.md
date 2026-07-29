@@ -37,7 +37,8 @@ gravavel.
 | `traducoes.db` | Cache de traducoes + historico de edicoes | Nao |
 | `traducoes.db` (`PRAGMA user_version`) | Versao do schema; migracao so roda quando desatualizada | — |
 | `comments_fts` (dentro do `traducoes.db`) | Indice de busca FTS5, mantido por gatilhos (R8) | Nao |
-| `Substituicoes.txt` | Fonte de verdade do glossario | Sim |
+| `Substituicoes.txt` | Fonte de verdade do glossario do usuario | Sim |
+| `tradutor_pgn/Substituicoes-semente.txt` | Terminologia que vem com o programa (S15) | Sim |
 | `glossario.db` | Indice SQLite derivado do `Substituicoes.txt` | Sim |
 | `glossario.db` (`schema_version`) | Marca do esquema; um banco de versao anterior e reconstruido do arquivo | — |
 | `glossario.db` (`source_path`, `source_hash`) | De qual arquivo ele veio: caminho relativo ao proprio banco e hash do conteudo | — |
@@ -520,18 +521,33 @@ Nenhuma das duas roda com uma traducao em andamento.
 ### 5.1 Formato
 
 `Substituicoes.txt` contem uma atribuicao Python com uma lista de tuplas, lida
-com `ast.literal_eval` (nunca `exec`). Cada regra tem de dois a quatro campos —
-`(original, substituicao, tipo, prioridade)` — e **cada campo so e escrito quando
-tem algo a dizer**:
+com `ast.literal_eval` (nunca `exec`). Cada regra tem de dois a cinco campos —
+`(original, substituicao, tipo, prioridade, escopo)` — e **cada campo so e
+escrito quando tem algo a dizer**:
 
 ```python
+escopo = 'pt'                               # padrao do arquivo (opcional)
+
 substituicoes = [
-    ('rook', 'torre'),                     # tipo suggestion, prioridade 0
+    ('rook', 'torre'),                      # suggestion, prioridade 0, escopo 'pt'
     ('Queen', 'Dama'),
-    ('== EndSquare ==', '', 'cleanup'),    # outro tipo
-    ('torre', 'castle', 'suggestion', 1),  # com prioridade
+    ('== EndSquare ==', '', 'cleanup'),     # outro tipo
+    ('torre', 'castle', 'suggestion', 1),   # com prioridade
+    ('×', 'x', 'automatic', 0, '*'),        # excecao: vale para todo par
+    ('@casa@-torre', 'torre de @casa@'),    # vale pelas 64 casas
 ]
 ```
+
+**O escopo e declarado uma vez para o arquivo, e por regra apenas para
+discordar.** A ausencia do quinto campo significa "herda o padrao"; num arquivo
+sem a declaracao, herdar e "vale para todo par", e por isso um
+`Substituicoes.txt` de antes desta versao continua valendo sem uma linha
+alterada. O `'*'` e como se escreve a excecao global quando existe um padrao.
+
+A razao e a mesma que faz tipo e prioridade serem omitidos: o arquivo tem
+milhares de linhas e e versionado. Escrever `, 'pt'` nas 5.900 regras
+portuguesas do acervo seria um diff do arquivo inteiro para registrar uma
+decisao unica — a migracao real custou 23 insercoes e 19 remocoes.
 
 O que faltar assume o padrao, entao um arquivo escrito por uma versao anterior
 continua valendo sem conversao. O inverso tambem importa: o arquivo tem milhares
@@ -575,6 +591,40 @@ delecao.** Substituicao vazia e invalida em toda regra menos na de `cleanup`,
 onde ela e o proprio ponto (apagar lixo de conversao). A validacao do editor e a
 da importacao de CSV usam o **mesmo** criterio; enquanto discordavam, um
 round-trip pelo CSV descartava em silencio as 50 regras de delecao do glossario.
+
+**Garantia S11 — regra com escopo de idioma so e aplicada no seu par.** O escopo
+nomeia o idioma de **DESTINO** (`'pt'`), ou o par inteiro quando o erro e daquela
+traducao especifica (`'en>pt'`). Sem escopo, vale para todo par — o
+comportamento que o programa sempre teve.
+
+E o destino sem excecao por tipo, e isso e uma decisao e nao um descuido. A
+leitura tentadora seria "o idioma do texto que a regra le", que para uma regra de
+`cleanup` e a ORIGEM (ela le o comentario original): com ela, um arquivo que
+declara `escopo = 'pt'` desligaria em silencio todas as regras de limpeza numa
+execucao en -> pt. O preco da escolha simples esta declarado na secao 10.
+
+Um escopo que exige idioma de origem **nao casa uma execucao em "Detectar"**: sem
+a declaracao nao ha como afirmar que o original esta em ingles, e aplicar seria um
+palpite. E a mesma razao pela qual a correcao de lances (P3) nao roda ali.
+
+Duas regras com escopos que **nunca se cruzam nao conflitam** (S9/S12): uma para
+`'pt'` e outra para `'it'` sao carregadas em execucoes diferentes, e acusa-las de
+disputa seria descrever uma briga que nao acontece. Escopo vazio cruza com todos.
+
+**Garantia S15 — o dicionario-semente nunca sobrepoe uma regra do usuario.** O
+programa vem com terminologia enxadristica propria
+(`tradutor_pgn/Substituicoes-semente.txt`, 232 regras, ingles -> destino,
+escopadas, todas `suggestion`), carregada junto com o glossario do usuario. Uma
+regra da semente e **descartada** quando ele tem uma com o mesmo padrao no mesmo
+escopo — ou sem escopo nenhum, que e uma decisao mais ampla ainda. A comparacao e
+por `casefold`, pela licao de S12. As que sobram entram depois das dele, entao a
+ordem do arquivo continua dando a ele a palavra final.
+
+Os dois arquivos **nao se misturam no disco**: o do usuario sai de `sys.argv[0]`
+(ao lado do executavel, onde ele edita), a semente sai de `__file__` (dentro do
+pacote). Atualizar o programa troca a semente e nao toca no trabalho de quem usa.
+Um defeito na semente degrada para "sem semente" e **avisa** — ela vem com o
+programa, entao o defeito e nosso.
 
 ### 5.2 Semantica de casamento
 
@@ -956,6 +1006,8 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | S12 | Conflito por diferenca de caixa e anunciado, e so quando a vencedora produz outra coisa | Bug: 210 regras nunca disparavam, e o detector era cego a todas |
 | S13 | Tipo de regra desconhecido avisa em vez de degradar em silencio | Bug: `'automático'` virava sugestao e deixava de rodar depois da API |
 | S14 | Exportar e reimportar o glossario preserva as regras de delecao | Bug: o round-trip pelo CSV descartava as 50 em silencio |
+| S11 | Regra com escopo de idioma so e aplicada no seu par | Bug: `('movimento','lance')` corrompia `il movimento` numa traducao para o italiano |
+| S15 | A semente nunca sobrepoe uma regra do usuario | Risco: o programa passar a vir com terminologia e ela vencer a de quem usa |
 | R1 | Gravacao so por acao do usuario | Bug: navegar reescreve o banco |
 | R5 | Navegar custa O(pagina) | Perf: paginacao anulada por varredura |
 | R8 | Navegar custa O(pagina) tambem com busca ativa | Perf: `LIKE '%x%'` varre a tabela a cada interacao |
@@ -1065,14 +1117,20 @@ X3). O que resta declarado como limite:
 **Glossario e arquivos gerados**
 
 - O glossario e uma lista linear. A prioridade explicita (S10) resolve o caso de
-  adiantar uma regra, mas so entre regras — nao ha grupos, escopos por idioma
-  nem condicoes: uma regra vale para todo texto do seu recorte. Em particular,
-  **o glossario nao e por par de idiomas**: as mesmas regras valem para as
-  traducoes de todas as linguas de origem **e de destino** — e isso ja custa
-  caro, nao e so teoria: `('movimento','lance')` corrompe uma traducao para o
-  italiano e `('alfil','bispo')` uma para o espanhol, confirmado com o
-  glossario real. Traduzir para qualquer lingua que nao o portugues passa o
-  texto por um filtro portugues. (ROADMAP 15)
+  adiantar uma regra e o escopo (S11) resolve o de restringi-la a um par de
+  idiomas, mas nao ha **grupos nem condicoes**: dentro do seu escopo e do seu
+  recorte de tipo, uma regra vale para todo texto.
+- **O escopo alcanca o destino, e nao a origem numa regra de limpeza.** Uma
+  regra de `cleanup` scopada por origem nao e expressavel; nenhuma das 50
+  precisa, porque lixo de conversao nao tem lingua. A forma `'en>'` existe no
+  parser e o que falta e decidir o que ela significaria ali. (ROADMAP 15.1)
+- **A semente nao aparece no editor de glossario**, que edita o arquivo do
+  usuario. As regras dela chegam como sugestao sem linha correspondente na
+  lista, e "Excluir do glossario" numa delas cai no caminho de "entrada nao
+  encontrada" (S6: nada e gravado, e o usuario e avisado). (ROADMAP 15.2)
+- **A semente e toda `suggestion`**: para quem traduz para o italiano, ela ajuda
+  na revisao e nao na passagem automatica. E deliberado — aplicar palpite
+  generico sem ninguem ver e o que a secao 14 passou uma revisao consertando.
 - A sensibilidade a caixa e **inferida da grafia do padrao** (`orig ==
   orig.lower()`), e nao declarada. Escrever uma regra em minusculas e a unica
   forma de pedir casamento sem diferenciar caixa, entao as duas decisoes —
@@ -1149,13 +1207,11 @@ Declaradas aqui para que a secao 9 continue sendo apenas o que os testes ja
 protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
-Da revisao de 2026-07-29 (ROADMAP 15 a 20; as garantias das secoes 13 e 14 —
-X1-X3, S12-S14 — foram entregues no mesmo dia e ja estao na secao 9):
+Da revisao de 2026-07-29 (ROADMAP 16 a 20; as garantias das secoes 13, 14 e 15 —
+X1-X3, S11-S15 — foram entregues no mesmo dia e ja estao na secao 9):
 
 | # | Garantia | Item |
 |---|---|---|
-| S11 | Regra com escopo de idioma so e aplicada no seu par | 15 |
-| S15 | O dicionario-semente nunca sobrepoe uma regra do usuario | 15 |
 | Q1 | Lance perdido e anotacao rompida geram aviso de qualidade | 16 |
 | Q2 | As heuristicas de QA tem versao, e muda-las reavalia o banco | 16 |
 | R10 | "Ir para ID" e "Proximo aviso" respeitam o filtro de origem | 17 |

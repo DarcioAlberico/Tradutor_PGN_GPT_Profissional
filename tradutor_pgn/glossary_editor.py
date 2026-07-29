@@ -11,7 +11,12 @@ from .glossario import (
     GLOSSARY_RULE_CLEANUP,
     GLOSSARY_RULE_SUGGESTION,
     GLOSSARY_RULE_TYPES,
+    GLOSSARY_SCOPE_ALL,
+    GLOSSARY_SCOPE_ANY,
     add_glossary_entry,
+    glossary_default_scope,
+    glossary_entry_scope,
+    normalize_glossary_scope,
     analyze_glossary_csv_import,
     create_glossary_backup,
     deduplicate_glossary_entries,
@@ -117,6 +122,7 @@ def build_glossary_diagnostics(entries, conflicts=None):
             orig,
             new,
             rule_type=glossary_entry_type(entry),
+            scope=glossary_entry_scope(entry),
         )
         if pair_counts.get((orig, new), 0) > 1:
             warnings.append("Entrada duplicada.")
@@ -195,6 +201,12 @@ def row_label(entries, index, diagnostics=None):
     # transformaria a ausencia de decisao em ruido em toda a lista.
     priority = glossary_entry_priority(entry)
     marca = f"  ·  P{priority:+d}" if priority != GLOSSARY_PRIORITY_DEFAULT else ""
+    # O idioma aparece so quando a regra o declara, pelo mesmo motivo da
+    # prioridade: num glossario de um idioma so, escrever "pt" em cinco mil
+    # linhas transforma o normal em ruido e esconde a excecao.
+    scope = glossary_entry_scope(entry)
+    if scope:
+        marca += f"  ·  {scope}"
     return (
         f"{status}  #{index + 1}  -  {type_label}{marca}\n"
         f"De: {preview(orig)}\nPara: {preview(new)}"
@@ -292,6 +304,7 @@ class GlossaryEditor:
             "new": "",
             "type": GLOSSARY_RULE_SUGGESTION,
             "priority": GLOSSARY_PRIORITY_DEFAULT,
+            "scope": GLOSSARY_SCOPE_ALL,
         }
 
         self.search_text = tk.StringVar(master=self.win, value="")
@@ -307,6 +320,10 @@ class GlossaryEditor:
         self.priority_text = tk.StringVar(
             master=self.win, value=str(GLOSSARY_PRIORITY_DEFAULT)
         )
+        self.scope_text = tk.StringVar(master=self.win, value="")
+        # O padrao declarado pelo arquivo, lido uma vez: e ele que a janela
+        # oferece como valor de partida e o que a gravacao preserva.
+        self.file_default_scope = glossary_default_scope()
 
         self.win.columnconfigure(0, weight=1)
         self.win.rowconfigure(0, weight=1)
@@ -400,7 +417,7 @@ class GlossaryEditor:
         detail_frame.columnconfigure(0, weight=1)
         detail_frame.rowconfigure(1, weight=1)
         detail_frame.rowconfigure(3, weight=1)
-        detail_frame.rowconfigure(9, weight=1)
+        detail_frame.rowconfigure(10, weight=1)
 
         ctk.CTkLabel(detail_frame, text="Texto encontrado:").grid(
             row=0,
@@ -456,6 +473,33 @@ class GlossaryEditor:
             anchor="w",
         ).grid(row=0, column=4, sticky="w", padx=(8, 0))
 
+        # Campo de texto pelo mesmo motivo da prioridade: o escopo aceita um
+        # codigo de idioma, um par (`en>pt`) ou `*`, e um arquivo editado a mao
+        # pode trazer um valor que nenhum seletor previa. Mostrar o que esta la e
+        # deixar a validacao avisar e melhor do que esconder ou trocar.
+        scope_bar = ctk.CTkFrame(detail_frame, fg_color="transparent")
+        scope_bar.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 8))
+        scope_bar.columnconfigure(2, weight=1)
+        ctk.CTkLabel(scope_bar, text="Idioma:").grid(
+            row=0, column=0, sticky="w", padx=(0, 6)
+        )
+        self.scope_entry = ctk.CTkEntry(
+            scope_bar,
+            textvariable=self.scope_text,
+            width=110,
+            justify="center",
+        )
+        self.scope_entry.grid(row=0, column=1, sticky="w")
+        padrao = self.file_default_scope or "todos"
+        ctk.CTkLabel(
+            scope_bar,
+            text=(
+                f"(destino, ou 'en>pt'; '*' = todos; padrão do arquivo: {padrao})"
+            ),
+            text_color="#64748b",
+            anchor="w",
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+
         self.validation_label = ctk.CTkLabel(
             detail_frame,
             text="",
@@ -463,12 +507,12 @@ class GlossaryEditor:
             justify=tk.LEFT,
             text_color=OK_COLOR,
         )
-        self.validation_label.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 8))
+        self.validation_label.grid(row=6, column=0, sticky="ew", padx=10, pady=(0, 8))
 
         # So aparece quando a entrada selecionada disputa um padrao com outra. Fora
         # disso a barra sai do grid, para nao ocupar espaco permanente com nada.
         self.conflict_bar = ctk.CTkFrame(detail_frame, fg_color="transparent")
-        self.conflict_bar.grid(row=6, column=0, sticky="ew", padx=10, pady=(0, 8))
+        self.conflict_bar.grid(row=7, column=0, sticky="ew", padx=10, pady=(0, 8))
         self.conflict_bar.columnconfigure(0, weight=1)
         self.conflict_label = ctk.CTkLabel(
             self.conflict_bar,
@@ -491,7 +535,7 @@ class GlossaryEditor:
         self.conflict_bar.grid_remove()
 
         test_header = ctk.CTkFrame(detail_frame, fg_color="transparent")
-        test_header.grid(row=7, column=0, sticky="ew", padx=10, pady=(0, 2))
+        test_header.grid(row=8, column=0, sticky="ew", padx=10, pady=(0, 2))
         test_header.columnconfigure(1, weight=1)
         ctk.CTkLabel(test_header, text="Teste rápido:").grid(row=0, column=0, sticky="w")
         self.btn_apply_preview = ctk.CTkButton(test_header, text="Aplicar selecionada", width=140)
@@ -504,10 +548,10 @@ class GlossaryEditor:
             textvariable=self.test_text_var,
             placeholder_text="Digite ou cole uma frase para testar a substituição selecionada",
         )
-        self.test_input.grid(row=8, column=0, sticky="ew", padx=10, pady=(0, 6))
+        self.test_input.grid(row=9, column=0, sticky="ew", padx=10, pady=(0, 6))
 
         self.preview_text = ctk.CTkTextbox(detail_frame, height=90, wrap=tk.WORD)
-        self.preview_text.grid(row=9, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.preview_text.grid(row=10, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self.preview_text.configure(state="disabled")
 
     def build_footer(self):
@@ -662,11 +706,36 @@ class GlossaryEditor:
     def set_priority(self, priority):
         self.priority_text.set(str(normalize_glossary_priority(priority)))
 
-    def set_form_baseline(self, orig="", new="", rule_type=None, priority=None):
+    def current_scope(self):
+        """O escopo digitado, ja canonico.
+
+        Diferente da prioridade, aqui nao ha estado invalido: campo vazio e `'*'`
+        querem dizer a mesma coisa ("todo par"), e um codigo desconhecido e
+        preservado para que a validacao possa avisar em vez de o programa
+        adivinhar.
+        """
+        return normalize_glossary_scope(self.scope_text.get())
+
+    def set_scope(self, scope):
+        """Mostra o escopo, escrevendo `'*'` quando ele contraria o padrao.
+
+        Campo vazio significaria "herda o padrao", e para uma regra global num
+        arquivo que declara `escopo = 'pt'` isso seria o oposto do que ela diz.
+        """
+        scope = normalize_glossary_scope(scope)
+        if not scope and self.file_default_scope:
+            self.scope_text.set(GLOSSARY_SCOPE_ANY)
+        else:
+            self.scope_text.set(scope)
+
+    def set_form_baseline(
+        self, orig="", new="", rule_type=None, priority=None, scope=None
+    ):
         self.form_baseline["orig"] = orig or ""
         self.form_baseline["new"] = new or ""
         self.form_baseline["type"] = rule_type or GLOSSARY_RULE_SUGGESTION
         self.form_baseline["priority"] = normalize_glossary_priority(priority)
+        self.form_baseline["scope"] = normalize_glossary_scope(scope)
 
     def form_changed(self):
         orig, new = self.current_pair()
@@ -675,6 +744,7 @@ class GlossaryEditor:
             or new != self.form_baseline["new"]
             or self.current_rule_type() != self.form_baseline["type"]
             or self.current_priority() != self.form_baseline["priority"]
+            or self.current_scope() != self.form_baseline["scope"]
         )
 
     def set_dirty(self, value):
@@ -984,11 +1054,13 @@ class GlossaryEditor:
         orig, new = glossary_entry_pair(entry)
         rule_type = glossary_entry_type(entry)
         priority = glossary_entry_priority(entry)
+        scope = glossary_entry_scope(entry)
         self.set_text(self.orig_text, orig)
         self.set_text(self.new_text, new)
         self.set_rule_type(rule_type)
         self.set_priority(priority)
-        self.set_form_baseline(orig, new, rule_type, priority)
+        self.set_scope(scope)
+        self.set_form_baseline(orig, new, rule_type, priority, scope)
         self.state.loading = False
         self.set_dirty(False)
         self.update_row_selection(index)
@@ -1002,7 +1074,10 @@ class GlossaryEditor:
         self.set_text(self.new_text, "")
         self.set_rule_type(GLOSSARY_RULE_SUGGESTION)
         self.set_priority(GLOSSARY_PRIORITY_DEFAULT)
-        self.set_form_baseline()
+        # Uma entrada nova herda o padrao do arquivo: num glossario declarado
+        # `escopo = 'pt'`, a regra que o usuario acaba de escrever e portuguesa.
+        self.set_scope(self.file_default_scope)
+        self.set_form_baseline(scope=self.file_default_scope)
         self.state.loading = False
         self.set_dirty(False)
         self.refresh_conflict()
@@ -1019,7 +1094,10 @@ class GlossaryEditor:
         self.set_text(self.new_text, (replacement or "").strip())
         self.set_rule_type(GLOSSARY_RULE_SUGGESTION)
         self.set_priority(GLOSSARY_PRIORITY_DEFAULT)
-        self.set_form_baseline()
+        # Uma entrada nova herda o padrao do arquivo: num glossario declarado
+        # `escopo = 'pt'`, a regra que o usuario acaba de escrever e portuguesa.
+        self.set_scope(self.file_default_scope)
+        self.set_form_baseline(scope=self.file_default_scope)
         self.state.loading = False
         self.set_dirty(True)
         self.refresh_conflict()
@@ -1093,12 +1171,14 @@ class GlossaryEditor:
         orig, new = self.current_pair()
         rule_type = self.current_rule_type()
         priority = self.current_priority()
+        scope = self.current_scope()
         warnings = validate_glossary_entry(
             orig,
             new,
             self.state.entries,
             self.state.selected_index,
             rule_type=rule_type,
+            scope=scope,
         )
         if priority is None:
             warnings.append(INVALID_PRIORITY_WARNING)
@@ -1118,7 +1198,7 @@ class GlossaryEditor:
         try:
             if self.state.selected_index is None:
                 result = add_glossary_entry(
-                    orig, new, rule_type=rule_type, priority=priority
+                    orig, new, rule_type=rule_type, priority=priority, scope=scope
                 )
                 self.load_rows_from_file()
                 self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
@@ -1139,6 +1219,7 @@ class GlossaryEditor:
                     rule_type=rule_type,
                     index_hint=self.state.selected_index,
                     priority=priority,
+                    scope=scope,
                 )
                 self.load_rows_from_file()
                 if result is None:
@@ -1150,7 +1231,7 @@ class GlossaryEditor:
             messagebox.showerror("Erro", f"Erro ao salvar glossário:\n{exc}", parent=self.win)
             return
 
-        self.set_form_baseline(orig, new, rule_type, priority)
+        self.set_form_baseline(orig, new, rule_type, priority, scope)
         self.set_dirty(False)
         self.update_app_glossary()
         self.apply_filter()
@@ -1164,7 +1245,10 @@ class GlossaryEditor:
         orig, new = self.current_pair()
         rule_type = self.current_rule_type()
         priority = self.current_priority()
-        warnings = validate_glossary_entry(orig, new, self.state.entries, rule_type=rule_type)
+        scope = self.current_scope()
+        warnings = validate_glossary_entry(
+            orig, new, self.state.entries, rule_type=rule_type, scope=scope
+        )
         if (
             "Texto original vazio." in warnings
             or "Texto de substituição vazio." in warnings
@@ -1175,7 +1259,7 @@ class GlossaryEditor:
 
         try:
             result = add_glossary_entry(
-                orig, new, rule_type=rule_type, priority=priority
+                orig, new, rule_type=rule_type, priority=priority, scope=scope
             )
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao salvar nova entrada:\n{exc}", parent=self.win)
@@ -1190,7 +1274,7 @@ class GlossaryEditor:
         # localizadas do mesmo jeito. `len(entries) - 1` so acertava porque a
         # insercao acrescenta no fim, e errava quando ela nao acontecia.
         self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
-        self.set_form_baseline(orig, new, rule_type, priority)
+        self.set_form_baseline(orig, new, rule_type, priority, scope)
         self.set_dirty(False)
         self.update_app_glossary()
         self.apply_filter()

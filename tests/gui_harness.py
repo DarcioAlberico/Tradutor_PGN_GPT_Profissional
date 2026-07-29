@@ -144,11 +144,16 @@ class GuiTestCase(unittest.TestCase):
         self._paths = (
             glossario._default_substitutions_path,
             glossario._default_glossary_db_path,
+            glossario._default_seed_path,
             settings.default_settings_path,
             sys.argv[0],
         )
         glossario._default_substitutions_path = lambda: str(self.base / "Substituicoes.txt")
         glossario._default_glossary_db_path = lambda: str(self.base / "glossario.db")
+        # A semente tambem, e por outra razao: ela EXISTE no repositorio e e
+        # mesclada em toda carga de regras (garantia S15), entao sem desliga-la a
+        # terminologia embutida apareceria nas sugestoes de toda janela testada.
+        glossario._default_seed_path = lambda: str(self.base / "semente-inexistente.txt")
         settings.default_settings_path = lambda: str(self.base / "settings.json")
         sys.argv[0] = str(self.base / "PGN_Tradutor_Pro.py")
         self.addCleanup(self._restore_paths)
@@ -170,6 +175,7 @@ class GuiTestCase(unittest.TestCase):
         (
             glossario._default_substitutions_path,
             glossario._default_glossary_db_path,
+            glossario._default_seed_path,
             settings.default_settings_path,
             sys.argv[0],
         ) = self._paths

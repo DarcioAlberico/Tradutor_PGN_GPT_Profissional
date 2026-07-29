@@ -1,0 +1,298 @@
+# -*- coding: utf-8 -*-
+# Dicionario-semente do PGN Tradutor Pro (ROADMAP 15.2, garantia S15)
+#
+# ESTE ARQUIVO VEM COM O PROGRAMA e e substituido quando ele e atualizado. Nao
+# edite aqui: o seu glossario e o `Substituicoes.txt`, ao lado do executavel, e
+# ele SEMPRE vence — uma regra sua com o mesmo padrao no mesmo escopo descarta a
+# regra correspondente daqui.
+#
+# Todas as regras vao de INGLES para o idioma de destino, e o quinto campo diz
+# qual. E a unica direcao segura: um padrao em ingles nao casa texto portugues,
+# italiano ou russo, entao nada aqui pode corromper o que ja funciona. O caso que
+# elas resolvem e o mais comum de todos — o tradutor automatico simplesmente NAO
+# TRADUZIU o termo. Medido no banco real: 263 traducoes com "White"/"Black" em
+# ingles.
+#
+# Todas sao `suggestion`, oferecidas no editor e aplicadas a pedido. A semente e
+# um palpite generico sobre a sua terminologia, e aplicar palpite sem ninguem ver
+# e o que a secao 14 do ROADMAP passou uma revisao inteira consertando.
+#
+# Faltam termos de proposito onde eu nao tinha certeza da forma consagrada: uma
+# lacuna e melhor do que uma regra errada, e o glossario do usuario e o lugar de
+# corrigir.
+
+substituicoes = [
+    # king
+    ('king', 'rei', 'suggestion', 0, 'pt'),
+    ('king', 'rey', 'suggestion', 0, 'es'),
+    ('king', 'roi', 'suggestion', 0, 'fr'),
+    ('king', 'König', 'suggestion', 0, 'de'),
+    ('king', 're', 'suggestion', 0, 'it'),
+    ('king', 'король', 'suggestion', 0, 'ru'),
+    # queen
+    ('queen', 'dama', 'suggestion', 0, 'pt'),
+    ('queen', 'dama', 'suggestion', 0, 'es'),
+    ('queen', 'dame', 'suggestion', 0, 'fr'),
+    ('queen', 'Dame', 'suggestion', 0, 'de'),
+    ('queen', 'donna', 'suggestion', 0, 'it'),
+    ('queen', 'ферзь', 'suggestion', 0, 'ru'),
+    # rook
+    ('rook', 'torre', 'suggestion', 0, 'pt'),
+    ('rook', 'torre', 'suggestion', 0, 'es'),
+    ('rook', 'tour', 'suggestion', 0, 'fr'),
+    ('rook', 'Turm', 'suggestion', 0, 'de'),
+    ('rook', 'torre', 'suggestion', 0, 'it'),
+    ('rook', 'ладья', 'suggestion', 0, 'ru'),
+    # rooks
+    ('rooks', 'torres', 'suggestion', 0, 'pt'),
+    ('rooks', 'torres', 'suggestion', 0, 'es'),
+    ('rooks', 'tours', 'suggestion', 0, 'fr'),
+    ('rooks', 'Türme', 'suggestion', 0, 'de'),
+    ('rooks', 'torri', 'suggestion', 0, 'it'),
+    ('rooks', 'ладьи', 'suggestion', 0, 'ru'),
+    # bishop
+    ('bishop', 'bispo', 'suggestion', 0, 'pt'),
+    ('bishop', 'alfil', 'suggestion', 0, 'es'),
+    ('bishop', 'fou', 'suggestion', 0, 'fr'),
+    ('bishop', 'Läufer', 'suggestion', 0, 'de'),
+    ('bishop', 'alfiere', 'suggestion', 0, 'it'),
+    ('bishop', 'слон', 'suggestion', 0, 'ru'),
+    # bishops
+    ('bishops', 'bispos', 'suggestion', 0, 'pt'),
+    ('bishops', 'alfiles', 'suggestion', 0, 'es'),
+    ('bishops', 'fous', 'suggestion', 0, 'fr'),
+    ('bishops', 'Läufer', 'suggestion', 0, 'de'),
+    ('bishops', 'alfieri', 'suggestion', 0, 'it'),
+    ('bishops', 'слоны', 'suggestion', 0, 'ru'),
+    # knight
+    ('knight', 'cavalo', 'suggestion', 0, 'pt'),
+    ('knight', 'caballo', 'suggestion', 0, 'es'),
+    ('knight', 'cavalier', 'suggestion', 0, 'fr'),
+    ('knight', 'Springer', 'suggestion', 0, 'de'),
+    ('knight', 'cavallo', 'suggestion', 0, 'it'),
+    ('knight', 'конь', 'suggestion', 0, 'ru'),
+    # knights
+    ('knights', 'cavalos', 'suggestion', 0, 'pt'),
+    ('knights', 'caballos', 'suggestion', 0, 'es'),
+    ('knights', 'cavaliers', 'suggestion', 0, 'fr'),
+    ('knights', 'Springer', 'suggestion', 0, 'de'),
+    ('knights', 'cavalli', 'suggestion', 0, 'it'),
+    ('knights', 'кони', 'suggestion', 0, 'ru'),
+    # pawn
+    ('pawn', 'peão', 'suggestion', 0, 'pt'),
+    ('pawn', 'peón', 'suggestion', 0, 'es'),
+    ('pawn', 'pion', 'suggestion', 0, 'fr'),
+    ('pawn', 'Bauer', 'suggestion', 0, 'de'),
+    ('pawn', 'pedone', 'suggestion', 0, 'it'),
+    ('pawn', 'пешка', 'suggestion', 0, 'ru'),
+    # pawns
+    ('pawns', 'peões', 'suggestion', 0, 'pt'),
+    ('pawns', 'peones', 'suggestion', 0, 'es'),
+    ('pawns', 'pions', 'suggestion', 0, 'fr'),
+    ('pawns', 'Bauern', 'suggestion', 0, 'de'),
+    ('pawns', 'pedoni', 'suggestion', 0, 'it'),
+    ('pawns', 'пешки', 'suggestion', 0, 'ru'),
+    # White
+    ('White', 'as brancas', 'suggestion', 0, 'pt'),
+    ('White', 'las blancas', 'suggestion', 0, 'es'),
+    ('White', 'les blancs', 'suggestion', 0, 'fr'),
+    ('White', 'Weiß', 'suggestion', 0, 'de'),
+    ('White', 'il bianco', 'suggestion', 0, 'it'),
+    ('White', 'белые', 'suggestion', 0, 'ru'),
+    # Black
+    ('Black', 'as pretas', 'suggestion', 0, 'pt'),
+    ('Black', 'las negras', 'suggestion', 0, 'es'),
+    ('Black', 'les noirs', 'suggestion', 0, 'fr'),
+    ('Black', 'Schwarz', 'suggestion', 0, 'de'),
+    ('Black', 'il nero', 'suggestion', 0, 'it'),
+    ('Black', 'чёрные', 'suggestion', 0, 'ru'),
+    # check
+    ('check', 'xeque', 'suggestion', 0, 'pt'),
+    ('check', 'jaque', 'suggestion', 0, 'es'),
+    ('check', 'échec', 'suggestion', 0, 'fr'),
+    ('check', 'Schach', 'suggestion', 0, 'de'),
+    ('check', 'scacco', 'suggestion', 0, 'it'),
+    ('check', 'шах', 'suggestion', 0, 'ru'),
+    # checkmate
+    ('checkmate', 'xeque-mate', 'suggestion', 0, 'pt'),
+    ('checkmate', 'jaque mate', 'suggestion', 0, 'es'),
+    ('checkmate', 'échec et mat', 'suggestion', 0, 'fr'),
+    ('checkmate', 'Schachmatt', 'suggestion', 0, 'de'),
+    ('checkmate', 'scacco matto', 'suggestion', 0, 'it'),
+    ('checkmate', 'мат', 'suggestion', 0, 'ru'),
+    # stalemate
+    ('stalemate', 'rei afogado', 'suggestion', 0, 'pt'),
+    ('stalemate', 'ahogado', 'suggestion', 0, 'es'),
+    ('stalemate', 'pat', 'suggestion', 0, 'fr'),
+    ('stalemate', 'Patt', 'suggestion', 0, 'de'),
+    ('stalemate', 'stallo', 'suggestion', 0, 'it'),
+    ('stalemate', 'пат', 'suggestion', 0, 'ru'),
+    # castling
+    ('castling', 'roque', 'suggestion', 0, 'pt'),
+    ('castling', 'enroque', 'suggestion', 0, 'es'),
+    ('castling', 'roque', 'suggestion', 0, 'fr'),
+    ('castling', 'Rochade', 'suggestion', 0, 'de'),
+    ('castling', 'arrocco', 'suggestion', 0, 'it'),
+    ('castling', 'рокировка', 'suggestion', 0, 'ru'),
+    # draw
+    ('draw', 'empate', 'suggestion', 0, 'pt'),
+    ('draw', 'tablas', 'suggestion', 0, 'es'),
+    ('draw', 'partie nulle', 'suggestion', 0, 'fr'),
+    ('draw', 'Remis', 'suggestion', 0, 'de'),
+    ('draw', 'patta', 'suggestion', 0, 'it'),
+    ('draw', 'ничья', 'suggestion', 0, 'ru'),
+    # resigns
+    ('resigns', 'abandona', 'suggestion', 0, 'pt'),
+    ('resigns', 'abandona', 'suggestion', 0, 'es'),
+    ('resigns', 'abandonne', 'suggestion', 0, 'fr'),
+    ('resigns', 'gibt auf', 'suggestion', 0, 'de'),
+    ('resigns', 'abbandona', 'suggestion', 0, 'it'),
+    ('resigns', 'сдаётся', 'suggestion', 0, 'ru'),
+    # square
+    ('square', 'casa', 'suggestion', 0, 'pt'),
+    ('square', 'casilla', 'suggestion', 0, 'es'),
+    ('square', 'case', 'suggestion', 0, 'fr'),
+    ('square', 'Feld', 'suggestion', 0, 'de'),
+    ('square', 'casa', 'suggestion', 0, 'it'),
+    ('square', 'поле', 'suggestion', 0, 'ru'),
+    # file
+    ('file', 'coluna', 'suggestion', 0, 'pt'),
+    ('file', 'columna', 'suggestion', 0, 'es'),
+    ('file', 'colonne', 'suggestion', 0, 'fr'),
+    ('file', 'Linie', 'suggestion', 0, 'de'),
+    ('file', 'colonna', 'suggestion', 0, 'it'),
+    ('file', 'вертикаль', 'suggestion', 0, 'ru'),
+    # rank
+    ('rank', 'fileira', 'suggestion', 0, 'pt'),
+    ('rank', 'fila', 'suggestion', 0, 'es'),
+    ('rank', 'rangée', 'suggestion', 0, 'fr'),
+    ('rank', 'Reihe', 'suggestion', 0, 'de'),
+    ('rank', 'traversa', 'suggestion', 0, 'it'),
+    ('rank', 'горизонталь', 'suggestion', 0, 'ru'),
+    # open file
+    ('open file', 'coluna aberta', 'suggestion', 0, 'pt'),
+    ('open file', 'columna abierta', 'suggestion', 0, 'es'),
+    ('open file', 'colonne ouverte', 'suggestion', 0, 'fr'),
+    ('open file', 'offene Linie', 'suggestion', 0, 'de'),
+    ('open file', 'colonna aperta', 'suggestion', 0, 'it'),
+    # kingside
+    ('kingside', 'ala do rei', 'suggestion', 0, 'pt'),
+    ('kingside', 'flanco de rey', 'suggestion', 0, 'es'),
+    ('kingside', 'aile roi', 'suggestion', 0, 'fr'),
+    ('kingside', 'Königsflügel', 'suggestion', 0, 'de'),
+    ('kingside', 'ala di re', 'suggestion', 0, 'it'),
+    # queenside
+    ('queenside', 'ala da dama', 'suggestion', 0, 'pt'),
+    ('queenside', 'flanco de dama', 'suggestion', 0, 'es'),
+    ('queenside', 'aile dame', 'suggestion', 0, 'fr'),
+    ('queenside', 'Damenflügel', 'suggestion', 0, 'de'),
+    ('queenside', 'ala di donna', 'suggestion', 0, 'it'),
+    # pin
+    ('pin', 'cravada', 'suggestion', 0, 'pt'),
+    ('pin', 'clavada', 'suggestion', 0, 'es'),
+    ('pin', 'clouage', 'suggestion', 0, 'fr'),
+    ('pin', 'Fesselung', 'suggestion', 0, 'de'),
+    ('pin', 'inchiodatura', 'suggestion', 0, 'it'),
+    ('pin', 'связка', 'suggestion', 0, 'ru'),
+    # fork
+    ('fork', 'garfo', 'suggestion', 0, 'pt'),
+    ('fork', 'horquilla', 'suggestion', 0, 'es'),
+    ('fork', 'fourchette', 'suggestion', 0, 'fr'),
+    ('fork', 'Gabel', 'suggestion', 0, 'de'),
+    ('fork', 'forchetta', 'suggestion', 0, 'it'),
+    ('fork', 'вилка', 'suggestion', 0, 'ru'),
+    # skewer
+    ('skewer', 'espeto', 'suggestion', 0, 'pt'),
+    ('skewer', 'enfilada', 'suggestion', 0, 'es'),
+    ('skewer', 'Spieß', 'suggestion', 0, 'de'),
+    ('skewer', 'infilata', 'suggestion', 0, 'it'),
+    # sacrifice
+    ('sacrifice', 'sacrifício', 'suggestion', 0, 'pt'),
+    ('sacrifice', 'sacrificio', 'suggestion', 0, 'es'),
+    ('sacrifice', 'sacrifice', 'suggestion', 0, 'fr'),
+    ('sacrifice', 'Opfer', 'suggestion', 0, 'de'),
+    ('sacrifice', 'sacrificio', 'suggestion', 0, 'it'),
+    ('sacrifice', 'жертва', 'suggestion', 0, 'ru'),
+    # discovered check
+    ('discovered check', 'xeque descoberto', 'suggestion', 0, 'pt'),
+    ('discovered check', 'jaque descubierto', 'suggestion', 0, 'es'),
+    ('discovered check', 'Abzugsschach', 'suggestion', 0, 'de'),
+    ('discovered check', 'scacco di scoperta', 'suggestion', 0, 'it'),
+    # opening
+    ('opening', 'abertura', 'suggestion', 0, 'pt'),
+    ('opening', 'apertura', 'suggestion', 0, 'es'),
+    ('opening', 'ouverture', 'suggestion', 0, 'fr'),
+    ('opening', 'Eröffnung', 'suggestion', 0, 'de'),
+    ('opening', 'apertura', 'suggestion', 0, 'it'),
+    ('opening', 'дебют', 'suggestion', 0, 'ru'),
+    # middlegame
+    ('middlegame', 'meio-jogo', 'suggestion', 0, 'pt'),
+    ('middlegame', 'medio juego', 'suggestion', 0, 'es'),
+    ('middlegame', 'milieu de partie', 'suggestion', 0, 'fr'),
+    ('middlegame', 'Mittelspiel', 'suggestion', 0, 'de'),
+    ('middlegame', 'mediogioco', 'suggestion', 0, 'it'),
+    ('middlegame', 'миттельшпиль', 'suggestion', 0, 'ru'),
+    # endgame
+    ('endgame', 'final', 'suggestion', 0, 'pt'),
+    ('endgame', 'final', 'suggestion', 0, 'es'),
+    ('endgame', 'finale', 'suggestion', 0, 'fr'),
+    ('endgame', 'Endspiel', 'suggestion', 0, 'de'),
+    ('endgame', 'finale', 'suggestion', 0, 'it'),
+    ('endgame', 'эндшпиль', 'suggestion', 0, 'ru'),
+    # passed pawn
+    ('passed pawn', 'peão passado', 'suggestion', 0, 'pt'),
+    ('passed pawn', 'peón pasado', 'suggestion', 0, 'es'),
+    ('passed pawn', 'pion passé', 'suggestion', 0, 'fr'),
+    ('passed pawn', 'Freibauer', 'suggestion', 0, 'de'),
+    ('passed pawn', 'pedone passato', 'suggestion', 0, 'it'),
+    # isolated pawn
+    ('isolated pawn', 'peão isolado', 'suggestion', 0, 'pt'),
+    ('isolated pawn', 'peón aislado', 'suggestion', 0, 'es'),
+    ('isolated pawn', 'pion isolé', 'suggestion', 0, 'fr'),
+    ('isolated pawn', 'isolierter Bauer', 'suggestion', 0, 'de'),
+    ('isolated pawn', 'pedone isolato', 'suggestion', 0, 'it'),
+    # doubled pawns
+    ('doubled pawns', 'peões dobrados', 'suggestion', 0, 'pt'),
+    ('doubled pawns', 'peones doblados', 'suggestion', 0, 'es'),
+    ('doubled pawns', 'pions doublés', 'suggestion', 0, 'fr'),
+    ('doubled pawns', 'Doppelbauern', 'suggestion', 0, 'de'),
+    ('doubled pawns', 'pedoni doppiati', 'suggestion', 0, 'it'),
+    # outpost
+    ('outpost', 'posto avançado', 'suggestion', 0, 'pt'),
+    ('outpost', 'puesto avanzado', 'suggestion', 0, 'es'),
+    ('outpost', 'Stützpunkt', 'suggestion', 0, 'de'),
+    ('outpost', 'avamposto', 'suggestion', 0, 'it'),
+    # initiative
+    ('initiative', 'iniciativa', 'suggestion', 0, 'pt'),
+    ('initiative', 'iniciativa', 'suggestion', 0, 'es'),
+    ('initiative', 'initiative', 'suggestion', 0, 'fr'),
+    ('initiative', 'Initiative', 'suggestion', 0, 'de'),
+    ('initiative', 'iniziativa', 'suggestion', 0, 'it'),
+    ('initiative', 'инициатива', 'suggestion', 0, 'ru'),
+    # counterplay
+    ('counterplay', 'contrajogo', 'suggestion', 0, 'pt'),
+    ('counterplay', 'contrajuego', 'suggestion', 0, 'es'),
+    ('counterplay', 'contre-jeu', 'suggestion', 0, 'fr'),
+    ('counterplay', 'Gegenspiel', 'suggestion', 0, 'de'),
+    ('counterplay', 'controgioco', 'suggestion', 0, 'it'),
+    # blunder
+    ('blunder', 'erro grave', 'suggestion', 0, 'pt'),
+    ('blunder', 'error grave', 'suggestion', 0, 'es'),
+    ('blunder', 'gaffe', 'suggestion', 0, 'fr'),
+    ('blunder', 'grober Fehler', 'suggestion', 0, 'de'),
+    ('blunder', 'errore grave', 'suggestion', 0, 'it'),
+    # threat
+    ('threat', 'ameaça', 'suggestion', 0, 'pt'),
+    ('threat', 'amenaza', 'suggestion', 0, 'es'),
+    ('threat', 'menace', 'suggestion', 0, 'fr'),
+    ('threat', 'Drohung', 'suggestion', 0, 'de'),
+    ('threat', 'minaccia', 'suggestion', 0, 'it'),
+    ('threat', 'угроза', 'suggestion', 0, 'ru'),
+    # advantage
+    ('advantage', 'vantagem', 'suggestion', 0, 'pt'),
+    ('advantage', 'ventaja', 'suggestion', 0, 'es'),
+    ('advantage', 'avantage', 'suggestion', 0, 'fr'),
+    ('advantage', 'Vorteil', 'suggestion', 0, 'de'),
+    ('advantage', 'vantaggio', 'suggestion', 0, 'it'),
+    ('advantage', 'преимущество', 'suggestion', 0, 'ru'),
+]

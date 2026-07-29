@@ -91,6 +91,7 @@ from tradutor_pgn.glossario import (
     load_glossary_entries_from_db,
     load_cleanup_substitutions,
     load_automatic_substitutions,
+    load_suggestion_substitutions,
     load_interactive_substitutions,
     load_substitutions,
     rebuild_glossary_database,
@@ -292,6 +293,12 @@ def setUpModule():
     glossario._default_substitutions_path = lambda: str(base / "Substituicoes.txt")
     glossario._default_glossary_db_path = lambda: str(base / "glossario.db")
     settings.default_settings_path = lambda: str(base / "settings.json")
+    # A semente tambem sai do caminho, e por uma razao diferente: ela EXISTE no
+    # repositorio e e mesclada em toda carga de regras (garantia S15), entao um
+    # teste que compara a lista de regras exata veria a terminologia embutida
+    # junto. Quem quer exercitar a semente passa `seed_path` explicitamente —
+    # ver `SeedGlossaryTests`.
+    glossario._default_seed_path = lambda: str(base / "semente-inexistente.txt")
 
 
 def tearDownModule():
@@ -1559,16 +1566,17 @@ class CallbackErrorReportingTests(unittest.TestCase):
         self.assertTrue(logs)
 
 
-def com_prioridade(entries, priority=GLOSSARY_PRIORITY_DEFAULT):
-    """Entradas de tres campos como o arquivo as devolve: com a prioridade.
+def com_prioridade(entries, priority=GLOSSARY_PRIORITY_DEFAULT, scope=""):
+    """Entradas de tres campos como o arquivo as devolve: com prioridade e escopo.
 
-    A entrada detalhada ganhou um quarto campo no item 1.5 parte 2. Nos testes
-    cujo assunto nao e a prioridade, escrever `, 0` em cada tupla so acrescenta
-    ruido — mas apagar o campo da comparacao esconderia uma prioridade mexida
-    por engano. Este helper diz explicitamente qual prioridade se espera.
+    A entrada detalhada ganhou um quarto campo no item 1.5 parte 2 e um quinto na
+    secao 15. Nos testes cujo assunto nao e nenhum dos dois, escrever `, 0, ""`
+    em cada tupla so acrescenta ruido — mas apagar os campos da comparacao
+    esconderia um deles mexido por engano. Este helper diz explicitamente o que
+    se espera nos dois.
     """
     return [
-        (orig, new, rule_type, priority) for orig, new, rule_type in entries
+        (orig, new, rule_type, priority, scope) for orig, new, rule_type in entries
     ]
 
 
@@ -1751,7 +1759,7 @@ class CsvImportSingleReadTests(unittest.TestCase):
             )
 
             entradas = load_glossary_entry_details(str(glossary), deduplicate=False)
-            pares = {(orig, new) for orig, new, _tipo, _prio in entradas}
+            pares = {(orig, new) for orig, new, _tipo, _prio, _escopo in entradas}
             self.assertEqual(stats["inserted"], 2)
             self.assertIn(("queen", "dama"), pares)
             self.assertIn(("bishop", "bispo"), pares)
@@ -3059,7 +3067,7 @@ class TranslationWorkerTests(unittest.TestCase):
 
                 translation_worker.translate_text = fake_translate
                 translation_worker.messagebox.showinfo = lambda *_args, **_kwargs: None
-                translation_worker.load_cleanup_substitutions = lambda: [
+                translation_worker.load_cleanup_substitutions = lambda **_kw: [
                     ("== EndSquare ==", ""),
                 ]
 
@@ -3112,8 +3120,8 @@ class TranslationWorkerTests(unittest.TestCase):
             try:
                 translation_worker.translate_text = lambda *_args, **_kwargs: "As brancas ganham a rainha"
                 translation_worker.messagebox.showinfo = lambda *_args, **_kwargs: None
-                translation_worker.load_cleanup_substitutions = lambda: []
-                translation_worker.load_automatic_substitutions = lambda: [
+                translation_worker.load_cleanup_substitutions = lambda **_kw: []
+                translation_worker.load_automatic_substitutions = lambda **_kw: [
                     ("rainha", "dama"),
                 ]
 
@@ -4284,7 +4292,7 @@ class DatabaseToolsBackgroundTests(unittest.TestCase):
                 setattr, db_tools, "load_automatic_substitutions",
                 db_tools.load_automatic_substitutions,
             )
-            db_tools.load_automatic_substitutions = lambda: [("rainha", "dama")]
+            db_tools.load_automatic_substitutions = lambda **_kw: [("rainha", "dama")]
 
             self.addCleanup(
                 setattr, db_tools, "analyze_database_automatic_rules",
@@ -4853,7 +4861,7 @@ class GlossaryFailureUiTests(unittest.TestCase):
     def test_startup_load_degrades_instead_of_killing_the_window(self):
         """Sem isso, um `Substituicoes.txt` quebrado impedia o programa de abrir."""
 
-        def explode():
+        def explode(**_kwargs):
             raise ValueError("arquivo invalido")
 
         previous = app_actions.load_interactive_substitutions
@@ -5017,9 +5025,11 @@ class GlossaryEntryLocationTests(unittest.TestCase):
 
             entradas = load_glossary_entry_details(str(path), deduplicate=False)
             # "rook" foi destruida e "queen" continua intacta: a entrada errada.
-            self.assertEqual(entradas[1], ("queen", "rainha", GLOSSARY_RULE_SUGGESTION, 0))
-            self.assertIn(("queen", "dama", GLOSSARY_RULE_SUGGESTION, 0), entradas)
-            self.assertNotIn(("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0), entradas)
+            self.assertEqual(
+            entradas[1], ("queen", "rainha", GLOSSARY_RULE_SUGGESTION, 0, "")
+        )
+            self.assertIn(("queen", "dama", GLOSSARY_RULE_SUGGESTION, 0, ""), entradas)
+            self.assertNotIn(("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0, ""), entradas)
 
     def test_update_by_entry_refuses_when_the_entry_is_gone(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5060,7 +5070,7 @@ class GlossaryEntryLocationTests(unittest.TestCase):
             self.assertEqual(result["index"], 0)
             self.assertEqual(
                 load_glossary_entry_details(str(path), deduplicate=False)[0],
-                ("rook", "torre alta", GLOSSARY_RULE_SUGGESTION, 0),
+                ("rook", "torre alta", GLOSSARY_RULE_SUGGESTION, 0, ""),
             )
 
     def test_update_by_entry_keeps_the_type_when_none_is_given(self):
@@ -5077,7 +5087,7 @@ class GlossaryEntryLocationTests(unittest.TestCase):
 
             self.assertEqual(
                 load_glossary_entry_details(str(path), deduplicate=False)[2],
-                ("pawn", "peao livre", GLOSSARY_RULE_AUTOMATIC, 0),
+                ("pawn", "peao livre", GLOSSARY_RULE_AUTOMATIC, 0, ""),
             )
 
     def test_delete_by_pair_can_target_the_type_and_the_duplicate(self):
@@ -5234,9 +5244,9 @@ class GlossaryPriorityTests(unittest.TestCase):
             path = Path(tmp) / "Substituicoes.txt"
             save_glossary_entries(
                 [
-                    ("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0),
-                    ("pawn", "peao", GLOSSARY_RULE_AUTOMATIC, 0),
-                    ("queen", "dama", GLOSSARY_RULE_SUGGESTION, 3),
+                    ("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0, ""),
+                    ("pawn", "peao", GLOSSARY_RULE_AUTOMATIC, 0, ""),
+                    ("queen", "dama", GLOSSARY_RULE_SUGGESTION, 3, ""),
                 ],
                 str(path),
                 create_backup=False,
@@ -5282,7 +5292,7 @@ class GlossaryPriorityTests(unittest.TestCase):
             )
 
             do_banco = load_glossary_entry_details_from_db(str(db_path))
-            self.assertEqual(do_banco, [("queen", "dama", GLOSSARY_RULE_SUGGESTION, 3)])
+            self.assertEqual(do_banco, [("queen", "dama", GLOSSARY_RULE_SUGGESTION, 3, "")])
 
     def test_a_database_from_the_previous_schema_is_rebuilt(self):
         """O `ALTER TABLE` sozinho seria uma armadilha.
@@ -5428,8 +5438,8 @@ class GlossaryPriorityTests(unittest.TestCase):
             base = Path(tmp)
             csv_path = base / "glossario.csv"
             entradas = [
-                ("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0),
-                ("queen", "dama", GLOSSARY_RULE_AUTOMATIC, 2),
+                ("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0, ""),
+                ("queen", "dama", GLOSSARY_RULE_AUTOMATIC, 2, ""),
             ]
             export_glossary_csv(str(csv_path), entradas)
 
@@ -5444,7 +5454,7 @@ class GlossaryPriorityTests(unittest.TestCase):
             )
             self.assertEqual(
                 read_glossary_csv(str(antigo)),
-                [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0)],
+                [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0, "")],
             )
 
     def test_saving_a_new_priority_finds_the_entry_to_update(self):
@@ -5479,7 +5489,7 @@ class GlossaryPriorityTests(unittest.TestCase):
 
             self.assertIsNotNone(resultado, "nao achou a entrada para atualizar")
             entradas = load_glossary_entry_details(str(path), prefer_db=False)
-            self.assertEqual(entradas, [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 5)])
+            self.assertEqual(entradas, [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 5, "")])
 
     def test_locating_an_entry_ignores_the_priority(self):
         """O mesmo, direto na funcao — e o que a promocao tambem depende.
@@ -5564,7 +5574,7 @@ class GlossaryPromotionTests(unittest.TestCase):
         promovidas = promote_glossary_rule(list(self.ENTRIES), 2)
         regras = [
             (orig, new, prio)
-            for orig, new, _tipo, prio in promovidas
+            for orig, new, _tipo, prio, _e in promovidas
         ]
 
         self.assertEqual(apply_all_substitutions("a torre", self.ENTRIES), "a rook")
@@ -5697,8 +5707,8 @@ class GlossaryConflictTests(unittest.TestCase):
         `apply_all_substitutions`.
         """
         entradas = [
-            ("torre", "rook", GLOSSARY_RULE_SUGGESTION, 0),
-            ("torre", "castle", GLOSSARY_RULE_SUGGESTION, 2),
+            ("torre", "rook", GLOSSARY_RULE_SUGGESTION, 0, ""),
+            ("torre", "castle", GLOSSARY_RULE_SUGGESTION, 2, ""),
         ]
         conflitos = glossario.glossary_conflicts(entradas)
 
@@ -5706,7 +5716,7 @@ class GlossaryConflictTests(unittest.TestCase):
             for contexto in info["contexts"]:
                 self.assertEqual(contexto["winner"], 1, "a ordem do arquivo venceu")
 
-        regras = [(orig, new, prio) for orig, new, _tipo, prio in entradas]
+        regras = [(orig, new, prio) for orig, new, _tipo, prio, _e in entradas]
         self.assertEqual(self.aplicada(regras, "a torre avanca"), "a castle avanca")
 
         # E a mensagem acompanha: quem perde continua sendo avisado.
@@ -6396,7 +6406,7 @@ class ReadGlossaryCsvTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_CLEANUP, 0)]
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_CLEANUP, 0, "")]
             )
 
     def test_headers_are_matched_ignoring_case_and_spaces(self):
@@ -6406,7 +6416,7 @@ class ReadGlossaryCsvTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0)]
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0, "")]
             )
 
     def test_missing_type_column_defaults_to_suggestion(self):
@@ -6414,7 +6424,7 @@ class ReadGlossaryCsvTests(unittest.TestCase):
             path = self.write_csv(tmp, "original,replacement\r\nrook,torre\r\n")
 
             self.assertEqual(
-                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0)]
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0, "")]
             )
 
     def test_unknown_type_falls_back_to_suggestion(self):
@@ -6424,7 +6434,7 @@ class ReadGlossaryCsvTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0)]
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0, "")]
             )
 
     def test_values_are_stripped(self):
@@ -6434,7 +6444,7 @@ class ReadGlossaryCsvTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0)]
+                read_glossary_csv(path), [("rook", "torre", GLOSSARY_RULE_SUGGESTION, 0, "")]
             )
 
     def test_missing_required_column_is_rejected(self):
@@ -7766,7 +7776,7 @@ class ApplyAutomaticRulesFlowTests(unittest.TestCase):
             setattr, db_tools, "load_automatic_substitutions",
             db_tools.load_automatic_substitutions,
         )
-        db_tools.load_automatic_substitutions = lambda: list(regras)
+        db_tools.load_automatic_substitutions = lambda **_kw: list(regras)
 
     def _rodar(self, db_path, **kwargs):
         SynchronousProgress().install(self, db_tools)
@@ -7893,7 +7903,7 @@ class ApplyAutomaticRulesFlowTests(unittest.TestCase):
                 db_tools.load_automatic_substitutions,
             )
 
-            def explode():
+            def explode(**_kwargs):
                 raise ValueError("Substituicoes.txt malformado")
 
             db_tools.load_automatic_substitutions = explode
@@ -10949,7 +10959,7 @@ class UnknownRuleTypeTests(unittest.TestCase):
 
         # Degrada, como S5 manda: uma regra torta nao desliga as outras.
         self.assertEqual(
-            [(o, n, t) for o, n, t, _p in entradas],
+            [(o, n, t) for o, n, t, _p, _e in entradas],
             [
                 ("rook", "torre", glossario.GLOSSARY_RULE_AUTOMATIC),
                 ("queen", "dama", glossario.GLOSSARY_RULE_SUGGESTION),
@@ -11032,7 +11042,7 @@ class SquarePlaceholderTests(unittest.TestCase):
         )
         com_placeholder = [
             orig
-            for orig, _new, _tipo, _prio in entradas
+            for orig, _new, _tipo, _prio, _escopo in entradas
             if glossario.GLOSSARY_SQUARE_PLACEHOLDER in orig
         ]
         self.assertGreaterEqual(len(com_placeholder), 20)
@@ -11040,12 +11050,405 @@ class SquarePlaceholderTests(unittest.TestCase):
         casa_literal = re.compile(r"\b[a-h][1-8]\b")
         enumeradas = [
             orig
-            for orig, _new, _tipo, _prio in entradas
+            for orig, _new, _tipo, _prio, _escopo in entradas
             if casa_literal.search(orig)
         ]
         # Sobram so as 28 automaticas de peao, que ficaram literais de proposito
         # para nao mudar o tipo de 91 padroes (ROADMAP 14.7).
         self.assertLessEqual(len(enumeradas), 40)
+
+
+class LanguageScopeTests(unittest.TestCase):
+    """Escopo de idioma por regra (garantia S11, ROADMAP 15.1).
+
+    O glossario era global: as regras que corrigem portugues rodavam sobre a
+    traducao para o italiano tambem, e `('movimento', 'lance')` transformava
+    `il movimento` em `il lance`.
+    """
+
+    def test_the_scope_names_the_target(self):
+        self.assertTrue(glossario.scope_matches("pt", "en", "pt"))
+        self.assertFalse(glossario.scope_matches("pt", "en", "it"))
+        self.assertTrue(glossario.scope_matches("", "en", "it"), "sem escopo vale sempre")
+
+    def test_the_pair_form_requires_both(self):
+        self.assertTrue(glossario.scope_matches("en>pt", "en", "pt"))
+        self.assertFalse(glossario.scope_matches("en>pt", "es", "pt"))
+
+    def test_a_pair_scope_does_not_match_an_undeclared_source(self):
+        """Em "Detectar" nao ha como afirmar que o original esta em ingles, e
+        aplicar seria um palpite — a mesma escolha da correcao de lances (P3)."""
+        self.assertFalse(glossario.scope_matches("en>pt", "", "pt"))
+
+    def test_no_declared_pair_filters_nothing(self):
+        """O comportamento de antes desta versao, e o que mantem de pe todo
+        chamador que nao passa idioma."""
+        self.assertTrue(glossario.scope_matches("pt", None, None))
+
+    def test_star_and_empty_mean_the_same(self):
+        self.assertEqual(glossario.normalize_glossary_scope("*"), "")
+        self.assertEqual(glossario.normalize_glossary_scope(None), "")
+        self.assertEqual(glossario.normalize_glossary_scope(" pt "), "pt")
+
+    def test_the_portuguese_rule_no_longer_reaches_italian(self):
+        """O dano medido que abriu a secao 15, agora com o escopo."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        caminho = Path(tmp.name) / "Substituicoes.txt"
+        caminho.write_text(
+            "escopo = 'pt'\n"
+            "substituicoes = [\n"
+            "    ('movimento', 'lance', 'automatic'),\n"
+            "    ('\\u00d7', 'x', 'automatic', 0, '*'),\n"
+            "]\n",
+            encoding="utf-8",
+        )
+
+        para_it = load_automatic_substitutions(
+            str(caminho), source_language="en", target_language="it"
+        )
+        para_pt = load_automatic_substitutions(
+            str(caminho), source_language="en", target_language="pt"
+        )
+
+        self.assertEqual(
+            glossario.apply_all_substitutions("Il movimento della torre", para_it),
+            "Il movimento della torre",
+        )
+        self.assertEqual(
+            glossario.apply_all_substitutions("O movimento da torre", para_pt),
+            "O lance da torre",
+        )
+        # A regra de notacao e global de proposito: `×` nao e portugues.
+        self.assertEqual(
+            glossario.apply_all_substitutions("N×d4", para_it), "Nxd4"
+        )
+
+    def test_a_file_without_the_declaration_behaves_exactly_as_before(self):
+        """Retrocompatibilidade: sem `escopo`, toda regra vale para todo par."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        caminho = Path(tmp.name) / "Substituicoes.txt"
+        caminho.write_text(
+            "substituicoes = [\n    ('rook', 'torre'),\n]\n", encoding="utf-8"
+        )
+
+        self.assertEqual(glossario.glossary_default_scope(str(caminho)), "")
+        for destino in ("pt", "it", "ru"):
+            with self.subTest(destino=destino):
+                regras = load_suggestion_substitutions(
+                    str(caminho), source_language="en", target_language=destino
+                )
+                self.assertEqual(regras, [("rook", "torre")])
+
+    def test_the_declaration_is_one_line_and_the_rules_inherit_it(self):
+        """O argumento do formato: declarar uma vez em vez de escrever `, 'pt'`
+        em cinco mil e setecentas regras, que seria um diff do arquivo inteiro."""
+        entradas = [
+            ("rook", "torre", "suggestion", 0, "pt"),
+            ("×", "x", "automatic", 0, ""),
+            ("bishop", "alfiere", "suggestion", 0, "it"),
+        ]
+        texto = glossario._serialize_entries(entradas, default_scope="pt")
+
+        self.assertIn("escopo = 'pt'", texto)
+        # Herda: o campo nao aparece.
+        self.assertIn("    ('rook', 'torre'),\n", texto)
+        # Discorda: aparece, e `'*'` e como se escreve "todo par".
+        self.assertIn("('×', 'x', 'automatic', 0, '*'),", texto)
+        self.assertIn("('bishop', 'alfiere', 'suggestion', 0, 'it'),", texto)
+
+    def test_the_round_trip_through_the_file_preserves_every_scope(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        caminho = Path(tmp.name) / "Substituicoes.txt"
+        entradas = [
+            ("rook", "torre", "suggestion", 0, "pt"),
+            ("×", "x", "automatic", 0, ""),
+            ("bishop", "alfiere", "suggestion", 0, "it"),
+        ]
+        caminho.write_text(
+            glossario._serialize_entries(entradas, default_scope="pt"),
+            encoding="utf-8",
+        )
+
+        relidas = load_glossary_entry_details(
+            str(caminho), deduplicate=False, prefer_db=False
+        )
+        self.assertEqual(relidas, entradas)
+
+    def test_saving_an_entry_keeps_the_file_declaration(self):
+        """Sem isto, a primeira gravacao pela janela apagaria o `escopo = 'pt'` e
+        as milhares de regras portuguesas voltariam a ser globais."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        caminho = Path(tmp.name) / "Substituicoes.txt"
+        caminho.write_text(
+            "escopo = 'pt'\nsubstituicoes = [\n    ('rook', 'torre'),\n]\n",
+            encoding="utf-8",
+        )
+
+        glossario.add_glossary_entry("queen", "dama", path=str(caminho))
+
+        texto = caminho.read_text(encoding="utf-8")
+        self.assertIn("escopo = 'pt'", texto)
+        relidas = load_glossary_entry_details(
+            str(caminho), deduplicate=False, prefer_db=False
+        )
+        self.assertEqual(
+            relidas,
+            [
+                ("rook", "torre", "suggestion", 0, "pt"),
+                ("queen", "dama", "suggestion", 0, "pt"),
+            ],
+            "a entrada nova herda o padrao do arquivo",
+        )
+
+    def test_the_scope_survives_the_round_trip_through_the_database(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "glossario.db"
+        sync_glossary_database(
+            [("rook", "torre", "suggestion", 0, "pt")], db_path=str(db)
+        )
+        self.assertEqual(
+            load_glossary_entry_details_from_db(str(db)),
+            [("rook", "torre", "suggestion", 0, "pt")],
+        )
+
+    def test_the_csv_carries_the_scope_and_tolerates_its_absence(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        csv_path = Path(tmp.name) / "g.csv"
+        glossario.export_glossary_csv(
+            str(csv_path), entries=[("rook", "torre", "suggestion", 0, "pt")]
+        )
+        self.assertEqual(
+            glossario.read_glossary_csv(str(csv_path)),
+            [("rook", "torre", "suggestion", 0, "pt")],
+        )
+
+        sem_coluna = Path(tmp.name) / "antigo.csv"
+        sem_coluna.write_text(
+            "original,replacement\nrook,torre\n", encoding="utf-8"
+        )
+        self.assertEqual(
+            glossario.read_glossary_csv(str(sem_coluna)),
+            [("rook", "torre", "suggestion", 0, "")],
+        )
+
+    def test_rules_for_different_targets_do_not_conflict(self):
+        """Elas nunca sao carregadas juntas, entao acusa-las de conflito seria
+        descrever uma briga que nao acontece."""
+        entradas = [
+            ("rook", "torre", "suggestion", 0, "pt"),
+            ("rook", "tour", "suggestion", 0, "fr"),
+        ]
+        self.assertEqual(glossario.glossary_conflicts(entradas), {})
+
+    def test_an_unscoped_rule_still_conflicts_with_a_scoped_one(self):
+        """Escopo vazio cruza com todos: a regra global alcanca o par da outra."""
+        entradas = [
+            ("rook", "torre", "suggestion", 0, ""),
+            ("rook", "tour", "suggestion", 0, "fr"),
+        ]
+        self.assertEqual(sorted(glossario.glossary_conflicts(entradas)), [0, 1])
+
+    def test_an_unknown_scope_language_warns_instead_of_going_global(self):
+        """Degradar para "vale para todos" espalharia a regra em vez de
+        limita-la, que e o oposto do que a intencao diz."""
+        avisos = []
+        glossario.set_glossary_error_handler(avisos.append)
+        self.addCleanup(glossario.set_glossary_error_handler, None)
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        caminho = Path(tmp.name) / "Substituicoes.txt"
+        caminho.write_text(
+            "substituicoes = [\n    ('rook', 'torre', 'suggestion', 0, 'ptt'),\n]\n",
+            encoding="utf-8",
+        )
+
+        entradas = load_glossary_entry_details(str(caminho), prefer_db=False)
+        self.assertEqual(glossario.glossary_entry_scope(entradas[0]), "ptt")
+        self.assertTrue(any("ptt" in aviso for aviso in avisos))
+        # E ela nao casa par nenhum: fica muda, e o aviso e o que a denuncia.
+        self.assertEqual(
+            load_suggestion_substitutions(
+                str(caminho), source_language="en", target_language="pt"
+            ),
+            [],
+        )
+
+    def test_the_real_glossary_declares_the_portuguese_scope(self):
+        """O acervo versionado esta escopado. Falhar aqui significa que o
+        `escopo = 'pt'` saiu do arquivo, e as milhares de regras portuguesas
+        voltaram a alcancar as traducoes para os outros seis idiomas."""
+        path = Path(__file__).resolve().parent.parent / "Substituicoes.txt"
+        if not path.exists():  # pragma: no cover - checkout sem o glossario
+            self.skipTest("Substituicoes.txt nao esta neste checkout")
+
+        self.assertEqual(glossario.glossary_default_scope(str(path)), "pt")
+
+        entradas = load_glossary_entry_details(
+            str(path), deduplicate=False, prefer_db=False
+        )
+        escopos = {glossario.glossary_entry_scope(e) for e in entradas}
+        self.assertEqual(escopos, {"pt", ""}, "so 'pt' e as globais de notacao")
+
+        # As globais sao notacao, e nao lingua: nenhuma delas tem letra acentuada
+        # nem palavra portuguesa.
+        globais = [
+            glossario.glossary_entry_pair(e)[0]
+            for e in entradas
+            if not glossario.glossary_entry_scope(e)
+        ]
+        self.assertLessEqual(len(globais), 25)
+        self.assertIn("×", globais)
+
+
+class SeedGlossaryTests(unittest.TestCase):
+    """O dicionario-semente (garantia S15, ROADMAP 15.2)."""
+
+    def seed_path(self):
+        return (
+            Path(__file__).resolve().parent.parent
+            / "tradutor_pgn"
+            / "Substituicoes-semente.txt"
+        )
+
+    def test_the_seed_ships_with_the_program(self):
+        caminho = self.seed_path()
+        self.assertTrue(caminho.exists(), "a semente vem com o programa")
+        entradas = glossario.load_seed_entries(str(caminho))
+        self.assertGreater(len(entradas), 100)
+
+    def test_every_seed_rule_is_scoped_and_a_suggestion(self):
+        """Sem escopo, uma regra da semente para o italiano alcancaria o
+        portugues — o defeito que a secao 15 existe para fechar. E `suggestion`
+        porque a semente e um palpite generico sobre a terminologia de quem usa.
+        """
+        for entry in glossario.load_seed_entries(str(self.seed_path())):
+            orig, _new = glossario.glossary_entry_pair(entry)
+            with self.subTest(orig=orig):
+                self.assertTrue(glossario.glossary_entry_scope(entry))
+                self.assertEqual(
+                    glossario.glossary_entry_type(entry),
+                    glossario.GLOSSARY_RULE_SUGGESTION,
+                )
+
+    def test_no_seed_scope_names_an_unknown_language(self):
+        entradas = glossario.load_seed_entries(str(self.seed_path()))
+        self.assertEqual(glossario.unknown_scope_languages(entradas), [])
+
+    def test_the_seed_gives_terminology_to_a_language_that_had_none(self):
+        """Cinco idiomas tinham ZERO regras. Agora tem o nucleo."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        vazio = Path(tmp.name) / "Substituicoes.txt"
+        vazio.write_text("substituicoes = []\n", encoding="utf-8")
+
+        for destino, esperado in (("it", "alfiere"), ("de", "Läufer"), ("ru", "слон")):
+            with self.subTest(destino=destino):
+                regras = load_interactive_substitutions(
+                    str(vazio),
+                    source_language="en",
+                    target_language=destino,
+                    seed_path=str(self.seed_path()),
+                )
+                self.assertIn(("bishop", esperado), [(r[0], r[1]) for r in regras])
+
+    def test_the_user_rule_always_wins(self):
+        """Garantia S15: para o mesmo padrao no mesmo escopo, a semente sai."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        do_usuario = Path(tmp.name) / "Substituicoes.txt"
+        do_usuario.write_text(
+            "substituicoes = [\n"
+            "    ('bishop', 'o meu bispo', 'suggestion', 0, 'it'),\n"
+            "]\n",
+            encoding="utf-8",
+        )
+
+        regras = load_interactive_substitutions(
+            str(do_usuario),
+            source_language="en",
+            target_language="it",
+            seed_path=str(self.seed_path()),
+        )
+        para_bishop = [r[1] for r in regras if r[0] == "bishop"]
+        self.assertEqual(para_bishop, ["o meu bispo"])
+
+    def test_an_unscoped_user_rule_also_beats_the_seed(self):
+        """Uma decisao que vale para todo par vence a semente do par especifico:
+        o usuario disse "sempre assim", e a semente e o palpite."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        do_usuario = Path(tmp.name) / "Substituicoes.txt"
+        do_usuario.write_text(
+            "substituicoes = [\n    ('bishop', 'sempre assim'),\n]\n",
+            encoding="utf-8",
+        )
+
+        regras = load_interactive_substitutions(
+            str(do_usuario),
+            source_language="en",
+            target_language="it",
+            seed_path=str(self.seed_path()),
+        )
+        self.assertEqual([r[1] for r in regras if r[0] == "bishop"], ["sempre assim"])
+
+    def test_the_seed_yields_on_a_case_difference_too(self):
+        """A licao de S12: uma semente em minusculas engoliria a versao
+        capitalizada do usuario sem que nada dissesse."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        do_usuario = Path(tmp.name) / "Substituicoes.txt"
+        do_usuario.write_text(
+            "substituicoes = [\n"
+            "    ('Bishop', 'O Meu Bispo', 'suggestion', 0, 'it'),\n"
+            "]\n",
+            encoding="utf-8",
+        )
+
+        regras = load_interactive_substitutions(
+            str(do_usuario),
+            source_language="en",
+            target_language="it",
+            seed_path=str(self.seed_path()),
+        )
+        self.assertEqual(
+            [(r[0], r[1]) for r in regras if r[0].casefold() == "bishop"],
+            [("Bishop", "O Meu Bispo")],
+        )
+
+    def test_a_broken_seed_does_not_stop_the_user_glossary(self):
+        """A semente e conveniencia: um defeito nela nao pode desligar o
+        glossario de quem usa. Mas tambem nao pode ser silencioso — ela vem com
+        o programa, entao o defeito e nosso."""
+        avisos = []
+        glossario.set_glossary_error_handler(avisos.append)
+        self.addCleanup(glossario.set_glossary_error_handler, None)
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        quebrada = Path(tmp.name) / "semente.txt"
+        quebrada.write_text("isto nao e python {{{", encoding="utf-8")
+        do_usuario = Path(tmp.name) / "Substituicoes.txt"
+        do_usuario.write_text(
+            "substituicoes = [\n    ('rook', 'torre'),\n]\n", encoding="utf-8"
+        )
+
+        entradas = load_glossary_entry_details(str(do_usuario), prefer_db=False)
+        regras = glossario._seed_rules_for(
+            entradas,
+            {glossario.GLOSSARY_RULE_SUGGESTION},
+            source_language="en",
+            target_language="pt",
+            seed_path=str(quebrada),
+        )
+        self.assertEqual(regras, [])
+        self.assertTrue(any("semente" in aviso for aviso in avisos))
 
 
 class CuratedGlossaryTests(unittest.TestCase):
@@ -11065,7 +11468,7 @@ class CuratedGlossaryTests(unittest.TestCase):
             str(path), deduplicate=False, prefer_db=False
         )
         cls.por_padrao = {}
-        for orig, new, tipo, prio in cls.entradas:
+        for orig, new, tipo, prio, _escopo in cls.entradas:
             cls.por_padrao.setdefault(orig, []).append((new, tipo, prio))
 
     def substituicoes(self, padrao):
@@ -11113,7 +11516,9 @@ class CuratedGlossaryTests(unittest.TestCase):
         """Apagar lixo de conversao e trabalho de limpeza: roda antes da API, e
         assim para de pagar traducao de lixo (garantia S14)."""
         delecoes = [
-            (orig, tipo) for orig, new, tipo, _prio in self.entradas if not new
+            (orig, tipo)
+            for orig, new, tipo, _prio, _escopo in self.entradas
+            if not new
         ]
         self.assertTrue(delecoes)
         for orig, tipo in delecoes:
@@ -11121,7 +11526,7 @@ class CuratedGlossaryTests(unittest.TestCase):
                 self.assertEqual(tipo, glossario.GLOSSARY_RULE_CLEANUP)
 
     def test_no_rule_returns_what_it_found(self):
-        for orig, new, _tipo, _prio in self.entradas:
+        for orig, new, _tipo, _prio, _escopo in self.entradas:
             if orig:
                 with self.subTest(orig=orig):
                     self.assertNotEqual(orig, new)
@@ -11133,7 +11538,7 @@ class CuratedGlossaryTests(unittest.TestCase):
         a concorrente."""
         priorizadas = [
             (orig, new, prio)
-            for orig, new, _tipo, prio in self.entradas
+            for orig, new, _tipo, prio, _escopo in self.entradas
             if prio != glossario.GLOSSARY_PRIORITY_DEFAULT
         ]
         self.assertIn(("Black", "as pretas", 1), priorizadas)

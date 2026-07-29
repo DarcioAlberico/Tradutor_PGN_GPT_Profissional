@@ -39,6 +39,22 @@ datas, binaries, hiddenimports = collect_all("customtkinter")
 # Ficar em `_internal\spelling_ssp\` nao o torna intocavel: o build e onedir,
 # entao o arquivo esta em disco e da para troca-lo por uma versao mais nova das
 # classificacoes sem reconstruir nada.
+# O dicionario-semente segue a MESMA regra do `spelling.ssp`, e pelo mesmo
+# motivo: ele vem com o programa, e localizado por `__file__` (ver
+# `_default_seed_path`), e por isso vai para dentro do pacote — ao lado do
+# modulo, em `_internal\tradutor_pgn\`. O `Substituicoes.txt` do usuario
+# continua fora, ao lado do `.exe`, onde ele pode edita-lo. Sao dois arquivos
+# de glossario com donos diferentes, e mantê-los em pastas diferentes e o que
+# impede a atualizacao do programa de tocar o trabalho de quem usa.
+SEED = os.path.join("tradutor_pgn", "Substituicoes-semente.txt")
+if os.path.exists(SEED):
+    datas += [(SEED, "tradutor_pgn")]
+else:
+    print(
+        "AVISO: Substituicoes-semente.txt nao encontrado; o executavel sai sem "
+        "a terminologia embutida e so o glossario do usuario vale."
+    )
+
 SPELLING = os.path.join("spelling_ssp", "spelling.ssp")
 if os.path.exists(SPELLING):
     datas += [(SPELLING, "spelling_ssp")]

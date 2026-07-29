@@ -83,10 +83,18 @@ def run_translation(
         # O cache e carregado depois da extracao, quando ja se sabe QUAIS
         # comentarios esta execucao vai consultar (ROADMAP 2.9).
         app.translation_cache = {}
-        cleanup_rules = load_cleanup_substitutions()
+        # O par de idiomas decide QUAIS regras existem nesta execucao (garantia
+        # S11). Uma regra escopada para o portugues nao alcanca uma traducao para
+        # o italiano — e era esse o defeito: `('movimento', 'lance')` corrompia
+        # `il movimento` porque o glossario nao sabia para que lingua traduzia.
+        cleanup_rules = load_cleanup_substitutions(
+            source_language=source_language, target_language=target_language
+        )
         if cleanup_rules:
             app.log_message(f"Regras de limpeza carregadas: {len(cleanup_rules)}")
-        automatic_rules = load_automatic_substitutions()
+        automatic_rules = load_automatic_substitutions(
+            source_language=source_language, target_language=target_language
+        )
         if automatic_rules:
             app.log_message(f"Regras automaticas carregadas: {len(automatic_rules)}")
 

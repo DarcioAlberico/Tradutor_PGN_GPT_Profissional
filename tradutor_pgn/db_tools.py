@@ -530,7 +530,9 @@ def analyze_database_automatic_rules(
     source_language=None,
 ):
     if automatic_rules is None:
-        automatic_rules = load_automatic_substitutions()
+        automatic_rules = load_automatic_substitutions(
+            source_language=source_language, target_language=target_language
+        )
 
     conn = initialize_database(db_path)
     try:
@@ -558,7 +560,9 @@ def apply_database_automatic_rules(
     source_language=None,
 ):
     if automatic_rules is None:
-        automatic_rules = load_automatic_substitutions()
+        automatic_rules = load_automatic_substitutions(
+            source_language=source_language, target_language=target_language
+        )
 
     backup_path = None
     if create_backup:
@@ -692,7 +696,9 @@ def apply_automatic_rules_to_database(
             on_finish(None)
 
     try:
-        automatic_rules = load_automatic_substitutions()
+        automatic_rules = load_automatic_substitutions(
+            source_language=source_language, target_language=target_language
+        )
     except Exception as exc:
         falhou(exc)
         return None
