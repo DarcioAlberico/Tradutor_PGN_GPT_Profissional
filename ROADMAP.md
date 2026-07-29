@@ -2875,3 +2875,57 @@ vale como criterio: **quando a mutacao passa, a primeira suspeita e o que o codi
 diz de si mesmo.**
 
 **Garantia M1 (nova):** *a janela principal reabre no que foi escolhido.*
+
+### 12.1 Um caractere invisivel apagava a memoria do programa — CONCLUIDO (2026-07-29)
+
+Achado **conferindo o executavel antes de publicar a v0.2.1**, e nao pelos
+testes. Semeei um `pgn_tradutor_pro_settings.json` ao lado do `.exe` para
+verificar a garantia M1 no binario empacotado, reabri, e a janela veio com os
+padroes. A primeira suspeita foi a M1; a causa era outra e bem pior.
+
+O arquivo que eu escrevi saiu do PowerShell com `Out-File -Encoding utf8`, que no
+Windows PowerShell 5.1 grava UTF-8 **com BOM**. E `load_settings` abria com
+`encoding="utf-8"`:
+
+```
+tem BOM utf-8: True
+json.loads(...)  -> JSONDecodeError: Unexpected UTF-8 BOM
+load_settings()  -> {}
+```
+
+O `except (FileNotFoundError, json.JSONDecodeError, OSError)` capturava e devolvia
+`{}`, e o programa seguia como se nao houvesse configuracao nenhuma. **Tres bytes
+invisiveis no inicio do arquivo apagavam de uma vez** os rascunhos nao salvos das
+janelas de edicao (garantia R4), a lista de arquivos que ficaram devendo (T4), o
+modo de busca, o tamanho da fonte, a posicao dos divisores e as escolhas da
+janela principal (M1).
+
+**E a perda era definitiva.** Nada avisa — a degradacao para `{}` e exatamente o
+comportamento certo para um arquivo ausente —, e a proxima gravacao escreve um
+arquivo novo sem nada daquilo. O usuario descobriria ao perder uma edicao que
+achava salva.
+
+O acidente do PowerShell nao e o cenario; e so o que o reproduziu. O arquivo e
+JSON e existe para ser editavel a mao, e o Bloco de Notas do Windows grava UTF-8
+com BOM. Qualquer edicao manual das configuracoes zerava as configuracoes.
+
+**A correcao e uma palavra**: `utf-8-sig` na leitura, `utf-8` na gravacao —
+aceita-se o BOM, nao se escreve um. E a mesma assimetria que a leitura de CSV
+deste programa ja usava, e o mesmo principio das garantias E3/E4 para os PGN. O
+`UnicodeDecodeError` entrou junto no `except`: um arquivo que nem seja texto
+levanta ele, e nao `JSONDecodeError`.
+
+**Duas licoes, e a segunda vale mais que o bug:**
+
+- Um `except` largo com uma degradacao razoavel esconde a diferenca entre "nao ha
+  arquivo" e "ha um arquivo e eu nao sei le-lo". As duas viram `{}`. E o mesmo
+  desenho que a garantia S5 corrigiu no glossario, e que E4 corrigiu na deteccao
+  de codificacao; aqui ele sobreviveu porque o caminho parecia trivial demais
+  para ter modo de falha.
+- **Foi a verificacao do binario que achou.** Os 619 testes passavam, e passariam
+  para sempre: nenhum deles escrevia um arquivo de configuracoes que nao tivesse
+  sido escrito pelo proprio programa. Conferir o executavel antes de publicar
+  deixou de ser cerimonia duas vezes seguidas — na v0.2.0 achou o botao
+  indistinguivel, aqui achou isto.
+
+**Garantia M2 (nova):** *um BOM no arquivo de configuracoes nao apaga nada.*

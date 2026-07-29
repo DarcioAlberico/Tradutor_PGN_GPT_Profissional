@@ -218,7 +218,7 @@ bloqueia o terminal e não dá handle nenhum sobre o app.
 python -m unittest discover -s tests
 ```
 
-619 testes, ~113 s. Os de `test_editor_windows.py` e `test_main_window.py` abrem
+627 testes, ~112 s. Os de `test_editor_windows.py` e `test_main_window.py` abrem
 janelas de verdade — os editores e a janela principal — e são pulados onde não
 houver display. O harness comum deles (gate de display, silenciamento de
 diálogos, sandbox de caminhos) está em `tests/gui_harness.py`.

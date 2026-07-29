@@ -14,13 +14,30 @@ def default_settings_path():
 
 
 def load_settings(path=None):
+    """Le as configuracoes, tolerando um BOM no arquivo.
+
+    `utf-8-sig` na LEITURA e `utf-8` na gravacao: aceita-se o BOM, nao se
+    escreve um. E a mesma assimetria que a leitura de CSV do programa ja usa, e
+    aqui ela evita uma perda de dados silenciosa e total.
+
+    O arquivo e JSON e editavel a mao — e o Bloco de Notas do Windows grava UTF-8
+    **com BOM**. Lido como `utf-8`, o BOM faz o `json.load` levantar
+    `JSONDecodeError`, este `except` devolve `{}` e o programa segue como se o
+    arquivo estivesse vazio: somem os rascunhos nao salvos das janelas de edicao
+    (garantia R4), a lista de arquivos que ficaram devendo (T4), o modo de busca,
+    o tamanho da fonte e as escolhas da janela principal (M1).
+
+    E a perda e definitiva, porque nada avisa: a proxima gravacao escreve um
+    arquivo novo sem nada daquilo. Um caractere invisivel no inicio do arquivo
+    apagava a memoria inteira do programa.
+    """
     if path is None:
         path = default_settings_path()
 
     try:
-        with open(path, "r", encoding="utf-8") as file:
+        with open(path, "r", encoding="utf-8-sig") as file:
             data = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError):
         return {}
 
     if not isinstance(data, dict):

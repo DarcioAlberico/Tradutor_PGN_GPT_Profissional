@@ -60,6 +60,19 @@ e o padrao dele, "Detectar", e justamente o valor que deixa as duas desligadas.
 Resetando a cada abertura, esquecer um clique custa uma execucao inteira
 traduzida no escuro, e nada denuncia isso depois: o PGN gerado parece pronto.
 
+**Garantia M2 — um BOM no arquivo de configuracoes nao apaga nada.** A leitura e
+`utf-8-sig` e a gravacao e `utf-8`: aceita-se o BOM, nao se escreve um. O arquivo
+e JSON editavel a mao, e o Bloco de Notas do Windows grava UTF-8 com BOM — lido
+como `utf-8`, o `json.load` levanta, a leitura degrada para "sem configuracao" e
+o programa perde de uma vez os rascunhos das janelas de edicao (R4), a lista de
+arquivos que ficaram devendo (T4), o modo de busca, o tamanho da fonte e as
+escolhas da janela principal (M1). E a perda e definitiva: nada avisa, e a
+proxima gravacao escreve um arquivo novo sem nada daquilo.
+
+A tolerancia para no BOM. Um arquivo que nao seja JSON, ou que nem seja texto,
+continua degradando para vazio — o programa abre com os padroes em vez de nao
+abrir.
+
 A gravacao passa por `update_settings`, que rele o disco imediatamente antes de
 escrever: os rascunhos das janelas de edicao vivem no mesmo arquivo (garantia
 R4). Um valor que o programa nao reconhece mais — um idioma que saiu da lista,
@@ -857,6 +870,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | C1 | Trabalho pesado roda fora da thread do Tk, e a resposta volta nela | Bug: "Aplicar automaticas" segurava a janela por 38 s |
 | C3 | Nenhuma transacao de escrita atravessa uma chamada de rede, e um lock vira mensagem | Bug: worker travava o "Salvar" do editor por um lote inteiro |
 | M1 | A janela principal reabre no que foi escolhido | Risco: "Detectar" volta sozinho e desliga a correcao de lances sem avisar |
+| M2 | Um BOM no arquivo de configuracoes nao apaga nada | Bug: um caractere invisivel zerava rascunhos, lista de falhas e preferencias |
 
 ---
 

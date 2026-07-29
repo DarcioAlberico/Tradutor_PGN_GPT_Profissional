@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import os
 import re
 import sqlite3
@@ -170,6 +171,7 @@ from tradutor_pgn.glossary_editor import (
     glossary_filter_indices,
     sort_glossary_indices,
 )
+from tradutor_pgn.failed_runs import load_failed_run
 from tradutor_pgn.settings import (
     MAIN_WINDOW_DEFAULTS,
     MAIN_WINDOW_KEY,
@@ -10182,6 +10184,123 @@ class MainWindowSettingsTests(unittest.TestCase):
             guardado = load_settings(caminho)[MAIN_WINDOW_KEY]
             self.assertEqual(guardado["source_language"], "en")
             self.assertEqual(guardado["source_path"], "C:/x")
+
+class SettingsWithBomTests(unittest.TestCase):
+    """Um BOM no arquivo de configuracoes apagava a memoria inteira do programa.
+
+    O arquivo e JSON editavel a mao, e o Bloco de Notas do Windows grava UTF-8
+    **com BOM**. Lido como `utf-8`, o `json.load` levanta, o `except` devolve
+    `{}` e o programa segue como se nao houvesse configuracao nenhuma — e a
+    proxima gravacao escreve um arquivo novo sem nada. Nada avisa.
+
+    Encontrado conferindo o executavel antes de publicar a v0.2.1: as escolhas
+    da janela principal nao voltavam, e a causa nao era a janela.
+    """
+
+    def arquivo(self, conteudo, com_bom):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        caminho = Path(tmp.name) / "settings.json"
+        bruto = json.dumps(conteudo).encode("utf-8")
+        caminho.write_bytes((b"\xef\xbb\xbf" if com_bom else b"") + bruto)
+        return str(caminho)
+
+    def test_a_file_with_a_bom_is_read_and_not_discarded(self):
+        caminho = self.arquivo({"editor": {"font_size": 15}}, com_bom=True)
+
+        self.assertEqual(load_settings(caminho), {"editor": {"font_size": 15}})
+
+    def test_a_file_without_a_bom_still_works(self):
+        caminho = self.arquivo({"editor": {"font_size": 15}}, com_bom=False)
+
+        self.assertEqual(load_settings(caminho), {"editor": {"font_size": 15}})
+
+    def test_the_drafts_survive_a_bom(self):
+        """Garantia R4 pela porta dos fundos.
+
+        O que R4 protege e o rascunho nao salvo de uma janela contra a gravacao
+        de outra. De nada adianta se um caractere invisivel no inicio do arquivo
+        faz o programa inteiro esquecer que ele existe.
+        """
+        caminho = self.arquivo(
+            {"editor_drafts": {"chave": {"text": "nao salvo", "base_translation": ""}}},
+            com_bom=True,
+        )
+
+        self.assertIn("chave", load_settings(caminho).get("editor_drafts", {}))
+
+    def test_the_failed_run_list_survives_a_bom(self):
+        """Garantia T4: a lista do "Reprocessar Falhas" mora no mesmo arquivo."""
+        caminho = self.arquivo(
+            {
+                "failed_translation": {
+                    "target_language": "pt",
+                    "files": ["/a/b.pgn"],
+                    "failed_count": 3,
+                }
+            },
+            com_bom=True,
+        )
+
+        registro = load_failed_run(caminho)
+        self.assertIsNotNone(registro)
+        self.assertEqual(registro["files"], ["/a/b.pgn"])
+
+    def test_writing_never_adds_a_bom(self):
+        """Aceita-se o BOM na leitura; nao se escreve um.
+
+        Gravar com BOM funcionaria com esta leitura e quebraria qualquer outro
+        leitor de JSON — e o arquivo existe para ser editavel a mao.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            caminho = str(Path(tmp) / "settings.json")
+            save_settings({"editor": {"font_size": 12}}, caminho)
+
+            self.assertFalse(Path(caminho).read_bytes().startswith(b"\xef\xbb\xbf"))
+
+    def test_a_round_trip_through_a_bom_keeps_everything(self):
+        """O caminho completo: le com BOM, grava uma secao, o resto continua la.
+
+        E o cenario que perde dado de verdade — ler devolvendo `{}` e depois
+        gravar por cima e o que torna a perda definitiva.
+        """
+        caminho = self.arquivo(
+            {
+                "editor_drafts": {"chave": {"text": "nao salvo"}},
+                "editor": {"font_size": 15},
+            },
+            com_bom=True,
+        )
+
+        write_main_window_settings({"source_language": "en"}, caminho)
+
+        disco = load_settings(caminho)
+        self.assertEqual(disco["editor_drafts"], {"chave": {"text": "nao salvo"}})
+        self.assertEqual(disco["editor"], {"font_size": 15})
+        self.assertEqual(disco[MAIN_WINDOW_KEY]["source_language"], "en")
+
+    def test_a_file_that_is_not_json_at_all_still_degrades_to_empty(self):
+        """A tolerancia ao BOM nao pode virar tolerancia a lixo.
+
+        Um arquivo corrompido continua devolvendo `{}` — o programa abre com os
+        padroes em vez de nao abrir.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        caminho = Path(tmp.name) / "settings.json"
+        caminho.write_bytes(b"\xef\xbb\xbf isto nao e json {{{")
+
+        self.assertEqual(load_settings(str(caminho)), {})
+
+    def test_bytes_that_are_not_utf8_degrade_to_empty(self):
+        """Nem toda falha de leitura e de JSON: um arquivo binario levanta
+        `UnicodeDecodeError`, que precisa ser tratado junto."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        caminho = Path(tmp.name) / "settings.json"
+        caminho.write_bytes(b"\xff\xfe\x00\x00 lixo binario")
+
+        self.assertEqual(load_settings(str(caminho)), {})
 
 if __name__ == "__main__":
     unittest.main()
