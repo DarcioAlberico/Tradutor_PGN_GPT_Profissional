@@ -135,11 +135,18 @@ def translate_text_chunk(
     log_message=None,
     session=None,
     pacer=None,
+    source_language="",
 ):
+    """Traduz um trecho. `source_language` vazio mantem o `sl=auto` de sempre.
+
+    Declarar o idioma de origem nao e so metadado: `sl=auto` faz o endpoint
+    adivinhar a partir do texto, e um comentario curto de xadrez — "Ng5!", "Bien
+    jugado" — e pouco texto para adivinhar. Dito o idioma, ele para de tentar.
+    """
     url = "https://translate.googleapis.com/translate_a/single"
     params = {
         "client": "gtx",
-        "sl": "auto",
+        "sl": source_language or "auto",
         "tl": target_language,
         "dt": "t",
         "q": text,
@@ -199,6 +206,7 @@ def translate_text(
     cancel_flag=None,
     session=None,
     pacer=None,
+    source_language="",
 ):
     chunks = split_text_for_translation(text)
     if len(chunks) > 1 and log_message:
@@ -215,6 +223,7 @@ def translate_text(
             log_message,
             session=session,
             pacer=pacer,
+            source_language=source_language,
         )
         if translated is None:
             return None

@@ -21,6 +21,9 @@ class PGNTranslatorApp:
         # Variáveis principais
         self.source_path = tk.StringVar()
         self.target_language = tk.StringVar(value="pt")
+        # Vazio e "detectar automaticamente", que e o que o programa sempre fez
+        # (`sl=auto`). Quem nao mexer no seletor continua exatamente onde estava.
+        self.source_language = tk.StringVar(value="")
         self.process_subdirs = tk.BooleanVar(value=True)
         self.is_processing = False
         self.log_queue = queue.Queue()
@@ -136,6 +139,12 @@ class PGNTranslatorApp:
 
     def normalize_pgn_metadata(self):
         app_actions.normalize_pgn_metadata(self)
+
+    def reset_translations(self):
+        app_actions.reset_translations(self)
+
+    def reset_glossary(self):
+        app_actions.reset_glossary(self)
 
     # ============================
     #   EDITAR TRADUÇÕES

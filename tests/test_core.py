@@ -1,6 +1,7 @@
 import csv
 import io
 import os
+import re
 import sqlite3
 import sys
 import types
@@ -15,6 +16,7 @@ from pathlib import Path
 from tradutor_pgn import database, glossario, settings
 from tradutor_pgn.app_config import (
     DATABASE_BACKUP_KEEP_COUNT,
+    DATABASE_BACKUP_MAX_TOTAL_MB,
     GLOSSARY_BACKUP_KEEP_COUNT,
     LOG_KEEP_COUNT,
     MAX_TRANSLATE_CHARS,
@@ -24,7 +26,10 @@ from tradutor_pgn.database import (
     SCHEMA_VERSION,
     SEARCH_MODE_SUBSTRING,
     SEARCH_MODE_TERMS,
+    SOURCE_LANGUAGE_UNKNOWN,
+    adopt_unknown_source_language,
     build_fts_match_query,
+    clear_all_translations,
     fts_index_ready,
     AutomaticRulesCanceled,
     apply_automatic_translation_updates,
@@ -108,7 +113,10 @@ from tradutor_pgn.pgn_spellcheck import (
     collect_spellcheck_pgn_files,
     normalize_pgn_metadata_content,
     normalize_pgn_metadata_file,
+    normalize_pgn_metadata_path,
     normalized_output_path,
+    PGN_TAG_RE,
+    SUPPORTED_TAGS,
     parse_spelling_file,
 )
 from tradutor_pgn.review_quality import (
@@ -121,6 +129,7 @@ from tradutor_pgn.review_quality import (
     summarize_quality_warnings,
 )
 from tradutor_pgn.background_task import BackgroundTask, TaskCanceled
+from tradutor_pgn.confirm_dialog import CONFIRMATION_WORD, confirmation_accepted
 from tradutor_pgn.db_tools import (
     analyze_database_automatic_rules,
     analyze_translations_csv_import,
@@ -171,10 +180,12 @@ from tradutor_pgn import (
     translation_worker,
     window_utils,
 )
+from tradutor_pgn import backup_retention
 from tradutor_pgn.backup_retention import (
     backup_timestamp,
     is_backup_of_family,
     prune_backups,
+    prune_database_backups,
     prune_glossary_backups,
     select_backups_to_delete,
     uniqueness_suffix,
@@ -6042,6 +6053,45 @@ class TranslateTextChunkTests(unittest.TestCase):
         self.assertEqual(params["tl"], "pt")
         self.assertEqual(set(params) - {"client", "sl", "tl", "dt", "q"}, set())
 
+    def test_the_declared_source_language_goes_in_the_request(self):
+        """`sl=auto` faz o endpoint adivinhar a partir do texto.
+
+        Um comentario curto de xadrez — "Ng5!", "Bien jugado" — e pouco texto
+        para adivinhar, e o palpite errado produz uma traducao errada sem erro
+        nenhum. Dito o idioma, ele para de tentar.
+        """
+        session = FakeSession([FakeResponse(200, self.OK_PAYLOAD)])
+        translation_api.translate_text_chunk(
+            "abc", "pt", self.logs.append, session=session, source_language="es"
+        )
+
+        self.assertEqual(session.calls[0]["params"]["sl"], "es")
+
+    def test_without_a_declared_source_it_still_asks_for_detection(self):
+        """O padrao continua sendo o que o programa sempre fez."""
+        _result, session = self.translate([FakeResponse(200, self.OK_PAYLOAD)], "abc")
+
+        self.assertEqual(session.calls[0]["params"]["sl"], "auto")
+
+    def test_the_source_language_survives_the_split_into_chunks(self):
+        """Um comentario longo vira varias requisicoes, e todas sao do mesmo PGN.
+
+        Perder o idioma entre a primeira e a segunda daria metade da traducao
+        com o idioma declarado e metade adivinhada.
+        """
+        session = FakeSession([FakeResponse(200, self.OK_PAYLOAD) for _ in range(10)])
+        texto = ("Frase. " * 2000).strip()
+        self.assertGreater(len(split_text_for_translation(texto)), 1)
+
+        translation_api.translate_text(
+            texto, "pt", session=session, source_language="it"
+        )
+
+        self.assertTrue(session.calls)
+        self.assertEqual(
+            {chamada["params"]["sl"] for chamada in session.calls}, {"it"}
+        )
+
     def test_empty_segments_are_skipped(self):
         payload = [[["Um", "One"], None, ["", ""], [" dois", " two"]]]
         result, _session = self.translate([FakeResponse(200, payload)])
@@ -6201,7 +6251,7 @@ class TranslateTextTests(unittest.TestCase):
         """Garantia T3: nao se monta uma traducao pela metade."""
         chamadas = []
 
-        def fake(chunk, _lang, _log=None, session=None, pacer=None):
+        def fake(chunk, _lang, _log=None, session=None, pacer=None, source_language=""):
             chamadas.append(chunk)
             return None if len(chamadas) == 2 else "ok"
 
@@ -6215,7 +6265,7 @@ class TranslateTextTests(unittest.TestCase):
         chamadas = []
         flag = threading.Event()
 
-        def fake(chunk, _lang, _log=None, session=None, pacer=None):
+        def fake(chunk, _lang, _log=None, session=None, pacer=None, source_language=""):
             chamadas.append(chunk)
             flag.set()
             return "ok"
@@ -7064,6 +7114,1963 @@ class FallbackTransactionTests(WorkerFallbackHarness, unittest.TestCase):
         for comentario in self.COMMENTS:
             self.assertEqual(gravadas.get(comentario), f"[{comentario}]")
 
+
+class BackupSizeBudgetTests(unittest.TestCase):
+    """Terceira regra da retencao: teto de ESPACO, nao de contagem.
+
+    Contar arquivos so limita disco quando eles tem tamanho parecido. As copias
+    do banco eram de 7 MB em junho e de 107 MB em julho: as mesmas 10 copias que
+    a contagem permite passaram a valer mais de 1 GB sem nenhum limite mudar.
+    """
+
+    NOW = datetime(2026, 7, 28, 12, 0, 0)
+    MB = 1024 * 1024
+
+    def _names(self, count, step=timedelta(hours=1)):
+        """`count` backups do banco, do mais novo para o mais velho."""
+        return [
+            f"traducoes-backup-{_stamp(self.NOW - step * index)}.db"
+            for index in range(count)
+        ]
+
+    def _select(self, names, sizes_mb, budget_mb, keep_minimum=3, **kwargs):
+        sizes = {name: mb * self.MB for name, mb in zip(names, sizes_mb)}
+        return select_backups_to_delete(
+            names,
+            keep_count=None,
+            max_age_days=None,
+            keep_minimum=keep_minimum,
+            now=self.NOW,
+            max_total_bytes=budget_mb * self.MB,
+            sizes=sizes,
+            **kwargs,
+        )
+
+    def test_nothing_is_dropped_below_the_budget(self):
+        names = self._names(4)
+        self.assertEqual(self._select(names, [107, 104, 9, 7], budget_mb=400), [])
+
+    def test_the_oldest_go_until_it_fits(self):
+        """Guarda o maior conjunto de copias RECENTES que cabe no teto."""
+        names = self._names(6)
+        # 110+110+107 = 327 cabe; somar 104 daria 431 e estoura.
+        doomed = self._select(names, [110, 110, 107, 104, 9, 7], budget_mb=400)
+
+        self.assertEqual(sorted(doomed), sorted(names[3:]))
+
+    def test_the_kept_set_really_fits(self):
+        names = self._names(6)
+        sizes = [110, 110, 107, 104, 9, 7]
+        doomed = self._select(names, sizes, budget_mb=400)
+
+        mantidos = [
+            tamanho
+            for nome, tamanho in zip(names, sizes)
+            if nome not in doomed
+        ]
+        self.assertLessEqual(sum(mantidos), 400, "o que sobrou nao cabe no teto")
+
+    def test_the_floor_wins_over_the_budget(self):
+        """Um banco maior que o teto nao pode deixar o usuario sem backup.
+
+        Com copias de 500 MB e teto de 400, a primeira ja estoura. O piso de
+        `keep_minimum` garante que as tres mais novas ficam mesmo assim.
+        """
+        names = self._names(5)
+        doomed = self._select(names, [500] * 5, budget_mb=400, keep_minimum=3)
+
+        self.assertEqual(sorted(doomed), sorted(names[3:]))
+        self.assertNotIn(names[0], doomed)
+
+    def test_a_single_oversized_backup_survives(self):
+        names = self._names(1)
+        self.assertEqual(self._select(names, [900], budget_mb=400), [])
+
+    def test_the_new_copy_is_never_dropped_by_the_budget(self):
+        names = self._names(5)
+        doomed = self._select(
+            names, [500] * 5, budget_mb=1, keep_minimum=0, protected=(names[0],)
+        )
+
+        self.assertNotIn(names[0], doomed)
+
+    def test_without_a_budget_the_rule_is_off(self):
+        names = self._names(6)
+        sizes = {name: 500 * self.MB for name in names}
+        self.assertEqual(
+            select_backups_to_delete(
+                names,
+                keep_count=None,
+                max_age_days=None,
+                now=self.NOW,
+                max_total_bytes=None,
+                sizes=sizes,
+            ),
+            [],
+        )
+
+    def test_without_sizes_the_rule_is_off(self):
+        """Sem os tamanhos nao da para decidir — e chutar seria apagar demais."""
+        names = self._names(6)
+        self.assertEqual(
+            select_backups_to_delete(
+                names,
+                keep_count=None,
+                max_age_days=None,
+                now=self.NOW,
+                max_total_bytes=1,
+                sizes=None,
+            ),
+            [],
+        )
+
+    def test_count_and_budget_compose(self):
+        names = self._names(6)
+        sizes = {name: 50 * self.MB for name in names}
+        doomed = select_backups_to_delete(
+            names,
+            keep_count=4,
+            max_age_days=None,
+            keep_minimum=0,
+            now=self.NOW,
+            max_total_bytes=120 * self.MB,
+            sizes=sizes,
+        )
+
+        # A contagem tira as duas mais velhas; o teto (120 MB = 2 copias de 50
+        # cabem, a terceira estoura) tira mais uma.
+        self.assertEqual(sorted(doomed), sorted(names[2:]))
+
+
+class DatabaseBackupBudgetOnDiskTests(unittest.TestCase):
+    """`prune_database_backups` medindo arquivos de verdade."""
+
+    NOW = datetime(2026, 7, 28, 12, 0, 0)
+
+    def _seed(self, directory, name, size_bytes):
+        path = Path(directory) / name
+        path.write_bytes(b"\0" * size_bytes)
+        return path
+
+    def test_the_budget_frees_space_and_keeps_the_newest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            arquivos = [
+                self._seed(
+                    tmp,
+                    f"traducoes-backup-{_stamp(self.NOW - timedelta(hours=i))}.db",
+                    200_000,
+                )
+                for i in range(6)
+            ]
+
+            removidos = prune_database_backups(
+                tmp,
+                "traducoes",
+                keep_count=None,
+                max_age_days=None,
+                keep_minimum=0,
+                now=self.NOW,
+                max_total_bytes=500_000,   # cabem duas de 200 KB; a terceira estoura
+            )
+
+            self.assertEqual(len(removidos), 4)
+            self.assertTrue(all(p.exists() for p in arquivos[:2]))
+            self.assertFalse(any(p.exists() for p in arquivos[2:]))
+
+    def test_the_glossary_family_is_not_measured_or_touched(self):
+        """O teto e so do banco: o glossario continua so na contagem."""
+        with tempfile.TemporaryDirectory() as tmp:
+            glossario_backups = [
+                self._seed(
+                    tmp,
+                    f"Substituicoes-{_stamp(self.NOW - timedelta(hours=i))}.txt",
+                    400_000,
+                )
+                for i in range(5)
+            ]
+            banco = [
+                self._seed(
+                    tmp,
+                    f"traducoes-backup-{_stamp(self.NOW - timedelta(hours=i))}.db",
+                    400_000,
+                )
+                for i in range(5)
+            ]
+
+            prune_database_backups(
+                tmp,
+                "traducoes",
+                keep_count=None,
+                max_age_days=None,
+                keep_minimum=0,
+                now=self.NOW,
+                max_total_bytes=500_000,
+            )
+
+            self.assertTrue(
+                all(p.exists() for p in glossario_backups),
+                "a limpeza do banco nao pode tocar os backups do glossario",
+            )
+            self.assertEqual(sum(1 for p in banco if p.exists()), 1)
+
+    def test_the_default_budget_is_applied(self):
+        """Sem passar `max_total_bytes`, o teto do config tem de valer.
+
+        A primeira versao deste teste so conferia que a constante era positiva e
+        que uma pasta vazia nao removia nada — e passava igual com a producao
+        certa e com o `setdefault` do teto REMOVIDO. Um teste que passa dos dois
+        jeitos nao protege nada.
+
+        O que faltava era sair do valor padrao: encher 400 MB de arquivo e
+        inviavel, entao o teto e que desce ate o cenario.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            arquivos = [
+                self._seed(
+                    tmp,
+                    f"traducoes-backup-{_stamp(self.NOW - timedelta(hours=i))}.db",
+                    200_000,
+                )
+                for i in range(5)
+            ]
+
+            anterior = backup_retention.DATABASE_BACKUP_MAX_TOTAL_MB
+            backup_retention.DATABASE_BACKUP_MAX_TOTAL_MB = 500_000 / (1024 * 1024)
+            self.addCleanup(
+                setattr,
+                backup_retention,
+                "DATABASE_BACKUP_MAX_TOTAL_MB",
+                anterior,
+            )
+
+            removidos = backup_retention.prune_database_backups(
+                tmp,
+                "traducoes",
+                keep_count=None,
+                max_age_days=None,
+                keep_minimum=0,
+                now=self.NOW,
+            )
+
+            self.assertEqual(len(removidos), 3, "o teto padrao nao foi aplicado")
+            self.assertTrue(all(p.exists() for p in arquivos[:2]))
+
+
+# PGN com tudo o que a normalizacao NAO pode tocar: variantes aninhadas,
+# comentarios contendo nomes que o dicionario corrigiria numa tag, NAGs,
+# avaliacoes e uma tag fora da lista das cinco suportadas.
+PGN_COMPLETO = (
+    '[Event "WCh"]\n'
+    '[Site "Londres"]\n'
+    '[Round "1.0"]\n'
+    '[White "GM Aberg, Anton"]\n'
+    '[Black "J. S. Speelman"]\n'
+    '[Result "1-0"]\n'
+    '[ECO "B76"]\n'
+    '[Annotator "GM Aberg, Anton"]\n'
+    '\n'
+    '1. e4 c5 {GM Aberg, Anton comenta aqui} 2. Nf3 d6 $1 3. d4 cxd4\n'
+    '4. Nxd4 Nf6 (4... g6 5. Nc3 {Londres seria trocada se fosse tag} Bg7\n'
+    '(5... a6 6. Be3 $14) 6. Be3) 5. Nc3 g6 $6 {J. S. Speelman aqui tambem}\n'
+    '6. Be3 Bg7 1-0\n'
+)
+
+def _movetext(texto):
+    """So as linhas de lance: tudo o que nao e cabecalho nem linha em branco."""
+    return [
+        linha
+        for linha in texto.splitlines()
+        if linha.strip() and not linha.lstrip().startswith("[")
+    ]
+
+
+def _tags(texto):
+    return dict(
+        re.findall(r'^\[(\w+)\s+"(.*)"\]', texto, flags=re.MULTILINE)
+    )
+
+
+class SupportedTagsSingleSourceTests(unittest.TestCase):
+    """A lista de tags corrigidas tem de existir em UM lugar so.
+
+    `SUPPORTED_TAGS` diz em que secao do spelling.ssp cada tag procura, e
+    `PGN_TAG_RE` decide que linhas sao candidatas. Enquanto a lista estava
+    escrita nos dois, divergir falhava em silencio e em duas direcoes opostas:
+
+    - so no dict: o regex nunca casava a linha, e a tag nova simplesmente nao
+      era corrigida — sem erro, sem aviso;
+    - so no regex: `SUPPORTED_TAGS[tag_name]` levantava `KeyError` e derrubava
+      a normalizacao de qualquer PGN que tivesse aquela tag.
+
+    Este teste falha nos dois casos, porque compara o que o regex ACEITA com o
+    que o dict declara, em vez de conferir o texto do padrao.
+    """
+
+    OUTRAS_TAGS = [
+        "Annotator",
+        "Result",
+        "ECO",
+        "WhiteElo",
+        "BlackElo",
+        "Date",
+        "TimeControl",
+        "Opening",
+    ]
+
+    def _casa(self, tag):
+        return bool(PGN_TAG_RE.match(f'[{tag} "valor"]'))
+
+    def test_the_regex_accepts_exactly_the_declared_tags(self):
+        aceitas = {tag for tag in SUPPORTED_TAGS if self._casa(tag)}
+        self.assertEqual(
+            aceitas,
+            set(SUPPORTED_TAGS),
+            "ha tag declarada em SUPPORTED_TAGS que o regex nao reconhece",
+        )
+
+    def test_the_regex_accepts_nothing_else(self):
+        for tag in self.OUTRAS_TAGS:
+            with self.subTest(tag=tag):
+                self.assertNotIn(tag, SUPPORTED_TAGS)
+                self.assertFalse(
+                    self._casa(tag),
+                    f"o regex aceita {tag!r}, que nao esta em SUPPORTED_TAGS — "
+                    "isso vira KeyError na normalizacao",
+                )
+
+    def test_every_declared_tag_has_a_usable_section(self):
+        """A secao apontada tem de ser uma das que o spelling.ssp define."""
+        self.assertEqual(
+            {secao for secao in SUPPORTED_TAGS.values()} - {"PLAYER", "SITE", "EVENT", "ROUND"},
+            set(),
+        )
+
+
+class NormalizePgnMetadataPathTests(unittest.TestCase):
+    """`normalize_pgn_metadata_path`: o ponto de entrada do "Normalizar PGN".
+
+    Era a maior lacuna de cobertura do pacote depois do `background_task`: a
+    funcao inteira (45 linhas) sem um unico teste, embora seja o que o botao
+    chama. Os testes que existiam paravam uma camada abaixo, no conteudo e no
+    arquivo unico.
+    """
+
+    def _spelling_file(self, directory):
+        """Um `spelling.ssp` de verdade, para exercitar a carga do arquivo."""
+        path = Path(directory) / "spelling.ssp"
+        path.write_text(
+            '@PLAYER "., -_*"\n'
+            '%Prefix "GM " ""\n'
+            "Aaberg, Anton\n"
+            "  = Aberg, Anton\n"
+            "Speelman, Jonathan S\n"
+            "  = J. S. Speelman\n"
+            '@SITE "., -_()"\n'
+            "London\n"
+            "  = Londres\n"
+            '@EVENT ",. -_"\n'
+            "World Championship\n"
+            "  = WCh\n"
+            '@ROUND ""\n'
+            "1\n"
+            "  = 1.0\n",
+            encoding="utf-8",
+        )
+        return str(path)
+
+    def _write(self, directory, nome, conteudo=PGN_COMPLETO):
+        path = Path(directory) / nome
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(conteudo, encoding="utf-8")
+        return path
+
+    # ---------------- garantia N1 ----------------
+
+    def test_only_the_five_tags_change(self):
+        """Garantia N1, no nivel do arquivo gerado."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = self._write(tmp, "jogo.pgn")
+            stats = normalize_pgn_metadata_path(
+                str(pgn), spelling_path=self._spelling_file(tmp)
+            )
+
+            saida = Path(stats["outputs"][0]).read_text(encoding="utf-8")
+            antes, depois = _tags(PGN_COMPLETO), _tags(saida)
+
+            self.assertEqual(
+                {t for t in antes if antes[t] != depois[t]},
+                {"Event", "Site", "Round", "White", "Black"},
+            )
+            self.assertEqual(depois["Result"], "1-0")
+            self.assertEqual(depois["ECO"], "B76")
+            self.assertEqual(
+                depois["Annotator"],
+                "GM Aberg, Anton",
+                "Annotator nao esta entre as tags suportadas",
+            )
+
+    def test_moves_variations_and_comments_are_byte_identical(self):
+        """A outra metade da N1: nada abaixo do cabecalho pode mudar.
+
+        O PGN de teste tem os mesmos nomes DENTRO de comentarios e uma variante
+        aninhada citando "Londres" — se a normalizacao escapasse do cabecalho,
+        e ali que apareceria.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = self._write(tmp, "jogo.pgn")
+            stats = normalize_pgn_metadata_path(
+                str(pgn), spelling_path=self._spelling_file(tmp)
+            )
+
+            saida = Path(stats["outputs"][0]).read_text(encoding="utf-8")
+            self.assertEqual(_movetext(saida), _movetext(PGN_COMPLETO))
+            self.assertIn("{GM Aberg, Anton comenta aqui}", saida)
+            self.assertIn("{Londres seria trocada se fosse tag}", saida)
+            self.assertIn("(5... a6 6. Be3 $14)", saida)
+            self.assertIn("$1", saida)
+            self.assertIn("$6", saida)
+
+    def test_the_original_is_never_touched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = self._write(tmp, "jogo.pgn")
+            antes = pgn.read_bytes()
+
+            normalize_pgn_metadata_path(
+                str(pgn), spelling_path=self._spelling_file(tmp)
+            )
+
+            self.assertEqual(pgn.read_bytes(), antes)
+
+    # ---------------- orquestracao ----------------
+
+    def test_a_single_file_is_counted_and_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = self._write(tmp, "jogo.pgn")
+            stats = normalize_pgn_metadata_path(
+                str(pgn), spelling_path=self._spelling_file(tmp)
+            )
+
+            self.assertEqual(stats["files"], 1)
+            self.assertEqual(stats["changed_files"], 1)
+            self.assertEqual(stats["unchanged_files"], 0)
+            self.assertEqual(stats["changes"], 5)
+            self.assertEqual(len(stats["outputs"]), 1)
+            self.assertTrue(stats["outputs"][0].endswith("-NORM.pgn"))
+
+    def test_a_file_without_corrections_produces_no_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            limpo = '[White "Nome Desconhecido"]\n\n1. e4 e5 1-0\n'
+            pgn = self._write(tmp, "limpo.pgn", limpo)
+
+            stats = normalize_pgn_metadata_path(
+                str(pgn), spelling_path=self._spelling_file(tmp)
+            )
+
+            self.assertEqual(stats["changed_files"], 0)
+            self.assertEqual(stats["unchanged_files"], 1)
+            self.assertEqual(stats["outputs"], [])
+            self.assertEqual(list(Path(tmp).glob("*-NORM.pgn")), [])
+
+    def test_a_directory_processes_every_pgn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write(tmp, "a.pgn")
+            self._write(tmp, "b.pgn")
+            spelling = self._spelling_file(tmp)
+
+            stats = normalize_pgn_metadata_path(tmp, spelling_path=spelling)
+
+            self.assertEqual(stats["files"], 2)
+            self.assertEqual(stats["changed_files"], 2)
+            self.assertEqual(len(stats["outputs"]), 2)
+
+    def test_subdirectories_obey_the_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write(tmp, "raiz.pgn")
+            self._write(tmp, os.path.join("sub", "dentro.pgn"))
+            spelling = self._spelling_file(tmp)
+
+            raso = normalize_pgn_metadata_path(
+                tmp, process_subdirs=False, spelling_path=spelling
+            )
+            fundo = normalize_pgn_metadata_path(
+                tmp, process_subdirs=True, spelling_path=spelling
+            )
+
+            self.assertEqual(raso["files"], 1)
+            self.assertEqual(fundo["files"], 2)
+
+    def test_already_normalized_files_are_skipped(self):
+        """Sem isso, reprocessar uma pasta geraria `-NORM-NORM`, e assim por diante."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write(tmp, "jogo.pgn")
+            self._write(tmp, "jogo-NORM.pgn")
+            spelling = self._spelling_file(tmp)
+
+            stats = normalize_pgn_metadata_path(tmp, spelling_path=spelling)
+
+            self.assertEqual(stats["files"], 1)
+            self.assertEqual(stats["skipped_normalized"], 1)
+
+    def test_a_missing_dictionary_fails_loudly(self):
+        """Sem o dicionario nao ha o que corrigir — e seguir calado
+        produziria uma copia identica com cara de "normalizada".
+
+        A mensagem faz parte do que se exige, e nao e preciosismo: sem a guarda
+        explicita o `parse_spelling_file` levanta `FileNotFoundError` do mesmo
+        jeito, ao tentar abrir o arquivo. Conferir so o TIPO deixa o teste
+        passar com a guarda removida — foi o que aconteceu na primeira versao.
+        O que distingue os dois casos e o texto: um nomeia o `spelling.ssp` e o
+        outro e o erro cru do `open()`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write(tmp, "jogo.pgn")
+            ausente = str(Path(tmp) / "nao-existe.ssp")
+
+            with self.assertRaises(FileNotFoundError) as capturado:
+                normalize_pgn_metadata_path(tmp, spelling_path=ausente)
+
+            self.assertIn("spelling.ssp nao encontrado", str(capturado.exception))
+            self.assertIn(ausente, str(capturado.exception))
+
+    def test_progress_goes_from_zero_to_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for nome in ("a.pgn", "b.pgn", "c.pgn", "d.pgn"):
+                self._write(tmp, nome)
+            avancos = []
+
+            normalize_pgn_metadata_path(
+                tmp,
+                spelling_path=self._spelling_file(tmp),
+                progress_callback=avancos.append,
+            )
+
+            self.assertEqual(len(avancos), 4)
+            self.assertEqual(avancos, sorted(avancos), "o progresso nao pode voltar")
+            self.assertAlmostEqual(avancos[-1], 1.0)
+
+    def test_an_empty_folder_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stats = normalize_pgn_metadata_path(
+                tmp, spelling_path=self._spelling_file(tmp)
+            )
+
+            self.assertEqual(stats["files"], 0)
+            self.assertEqual(stats["outputs"], [])
+
+    def test_the_log_names_each_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write(tmp, "jogo.pgn")
+            self._write(tmp, "limpo.pgn", '[White "Nome Desconhecido"]\n\n1. e4 1-0\n')
+            linhas = []
+
+            normalize_pgn_metadata_path(
+                tmp,
+                spelling_path=self._spelling_file(tmp),
+                log_message=linhas.append,
+            )
+
+            texto = "\n".join(linhas)
+            self.assertIn("jogo.pgn", texto)
+            self.assertIn("limpo.pgn", texto)
+            self.assertIn("sem alteracoes", texto)
+
+
+class ApplyAutomaticRulesFlowTests(unittest.TestCase):
+    """O caminho completo de "Aplicar automaticas".
+
+    So o ramo de CANCELAMENTO tinha teste. O fluxo principal — analisar,
+    confirmar, aplicar, relatar — era o maior bloco sem cobertura de
+    `db_tools` (56 linhas), justamente na operacao em que os itens 2.7 e 2.11
+    mais mexeram.
+
+    A operacao tem quatro saidas distintas e cada uma decide coisas diferentes:
+    o que o usuario ve, o que vai para `on_finish` e se o banco e tocado.
+    """
+
+    def _semear(self, db_path, linhas=6):
+        conn = initialize_database(str(db_path))
+        cursor = conn.cursor()
+        for indice in range(linhas):
+            # Metade casa com a regra, metade nao: separa "varreu" de "alterou".
+            texto = "A rainha avanca" if indice % 2 == 0 else "O bispo avanca"
+            save_translation(cursor, f"orig {indice}", texto, "pt")
+        conn.commit()
+        conn.close()
+        return linhas
+
+    def _traducoes(self, db_path):
+        conn = sqlite3.connect(str(db_path))
+        try:
+            return sorted(
+                linha[0]
+                for linha in conn.execute(
+                    "SELECT translated_comment FROM comments"
+                ).fetchall()
+            )
+        finally:
+            conn.close()
+
+    def _app(self, db_path, cache=None):
+        return types.SimpleNamespace(
+            output_db=str(db_path),
+            translation_cache={} if cache is None else cache,
+            root=None,
+        )
+
+    def _dialogos(self, confirmar=True):
+        vistos = []
+        self.addCleanup(setattr, db_tools, "messagebox", db_tools.messagebox)
+        db_tools.messagebox = types.SimpleNamespace(
+            askyesno=lambda t, m, **_kw: (vistos.append(("askyesno", t, m)), confirmar)[1],
+            showinfo=lambda t, m, **_kw: vistos.append(("info", t, m)),
+            showerror=lambda t, m, **_kw: vistos.append(("error", t, m)),
+        )
+        return vistos
+
+    def _regras(self, regras=(("rainha", "dama"),)):
+        self.addCleanup(
+            setattr, db_tools, "load_automatic_substitutions",
+            db_tools.load_automatic_substitutions,
+        )
+        db_tools.load_automatic_substitutions = lambda: list(regras)
+
+    def _rodar(self, db_path, **kwargs):
+        SynchronousProgress().install(self, db_tools)
+        recebidos = []
+        db_tools.apply_automatic_rules_to_database(
+            self._app(db_path, kwargs.pop("cache", None)),
+            on_finish=recebidos.append,
+            **kwargs,
+        )
+        return recebidos
+
+    # ------------------------------------------------ o caminho feliz
+
+    def test_confirming_rewrites_the_matching_rows_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._semear(db_path)
+            self._regras()
+            vistos = self._dialogos(confirmar=True)
+
+            recebidos = self._rodar(db_path)
+
+            traducoes = self._traducoes(db_path)
+            self.assertEqual(traducoes.count("A dama avanca"), 3)
+            self.assertEqual(
+                traducoes.count("O bispo avanca"), 3, "linha sem regra foi mexida"
+            )
+            self.assertNotIn("A rainha avanca", traducoes)
+
+            self.assertEqual(len(recebidos), 1)
+            self.assertIsNotNone(recebidos[0], "o resultado devia chegar em on_finish")
+            self.assertEqual(recebidos[0]["changed"], 3)
+
+            self.assertEqual(
+                [tipo for tipo, _t, _m in vistos],
+                ["askyesno", "info"],
+                "esperava confirmacao e depois o resumo",
+            )
+
+    def test_the_stale_memory_cache_is_dropped(self):
+        """Sem isso o worker reusaria a traducao ANTERIOR as regras.
+
+        `translation_cache` guarda `{original: traduzido}` da execucao. Depois
+        de reescrever as traducoes no banco, o que esta em memoria e a versao
+        velha — e o cache tem precedencia sobre o banco.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._semear(db_path)
+            self._regras()
+            self._dialogos(confirmar=True)
+            cache = {"orig 0": "A rainha avanca"}
+
+            self._rodar(db_path, cache=cache)
+
+            self.assertEqual(cache, {}, "o cache em memoria ficou desatualizado")
+
+    # ------------------------------------------------ as saidas sem escrita
+
+    def test_declining_the_confirmation_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._semear(db_path)
+            antes = self._traducoes(db_path)
+            self._regras()
+            vistos = self._dialogos(confirmar=False)
+
+            recebidos = self._rodar(db_path)
+
+            self.assertEqual(self._traducoes(db_path), antes)
+            self.assertEqual(recebidos, [None])
+            self.assertEqual([tipo for tipo, _t, _m in vistos], ["askyesno"])
+
+    def test_nothing_to_change_reports_the_scope_and_skips_the_question(self):
+        """Aqui `on_finish` recebe a PREVIA, e nao `None`.
+
+        A assimetria e proposital: "nada a fazer" e um resultado, e nao uma
+        desistencia — quem chamou pode querer os numeros da varredura.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._semear(db_path)
+            self._regras([("inexistente", "outra")])
+            vistos = self._dialogos()
+
+            recebidos = self._rodar(db_path)
+
+            self.assertEqual([tipo for tipo, _t, _m in vistos], ["info"])
+            self.assertEqual(len(recebidos), 1)
+            self.assertIsNotNone(recebidos[0])
+            self.assertEqual(recebidos[0]["changed"], 0)
+            self.assertGreater(recebidos[0]["scanned"], 0)
+
+    def test_without_automatic_rules_it_stops_before_touching_the_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._semear(db_path)
+            self._regras([])
+            vistos = self._dialogos()
+
+            progresso = SynchronousProgress()
+            progresso.install(self, db_tools)
+            recebidos = []
+            db_tools.apply_automatic_rules_to_database(
+                self._app(db_path), on_finish=recebidos.append
+            )
+
+            self.assertEqual(recebidos, [None])
+            self.assertEqual([tipo for tipo, _t, _m in vistos], ["info"])
+            self.assertIn("Nenhuma regra automatica", vistos[0][2])
+            self.assertEqual(
+                progresso.chamadas, [], "nem chegou a abrir a barra de progresso"
+            )
+
+    def test_a_broken_glossary_becomes_an_error_dialog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._semear(db_path)
+            antes = self._traducoes(db_path)
+            vistos = self._dialogos()
+
+            self.addCleanup(
+                setattr, db_tools, "load_automatic_substitutions",
+                db_tools.load_automatic_substitutions,
+            )
+
+            def explode():
+                raise ValueError("Substituicoes.txt malformado")
+
+            db_tools.load_automatic_substitutions = explode
+
+            recebidos = []
+            db_tools.apply_automatic_rules_to_database(
+                self._app(db_path), on_finish=recebidos.append
+            )
+
+            self.assertEqual([tipo for tipo, _t, _m in vistos], ["error"])
+            self.assertIn("malformado", vistos[0][2])
+            self.assertEqual(recebidos, [None])
+            self.assertEqual(self._traducoes(db_path), antes)
+
+    def test_a_failure_while_writing_is_reported_and_not_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._semear(db_path)
+            self._regras()
+            vistos = self._dialogos(confirmar=True)
+
+            self.addCleanup(
+                setattr, db_tools, "apply_database_automatic_rules",
+                db_tools.apply_database_automatic_rules,
+            )
+
+            def falha(*_a, **_kw):
+                raise sqlite3.OperationalError("database is locked")
+
+            db_tools.apply_database_automatic_rules = falha
+
+            recebidos = self._rodar(db_path)
+
+            self.assertEqual([tipo for tipo, _t, _m in vistos], ["askyesno", "error"])
+            self.assertEqual(recebidos, [None])
+
+    # ------------------------------------------------ escopo
+
+    def test_the_language_scope_reaches_the_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._semear(db_path)
+            conn = initialize_database(str(db_path))
+            cursor = conn.cursor()
+            save_translation(cursor, "outro idioma", "A rainha avanca", "en")
+            conn.commit()
+            conn.close()
+
+            self._regras()
+            self._dialogos(confirmar=True)
+
+            self._rodar(db_path, target_language="pt")
+
+            conn = sqlite3.connect(str(db_path))
+            try:
+                em_ingles = conn.execute(
+                    "SELECT translated_comment FROM comments WHERE target_language = 'en'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(
+                em_ingles, "A rainha avanca", "o escopo de idioma nao foi respeitado"
+            )
+
+
+class ShowDatabaseStatsTests(unittest.TestCase):
+    """O botao "Estatisticas". A funcao inteira estava sem teste.
+
+    E so leitura, mas e um relatorio: numero errado aqui nao quebra nada e
+    engana em silencio. O que se exige e que os totais batam com o banco e que
+    a contagem por idioma nao se misture.
+    """
+
+    def _montar(self, db_path):
+        """Tres pares de idiomas, com o aviso QA num deles so.
+
+        A origem de cada linha e escolhida para que o relatorio SEPARE os pares:
+        se as tres traducoes em pt tivessem a mesma origem, agrupar pelo par e
+        agrupar so pelo destino dariam o mesmo texto, e o teste passaria
+        igualmente com as duas producoes.
+        """
+        conn = initialize_database(str(db_path))
+        cursor = conn.cursor()
+        save_translation(cursor, "orig pt 1", "traducao boa", "pt", "en")
+        save_translation(cursor, "orig pt 2", "outra traducao boa", "pt", "en")
+        # Traducao identica ao original => aviso de qualidade. Origem nao
+        # informada, que e o par que as 201 mil linhas do banco real herdaram.
+        save_translation(cursor, "repetido igual", "repetido igual", "pt")
+        save_translation(cursor, "orig en 1", "english one", "en")
+        save_translation(cursor, "orig en 2", "english two", "en")
+        cursor.execute(
+            "UPDATE comments SET verified = 1 WHERE original_comment = 'orig pt 1'"
+        )
+        conn.commit()
+        conn.close()
+
+    def _mostrar(self, db_path):
+        vistos = []
+        self.addCleanup(setattr, db_tools, "messagebox", db_tools.messagebox)
+        db_tools.messagebox = types.SimpleNamespace(
+            showinfo=lambda t, m, **_kw: vistos.append(("info", t, m)),
+            showerror=lambda t, m, **_kw: vistos.append(("error", t, m)),
+        )
+        db_tools.show_db_stats(types.SimpleNamespace(output_db=str(db_path)))
+        return vistos
+
+    def test_the_totals_match_the_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._montar(db_path)
+
+            vistos = self._mostrar(db_path)
+
+            self.assertEqual([tipo for tipo, _t, _m in vistos], ["info"])
+            msg = vistos[0][2]
+            self.assertIn("Total de traducoes armazenadas: 5", msg)
+            self.assertIn("Verificadas: 1", msg)
+            self.assertIn("Pendentes: 4", msg)
+
+    def test_each_language_pair_is_counted_on_its_own(self):
+        """Duas traducoes em pt vindas do ingles e uma vinda de origem nao dita.
+
+        Somadas pelo destino seriam "pt: 3"; o relatorio precisa mostrar as duas
+        linhas separadas, senao o par que o usuario escolheu declarar desaparece
+        no total.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._montar(db_path)
+
+            msg = self._mostrar(db_path)[0][2]
+
+            self.assertIn("- Inglês -> pt: 2 | verificadas: 1 | pendentes: 1", msg)
+            self.assertIn("- Não informado -> pt: 1 | verificadas: 0 | pendentes: 1", msg)
+            self.assertIn("- Não informado -> en: 2 | verificadas: 0 | pendentes: 2", msg)
+            self.assertNotIn("- pt: 3", msg)
+
+    def test_the_quality_warning_is_counted_in_the_right_pair(self):
+        """O aviso e da linha sem origem declarada.
+
+        Nem o par `Inglês -> pt` (mesmo destino, outra origem) nem
+        `Não informado -> en` (mesma origem, outro destino) podem herda-lo — e
+        sao justamente esses dois que um agrupamento pela metade confundiria.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._montar(db_path)
+
+            msg = self._mostrar(db_path)[0][2]
+
+            def linha(prefixo):
+                return next(l for l in msg.splitlines() if l.strip().startswith(prefixo))
+
+            self.assertTrue(
+                linha("- Não informado -> pt:").rstrip().endswith("QA: 1"),
+                linha("- Não informado -> pt:"),
+            )
+            self.assertTrue(
+                linha("- Inglês -> pt:").rstrip().endswith("QA: 0"),
+                linha("- Inglês -> pt:"),
+            )
+            self.assertTrue(
+                linha("- Não informado -> en:").rstrip().endswith("QA: 0"),
+                linha("- Não informado -> en:"),
+            )
+
+    def test_an_empty_database_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "vazio.db"
+            initialize_database(str(db_path)).close()
+
+            vistos = self._mostrar(db_path)
+
+            self.assertEqual([tipo for tipo, _t, _m in vistos], ["info"])
+            self.assertIn("Total de traducoes armazenadas: 0", vistos[0][2])
+
+    def test_a_broken_database_becomes_an_error_dialog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            quebrado = Path(tmp) / "nao-e-banco.db"
+            quebrado.write_bytes(b"isto nao e um banco sqlite" * 100)
+
+            vistos = self._mostrar(quebrado)
+
+            self.assertEqual([tipo for tipo, _t, _m in vistos], ["error"])
+            self.assertIn("Nao foi possivel acessar", vistos[0][2])
+
+            # E o arquivo NAO pode ficar preso: ver o teste abaixo.
+            quebrado.unlink()
+
+    def test_a_broken_database_does_not_stay_locked(self):
+        """Encontrado escrevendo o teste acima, que nao conseguia apagar o tmp.
+
+        `initialize_database` abre a conexao e so depois roda o PRAGMA. Num
+        banco corrompido o PRAGMA levanta, a excecao sobe sem a conexao nunca
+        ter sido devolvida — quem chamou nao tem o que fechar — e o arquivo fica
+        preso ate o coletor de lixo passar.
+
+        O efeito para o usuario e o pior possivel: o programa avisa que nao
+        conseguiu ler o banco e, ao mesmo tempo, impede que ele seja substituido
+        pelo backup. Atinge todo chamador de `initialize_database`, e nao so
+        este.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            quebrado = Path(tmp) / "nao-e-banco.db"
+            quebrado.write_bytes(b"isto nao e um banco sqlite" * 100)
+
+            with self.assertRaises(sqlite3.DatabaseError):
+                initialize_database(str(quebrado))
+
+            # Sem a correcao isto levanta PermissionError no Windows.
+            quebrado.unlink()
+            self.assertFalse(quebrado.exists())
+
+    def test_the_connection_is_released(self):
+        """O `finally` fecha a conexao mesmo no caminho de sucesso.
+
+        Ficar com ela aberta prenderia o banco enquanto a janela vivesse — e o
+        editor e o worker disputam o mesmo arquivo (garantia C3).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._montar(db_path)
+            self._mostrar(db_path)
+
+            # Se a leitura tivesse deixado conexao aberta, esta escrita
+            # exclusiva falharia.
+            conn = sqlite3.connect(str(db_path), timeout=0.5)
+            try:
+                conn.execute("BEGIN EXCLUSIVE")
+                conn.execute(
+                    "UPDATE comments SET verified = 1 WHERE target_language = 'pt'"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+
+# ===========================================================================
+# Idioma de origem: schema, migracao, adocao e filtro
+# ===========================================================================
+
+
+def _schema3_database(db_path):
+    """Um banco no schema 3 — o que existia antes de a origem entrar na chave.
+
+    Escrito a mao, e nao gerado pelo programa: o ponto do teste e que a migracao
+    receba exatamente a tabela antiga, com a UNIQUE antiga e sem a coluna nova.
+    """
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            original_comment TEXT,
+            translated_comment TEXT,
+            target_language TEXT,
+            verified INTEGER DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT,
+            verified_at TEXT,
+            quality_warning INTEGER,
+            UNIQUE(original_comment, target_language)
+        );
+        CREATE TABLE comment_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            comment_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            previous_translation TEXT,
+            new_translation TEXT,
+            previous_verified INTEGER,
+            new_verified INTEGER,
+            created_at TEXT
+        );
+        PRAGMA user_version = 3;
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+class SourceLanguageSchemaTests(unittest.TestCase):
+    """A coluna `source_language` e a chave nova da tabela `comments`."""
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        return Path(sandbox.name) / "cache.db"
+
+    def test_the_same_comment_from_two_languages_is_two_rows(self):
+        """O ponto do item: a origem faz parte da identidade da traducao.
+
+        "Nada" em espanhol e "Nada" em portugues sao o mesmo texto e traducoes
+        diferentes. Com a chave antiga, a segunda execucao encontrava a linha da
+        primeira e devolvia a traducao da outra lingua como se fosse dela.
+        """
+        conn = initialize_database(str(self.banco()))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+
+        self.assertEqual(save_translation(cur, "Nada", "Nothing", "en", "es"), "inserted")
+        self.assertEqual(save_translation(cur, "Nada", "Anything", "en", "pt"), "inserted")
+        conn.commit()
+
+        self.assertEqual(
+            cur.execute(
+                "SELECT source_language, translated_comment FROM comments ORDER BY id"
+            ).fetchall(),
+            [("es", "Nothing"), ("pt", "Anything")],
+        )
+
+    def test_the_same_pair_twice_is_still_one_row(self):
+        """A chave nova nao pode virar uma licenca para duplicar."""
+        conn = initialize_database(str(self.banco()))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+
+        save_translation(cur, "Nada", "Nothing", "en", "es")
+        self.assertEqual(
+            save_translation(cur, "Nada", "Outra coisa", "en", "es"), "unchanged"
+        )
+        conn.commit()
+
+        self.assertEqual(cur.execute("SELECT COUNT(*) FROM comments").fetchone()[0], 1)
+
+    def test_the_unknown_source_is_an_empty_string_and_not_null(self):
+        """Num indice UNIQUE, todo NULL e distinto de qualquer outro.
+
+        Com `NULL` no lugar da string vazia, a chave deixaria de valer para as
+        linhas legadas — e a mesma execucao repetida inseriria tudo de novo, sem
+        erro nenhum. E o motivo de a coluna ser `NOT NULL DEFAULT ''`.
+        """
+        conn = initialize_database(str(self.banco()))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+
+        save_translation(cur, "the rook", "a torre", "pt")
+        save_translation(cur, "the rook", "outra", "pt")
+        conn.commit()
+
+        linhas = cur.execute("SELECT source_language FROM comments").fetchall()
+        self.assertEqual(linhas, [(SOURCE_LANGUAGE_UNKNOWN,)])
+        self.assertEqual(SOURCE_LANGUAGE_UNKNOWN, "")
+
+    def test_migrating_keeps_the_ids_and_marks_the_source_unknown(self):
+        """Os ids sao o que faz o indice FTS sobreviver a reconstrucao.
+
+        `comments_fts` e indexado por `rowid`. Se a copia renumerasse as linhas,
+        cada entrada do indice passaria a apontar para o texto de outra linha e a
+        busca devolveria resultados errados — sem erro, sem aviso.
+        """
+        db_path = self.banco()
+        _schema3_database(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        conn.executemany(
+            "INSERT INTO comments (id, original_comment, translated_comment,"
+            " target_language, verified, quality_warning) VALUES (?, ?, ?, ?, ?, 0)",
+            [
+                (7, "the rook", "a torre", "pt", 1),
+                (9, "the bishop", "o bispo", "pt", 0),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        conn = initialize_database(str(db_path))
+        self.addCleanup(conn.close)
+
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+        self.assertEqual(
+            conn.execute(
+                "SELECT id, original_comment, source_language, verified"
+                " FROM comments ORDER BY id"
+            ).fetchall(),
+            [(7, "the rook", "", 1), (9, "the bishop", "", 0)],
+        )
+
+    def test_migrating_leaves_the_search_index_pointing_at_the_right_rows(self):
+        db_path = self.banco()
+        _schema3_database(db_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.executemany(
+            "INSERT INTO comments (id, original_comment, translated_comment,"
+            " target_language, verified, quality_warning) VALUES (?, ?, ?, ?, 0, 0)",
+            [(3, "the rook", "a torre", "pt"), (11, "the bishop", "o bispo", "pt")],
+        )
+        conn.commit()
+        conn.close()
+
+        conn = initialize_database(str(db_path))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+        if not fts_index_ready(cur):
+            self.skipTest("SQLite sem FTS5")
+
+        achados = cur.execute(
+            "SELECT id, original_comment FROM comments WHERE id IN"
+            f" (SELECT rowid FROM {FTS_TABLE} WHERE {FTS_TABLE} MATCH ?)",
+            ('"bispo"',),
+        ).fetchall()
+        self.assertEqual(achados, [(11, "the bishop")])
+
+    def test_migrating_replaces_the_old_unique_constraint(self):
+        """Sem trocar a restricao, a linha do espanhol nao caberia na tabela."""
+        db_path = self.banco()
+        _schema3_database(db_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO comments (id, original_comment, translated_comment,"
+            " target_language, verified, quality_warning) VALUES (1, 'Nada',"
+            " 'Nothing', 'en', 0, 0)"
+        )
+        conn.commit()
+        conn.close()
+
+        conn = initialize_database(str(db_path))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+        self.assertEqual(save_translation(cur, "Nada", "Anything", "en", "pt"), "inserted")
+        conn.commit()
+        self.assertEqual(cur.execute("SELECT COUNT(*) FROM comments").fetchone()[0], 2)
+
+
+class AdoptUnknownSourceLanguageTests(unittest.TestCase):
+    """As 201.607 linhas que o banco real ja tinha nao podem ser pagas de novo.
+
+    Elas ficaram com origem "nao informada" na migracao. Sem a adocao, a primeira
+    execucao que declarasse "estes PGN estao em espanhol" nao acharia nenhuma
+    delas no cache e mandaria tudo de volta para a API.
+    """
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        conn = initialize_database(str(Path(sandbox.name) / "cache.db"))
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_it_labels_the_rows_of_the_comments_asked_for(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "the rook", "a torre", "pt")
+        save_translation(cur, "the bishop", "o bispo", "pt")
+        conn.commit()
+
+        adotadas = adopt_unknown_source_language(cur, "pt", "en", ["the rook"])
+        conn.commit()
+
+        self.assertEqual(adotadas, 1)
+        self.assertEqual(
+            cur.execute(
+                "SELECT original_comment, source_language FROM comments ORDER BY id"
+            ).fetchall(),
+            [("the rook", "en"), ("the bishop", "")],
+        )
+
+    def test_a_row_that_already_declares_another_source_is_left_alone(self):
+        """Adotar so alcanca quem nao tinha idioma nenhum.
+
+        Reetiquetar uma linha que ja diz "veio do espanhol" seria apagar uma
+        declaracao do usuario com outra.
+        """
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "Nada", "Nothing", "en", "es")
+        conn.commit()
+
+        self.assertEqual(adopt_unknown_source_language(cur, "en", "pt", ["Nada"]), 0)
+        conn.commit()
+        self.assertEqual(
+            cur.execute("SELECT source_language FROM comments").fetchall(), [("es",)]
+        )
+
+    def test_adopting_into_an_occupied_pair_keeps_both_rows(self):
+        """A adocao pode esbarrar na propria chave, e ai ela nao acontece.
+
+        Se ja existe (mesmo comentario, mesma origem, mesmo destino), promover a
+        linha sem rotulo criaria uma duplicata. `UPDATE OR IGNORE` deixa as duas
+        como estao em vez de derrubar a execucao inteira com um IntegrityError.
+        """
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "Nada", "Nothing (antiga)", "en")
+        save_translation(cur, "Nada", "Nothing (espanhol)", "en", "es")
+        conn.commit()
+
+        adopt_unknown_source_language(cur, "en", "es", ["Nada"])
+        conn.commit()
+
+        self.assertEqual(
+            sorted(
+                cur.execute(
+                    "SELECT source_language, translated_comment FROM comments"
+                ).fetchall()
+            ),
+            [("", "Nothing (antiga)"), ("es", "Nothing (espanhol)")],
+        )
+
+    def test_detecting_automatically_adopts_nothing(self):
+        """Detectar nao e uma declaracao, entao nao ha o que registrar."""
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "the rook", "a torre", "pt")
+        conn.commit()
+
+        self.assertEqual(adopt_unknown_source_language(cur, "pt", "", ["the rook"]), 0)
+        self.assertEqual(
+            cur.execute("SELECT source_language FROM comments").fetchall(), [("",)]
+        )
+
+    def test_it_survives_more_comments_than_sqlite_accepts_as_parameters(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        quantos = database.CACHE_LOOKUP_CHUNK * 2 + 5
+        for i in range(quantos):
+            save_translation(cur, f"original {i}", f"traducao {i}", "pt")
+        conn.commit()
+
+        adotadas = adopt_unknown_source_language(
+            cur, "pt", "en", [f"original {i}" for i in range(quantos)]
+        )
+        conn.commit()
+
+        self.assertEqual(adotadas, quantos)
+        self.assertEqual(
+            cur.execute(
+                "SELECT COUNT(*) FROM comments WHERE source_language = 'en'"
+            ).fetchone()[0],
+            quantos,
+        )
+
+
+class TranslationCacheByLanguagePairTests(unittest.TestCase):
+    """O cache e do PAR, e nao so do destino."""
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        conn = initialize_database(str(Path(sandbox.name) / "cache.db"))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+        save_translation(cur, "Nada", "Nothing", "en", "es")
+        save_translation(cur, "Nada", "Anything", "en", "pt")
+        save_translation(cur, "the rook", "a torre", "pt")
+        conn.commit()
+        return cur
+
+    def test_each_source_gets_its_own_translation(self):
+        cur = self.banco()
+        self.assertEqual(
+            load_translation_cache(cur, "en", ["Nada"], source_language="es"),
+            {"Nada": "Nothing"},
+        )
+        self.assertEqual(
+            load_translation_cache(cur, "en", ["Nada"], source_language="pt"),
+            {"Nada": "Anything"},
+        )
+
+    def test_a_declared_source_never_reuses_the_unlabelled_row(self):
+        """Nao por economia, por correcao.
+
+        A linha sem rotulo pode ter vindo de qualquer lingua. Entrega-la a uma
+        execucao que declarou espanhol e exatamente o engano entre linguas que o
+        filtro existe para impedir — e a adocao e o caminho legitimo de
+        aproveita-la, porque ela passa pela declaracao do usuario.
+        """
+        cur = self.banco()
+        self.assertEqual(
+            load_translation_cache(cur, "pt", ["the rook"], source_language="en"), {}
+        )
+        self.assertEqual(
+            load_translation_cache(cur, "pt", ["the rook"]), {"the rook": "a torre"}
+        )
+
+    def test_the_full_load_is_restricted_to_the_pair_too(self):
+        """O atalho de carregar tudo nao pode ser um jeito de furar o filtro."""
+        cur = self.banco()
+        self.assertEqual(
+            load_translation_cache(cur, "en", source_language="es"), {"Nada": "Nothing"}
+        )
+
+
+class ReviewFilterBySourceLanguageTests(unittest.TestCase):
+    """O filtro de origem do editor, na camada de consulta."""
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        conn = initialize_database(str(Path(sandbox.name) / "cache.db"))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+        save_translation(cur, "the rook", "a torre", "pt", "en")
+        save_translation(cur, "the bishop", "o bispo", "pt", "en")
+        save_translation(cur, "la torre", "a torre", "pt", "es")
+        save_translation(cur, "antiga", "traducao antiga", "pt")
+        conn.commit()
+        return cur
+
+    def originais(self, linhas):
+        return sorted(linha[1] for linha in linhas)
+
+    def test_none_means_every_source(self):
+        cur = self.banco()
+        self.assertEqual(
+            self.originais(fetch_review_rows(cur, "pt", source_language=None)),
+            ["antiga", "la torre", "the bishop", "the rook"],
+        )
+
+    def test_a_language_brings_only_that_pair(self):
+        cur = self.banco()
+        self.assertEqual(
+            self.originais(fetch_review_rows(cur, "pt", source_language="en")),
+            ["the bishop", "the rook"],
+        )
+
+    def test_the_empty_string_is_a_source_and_not_the_absence_of_a_filter(self):
+        """A distincao de que o filtro inteiro depende.
+
+        `None` nao filtra; `""` filtra pelas linhas cuja origem ninguem
+        declarou. Tratar os dois como a mesma coisa faria "Nao informado" mostrar
+        a tabela toda — e nas 201 mil linhas do banco real isso passaria
+        despercebido, porque quase tudo esta nesse balde.
+        """
+        cur = self.banco()
+        self.assertEqual(
+            self.originais(fetch_review_rows(cur, "pt", source_language="")),
+            ["antiga"],
+        )
+
+    def test_the_counts_follow_the_same_filter_as_the_page(self):
+        """Senao a lista pagina por um numero que nao e o dela.
+
+        E a mesma armadilha do item 2.8: os dois criterios vivem em consultas
+        diferentes e divergir nao quebra nada visivel.
+        """
+        cur = self.banco()
+        for origem, esperado in [(None, 4), ("en", 2), ("es", 1), ("", 1)]:
+            with self.subTest(origem=origem):
+                resumo = get_review_status_counts(cur, "pt", source_language=origem)
+                self.assertEqual(resumo["total"], esperado)
+                self.assertEqual(
+                    count_review_rows(cur, "pt", source_language=origem), esperado
+                )
+                self.assertEqual(
+                    len(
+                        fetch_review_rows_page(
+                            cur, "pt", limit=100, offset=0, source_language=origem
+                        )
+                    ),
+                    esperado,
+                )
+
+    def test_the_offset_of_a_row_is_within_its_own_filter(self):
+        cur = self.banco()
+        linhas = fetch_review_rows(cur, "pt", source_language="en")
+        segundo = linhas[1][0]
+        self.assertEqual(
+            get_review_row_offset(cur, "pt", segundo, source_language="en"), 1
+        )
+        # Com a origem errada a linha simplesmente nao esta na lista.
+        self.assertIsNone(get_review_row_offset(cur, "pt", segundo, source_language="es"))
+
+    def test_verifying_exact_matches_stays_inside_the_pair(self):
+        """"a torre" existe nas duas origens, com originais diferentes.
+
+        Marcar a do ingles nao pode dar por revisada a do espanhol: sao textos
+        que o usuario nem viu, na tela que ele abriu para nao misturar linguas.
+        """
+        cur = self.banco()
+        do_ingles = cur.execute(
+            "SELECT id FROM comments WHERE original_comment = 'the rook'"
+        ).fetchone()[0]
+
+        set_exact_translation_matches_verified(cur, do_ingles)
+
+        self.assertEqual(
+            cur.execute(
+                "SELECT original_comment, verified FROM comments"
+                " WHERE translated_comment = 'a torre' ORDER BY id"
+            ).fetchall(),
+            [("the rook", 1), ("la torre", 0)],
+        )
+
+
+class ClearAllTranslationsTests(unittest.TestCase):
+    """O "Zerar Traduções", na camada do banco."""
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        conn = initialize_database(str(Path(sandbox.name) / "cache.db"))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+        save_translation(cur, "the rook", "a torre", "pt", "en")
+        save_translation(cur, "the bishop", "o bispo", "pt", "en")
+        update_translation_by_id(
+            cur,
+            cur.execute("SELECT id FROM comments ORDER BY id").fetchone()[0],
+            "a torre revisada",
+        )
+        conn.commit()
+        return conn
+
+    def test_it_reports_how_many_rows_it_removed(self):
+        conn = self.banco()
+        self.assertEqual(clear_all_translations(conn), 2)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0], 0)
+
+    def test_the_history_goes_with_the_translations(self):
+        """Historico de traducoes que nao existem mais nao e historico de nada."""
+        conn = self.banco()
+        self.assertGreater(
+            conn.execute("SELECT COUNT(*) FROM comment_history").fetchone()[0], 0
+        )
+        clear_all_translations(conn)
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM comment_history").fetchone()[0], 0
+        )
+
+    def test_the_database_is_usable_right_after(self):
+        """Zerar nao pode deixar o banco sem schema: o proximo uso e uma gravacao."""
+        conn = self.banco()
+        clear_all_translations(conn)
+
+        cur = conn.cursor()
+        self.assertEqual(
+            save_translation(cur, "novo", "novo traduzido", "pt", "en"), "inserted"
+        )
+        conn.commit()
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+
+    def test_the_search_index_is_emptied_too(self):
+        """Um indice com termos de linhas apagadas devolve o que nao existe."""
+        conn = self.banco()
+        cur = conn.cursor()
+        if not fts_index_ready(cur):
+            self.skipTest("SQLite sem FTS5")
+
+        clear_all_translations(conn)
+
+        self.assertEqual(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {FTS_TABLE} WHERE {FTS_TABLE} MATCH ?",
+                ('"torre"',),
+            ).fetchone()[0],
+            0,
+        )
+
+
+class TypedConfirmationTests(unittest.TestCase):
+    """A regra do dialogo que exige digitar a palavra.
+
+    Pura e separada da janela de proposito: e ela que decide se algo e apagado, e
+    testa-la nao pode exigir abrir um `Toplevel`.
+    """
+
+    def test_the_word_releases_the_action(self):
+        self.assertTrue(confirmation_accepted(CONFIRMATION_WORD))
+
+    def test_case_and_surrounding_space_do_not_matter(self):
+        """Quem digitou DELETE decidiu tanto quanto quem digitou delete."""
+        for texto in ["DELETE", " delete ", "Delete", "\tdelete\n"]:
+            with self.subTest(texto=texto):
+                self.assertTrue(confirmation_accepted(texto))
+
+    def test_anything_else_does_not(self):
+        for texto in ["", None, "del", "deletes", "apagar", "sim", "s"]:
+            with self.subTest(texto=texto):
+                self.assertFalse(confirmation_accepted(texto))
+
+    def test_a_yes_never_passes_for_the_word(self):
+        """O ponto do dialogo e nao ser um Sim a um clique de distancia."""
+        self.assertFalse(confirmation_accepted("sim"))
+        self.assertFalse(confirmation_accepted("yes"))
+        self.assertFalse(confirmation_accepted("ok"))
+
+# ===========================================================================
+# O idioma de origem no caminho da traducao
+# ===========================================================================
+
+
+class WorkerSourceLanguageTests(unittest.TestCase):
+    """O que a execucao faz com o idioma que o usuario declarou."""
+
+    def setUp(self):
+        original = translation_worker.messagebox
+
+        class SemDialogos:
+            showinfo = staticmethod(lambda *_a, **_k: None)
+            showwarning = staticmethod(lambda *_a, **_k: None)
+            showerror = staticmethod(lambda *_a, **_k: None)
+            askyesno = staticmethod(lambda *_a, **_k: True)
+
+        translation_worker.messagebox = SemDialogos
+        self.addCleanup(setattr, translation_worker, "messagebox", original)
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.db_path = self.base / "cache.db"
+
+    def escreve_pgn(self, nome="game.pgn", comentario="El alfil domina"):
+        pgn = self.base / nome
+        pgn.write_text(
+            f'[Event "Test"]\n\n1. e4 {{{comentario}}}\n', encoding="utf-8"
+        )
+        return pgn
+
+    def falso_translate(self, resposta="O bispo domina"):
+        """Captura o que chegou a camada de rede, sem tocar nela."""
+        recebidos = []
+
+        def falso(text, target_language, *_a, **kwargs):
+            recebidos.append(
+                {
+                    "text": text,
+                    "target_language": target_language,
+                    "source_language": kwargs.get("source_language"),
+                }
+            )
+            return resposta
+
+        original = translation_worker.translate_text
+        translation_worker.translate_text = falso
+        self.addCleanup(setattr, translation_worker, "translate_text", original)
+        return recebidos
+
+    def linhas(self):
+        conn = initialize_database(str(self.db_path))
+        try:
+            return conn.execute(
+                "SELECT original_comment, translated_comment, source_language,"
+                " target_language FROM comments ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def test_the_declared_source_reaches_the_api(self):
+        """`sl=auto` faz o endpoint adivinhar a partir de um comentario curto."""
+        recebidos = self.falso_translate()
+        pgn = self.escreve_pgn()
+
+        translation_worker.run_translation(
+            FakeApp(self.db_path), str(pgn), "pt", False, source_language="es"
+        )
+
+        self.assertEqual([r["source_language"] for r in recebidos], ["es"])
+
+    def test_detecting_automatically_still_sends_nothing(self):
+        """O padrao continua sendo o comportamento que o programa sempre teve."""
+        recebidos = self.falso_translate()
+        pgn = self.escreve_pgn()
+
+        translation_worker.run_translation(FakeApp(self.db_path), str(pgn), "pt", False)
+
+        self.assertEqual([r["source_language"] for r in recebidos], [""])
+
+    def test_the_translation_is_stored_under_the_declared_pair(self):
+        self.falso_translate()
+        pgn = self.escreve_pgn()
+
+        translation_worker.run_translation(
+            FakeApp(self.db_path), str(pgn), "pt", False, source_language="es"
+        )
+
+        self.assertEqual(
+            self.linhas(), [("El alfil domina", "O bispo domina", "es", "pt")]
+        )
+
+    def test_the_same_comment_in_two_source_languages_is_translated_twice(self):
+        """A prova de que a chave nova vale ponta a ponta.
+
+        O mesmo texto vindo de dois idiomas rende duas chamadas de API e duas
+        linhas. Com a chave antiga, a segunda execucao acharia a primeira no
+        cache e escreveria a traducao do espanhol num PGN italiano.
+        """
+        recebidos = self.falso_translate()
+        pgn = self.escreve_pgn(comentario="Nada")
+
+        translation_worker.run_translation(
+            FakeApp(self.db_path), str(pgn), "en", False, source_language="es"
+        )
+        translation_worker.run_translation(
+            FakeApp(self.db_path), str(pgn), "en", False, source_language="it"
+        )
+
+        self.assertEqual([r["source_language"] for r in recebidos], ["es", "it"])
+        self.assertEqual(
+            [linha[2] for linha in self.linhas()], ["es", "it"]
+        )
+
+    def test_the_cache_already_in_the_database_is_adopted_and_not_paid_again(self):
+        """O que impede a mudanca de chave de cobrar as 201.607 linhas de novo.
+
+        As traducoes gravadas antes desta versao ficaram sem idioma de origem. A
+        primeira execucao que declara um idioma as adota — nenhuma chamada de
+        API — em vez de encontrar o cache vazio e mandar tudo para a rede.
+        """
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        save_translation(cur, "El alfil domina", "O bispo domina", "pt")
+        conn.commit()
+        conn.close()
+
+        recebidos = self.falso_translate()
+        pgn = self.escreve_pgn()
+        app = FakeApp(self.db_path)
+
+        translation_worker.run_translation(
+            app, str(pgn), "pt", False, source_language="es"
+        )
+
+        self.assertEqual(recebidos, [], "a API foi chamada para algo que ja estava no banco")
+        self.assertEqual(
+            self.linhas(), [("El alfil domina", "O bispo domina", "es", "pt")]
+        )
+        self.assertIn("marcadas como 'es'", "\n".join(app.logs))
+
+    def test_adopting_does_not_touch_a_row_of_another_declared_source(self):
+        """Adotar so alcanca quem nao tinha idioma nenhum — nem no worker."""
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        save_translation(cur, "El alfil domina", "O bispo domina", "pt", "it")
+        conn.commit()
+        conn.close()
+
+        recebidos = self.falso_translate("O alfil domina")
+        pgn = self.escreve_pgn()
+
+        translation_worker.run_translation(
+            FakeApp(self.db_path), str(pgn), "pt", False, source_language="es"
+        )
+
+        self.assertEqual(len(recebidos), 1, "a linha do italiano foi reaproveitada")
+        self.assertEqual(
+            sorted(self.linhas()),
+            [
+                ("El alfil domina", "O alfil domina", "es", "pt"),
+                ("El alfil domina", "O bispo domina", "it", "pt"),
+            ],
+        )
+
+    def test_a_failed_run_records_the_pair_it_was_translating(self):
+        original = translation_worker.translate_text
+        translation_worker.translate_text = lambda *_a, **_k: None
+        self.addCleanup(setattr, translation_worker, "translate_text", original)
+
+        pgn = self.escreve_pgn()
+        translation_worker.run_translation(
+            FakeApp(self.db_path), str(pgn), "pt", False, source_language="es"
+        )
+
+        registro = failed_runs.load_failed_run()
+        self.assertIsNotNone(registro)
+        self.assertEqual(registro["source_language"], "es")
+        self.assertEqual(registro["target_language"], "pt")
+
+
+class FailedRunSourceLanguageTests(unittest.TestCase):
+    """O registro de falhas guarda o par, e le registros antigos sem ele."""
+
+    def test_the_record_carries_the_source_language(self):
+        registro = failed_runs.build_failed_run_record(
+            "pt", ["/a/b.pgn"], 3, source_language="es"
+        )
+        self.assertEqual(registro["source_language"], "es")
+
+    def test_a_record_from_an_older_version_is_still_usable(self):
+        """Descartar uma lista de falhas boa por causa de um campo novo seria
+        transformar uma compatibilidade em perda de trabalho."""
+        antigo = {
+            "target_language": "pt",
+            "files": ["/a/b.pgn"],
+            "failed_count": 2,
+            "when": "2026-07-27T10:00:00",
+        }
+        normalizado = failed_runs.normalize_failed_run_record(antigo)
+        self.assertIsNotNone(normalizado)
+        self.assertEqual(normalizado["source_language"], "")
+
+    def test_the_description_names_the_pair(self):
+        registro = failed_runs.build_failed_run_record(
+            "pt", ["/a/b.pgn"], 3, source_language="es"
+        )
+        self.assertIn("es -> pt", failed_runs.describe_failed_run(registro, lambda _p: True))
+
+
+# ===========================================================================
+# Zerar o banco de traducoes e zerar o glossario
+# ===========================================================================
+
+
+class ResetToolsTestCase(unittest.TestCase):
+    """Base das duas ferramentas destrutivas.
+
+    O `ask_typed_confirmation` e substituido por uma funcao que registra o que
+    foi perguntado e devolve o que o teste mandar. A regra que ele aplica ja tem
+    teste proprio (`TypedConfirmationTests`); o que interessa aqui e o que
+    acontece ANTES e DEPOIS da resposta.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+        self.dialogos = []
+        original_messagebox = db_tools.messagebox
+        db_tools.messagebox = types.SimpleNamespace(
+            showinfo=lambda t, m, **_k: self.dialogos.append(("info", t, m)),
+            showerror=lambda t, m, **_k: self.dialogos.append(("error", t, m)),
+            askyesno=lambda t, m, **_k: True,
+        )
+        self.addCleanup(setattr, db_tools, "messagebox", original_messagebox)
+
+        self.perguntas = []
+        self.resposta = True
+        original_ask = db_tools.ask_typed_confirmation
+        db_tools.ask_typed_confirmation = self.perguntar
+        self.addCleanup(setattr, db_tools, "ask_typed_confirmation", original_ask)
+
+        # As tarefas de fundo rodam na hora: o que esta sob teste e a
+        # orquestracao, e a thread ja tem teste proprio em test_background_task.
+        original_run = db_tools.run_with_progress
+        db_tools.run_with_progress = self.rodar_sincrono
+        self.addCleanup(setattr, db_tools, "run_with_progress", original_run)
+
+    def perguntar(self, _parent, titulo, mensagem, **_kwargs):
+        self.perguntas.append((titulo, mensagem))
+        return self.resposta
+
+    def rodar_sincrono(self, _parent, _titulo, work, on_success=None, **_kwargs):
+        resultado = work(BackgroundTask())
+        if on_success is not None:
+            on_success(resultado)
+
+    def app_falso(self, db_path):
+        return types.SimpleNamespace(
+            output_db=str(db_path),
+            root=None,
+            translation_cache={"the rook": "a torre"},
+            glossary_substitutions=[],
+            glossary_change_callbacks=[],
+            log_message=lambda _m: None,
+        )
+
+
+class ResetTranslationsTests(ResetToolsTestCase):
+    def banco(self):
+        db_path = self.base / "traducoes.db"
+        conn = initialize_database(str(db_path))
+        cur = conn.cursor()
+        save_translation(cur, "the rook", "a torre", "pt", "en")
+        save_translation(cur, "the bishop", "o bispo", "pt", "en")
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def backups(self):
+        pasta = self.base / "backups"
+        return sorted(p.name for p in pasta.glob("*.db")) if pasta.exists() else []
+
+    def linhas(self, db_path):
+        conn = initialize_database(str(db_path))
+        try:
+            return conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_the_backup_is_taken_before_the_question(self):
+        """E a unica forma de voltar atras, e o custo dela e 0,4 s.
+
+        Deixa-la para depois do "Apagar" significaria que uma falha entre a
+        confirmacao e a copia apaga tudo sem rede. O pior caso desta ordem e uma
+        copia a mais para quem desistiu, e a retencao cuida dela.
+        """
+        db_path = self.banco()
+        self.resposta = False
+
+        db_tools.reset_translations(self.app_falso(db_path))
+
+        self.assertEqual(len(self.backups()), 1)
+        self.assertEqual(len(self.perguntas), 1)
+        self.assertIn(self.backups()[0], self.perguntas[0][1])
+
+    def test_saying_no_leaves_the_database_alone(self):
+        db_path = self.banco()
+        self.resposta = False
+
+        db_tools.reset_translations(self.app_falso(db_path))
+
+        self.assertEqual(self.linhas(db_path), 2)
+
+    def test_saying_yes_empties_it(self):
+        db_path = self.banco()
+
+        db_tools.reset_translations(self.app_falso(db_path))
+
+        self.assertEqual(self.linhas(db_path), 0)
+        self.assertIn("info", [tipo for tipo, _t, _m in self.dialogos])
+
+    def test_the_in_memory_cache_goes_with_it(self):
+        """O cache tem precedencia sobre o banco.
+
+        Deixado como estava, a proxima traducao reaproveitaria exatamente o que o
+        usuario acabou de mandar apagar — e sem tocar no banco, entao nada
+        apareceria como erro.
+        """
+        db_path = self.banco()
+        app = self.app_falso(db_path)
+
+        db_tools.reset_translations(app)
+
+        self.assertEqual(app.translation_cache, {})
+
+    def test_the_cache_survives_a_no(self):
+        db_path = self.banco()
+        app = self.app_falso(db_path)
+        self.resposta = False
+
+        db_tools.reset_translations(app)
+
+        self.assertEqual(app.translation_cache, {"the rook": "a torre"})
+
+    def test_an_empty_database_is_not_worth_asking_about(self):
+        db_path = self.base / "vazio.db"
+        initialize_database(str(db_path)).close()
+
+        db_tools.reset_translations(self.app_falso(db_path))
+
+        self.assertEqual(self.perguntas, [])
+        self.assertEqual(self.backups(), [], "nem backup de um banco vazio")
+
+    def test_the_question_says_how_many_rows_are_at_stake(self):
+        db_path = self.banco()
+        self.resposta = False
+
+        db_tools.reset_translations(self.app_falso(db_path))
+
+        self.assertIn("2 tradução(ões)", self.perguntas[0][1])
+
+
+class ResetGlossaryTests(ResetToolsTestCase):
+    def glossario_com(self, entradas):
+        path = self.base / "Substituicoes.txt"
+        save_glossary_entries(
+            entradas, path=str(path), create_backup=False, sync_db=False
+        )
+        original = glossario._default_substitutions_path
+        glossario._default_substitutions_path = lambda: str(path)
+        self.addCleanup(
+            setattr, glossario, "_default_substitutions_path", original
+        )
+        return path
+
+    def test_saying_no_leaves_every_rule_in_place(self):
+        path = self.glossario_com([("rook", "torre"), ("queen", "dama")])
+        app = self.app_falso(self.base / "traducoes.db")
+        app.glossary_substitutions = [("rook", "torre"), ("queen", "dama")]
+        self.resposta = False
+
+        db_tools.reset_glossary(app)
+
+        self.assertEqual(len(load_glossary_entries(str(path), prefer_db=False)), 2)
+        self.assertEqual(len(app.glossary_substitutions), 2)
+
+    def test_saying_yes_empties_the_file(self):
+        path = self.glossario_com([("rook", "torre"), ("queen", "dama")])
+        app = self.app_falso(self.base / "traducoes.db")
+        app.glossary_substitutions = [("rook", "torre"), ("queen", "dama")]
+
+        db_tools.reset_glossary(app)
+
+        self.assertEqual(load_glossary_entries(str(path), prefer_db=False), [])
+        self.assertEqual(app.glossary_substitutions, [])
+
+    def test_the_backup_comes_before_the_question(self):
+        self.glossario_com([("rook", "torre")])
+        app = self.app_falso(self.base / "traducoes.db")
+        self.resposta = False
+
+        db_tools.reset_glossary(app)
+
+        copias = sorted((self.base / "backups").glob("Substituicoes-*.txt"))
+        self.assertEqual(len(copias), 1)
+        self.assertIn(copias[0].name, self.perguntas[0][1])
+        # E ela contem as regras de antes, que e o unico jeito de voltar.
+        self.assertIn("rook", copias[0].read_text(encoding="utf-8"))
+
+    def test_only_one_backup_is_left_behind(self):
+        """A gravacao tambem sabe fazer backup; duas copias identicas na pasta
+        fariam a retencao descartar uma versao antiga de verdade para caber."""
+        self.glossario_com([("rook", "torre")])
+        app = self.app_falso(self.base / "traducoes.db")
+
+        db_tools.reset_glossary(app)
+
+        self.assertEqual(len(list((self.base / "backups").glob("Substituicoes-*.txt"))), 1)
+
+    def test_the_open_windows_are_told(self):
+        """Um editor aberto continuaria oferecendo sugestoes de regras que
+        acabaram de deixar de existir."""
+        self.glossario_com([("rook", "torre")])
+        app = self.app_falso(self.base / "traducoes.db")
+        avisos = []
+        app.glossary_change_callbacks = [avisos.append]
+
+        db_tools.reset_glossary(app)
+
+        self.assertEqual(avisos, [[]])
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,7 +26,8 @@ import customtkinter as ctk
 
 from gui_harness import GuiTestCase
 from tradutor_pgn import app as app_module
-from tradutor_pgn import app_actions, app_config, edit_window, glossary_editor
+from tradutor_pgn import app_actions, app_config, confirm_dialog, edit_window
+from tradutor_pgn import glossary_editor
 from tradutor_pgn import main_window
 from tradutor_pgn.backup_retention import is_backup_of_family, prune_log_files
 from tradutor_pgn.failed_runs import load_failed_run, save_failed_run
@@ -127,11 +128,19 @@ class MainWindowTestCase(GuiTestCase):
         chamadas = []
         pronto = threading.Event()
 
-        def falso(app, source_path, target_language, process_subdirs, only_files=None):
+        def falso(
+            app,
+            source_path,
+            target_language,
+            process_subdirs,
+            only_files=None,
+            source_language="",
+        ):
             chamadas.append(
                 {
                     "source_path": source_path,
                     "target_language": target_language,
+                    "source_language": source_language,
                     "process_subdirs": process_subdirs,
                     "only_files": only_files,
                 }
@@ -321,6 +330,9 @@ class StartTranslationTests(MainWindowTestCase):
         pgn = self.escreve_pgn("partida.pgn")
         self.app.source_path.set(pgn)
         self.app.target_language.set("es")
+        # Nao e o padrao de proposito: com "detectar" selecionado, um worker que
+        # ignorasse o seletor de origem seria indistinguivel de um que o le.
+        self.app.source_language.set("it")
         self.app.process_subdirs.set(False)
 
         self.click_start()
@@ -331,6 +343,7 @@ class StartTranslationTests(MainWindowTestCase):
             [{
                 "source_path": pgn,
                 "target_language": "es",
+                "source_language": "it",
                 "process_subdirs": False,
                 "only_files": None,
             }],
@@ -354,10 +367,11 @@ class StartTranslationTests(MainWindowTestCase):
 class RetryFailedTranslationTests(MainWindowTestCase):
     """O dialogo do item 7.3: reprocessar so o que ficou devendo."""
 
-    def registra(self, arquivos, idioma="en", falhas=3):
+    def registra(self, arquivos, idioma="en", falhas=3, origem="de"):
         save_failed_run(
             {
                 "target_language": idioma,
+                "source_language": origem,
                 "files": [str(a) for a in arquivos],
                 "failed_count": falhas,
                 "when": "2026-07-27T14:00:00",
@@ -377,25 +391,35 @@ class RetryFailedTranslationTests(MainWindowTestCase):
         self.assertIn("Reprocessar falhas", self.dialogs.titles("info"))
 
     def test_it_uses_the_language_of_the_failed_run_and_not_the_selector(self):
-        """A lista foi montada traduzindo para aquele idioma.
+        """A lista foi montada traduzindo aquele PAR de idiomas.
 
         Reaproveita-la com outro selecionado produziria um arquivo misturado sem
-        que ninguem tivesse pedido.
+        que ninguem tivesse pedido — e, desde que a origem entrou na chave do
+        banco, as traducoes que faltam iriam parar numa gaveta diferente da dos
+        comentarios que ja deram certo.
         """
         chamadas, pronto = self.worker_falso()
         pgn = self.escreve_pgn("faltou.pgn")
-        self.registra([pgn], idioma="fr")
+        self.registra([pgn], idioma="fr", origem="ru")
         self.app.target_language.set("pt")
+        self.app.source_language.set("en")
 
         self.clicar()
         self.assertTrue(pronto.wait(10), "o worker nao foi chamado")
 
         self.assertEqual(chamadas[0]["target_language"], "fr")
+        self.assertEqual(chamadas[0]["source_language"], "ru")
         self.assertEqual(chamadas[0]["only_files"], [pgn])
         self.assertEqual(
             self.app.target_language.get(), "fr", "o seletor nao acompanhou"
         )
+        self.assertEqual(
+            self.app.source_language.get(),
+            "ru",
+            "o seletor de origem nao acompanhou",
+        )
         self.assertIn("Idioma ajustado", self.log())
+        self.assertIn("Idioma de origem ajustado", self.log())
 
     def test_files_that_vanished_are_dropped_and_the_rest_still_runs(self):
         chamadas, pronto = self.worker_falso()
@@ -773,6 +797,254 @@ class CreditsFooterTests(MainWindowTestCase):
             "o rodape ficou acima do log",
         )
 
+
+class ResetButtonTests(MainWindowTestCase):
+    """Os dois botoes que apagam trabalho do usuario.
+
+    Sao as unicas acoes da janela sem volta pelo proprio programa — o que existe
+    e o backup —, entao o que se exige aqui e o roteamento e a recusa em rodar
+    durante uma traducao. O que cada uma faz com o disco esta em
+    `ResetTranslationsTests` e `ResetGlossaryTests`.
+    """
+
+    def test_each_reset_button_reaches_its_own_operation(self):
+        """Trocados de lugar, os dois continuam abrindo dialogo e apagam a
+        coisa errada — e a errada aqui e o trabalho de meses do usuario."""
+        recebidos = []
+        self.patch(
+            app_actions,
+            "reset_translations_database",
+            lambda app: recebidos.append(("traducoes", app)),
+        )
+        self.patch(
+            app_actions,
+            "reset_glossary_file",
+            lambda app: recebidos.append(("glossario", app)),
+        )
+
+        self.button("Zerar Traduções").invoke()
+        self.button("Zerar Glossário").invoke()
+        self.pump()
+
+        self.assertEqual([nome for nome, _app in recebidos], ["traducoes", "glossario"])
+        for _nome, app in recebidos:
+            self.assertIs(app, self.app)
+
+    def test_neither_runs_during_a_translation(self):
+        """Zerar o banco no meio de uma execucao daria o pior dos dois mundos:
+        o worker continua gravando no que acabou de ser apagado."""
+        chamadas = []
+        self.patch(
+            app_actions, "reset_translations_database", lambda app: chamadas.append("t")
+        )
+        self.patch(app_actions, "reset_glossary_file", lambda app: chamadas.append("g"))
+        self.app.is_processing = True
+
+        self.button("Zerar Traduções").invoke()
+        self.button("Zerar Glossário").invoke()
+        self.pump()
+
+        self.assertEqual(chamadas, [])
+        self.assertEqual(len(self.dialogs.messages("info")), 2)
+
+    def test_they_are_visibly_destructive(self):
+        """A confirmacao digitada e a defesa; a cor e o aviso.
+
+        Sem ela os dois ficam indistinguiveis de "Backup BD" na mesma grade, a
+        um clique apressado de distancia.
+        """
+        for rotulo in ("Zerar Traduções", "Zerar Glossário"):
+            with self.subTest(rotulo=rotulo):
+                self.assertEqual(
+                    self.button(rotulo).cget("fg_color"),
+                    main_window.DESTRUCTIVE_COLOR,
+                )
+        self.assertNotEqual(
+            self.button("Backup BD").cget("fg_color"), main_window.DESTRUCTIVE_COLOR
+        )
+
+
+class SourceLanguageSelectorTests(MainWindowTestCase):
+    """O seletor de idioma de origem da janela principal."""
+
+    def test_it_starts_on_automatic_detection(self):
+        """O padrao e o que o programa sempre fez (`sl=auto`): quem nao mexer no
+        seletor continua exatamente onde estava."""
+        self.assertEqual(self.app.source_language.get(), "")
+
+    def test_it_offers_detect_plus_every_language(self):
+        rotulos = [b.cget("text") for b in self.app.source_language_buttons]
+        self.assertEqual(
+            rotulos,
+            [app_config.AUTO_SOURCE_LABEL] + [nome for nome, _c in app_config.LANGUAGES],
+        )
+
+    def test_clicking_a_language_sets_the_variable(self):
+        por_rotulo = {
+            b.cget("text"): b for b in self.app.source_language_buttons
+        }
+        por_rotulo["Espanhol"].invoke()
+        self.pump()
+
+        self.assertEqual(self.app.source_language.get(), "es")
+
+    def test_source_and_target_are_independent(self):
+        """Sao dois seletores, e um `variable` trocado ligaria os dois sem erro
+        visivel — o programa so passaria a traduzir de e para o mesmo idioma."""
+        por_rotulo = {b.cget("text"): b for b in self.app.source_language_buttons}
+        por_rotulo["Alemão"].invoke()
+        self.app.target_language.set("pt")
+        self.pump()
+
+        self.assertEqual(self.app.source_language.get(), "de")
+        self.assertEqual(self.app.target_language.get(), "pt")
+
+class TypedConfirmationDialogTests(MainWindowTestCase):
+    """O dialogo de confirmacao digitada, aberto de verdade.
+
+    A regra que ele aplica ja tem teste puro. O que so aparece com a janela na
+    tela e o outro lado dela: o botao "Apagar" precisa ficar visivelmente
+    inerte ate a palavra ser digitada.
+    """
+
+    def abrir(self, roteiro):
+        """Abre o dialogo e roda `roteiro(janela)` de dentro dele.
+
+        `ask_typed_confirmation` e sincrono (`wait_window`), entao a resposta
+        precisa ser agendada ANTES — como um usuario, que so age depois de a
+        janela estar na tela.
+        """
+        resultado = {}
+
+        def agir():
+            janela = [
+                w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)
+            ][-1]
+            try:
+                roteiro(janela)
+            finally:
+                janela.destroy()
+
+        self.root.after(50, agir)
+        resultado["ok"] = confirm_dialog.ask_typed_confirmation(
+            self.root, "Zerar", "mensagem"
+        )
+        return resultado["ok"]
+
+    def campo(self, janela):
+        for widget in self.walk(janela):
+            if isinstance(widget, ctk.CTkEntry):
+                return widget
+        self.fail("o dialogo nao tem campo de texto")
+
+    def botao(self, janela, rotulo):
+        for widget in self.walk(janela):
+            if isinstance(widget, ctk.CTkButton):
+                if (widget.cget("text") or "").strip() == rotulo:
+                    return widget
+        self.fail(f"botao {rotulo!r} nao encontrado no dialogo")
+
+    def test_the_delete_button_starts_inert(self):
+        estados = {}
+
+        def roteiro(janela):
+            botao = self.botao(janela, "Apagar")
+            estados["state"] = botao.cget("state")
+            estados["cor"] = botao.cget("fg_color")
+
+        self.abrir(roteiro)
+
+        self.assertEqual(estados["state"], "disabled")
+        self.assertEqual(estados["cor"], confirm_dialog.CONFIRM_DISABLED_COLOR)
+
+    def test_typing_the_word_arms_it_and_the_colour_says_so(self):
+        """O `state` sozinho nao basta, e foi a janela de verdade que mostrou.
+
+        Sobre um vermelho saturado o escurecimento que o CustomTkinter aplica a
+        um botao desabilitado e quase imperceptivel: as duas capturas ficaram
+        indistinguiveis. Um botao que parece clicavel e nao faz nada le-se como
+        "o programa quebrou", e nao como "falta digitar a palavra".
+        """
+        estados = {}
+
+        def roteiro(janela):
+            campo = self.campo(janela)
+            botao = self.botao(janela, "Apagar")
+            campo.insert(0, confirm_dialog.CONFIRMATION_WORD)
+            self.pump()
+            estados["state"] = botao.cget("state")
+            estados["cor"] = botao.cget("fg_color")
+
+        self.abrir(roteiro)
+
+        self.assertEqual(estados["state"], "normal")
+        self.assertEqual(estados["cor"], confirm_dialog.CONFIRM_ENABLED_COLOR)
+
+    def test_a_wrong_word_leaves_it_inert(self):
+        estados = {}
+
+        def roteiro(janela):
+            self.campo(janela).insert(0, "apagar")
+            self.pump()
+            estados["state"] = self.botao(janela, "Apagar").cget("state")
+
+        self.abrir(roteiro)
+
+        self.assertEqual(estados["state"], "disabled")
+
+    def test_confirming_answers_yes_and_cancelling_answers_no(self):
+        def digitar_e_confirmar(janela):
+            self.campo(janela).insert(0, confirm_dialog.CONFIRMATION_WORD)
+            self.pump()
+            self.botao(janela, "Apagar").invoke()
+
+        def cancelar(janela):
+            self.campo(janela).insert(0, confirm_dialog.CONFIRMATION_WORD)
+            self.pump()
+            self.botao(janela, "Cancelar").invoke()
+
+        self.assertTrue(self.abrir(digitar_e_confirmar))
+        self.assertFalse(self.abrir(cancelar))
+
+    def test_closing_the_window_is_a_no(self):
+        """Sumir com o dialogo nunca pode significar seguir adiante.
+
+        **Fechar precisa ser o fechar de verdade**, e a primeira versao deste
+        teste nao era: ela chamava `destroy()`, que NAO dispara o
+        `WM_DELETE_WINDOW` — so o gerenciador de janelas dispara. O dialogo
+        entao devolvia o `False` que ja era o padrao, e trocar o handler por um
+        que respondesse "sim" continuava passando. Aqui o script registrado no
+        protocolo e executado como o X da janela o executaria.
+        """
+        def fechar_como_o_gerenciador(janela):
+            self.campo(janela).insert(0, confirm_dialog.CONFIRMATION_WORD)
+            self.pump()
+            janela.tk.eval(janela.protocol("WM_DELETE_WINDOW"))
+
+        self.assertFalse(self.abrir(fechar_como_o_gerenciador))
+
+    def test_escape_is_a_no_too(self):
+        def apertar_escape(janela):
+            self.campo(janela).insert(0, confirm_dialog.CONFIRMATION_WORD)
+            self.pump()
+            janela.focus_force()
+            janela.event_generate("<Escape>")
+            self.pump()
+
+        self.assertFalse(self.abrir(apertar_escape))
+
+    def test_the_button_refuses_even_when_invoked_directly(self):
+        """O `command` confere de novo, e nao confia no estado do botao.
+
+        O `trace` que habilita e um efeito colateral da digitacao; um caminho
+        que o desligue nao pode virar uma confirmacao que ninguem digitou.
+        """
+        def roteiro(janela):
+            botao = self.botao(janela, "Apagar")
+            botao.configure(state="normal")
+            botao.invoke()
+
+        self.assertFalse(self.abrir(roteiro))
 
 if __name__ == "__main__":
     unittest.main()

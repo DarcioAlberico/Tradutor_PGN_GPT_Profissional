@@ -1449,5 +1449,177 @@ class CallbackErrorHookTests(unittest.TestCase):
         self.assertEqual(self.dialogs, [], "sem o relator nao deveria haver dialogo")
 
 
+class EditorLanguagePairTests(EditorWindowTestCase):
+    """Os dois seletores de idioma do editor.
+
+    O que eles resolvem e uma queixa de uso: o banco guarda pares de idiomas
+    misturados na mesma lista, e revisar uma traducao do espanhol achando que e
+    do italiano nao produz erro nenhum — produz uma revisao errada.
+    """
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        save_translation(cur, "EN um", "PT um", "pt", "en")
+        save_translation(cur, "EN dois", "PT dois", "pt", "en")
+        save_translation(cur, "ES um", "PT tres", "pt", "es")
+        save_translation(cur, "LEGADO um", "PT quatro", "pt")
+        save_translation(cur, "EN outro destino", "FR um", "fr", "en")
+        conn.commit()
+        conn.close()
+
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = self.editor.win
+
+    def rotulos(self):
+        """Os originais que a lista esta mostrando."""
+        return sorted(linha[1] for linha in self.editor.state.rows)
+
+    def escolher(self, menu, valor):
+        """Escolhe no `CTkOptionMenu` como um clique escolheria.
+
+        `set()` sozinho muda o texto e NAO dispara o `command` — usa-lo sem a
+        chamada abaixo daria um teste que troca o rotulo e nunca recarrega a
+        lista, e que passaria com o `command` desligado.
+        """
+        menu.set(valor)
+        menu._command(valor)
+        self.pump()
+
+    def test_it_opens_showing_every_source(self):
+        self.assertEqual(self.editor.source_menu.get(), edit_window.SOURCE_FILTER_ALL)
+        self.assertEqual(self.rotulos(), ["EN dois", "EN um", "ES um", "LEGADO um"])
+
+    def test_choosing_a_source_loads_only_that_pair(self):
+        self.escolher(self.editor.source_menu, "Inglês")
+        self.assertEqual(self.rotulos(), ["EN dois", "EN um"])
+
+    def test_the_unknown_source_is_its_own_bucket(self):
+        """"Não informado" nao pode ser um sinonimo de "Todos".
+
+        No banco real quase tudo esta nesse balde, entao confundir os dois
+        pareceria funcionar por muito tempo.
+        """
+        self.escolher(self.editor.source_menu, edit_window.UNKNOWN_SOURCE_LABEL)
+        self.assertEqual(self.rotulos(), ["LEGADO um"])
+
+    def test_the_count_follows_the_filter(self):
+        self.escolher(self.editor.source_menu, "Espanhol")
+        self.assertEqual(self.editor.state.total_rows, 1)
+        self.assertIn("1 traduções", self.editor.page_label.cget("text"))
+
+    def test_changing_the_target_switches_the_list_and_the_title(self):
+        self.escolher(self.editor.target_menu, "Francês")
+        self.assertEqual(self.editor.lang, "fr")
+        self.assertEqual(self.rotulos(), ["EN outro destino"])
+        self.assertIn("fr", self.editor.win.title())
+
+    def test_the_two_filters_combine(self):
+        self.escolher(self.editor.target_menu, "Francês")
+        self.escolher(self.editor.source_menu, "Espanhol")
+        self.assertEqual(self.rotulos(), [])
+
+    def test_switching_goes_back_to_the_first_page(self):
+        """A pagina 40 do par anterior nao quer dizer nada no novo.
+
+        **Os dois pares precisam ter mais de uma pagina**, e a primeira versao
+        deste teste nao tinha: com quatro linhas ao todo, `clamp_page` ja
+        devolvia zero sozinho, e remover a linha que zera a pagina nao mudava
+        nada. E o mesmo defeito que o ROADMAP registra tres vezes — o cenario
+        usava o valor padrao, e com ele a producao quebrada e indistinguivel da
+        correta.
+        """
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        for i in range(edit_window.PAGE_SIZE + 20):
+            save_translation(cur, f"EN massa {i}", f"PT massa {i}", "pt", "en")
+            save_translation(cur, f"ES massa {i}", f"PT massa es {i}", "pt", "es")
+        conn.commit()
+        conn.close()
+
+        self.escolher(self.editor.source_menu, "Inglês")
+        self.editor.change_page(1)
+        self.assertEqual(self.editor.state.page_index, 1, "nao havia segunda pagina")
+
+        self.escolher(self.editor.source_menu, "Espanhol")
+
+        self.assertEqual(self.editor.state.page_index, 0)
+        self.assertTrue(
+            all(linha[1].startswith("ES") for linha in self.editor.state.rows),
+            "a lista trouxe linhas do par anterior",
+        )
+
+    def test_the_edit_in_progress_is_saved_before_switching(self):
+        """A linha aberta pertence ao par antigo; depois da troca ela sai da
+        lista, e gravar depois seria gravar contra um item que sumiu."""
+        self.escolher(self.editor.source_menu, "Inglês")
+        self.editor.select_index(0)
+        alvo = self.editor.current["id"]
+        self.set_text(self.editor.trans_text, "PT um revisado")
+        self.editor.set_dirty(True)
+
+        self.escolher(self.editor.source_menu, "Espanhol")
+
+        conn = initialize_database(self.db_path)
+        try:
+            gravado = conn.execute(
+                "SELECT translated_comment FROM comments WHERE id = ?", (alvo,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(gravado, "PT um revisado")
+
+    def test_the_source_filter_is_remembered_between_sessions(self):
+        self.escolher(self.editor.source_menu, "Espanhol")
+        self.editor.close_editor()
+        self.pump()
+
+        outro = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = outro.win
+        self.addCleanup(outro.win.destroy)
+
+        self.assertEqual(outro.source_menu.get(), "Espanhol")
+        self.assertEqual(
+            sorted(linha[1] for linha in outro.state.rows), ["ES um"]
+        )
+
+    def test_the_target_follows_the_main_window_on_every_opening(self):
+        """Lembrar o destino faria quem marcasse "Francês" na janela principal
+        abrir o editor em portugues, sem nada na tela explicando de onde veio."""
+        self.escolher(self.editor.target_menu, "Francês")
+        self.editor.close_editor()
+        self.pump()
+
+        self.app.target_language.set("pt")
+        outro = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = outro.win
+        self.addCleanup(outro.win.destroy)
+
+        self.assertEqual(outro.lang, "pt")
+
+    def test_no_two_options_mean_the_same_thing(self):
+        """Duas opcoes com o mesmo efeito sao uma que nao funciona.
+
+        O rotulo desconhecido cai em `None` — "todos" —, que e o unico destino
+        seguro para um valor que a janela nao reconhece; por isso o teste
+        percorre so os rotulos que ela mesma oferece.
+        """
+        rotulos = edit_window.source_filter_labels()
+        codigos = [edit_window.source_filter_code(r) for r in rotulos]
+
+        self.assertEqual(len(set(codigos)), len(rotulos), dict(zip(rotulos, codigos)))
+
+    def test_all_and_unknown_are_not_the_same_code(self):
+        self.assertIsNone(edit_window.source_filter_code(edit_window.SOURCE_FILTER_ALL))
+        self.assertEqual(
+            edit_window.source_filter_code(edit_window.UNKNOWN_SOURCE_LABEL), ""
+        )
+
 if __name__ == "__main__":
     unittest.main()

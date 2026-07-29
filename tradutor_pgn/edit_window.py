@@ -7,9 +7,11 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from .app_config import LANGUAGE_NAMES, LANGUAGES, UNKNOWN_SOURCE_LABEL
 from .database import (
     SEARCH_MODE_SUBSTRING,
     SEARCH_MODE_TERMS,
+    SOURCE_LANGUAGE_UNKNOWN,
     count_from_status_counts,
     count_review_rows,
     fetch_review_rows,
@@ -86,6 +88,45 @@ SEARCH_MODE_LABEL_TERMS = "Termos"
 SEARCH_MODE_LABEL_SUBSTRING = "Trecho"
 MIN_WIDTH = 1120
 MIN_HEIGHT = 680
+
+# Rotulo do filtro de origem que nao filtra nada. Precisa ser diferente de
+# `UNKNOWN_SOURCE_LABEL`: "Todos" traz a tabela inteira, "Não informado" traz so
+# as linhas cuja origem ninguem declarou. Confundir os dois foi exatamente o que
+# esta janela passou a existir para evitar.
+SOURCE_FILTER_ALL = "Todos"
+
+
+def source_filter_labels():
+    return [SOURCE_FILTER_ALL, UNKNOWN_SOURCE_LABEL] + [nome for nome, _ in LANGUAGES]
+
+
+def target_language_labels():
+    return [nome for nome, _ in LANGUAGES]
+
+
+def source_filter_code(label):
+    """O que o rotulo do seletor de origem significa para o banco.
+
+    Tres respostas diferentes, e o `None` e a que nao pode ser confundida com as
+    outras duas: `None` nao filtra, `""` filtra pelas linhas sem origem
+    declarada, e um codigo filtra por aquele idioma. Devolver `""` para "Todos"
+    esconderia a tabela inteira menos as legadas.
+    """
+    if label == SOURCE_FILTER_ALL:
+        return None
+    if label == UNKNOWN_SOURCE_LABEL:
+        return SOURCE_LANGUAGE_UNKNOWN
+    for nome, codigo in LANGUAGES:
+        if nome == label:
+            return codigo
+    return None
+
+
+def target_language_code(label):
+    for nome, codigo in LANGUAGES:
+        if nome == label:
+            return codigo
+    return None
 
 
 def safe_geometry(win, geometry):
@@ -182,6 +223,9 @@ class TranslationEditor:
 
     def build_state(self):
         """Estado da janela, variaveis de controle e fontes."""
+        # O destino comeca no que a janela principal tem selecionado — que e o
+        # que esta janela sempre fez — mas deixa de estar preso a ele: o seletor
+        # abaixo permite trocar sem fechar o editor.
         self.lang = self.app.target_language.get()
 
         self.win = ctk.CTkToplevel(self.app.root)
@@ -259,7 +303,7 @@ class TranslationEditor:
         self.list_frame = ctk.CTkFrame(self.main_pane, corner_radius=8, width=400)
         self.main_pane.add(self.list_frame, minsize=320)
         self.list_frame.columnconfigure(0, weight=1)
-        self.list_frame.rowconfigure(5, weight=1)
+        self.list_frame.rowconfigure(6, weight=1)
 
         self.header = ctk.CTkFrame(self.list_frame, fg_color="transparent")
         self.header.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
@@ -333,8 +377,56 @@ class TranslationEditor:
         self.status_segment.set(saved_status)
         self.status_segment.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 6))
 
+        self.build_language_bar()
+
         self.rows_frame = ctk.CTkScrollableFrame(self.list_frame, height=420)
-        self.rows_frame.grid(row=5, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.rows_frame.grid(row=6, column=0, sticky="nsew", padx=10, pady=(0, 10))
+
+    def build_language_bar(self):
+        """Os dois seletores de idioma, acima da lista.
+
+        Ficam junto dos outros filtros, e nao numa barra propria no topo da
+        janela, porque e isso que eles sao: filtram a mesma lista que o status e
+        a busca filtram, e a lista e o que muda quando qualquer um dos tres muda.
+
+        **Sao menus, e nao botoes segmentados como o status.** Oito idiomas em
+        botoes lado a lado nao cabem na largura do painel, e a forma segmentada so
+        se paga quando todas as opcoes ficam visiveis de uma vez.
+
+        A ORIGEM e o filtro que este item existe para dar (ver ROADMAP), e por
+        isso ela e a primeira e a unica com a opcao "Todos": o destino nunca e
+        "todos", porque a janela edita as traducoes de um idioma so — o rascunho,
+        o titulo e a aplicacao das regras automaticas sao todos por idioma de
+        destino.
+        """
+        self.language_bar = ctk.CTkFrame(self.list_frame, fg_color="transparent")
+        self.language_bar.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 6))
+        self.language_bar.columnconfigure(1, weight=1)
+        self.language_bar.columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(self.language_bar, text="Origem").grid(row=0, column=0, sticky="w")
+        self.source_menu = ctk.CTkOptionMenu(
+            self.language_bar,
+            values=source_filter_labels(),
+            command=lambda _value: self.change_language_filter(),
+        )
+        saved_source = self.editor_settings.get("source_filter", SOURCE_FILTER_ALL)
+        if saved_source not in source_filter_labels():
+            saved_source = SOURCE_FILTER_ALL
+        self.source_menu.set(saved_source)
+        self.source_menu.grid(row=0, column=1, sticky="ew", padx=(6, 10))
+
+        ctk.CTkLabel(self.language_bar, text="Destino").grid(row=0, column=2, sticky="w")
+        self.target_menu = ctk.CTkOptionMenu(
+            self.language_bar,
+            values=target_language_labels(),
+            command=lambda _value: self.change_language_filter(),
+        )
+        # Um idioma que nao esteja na lista (um banco antigo com um codigo que o
+        # programa nao oferece mais) cai no primeiro em vez de deixar o menu em
+        # branco — e o `change_language_filter` que roda depois grava a troca.
+        self.target_menu.set(LANGUAGE_NAMES.get(self.lang, LANGUAGES[0][0]))
+        self.target_menu.grid(row=0, column=3, sticky="ew", padx=(6, 0))
 
 
     def build_editor_pane(self):
@@ -734,6 +826,12 @@ class TranslationEditor:
                 "font_size": self.state.font_size,
                 "status_filter": self.status_segment.get(),
                 "search_mode": self.search_mode_segment.get(),
+                # So a ORIGEM e lembrada. O destino volta a cada abertura para o
+                # que a janela principal tem selecionado, que e o comportamento
+                # que esta janela sempre teve: lembra-lo faria quem marcasse
+                # "Inglês" na janela principal abrir o editor em portugues, sem
+                # nada na tela explicando de onde veio aquilo.
+                "source_filter": self.source_menu.get(),
             },
             window=self.win,
             sashes=(
@@ -1205,6 +1303,42 @@ class TranslationEditor:
     def qa_filter_active(self):
         return self.status_segment.get() == "Avisos QA"
 
+    def selected_source_language(self):
+        """O filtro de origem na forma que o banco entende (`None` = todos).
+
+        Lido a cada consulta pelo mesmo motivo de `selected_search_mode`: o
+        seletor e a fonte da verdade, e uma copia no estado so daria uma segunda
+        coisa para ficar desatualizada.
+        """
+        return source_filter_code(self.source_menu.get())
+
+    def change_language_filter(self):
+        """Troca de par de idiomas: grava o que estava aberto e recomeca.
+
+        Grava ANTES de trocar (`save_changes`), e nao depois: a linha em edicao
+        pertence ao par antigo, e apos a troca ela nao esta mais na lista — o
+        rascunho seria gravado contra um item que a janela nao mostra mais, ou
+        perdido em silencio.
+
+        Volta para a primeira pagina porque a pagina 40 do par anterior nao quer
+        dizer nada no novo: o filtro pode ter 3 linhas, e `clamp_page` deixaria o
+        usuario numa lista vazia sem explicar por que.
+        """
+        if self.current["id"]:
+            self.save_changes()
+
+        novo_destino = target_language_code(self.target_menu.get())
+        if novo_destino and novo_destino != self.lang:
+            self.lang = novo_destino
+            self.win.title(f"Editar traduções ({self.lang})")
+
+        self.state.page_index = 0
+        self.clear_current()
+        self.reload_rows()
+        if self.state.rows:
+            self.select_index(0)
+        self.save_editor_settings()
+
     def fetch_quality_warning_rows(self, cur):
         """Linhas com aviso — usado pelo relatorio QA, que precisa de todas."""
         return fetch_review_rows(
@@ -1213,6 +1347,7 @@ class TranslationEditor:
             search_text=self.state.active_search,
             status_filter="warnings",
             search_mode=self.selected_search_mode(),
+            source_language=self.selected_source_language(),
         )
 
     def update_page_controls(self):
@@ -1267,6 +1402,7 @@ class TranslationEditor:
         )
 
     def reload_rows(self):
+        source_language = self.selected_source_language()
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
             self.state.status_counts.update(
@@ -1275,6 +1411,7 @@ class TranslationEditor:
                     self.lang,
                     self.state.active_search,
                     search_mode=self.selected_search_mode(),
+                    source_language=source_language,
                 )
             )
             # A contagem de avisos ja vem agregada junto com as demais.
@@ -1296,6 +1433,7 @@ class TranslationEditor:
                     search_text=self.state.active_search,
                     status_filter=status_filter,
                     search_mode=self.selected_search_mode(),
+                    source_language=source_language,
                 )
             self.state.page_index = clamp_page(
                 self.state.page_index, self.state.total_rows, PAGE_SIZE
@@ -1310,6 +1448,7 @@ class TranslationEditor:
                     search_text=self.state.active_search,
                     status_filter=self.selected_status_filter(),
                     search_mode=self.selected_search_mode(),
+                    source_language=source_language,
                 )
             )
         self.render_rows()
@@ -1916,11 +2055,16 @@ class TranslationEditor:
             self.select_index(row_index_for_id(self.state.rows, previous_id, fallback=0))
             self.show_message(f"{stats['changed']} traducao(oes) atualizada(s)")
 
+        # Restrito ao mesmo filtro que a lista mostra: com "Origem: Espanhol"
+        # ativo, o usuario esta olhando as traducoes vindas do espanhol, e
+        # reescrever tambem as das outras linguas seria uma alteracao em massa
+        # que ele nao pediu nem consegue ver na tela.
         apply_automatic_rules_to_database(
             self.app,
             target_language=self.lang,
             parent=self.win,
             on_finish=concluido,
+            source_language=self.selected_source_language(),
         )
 
     def select_suggestion(self, index):

@@ -10,6 +10,15 @@ DEFAULT_SPELLING_PATH = os.path.join(
     "spelling.ssp",
 )
 NORMALIZED_SUFFIX = "-NORM"
+# Quais tags o "Normalizar PGN" corrige, e em que secao do spelling.ssp cada uma
+# procura. Fonte unica: o `PGN_TAG_RE` abaixo e DERIVADO daqui.
+#
+# A lista ja esteve escrita duas vezes — aqui e a mao dentro do regex — e as duas
+# copias falhavam em silencio ao divergir, cada uma de um jeito: acrescentar uma
+# tag so neste dict nao tinha efeito nenhum (o regex nunca casava a linha), e
+# acrescentar so no regex levantava `KeyError` no `SUPPORTED_TAGS[tag_name]`,
+# derrubando a normalizacao de qualquer PGN que tivesse aquela tag. Nenhum dos
+# dois erros e visivel ao ler so um dos lados.
 SUPPORTED_TAGS = {
     "White": "PLAYER",
     "Black": "PLAYER",
@@ -18,7 +27,11 @@ SUPPORTED_TAGS = {
     "Round": "ROUND",
 }
 SECTION_RE = re.compile(r'^@(\w+)\s+"([^"]*)"')
-PGN_TAG_RE = re.compile(r'^(\[(White|Black|Site|Event|Round)\s+")((?:\\.|[^"\\])*)("\]\s*)$')
+PGN_TAG_RE = re.compile(
+    r'^(\['
+    + "(" + "|".join(re.escape(tag) for tag in sorted(SUPPORTED_TAGS)) + ")"
+    + r'\s+")((?:\\.|[^"\\])*)("\]\s*)$'
+)
 QUOTED_PAIR_RE = re.compile(r'"([^"]*)"\s+"([^"]*)"')
 
 

@@ -6,7 +6,13 @@ verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
 **Nada pendente no momento.** As garantias que os testes protegem estao na
-[SPEC.md](SPEC.md), secao 8; ela e a lista que vale, e nao uma copia aqui.
+[SPEC.md](SPEC.md), secao 9; ela e a lista que vale, e nao uma copia aqui.
+
+**Revisao de 2026-07-28 (secao 9).** Tres pedidos do usuario, e o que os une nao
+e o tema — e o fato de os tres serem **decisoes dele que o codigo nao tinha como
+tomar sozinho**. Qual e a lingua do PGN, qual par revisar agora, e quando o
+trabalho acumulado deixou de servir. Ate aqui o programa adivinhava a primeira
+(`sl=auto`), ignorava a segunda e nao oferecia a terceira.
 
 **Revisao de 2026-07-27.** Os itens 1.4, 1.5, 2.7 a 2.10 e as secoes 6, 7 e 8
 sao novos. Sairam de uma analise do codigo inteiro com o banco real (195.607
@@ -215,6 +221,55 @@ nova nao deve estrear apagando o passado do usuario. Ha teste para isso, e
 tambem para o modo de falha mais chato possivel: se o formato do nome e o do
 padrao divergirem, a retencao de logs vira um no-op silencioso e tudo continua
 parecendo funcionar.
+
+### 1.6 A retencao conta arquivos, e o banco cresce — CONCLUIDO (2026-07-28)
+
+Medido hoje, um dia depois de 1.4 fazer a limpeza rodar na abertura. Ela
+funcionou: **663 -> 34 arquivos**. Mas 34 arquivos ocupam 237 MB, e vale olhar
+de onde eles vem:
+
+| familia | copias | espaco | limite | teto real |
+|---|---|---|---|---|
+| glossario | 30 | 9,7 MB | 30 copias | ~10 MB |
+| banco | 4 | **227 MB** | 10 copias | **~1,1 GB** |
+
+As duas copias mais antigas do banco tem 7,0 e 8,7 MB (junho); as duas recentes,
+103,9 e 107,1 MB (julho). O banco passou de ~8 MB para 110 MB no periodo.
+
+**A politica esta correta; o que envelheceu foi a premissa.** Contar arquivos so
+limita disco quando os arquivos tem tamanho parecido — verdade para o glossario,
+que e um texto de ~334 KB por copia, e falso para o banco. `DATABASE_BACKUP_
+KEEP_COUNT = 10` foi escolhido em 1.2 justamente por "cada copia e o banco
+inteiro", mas o numero nao acompanha o banco: as mesmas 10 copias que valiam
+70 MB em junho valem mais de 1 GB agora, **sem nenhum limite ter mudado**. E a
+pasta enche sozinha: backups do banco nascem em quatro operacoes comuns (botao
+"Backup BD", importar CSV, aplicar automaticas e o backup de seguranca da
+restauracao).
+
+**Correcao.** Terceira regra em `select_backups_to_delete`: teto de espaco
+(`max_total_bytes`), aplicada depois da contagem e da idade. Percorre os
+sobreviventes do mais novo para o mais velho somando o tamanho e guarda o maior
+conjunto de copias RECENTES que cabe — que e o que interessa numa restauracao.
+Sofre o mesmo piso `keep_minimum` da regra de idade: um banco maior que o teto
+nao pode deixar o usuario sem backup nenhum.
+
+A funcao continua pura — quem le o disco e o `prune_backups`, que passa os
+tamanhos prontos. So a familia do banco tem teto (`DATABASE_BACKUP_MAX_TOTAL_MB
+= 400`); no glossario a contagem continua sendo um bom proxy.
+
+Efeito na pasta real, simulado sem apagar nada: **hoje nao remove nada** (227 MB
+de 400) — uma politica nova nao deve estrear apagando o passado do usuario, o
+mesmo criterio de 1.4. Depois de mais quatro backups do tamanho atual, mantem 3
+copias e 330 MB, contra os 666 MB que as oito ocupariam sem o teto.
+
+**Uma das tres mutacoes nao quebrou nada, e o motivo ja tinha nome.** Remover o
+`setdefault` que aplica o teto na familia do banco passou na suite inteira: o
+`test_the_default_budget_is_applied` so conferia que a constante era positiva e
+que uma pasta vazia nao removia nada. E o mesmo padrao registrado na revisao de
+27/07 — **o cenario do teste usava o valor padrao, e com ele a producao quebrada
+e indistinguivel da correta**. Encher 400 MB de arquivo e inviavel, entao a
+correcao foi descer o teto ate o cenario em vez de subir o cenario ate o teto.
+Com isso, as tres mutacoes quebram.
 
 ### 1.5 Os conflitos de 1.1 eram decididos por acidente — CONCLUIDO (2026-07-27)
 
@@ -1530,6 +1585,155 @@ Todos os testes novos de rede, de B2 e de regressao foram conferidos por
 mutacao: quebrando a producao de proposito, eles falham. Um teste que passa dos
 dois jeitos nao protege nada.
 
+### 5.2 O despachante de tarefas nao tinha teste — CONCLUIDO (2026-07-28)
+
+Medida a cobertura do pacote inteiro, um modulo destoava de todos os outros:
+
+```
+background_task.py    95 stmts   79 sem cobertura    17%
+(o segundo pior)      80 stmts   19 sem cobertura    76%
+```
+
+E o `run_with_progress`, que tira backup, restauracao, importacao de CSV e
+"Aplicar automaticas" da thread da interface (2.11). Sao **sete pontos de
+chamada** em `db_tools`, e o corpo inteiro da funcao (linhas 73-173) nunca era
+executado por teste nenhum.
+
+**O motivo era razoavel, e e justamente o que torna o buraco perigoso.** Os
+testes dos chamadores usam o `SynchronousProgress`, que roda o trabalho na hora,
+porque o que eles verificam e a orquestracao das operacoes de banco e nao a
+thread — decisao correta. O efeito colateral e que **o dublê reimplementa o
+criterio de despacho do original**: se o de verdade mudasse, o dublê manteria o
+comportamento antigo e os sete chamadores continuariam passando. A suite ficaria
+verde testando uma copia da regra em vez da regra.
+
+Criado `tests/test_background_task.py`, que exercita a coisa real. **17% -> 88%**;
+as 11 linhas que sobram sao todas ramos defensivos de `except`. O que os testes
+fixam e a garantia C1 nas duas direcoes — o trabalho roda fora da thread do Tk, e
+tudo o que volta chega na thread do Tk (conferido comparando `get_ident()`) — mais
+o despacho: excecao vai para `on_error`, `TaskCanceled` vai para `on_cancel`, e
+**trabalho que devolve normalmente depois de `cancel()` conta como cancelado**.
+Esse ultimo e o mais facil de quebrar sem perceber: varias operacoes de
+`db_tools` desistem devolvendo o que deu tempo de fazer, e trata-lo como sucesso
+anunciaria "importacao concluida" para uma importacao interrompida.
+
+Cinco mutacoes, todas pegas.
+
+**O teste caiu numa armadilha que vale registrar, porque parece um bug de
+producao e nao e.** A primeira versao usava um laco de `root.update()` para
+processar os eventos, e **12 dos 17 testes falharam identicos**: "a tarefa nunca
+devolveu o controle". O Tk so aceita `after` vindo de outra thread enquanto a
+principal esta DENTRO do `mainloop()`; fora dele levanta
+`RuntimeError: main thread is not in main loop`, e o `run_with_progress` engole
+essa excecao de proposito (nesse ponto nao ha mais a quem avisar). Resultado: o
+trabalho roda ate o fim e a resposta some, sem nada acusar. Em producao nao
+acontece — a janela vive sob `mainloop()` —, entao o defeito era do teste. A
+correcao foi rodar o `mainloop()` de verdade e conferir a condicao de dentro
+dele, por um `after` encadeado.
+
+**Uma suspeita minha que a medicao derrubou.** A saida dos testes trazia um
+`bad window path name ".!ctktoplevel"`, e a hipotese foi que o `after(200)` de
+`bring_window_to_front` — o unico agendamento sem guarda no modulo — disparava
+contra janela destruida e, com o relator de erros da C3 instalado, virava um
+dialogo "Erro inesperado" para o usuario. **Nao vira.** Reproduzido com a janela
+destruida dentro da janela de tempo exata: zero dialogos. Destruir um widget
+apaga os comandos Tcl registrados nele, entao o timer dispara sem callback e a
+mensagem sai do Tcl — nunca chega ao `report_callback_exception`, que so ve
+excecao Python. E ruido cosmetico, e o item nao existe.
+
+### 5.3 "Normalizar PGN" sem teste, e a lista de tags em dois lugares — CONCLUIDO (2026-07-28)
+
+Depois do 5.2, o maior bloco continuo sem cobertura do pacote era
+`pgn_spellcheck.py:254-298`: **a funcao inteira** `normalize_pgn_metadata_path`,
+que e o que o botao "Normalizar PGN" chama. Os testes que existiam paravam uma
+camada abaixo — no conteudo e no arquivo unico —, entao a orquestracao (carregar
+o dicionario, coletar os arquivos, pular os ja normalizados, somar as
+estatisticas) nunca rodava.
+
+**A garantia N1 tambem nao estava na tabela da secao 8 da SPEC**, e com razao: o
+que havia era um teste de conteudo conferindo que um comentario sobrevivia. N1
+diz mais do que isso — comentarios, lances **e variantes** — e nao havia nada
+sobre variantes nem sobre o arquivo gerado.
+
+Doze testes novos para o orquestrador, com um PGN de teste construido para
+atrapalhar: variantes aninhadas, NAGs, avaliacoes, os mesmos nomes DENTRO de
+comentarios e uma tag `Annotator` com o nome que o dicionario corrigiria se ela
+fosse suportada. N1 passa a ser verificada onde importa — o movetext do arquivo
+gerado tem de sair identico linha a linha, e so as cinco tags mudam.
+
+**O achado veio de uma mutacao que NAO quebrou nada, e a investigacao do porque.**
+Duas mutacoes contra a N1 passaram na suite inteira. Nao era fraqueza dos
+testes: as duas eram no-ops, e o motivo de uma delas e o problema de verdade.
+
+Acrescentar `"Annotator"` a `SUPPORTED_TAGS` nao mudava comportamento nenhum
+porque **a lista de tags estava escrita duas vezes** — no dicionario e a mao
+dentro do `PGN_TAG_RE`. As duas copias falhavam em silencio ao divergir, cada
+uma de um jeito oposto, e nenhum dos dois erros e visivel lendo so um dos lados:
+
+| divergencia | efeito |
+|---|---|
+| tag so em `SUPPORTED_TAGS` | nada acontece: o regex nunca casa a linha, a tag nao e corrigida, sem erro nem aviso |
+| tag so no `PGN_TAG_RE` | `KeyError` em `SUPPORTED_TAGS[tag_name]` — derruba a normalizacao de **qualquer** PGN que tenha aquela tag |
+
+E a mesma classe do item 3.6 (a mesma decisao em dois lugares), e foi encontrada
+pelo mesmo caminho: uma verificacao que nao distinguia "os dois concordam" de
+"os dois sao o mesmo".
+
+Correcao: `PGN_TAG_RE` passa a ser **derivado** de `SUPPORTED_TAGS`, e ha teste
+que compara o que o regex ACEITA com o que o dicionario declara — e nao o texto
+do padrao, que continuaria passando com as duas copias. Os dois sentidos da
+divergencia foram reintroduzidos de proposito: o primeiro quebra dois testes, o
+segundo quebra cinco.
+
+**E um teste meu que nao testava nada, de novo.** O de dicionario ausente
+conferia so o TIPO da excecao, e `FileNotFoundError` e o que o `open()` levanta
+sozinho quando a guarda explicita e removida — passava dos dois jeitos. Agora
+exige a mensagem, que e o unico sinal que distingue a guarda do erro cru.
+
+Cobertura do pacote: 87% -> 88%; `pgn_spellcheck` saiu da lista dos piores.
+
+### 5.4 O fluxo de "Aplicar automaticas", e um banco corrompido que trancava o arquivo — CONCLUIDO (2026-07-28)
+
+Depois do 5.3 a maior lacuna restante era `db_tools.py`, com dois blocos:
+`apply_automatic_rules_to_database` (56 linhas) e `show_db_stats` (39, a funcao
+inteira).
+
+**"Aplicar automaticas" so tinha teste no ramo de CANCELAMENTO.** O fluxo
+principal — analisar, confirmar, aplicar, relatar — nunca rodava, justamente na
+operacao em que os itens 2.7 e 2.11 mais mexeram. Ela tem quatro saidas e cada
+uma decide coisas diferentes, inclusive uma assimetria que so aparece lendo com
+atencao: em "nada a mudar" o `on_finish` recebe a **previa**, e nao `None`,
+porque nada a fazer e um resultado e nao uma desistencia.
+
+Oito testes, entre eles o que fixa a limpeza do `translation_cache`: depois de
+reescrever as traducoes no banco, o que esta em memoria e a versao anterior as
+regras — e o cache tem precedencia sobre o banco. Quatro mutacoes, todas pegas.
+
+**A primeira mutacao nao chegou a ser aplicada, e o "OK" era falso.** A ancora
+`app.translation_cache.clear()` aparece tres vezes no arquivo; o script abortou
+por ambiguidade e o teste rodou contra o codigo intacto. Refeita por numero de
+linha, ela quebra. Vale como lembrete de que uma mutacao que "passa" so conta
+depois de confirmado que ela foi aplicada.
+
+**O achado veio de um teste que nao conseguia limpar o proprio diretorio
+temporario.** O caso "banco corrompido" deixava o arquivo preso com
+`PermissionError: [WinError 32]`. A causa esta em `initialize_database`, e nao
+no teste: ela abre a conexao e so depois roda o `PRAGMA user_version`. Num
+arquivo corrompido o PRAGMA levanta, a excecao sobe **sem a conexao nunca ter
+sido devolvida** — quem chamou nao tem o que fechar — e o arquivo fica preso ate
+o coletor de lixo passar.
+
+Reproduzido: uma conexao viva, arquivo intocavel, e liberado por um
+`gc.collect()` explicito. O efeito para o usuario e o pior possivel: o programa
+avisa que nao conseguiu ler o banco e, **ao mesmo tempo, impede que ele seja
+substituido pelo backup**. E atinge todo chamador de `initialize_database` — que
+e quase toda a interface —, e nao so o "Estatisticas" por onde apareceu.
+
+Correcao: fechar a conexao antes de deixar a excecao subir. A mutacao que remove
+esse `close()` reproduz o `WinError 32` nos testes.
+
+`db_tools`: 81% -> 88%. Pacote: 88%.
+
 ### 5.1 `app_actions.py`, o modulo menos coberto — CONCLUIDO (2026-07-27)
 
 **A medicao inicial estava otimista.** A anotacao dizia "11 de 25 funcoes
@@ -2050,3 +2254,292 @@ disparavam — na analise, seis idiomas testados e o `chardet` nunca passou de
 Nenhuma codificacao e adotada sem que a decodificacao completa tenha sido
 verificada, e nenhum `U+FFFD` entra no texto lido por escolha errada de
 codificacao. Fecha a lacuna que E1/E2/E3 deixavam para conteudo multibyte.
+
+---
+
+## 9. Idioma de origem e ferramentas destrutivas — CONCLUIDO (2026-07-28)
+
+Tres pedidos do usuario, numa rodada so. Vale registrar a ordem em que foram
+feitos, porque ela nao e a ordem em que aparecem aqui e explica uma decisao:
+o pedido do filtro do editor (9.3) veio junto com o de declarar o idioma (9.2),
+e foi ele que decidiu a forma do outro. Declarar o idioma so para mandar `sl=`
+a API teria sido metade do trabalho e nao resolveria a queixa — que era **nao
+misturar linguas na hora de revisar**.
+
+### 9.1 Nao havia como zerar o banco nem o glossario
+
+O programa tinha backup, restauracao, importacao e exportacao, e nenhuma forma de
+recomecar do zero. Quem quisesse limpar o banco tinha de fechar o programa e
+apagar o `traducoes.db` na mao — o que tambem apaga o `-wal` e o `-shm` se souber
+que eles existem, e deixa o `pgn_tradutor_pro_settings.json` com rascunhos
+apontando para ids que nao existem mais.
+
+**A dificuldade nao e apagar, e perguntar.** As confirmacoes que o programa ja
+tinha sao `messagebox.askyesno`, e elas bastam para o que e reversivel:
+restaurar, importar, aplicar automaticas — todas tiram backup antes e podem ser
+desfeitas voltando a ele. Zerar nao e dessa familia: o que se perde sao 201.607
+traducoes ou 7.061 regras, e um "Sim" fica a um pixel do "Nao".
+
+Por isso a confirmacao e **digitada** (`confirm_dialog.py`): o usuario escreve
+`delete`, e ate entao o botao de apagar nao funciona. Nao ha como fazer isso por
+engano, nem por um duplo clique que pegou o dialogo no caminho. Aceita-se
+qualquer caixa e espaco nas pontas — quem digitou `DELETE ` decidiu tanto quanto
+quem digitou `delete`, e recusar isso so daria um dialogo que diz nao sem
+explicar por que.
+
+**A regra e uma funcao pura**, `confirmation_accepted`, separada da janela: e ela
+que decide se algo e apagado, e querer testa-la nao pode exigir abrir um
+`Toplevel`.
+
+**Tres decisoes que os testes protegem:**
+
+- **O backup vem antes da pergunta**, e o caminho dele aparece na propria
+  confirmacao. Custa 0,4 s e e a unica volta atras; deixa-lo para depois do
+  "Apagar" significaria que uma falha entre a confirmacao e a copia apaga tudo
+  sem rede. O pior caso desta ordem e uma copia a mais para quem desistiu, e a
+  retencao S8 cuida dela.
+- **Sem cancelamento no meio** (`allow_cancel=False`), pela mesma razao da
+  restauracao: depois do `DROP TABLE` nao ha estado anterior para voltar, e um
+  botao que nao pode ser honrado e pior do que nenhum botao.
+- **O cache em memoria vai junto.** Ele tem precedencia sobre o banco: deixado
+  como estava, a proxima traducao reaproveitaria exatamente o que o usuario
+  acabou de mandar apagar — sem tocar no banco, entao nada apareceria como erro.
+
+**Zerar as traducoes derruba as tabelas em vez de apagar as linhas.** Nao e
+preferencia de estilo: cada `DELETE` dispara o gatilho que tira os termos daquela
+linha do `comments_fts`, e seriam 201.607 gatilhos para produzir uma tabela
+vazia. Derrubando a tabela, o `rebuild` do indice roda uma vez so, sobre nada. O
+`VACUUM` no fim e o que devolve os 115 MB ao disco — "zerar o banco" que nao
+libera um byte parece nao ter funcionado.
+
+**Zerar o glossario e sincrono, e a assimetria e de escala.** Gravar uma lista
+vazia num arquivo de 334 KB e reconstruir um indice sem regra nenhuma custa
+milissegundos; uma barra de progresso para isso seria um piscar de janela. Ele
+usa a mesma `save_glossary_entries` que salvar uma regra usa — nao ha caminho
+especial —, com `create_backup=False` porque a copia ja foi feita antes de
+perguntar. Duas copias identicas na pasta fariam a retencao descartar uma versao
+mais antiga de verdade para caber.
+
+Os dois botoes ficam em "Ferramentas", **em vermelho**, e nenhum roda com uma
+traducao em andamento. A cor e o aviso; a confirmacao digitada e a defesa.
+
+**Um achado da janela de verdade, que nenhum teste teria dado.** O `state=
+"disabled"` do CustomTkinter escurece o fundo padrao, mas sobre o vermelho
+saturado do botao "Apagar" o resultado e quase o mesmo tom: as duas capturas —
+com a palavra errada e com a certa — ficaram **indistinguiveis**. O botao
+continuava inerte de verdade, entao nada estava quebrado; o problema e o que ele
+comunica. Um botao que parece clicavel e nao faz nada le-se como "o programa
+quebrou", e nao como "falta digitar a palavra". Passou a trocar de cor
+explicitamente, e o teste afirma a cor alem do `state`.
+
+**Conferido por mutacao**, doze maneiras de errar, todas pegas: o backup indo
+para depois da confirmacao, a recusa apagando do mesmo jeito (nas duas
+ferramentas), o cache sobrevivendo, o historico ficando para tras, as janelas
+abertas nao sendo avisadas, a segunda copia em `backups/`, os dois botoes
+trocados de lugar, zerar rodando durante uma traducao, o dialogo aceitando
+qualquer texto, o botao nascendo habilitado, o botao parando de mudar de cor, e
+o `command` confiando no estado do botao em vez de reconferir a palavra.
+
+**Um teste meu que passava pelo motivo errado, e o motivo e do Tk.** O de
+"fechar a janela e nao" chamava `destroy()` — que **nao** dispara o
+`WM_DELETE_WINDOW`; so o gerenciador de janelas dispara. O dialogo entao devolvia
+o `False` que ja era o padrao, e trocar o handler por um que respondesse "sim"
+continuava passando. Refeito executando o script registrado no protocolo, como o
+X da janela o executaria; entrou junto o `Esc`, que tinha o mesmo buraco.
+
+**Verificado na janela de verdade**: com `apagar` digitado o botao fica cinza e o
+banco continua com as 5 linhas; com `delete` ele fica vermelho, o banco vai a 0,
+o cache em memoria esvazia e o backup esta em `backups/`. O mesmo para o
+glossario, de 2 regras a 0.
+
+### 9.2 A traducao adivinhava o idioma de origem, e o banco nao o guardava
+
+`translate_text_chunk` mandava `sl=auto` desde sempre. Para um texto corrido isso
+funciona; para um comentario de xadrez, que muitas vezes tem tres palavras
+(`"Bien jugado"`, `"Ng5!"`, `"Nada"`), e pouco texto para adivinhar — e o palpite
+errado produz uma traducao errada sem erro nenhum.
+
+O problema maior, porem, e o que ficava no banco. A chave era `(comentario
+original, idioma de destino)`, entao **o mesmo texto vindo de duas linguas era
+uma linha so**. `"Nada"` existe em espanhol e em portugues com sentidos
+diferentes; traduzido uma vez a partir do espanhol, o italiano recebia aquela
+traducao de volta pelo cache.
+
+**Feito: o idioma de origem e declarado e entra na chave.** Um seletor na janela
+principal, acima do de destino — a origem e a escolha que muda a cada pasta,
+enquanto o destino costuma ser sempre o mesmo, e deixa-la embaixo de sete botoes
+e o desenho que faz alguem traduzir um PGN italiano declarando espanhol.
+"Detectar" e o primeiro e o padrao: quem nao mexer no seletor continua
+exatamente onde estava. Garantia P1.
+
+**A escolha entre "so metadado" e "entra na chave" foi do usuario**, e a segunda
+e mais cara: exige reconstruir a tabela. Vale registrar o que isso significou.
+
+**O SQLite nao remove restricao de tabela.** `UNIQUE(original_comment,
+target_language)` esta declarada NA tabela, e a unica saida e o procedimento que
+a documentacao dele chama de "12 passos" — criar a tabela nova, copiar, derrubar
+a antiga, renomear. Medido no `traducoes.db` real (201.607 linhas, 115 MB):
+
+| etapa | tempo |
+|---|---|
+| reconstruir a tabela | 3,4 s |
+| recriar os indices | 0,8 s |
+| `VACUUM` | 1,4 s |
+| **migracao completa, com o resto** | **7,0 s** |
+
+Uma vez, na primeira abertura apos a atualizacao; a segunda leva 8,8 ms. O
+`VACUUM` existe porque as paginas da tabela antiga ficam livres **no arquivo**:
+sem ele o banco salta de 115 MB para 183 MB e so encolhe de volta com o uso.
+
+**Os ids sao preservados de proposito, e e isso que paga o passo mais caro.**
+`comments_fts` e um indice `external content` indexado por `rowid`. Se a copia
+renumerasse as linhas, cada entrada do indice passaria a apontar para o texto de
+outra — e a busca devolveria resultados errados, sem erro nem aviso. Copiando o
+`id` explicitamente, o indice continua valendo como estava: os 8.409 acertos de
+`"bispo"` antes e depois sao os mesmos, e cruzam com as mesmas linhas.
+
+**"Nao informado" e uma string vazia, e nao `NULL`**, e isto e o tipo de detalhe
+que so aparece quando alguem pergunta: **num indice UNIQUE o SQLite considera
+todo `NULL` diferente de qualquer outro, inclusive de outro `NULL`**. Com `NULL`
+ali, a chave deixaria de valer justamente para as 201.607 linhas legadas — cada
+execucao inseriria de novo os mesmos comentarios, sem nada acusar. Ha teste so
+para isso.
+
+**A adocao e o que impede a mudanca de cobrar o cache inteiro de novo.** As
+linhas existentes ficaram sem idioma de origem. Sem mais nada, a primeira
+execucao que dissesse "estes PGN estao em espanhol" nao acharia nenhuma delas e
+mandaria as 201.607 traducoes de volta para a API. `adopt_unknown_source_language`
+rotula, antes de carregar o cache, as linhas **daqueles comentarios** que ainda
+nao tem origem. Garantia P2.
+
+Uma linha sem idioma de origem nao contradiz o que o usuario acabou de declarar:
+ela so nao sabia. Tres limites que os testes fixam:
+
+- **so alcanca quem nao tinha idioma nenhum** — reetiquetar uma linha que ja diz
+  "veio do espanhol" seria apagar uma declaracao do usuario com outra;
+- **`UPDATE OR IGNORE`**, porque a adocao pode esbarrar na propria chave: se ja
+  existe uma linha no par de destino, a sem rotulo permanece como esta em vez de
+  derrubar a execucao com um `IntegrityError`;
+- **"Detectar" nao adota nada** — nao e uma declaracao.
+
+Custa 74 ms para uma pasta de 2.000 comentarios, contra minutos de rede na mesma
+execucao.
+
+**Antes da carga do cache, e nao depois**, e a ordem e o item inteiro: depois, a
+adocao chegaria tarde — o cache ja teria vindo vazio e a execucao ja teria
+decidido pagar tudo de novo.
+
+**O par vai junto para o resto do programa:** o CSV ganhou a coluna
+`source_language` (opcional na leitura, como a `priority` do glossario em 1.5),
+as estatisticas passaram a agrupar por par — `"pt: 12.000"` esconde justamente a
+informacao que o usuario passou a pedir —, e o registro de falhas guarda o par
+inteiro, porque reprocessar com outra origem gravaria as traducoes que faltam
+numa gaveta diferente da dos comentarios que ja deram certo.
+
+**Uma mutacao sobreviveu, e ela apontou um teste meu que nao testava nada.**
+"a API volta a receber `sl=auto` sempre" passava na suite inteira. O motivo: os
+testes do worker substituem `translate_text`, entao nunca chegam a
+`translate_text_chunk`, que e onde o `sl` e montado. Eu tinha verificado que o
+worker **passa** o idioma adiante e nada verificava que a camada de rede **o
+usa**. Entraram tres testes na camada certa, incluindo um que exige que o idioma
+sobreviva a divisao de um comentario longo em varias requisicoes — perde-lo entre
+a primeira e a segunda daria metade da traducao declarada e metade adivinhada.
+
+### 9.3 O editor misturava os pares de idiomas na mesma lista
+
+A queixa que originou o 9.2, e a que decidiu a forma dele. O editor lista por
+idioma de **destino**, herdado da janela principal, e dentro dele convivem as
+traducoes vindas de todas as linguas. Revisar uma traducao do espanhol achando
+que e do italiano nao produz erro nenhum — produz uma revisao errada, e nada na
+tela ajuda a perceber.
+
+**Feito: dois seletores proprios, origem e destino.** Garantia R9. Sao menus, e
+nao botoes segmentados como o filtro de status: oito idiomas lado a lado nao
+cabem na largura do painel, e a forma segmentada so se paga quando todas as
+opcoes ficam visiveis de uma vez.
+
+**Os dois nao sao simetricos, e cada assimetria tem razao:**
+
+| | opcoes | lembrado |
+|---|---|---|
+| **Origem** | Todos · Nao informado · os sete idiomas | sim |
+| **Destino** | os sete idiomas | nao |
+
+"Todos" so existe na origem porque a janela edita as traducoes de **um** destino:
+o rascunho, o titulo e a aplicacao das regras automaticas sao todos por destino.
+E o destino nao e lembrado de proposito — guarda-lo faria quem marcasse "Ingles"
+na janela principal abrir o editor em portugues, sem nada na tela explicando de
+onde aquilo veio.
+
+**"Nao informado" nao pode ser sinonimo de "Todos"**, e a distincao e a coisa
+mais facil de errar aqui: `None` nao filtra, `""` filtra pelas linhas cuja origem
+ninguem declarou. Confundi-los faz "Nao informado" mostrar a tabela inteira — e
+num banco em que 201.607 de 201.607 linhas estao nesse balde, isso pareceria
+funcionar por muito tempo. Ha teste so para a diferenca, nas tres camadas.
+
+**Trocar de par grava a edicao aberta antes**, e nao depois: a linha pertence ao
+par antigo e sai da lista na troca, entao gravar depois seria gravar contra um
+item que a janela nao mostra mais. E volta para a primeira pagina — a pagina 40
+do par anterior nao quer dizer nada no novo.
+
+**"Aplicar automaticas" ficou restrito ao filtro ativo.** Com "Origem: Espanhol"
+na tela, reescrever tambem as traducoes das outras linguas seria uma alteracao em
+massa que o usuario nao pediu nem consegue ver.
+
+**Um custo que a medicao pegou, e que teria sido uma regressao silenciosa da
+garantia R5.** Com o filtro de origem ativo, o resumo de status subiu de 34,9 ms
+para **78,7 ms** no banco real: o indice de cobertura
+`(target_language, verified, quality_warning)` deixa de cobrir a consulta quando
+`source_language` entra no `WHERE`, e a agregada volta a tocar a tabela. Entrou
+`idx_comments_pair_counts`, com a origem dentro:
+
+| | antes do indice | depois |
+|---|---|---|
+| resumo, sem filtro de origem | 34,9 ms | 34,5 ms |
+| resumo, origem = "nao informado" (as 201.607) | **78,7 ms** | **35,9 ms** |
+| resumo, um par sem nenhuma linha | — | 0,0 ms |
+| pagina 1000, com filtro de origem | — | 6,1 ms |
+
+Filtrar voltou a custar o mesmo que nao filtrar, que era o ponto de R5.
+
+**Um teste meu que passava pelo motivo errado, e e o mesmo padrao que esta
+revisao ja registrou tres vezes.** O de "trocar de par volta para a primeira
+pagina" montava quatro linhas ao todo — com uma pagina so, `clamp_page` ja
+devolvia zero sozinho, e **remover a linha que zera a pagina nao mudava nada**.
+Refeito com mais de uma pagina em cada par: agora a mutacao quebra, e o teste
+exige tambem que a lista nao traga linha do par anterior.
+
+**Conferido por mutacao**, quinze maneiras de errar entre 9.2 e 9.3, todas pegas:
+a origem desconhecida virando `NULL`, a migracao so acrescentando a coluna, a
+reconstrucao renumerando os ids, `save_translation` voltando a procurar so por
+`(original, destino)`, o filtro tratando `""` como ausencia de filtro, a adocao
+alcancando outra origem, a adocao sem `OR IGNORE`, "detectar" adotando tudo, o
+cache ignorando a origem, verificar iguais atravessando origens, a API voltando
+ao `sl=auto`, o worker nao adotando e nao gravando a origem, o registro de falhas
+perdendo o par, o editor nao passando o filtro adiante, trocar de par nao
+gravando a edicao aberta nem voltando a primeira pagina, e o filtro deixando de
+ser lembrado entre sessoes.
+
+**Uma "sobrevivente" que nao era, e a causa vale mais que o caso.** A mutacao
+"verificar iguais volta a atravessar origens" passava na rodada completa e
+falhava quando rodada sozinha — o oposto do que uma flutuacao de teste costuma
+parecer. Nao era o teste: era o **`.pyc`**. O script mutava `database.py` varias
+vezes em sequencia, e o interpretador do subprocesso reaproveitava o bytecode
+compilado da versao anterior, entao a mutacao nunca chegava a rodar. Com
+`PYTHONDONTWRITEBYTECODE=1` e uma conferencia de que o arquivo mutado esta mesmo
+em disco, as 31 mutacoes sao pegas de forma deterministica.
+
+E o mesmo aviso que o item 5.4 registrou por outro caminho: **uma mutacao que
+"passa" so conta depois de confirmado que ela foi aplicada.** La o script abortou
+por ancora ambigua; aqui ele aplicou e o Python ignorou.
+
+**Verificado na janela de verdade**, com cinco traducoes semeadas em quatro
+pares:
+
+```
+ao abrir (Origem=Todos, Destino=Portugues) : 4 linhas
+Origem=Ingles                              : 2 linhas  · "Pagina 1/1 · 2 traducoes"
+Origem=Nao informado                       : 1 linha
+Origem=Espanhol                            : 1 linha
+Destino=Frances, Origem=Todos              : 1 linha   · titulo "Editar traducoes (fr)"
+```

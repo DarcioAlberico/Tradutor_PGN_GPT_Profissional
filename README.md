@@ -163,9 +163,10 @@ nada, e **Manter esta**, que remove as concorrentes do arquivo.
 - `tradutor_pgn/app_config.py`: constantes compartilhadas do projeto.
 - `tradutor_pgn/background_task.py`: executa operacoes longas fora da thread da interface, com progresso e cancelamento.
 - `tradutor_pgn/backup_retention.py`: politica de retencao de `backups/` e `logs/`, com a decisao separada da remocao.
-- `tradutor_pgn/database.py`: inicializacao, conexao e cache do SQLite.
-- `tradutor_pgn/db_tools.py`: estatisticas, backup/restauracao, importacao/exportacao CSV e aplicacao das regras automaticas — todas em segundo plano.
-- `tradutor_pgn/edit_window.py`: janela de revisao e edicao de traducoes.
+- `tradutor_pgn/confirm_dialog.py`: confirmacao que exige digitar `delete`, usada pelas duas ferramentas que apagam trabalho do usuario.
+- `tradutor_pgn/database.py`: inicializacao, conexao e cache do SQLite, indexado pelo par de idiomas (origem, destino).
+- `tradutor_pgn/db_tools.py`: estatisticas, backup/restauracao, importacao/exportacao CSV, aplicacao das regras automaticas e as duas ferramentas de zerar — todas em segundo plano.
+- `tradutor_pgn/edit_window.py`: janela de revisao e edicao de traducoes, com filtro por par de idiomas.
 - `tradutor_pgn/editor_common.py`: logica pura compartilhada pelas duas janelas de edicao (geometria, paginacao, preview).
 - `tradutor_pgn/editor_text.py`: busca e substituicao de texto no editor.
 - `tradutor_pgn/editor_widgets.py`: pecas de interface compartilhadas pelas duas janelas (mensagens, linhas da lista, divisor, gravacao das configuracoes).
@@ -185,5 +186,5 @@ nada, e **Manter esta**, que remove as concorrentes do arquivo.
 - `.claude/skills/run-tradutor-pgn/`: ferramenta para abrir e dirigir o app sem interacao manual (inclusive o worker de traducao, sem abrir janela) e capturar telas.
 - `Substituicoes.txt`: as regras do glossario (original, substituicao e, quando ha, tipo e prioridade).
 - `glossario.db`: indice SQLite do glossario, derivado do `Substituicoes.txt`. E versionado para que um clone ja abra com o indice pronto, e ele proprio guarda de qual arquivo veio (caminho relativo e hash do conteudo), de modo que reconstroi sozinho assim que as regras mudam.
-- `traducoes.db`: cache local de traducoes.
+- `traducoes.db`: cache local de traducoes, uma linha por (comentario, idioma de origem, idioma de destino).
 - `backups/`, `logs/`: gerados em tempo de execucao, nao versionados.

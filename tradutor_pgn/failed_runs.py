@@ -26,17 +26,29 @@ from .settings import load_settings, update_settings
 FAILED_RUN_KEY = "failed_translation"
 
 
-def build_failed_run_record(target_language, failed_files, failed_count, when=None):
+def build_failed_run_record(
+    target_language,
+    failed_files,
+    failed_count,
+    when=None,
+    source_language="",
+):
     """O registro a persistir, ou `None` quando nao ha o que reprocessar.
 
     `None` e o resultado certo para uma execucao limpa: nao existe "registro
     vazio", existe nao haver registro. Quem grava usa isso para apagar o antigo.
+
+    O idioma de ORIGEM entra pela mesma razao que o de destino ja entrava: a
+    lista foi montada traduzindo um par de idiomas, e reprocessa-la com outro par
+    gravaria as traducoes numa gaveta diferente da dos comentarios que deram
+    certo — o arquivo sairia dividido entre dois pares sem ninguem ter pedido.
     """
     arquivos = sorted({str(caminho) for caminho in (failed_files or []) if caminho})
     if not arquivos or not failed_count:
         return None
     return {
         "target_language": target_language,
+        "source_language": source_language or "",
         "files": arquivos,
         "failed_count": int(failed_count),
         "when": when,
@@ -61,8 +73,16 @@ def normalize_failed_run_record(record):
     limpos = [str(caminho) for caminho in arquivos if caminho]
     if not limpos:
         return None
+    # A origem e opcional na leitura: um registro gravado por uma versao anterior
+    # nao a tem, e trata-lo como invalido descartaria uma lista de falhas
+    # perfeitamente boa. Ausente, vale "nao informado" — que e exatamente o que
+    # aquela execucao usou.
+    origem = record.get("source_language")
+    if not isinstance(origem, str):
+        origem = ""
     return {
         "target_language": idioma,
+        "source_language": origem,
         "files": limpos,
         "failed_count": record.get("failed_count") or 0,
         "when": record.get("when"),
@@ -88,7 +108,8 @@ def describe_failed_run(record, exists=os.path.exists):
     linhas = [
         f"Da ultima execucao ficaram {record['failed_count']} comentario(s) sem "
         f"traduzir, em {len(record['files'])} arquivo(s).",
-        f"Idioma: {record['target_language']}",
+        f"Idioma: {record['source_language'] or 'detectar'} -> "
+        f"{record['target_language']}",
         "",
     ]
     linhas.extend(f"  - {os.path.basename(caminho)}" for caminho in presentes[:10])

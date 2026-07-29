@@ -5,7 +5,7 @@ Cada salvamento do glossario copia o `Substituicoes.txt` inteiro (~334 KB) para
 Aqui fica a decisao de o que descartar, separada da remocao em si para poder ser
 testada sem tocar no disco.
 
-Duas regras, nesta ordem:
+Tres regras, nesta ordem:
 
 1. **Quantidade** — so os `keep_count` mais novos sobrevivem; o resto sai
    independentemente da idade. E esta regra que segura o crescimento, porque o
@@ -13,6 +13,12 @@ Duas regras, nesta ordem:
 2. **Idade** — dos que sobraram, sai quem for mais velho que `max_age_days`,
    exceto os `keep_minimum` mais novos. Sem esse piso, uma pasta parada por
    meses ficaria sem backup nenhum justamente quando ele e mais necessario.
+3. **Espaco** (`max_total_bytes`, so a familia do banco) — dos que ainda
+   sobraram, guarda-se o maior conjunto de copias RECENTES que cabe no teto.
+   Contar arquivos so limita disco quando os arquivos tem tamanho parecido: as
+   copias do banco eram de 7 MB em junho e de 107 MB em julho, entao as mesmas
+   10 copias que valiam 70 MB passaram a valer mais de 1 GB sem nenhum limite
+   ter mudado. O mesmo piso de `keep_minimum` vale aqui.
 """
 
 import os
@@ -23,6 +29,7 @@ from .app_config import (
     BACKUP_KEEP_MINIMUM,
     BACKUP_MAX_AGE_DAYS,
     DATABASE_BACKUP_KEEP_COUNT,
+    DATABASE_BACKUP_MAX_TOTAL_MB,
     GLOSSARY_BACKUP_KEEP_COUNT,
     LOG_KEEP_COUNT,
     LOG_MAX_AGE_DAYS,
@@ -94,6 +101,8 @@ def select_backups_to_delete(
     keep_minimum=BACKUP_KEEP_MINIMUM,
     now=None,
     protected=(),
+    max_total_bytes=None,
+    sizes=None,
 ):
     """Decide quais backups descartar. Funcao pura: nao acessa o disco.
 
@@ -101,6 +110,13 @@ def select_backups_to_delete(
     Arquivos sem carimbo no nome sao ignorados — nunca entram na lista de
     remocao. `protected` guarda nomes que jamais podem sair (o backup recem
     criado, por exemplo), mas eles continuam ocupando posicao na contagem.
+
+    `max_total_bytes` limita o espaco ocupado pela familia inteira; `sizes`
+    mapeia nome -> tamanho (quem chama e que le o disco, para esta funcao
+    continuar pura). Contar arquivos so limita espaco quando os arquivos tem
+    tamanho parecido — vale para o glossario, cujas copias sao um arquivo texto
+    de algumas centenas de KB, e nao vale para o banco, que cresce com o uso.
+    Ver `DATABASE_BACKUP_MAX_TOTAL_MB` em `app_config.py`.
 
     Um limite `None` (ou <= 0) desliga a regra correspondente.
     """
@@ -125,13 +141,34 @@ def select_backups_to_delete(
         cutoff = now - timedelta(days=max_age_days)
 
     doomed = []
+    sobreviventes = []
     for rank, (stamp, _suffix, base, name) in enumerate(dated):
         if base in protected_names:
+            sobreviventes.append((rank, base, name))
             continue
         if keep_count is not None and keep_count > 0 and rank >= keep_count:
             doomed.append(name)
         elif cutoff is not None and stamp < cutoff and rank >= keep_minimum:
             doomed.append(name)
+        else:
+            sobreviventes.append((rank, base, name))
+
+    # Terceira regra: teto de espaco. Percorre os sobreviventes do mais novo
+    # para o mais velho somando o tamanho; a partir de onde a soma estoura o
+    # teto, o resto sai. Guarda-se o maior conjunto de copias RECENTES que cabe,
+    # que e o que interessa numa restauracao.
+    if max_total_bytes is not None and max_total_bytes > 0 and sizes is not None:
+        acumulado = 0
+        estourou = False
+        for rank, base, name in sobreviventes:
+            acumulado += sizes.get(base, sizes.get(name, 0))
+            if not estourou and acumulado > max_total_bytes:
+                estourou = True
+            # O mesmo piso da regra de idade: as `keep_minimum` mais novas
+            # ficam mesmo que uma copia sozinha ja estoure o teto. Sem isso um
+            # banco maior que o teto deixaria o usuario sem backup nenhum.
+            if estourou and rank >= keep_minimum and base not in protected_names:
+                doomed.append(name)
 
     return doomed
 
@@ -145,6 +182,7 @@ def prune_backups(
     keep_minimum=BACKUP_KEEP_MINIMUM,
     now=None,
     protected=(),
+    max_total_bytes=None,
 ):
     """Aplica a politica em `backup_dir` e devolve os caminhos removidos.
 
@@ -165,6 +203,17 @@ def prune_backups(
     except OSError:
         return []
 
+    # Os tamanhos sao lidos aqui para `select_backups_to_delete` continuar sem
+    # tocar o disco. Um arquivo que suma entre a listagem e a medicao conta
+    # zero: some sozinho do resultado, e nao vale derrubar a limpeza por isso.
+    sizes = {}
+    if max_total_bytes:
+        for name in candidates:
+            try:
+                sizes[name] = os.path.getsize(os.path.join(backup_dir, name))
+            except OSError:
+                sizes[name] = 0
+
     removed = []
     for name in select_backups_to_delete(
         candidates,
@@ -173,6 +222,8 @@ def prune_backups(
         keep_minimum=keep_minimum,
         now=now,
         protected=protected,
+        max_total_bytes=max_total_bytes,
+        sizes=sizes if max_total_bytes else None,
     ):
         target = os.path.join(backup_dir, name)
         try:
@@ -193,9 +244,14 @@ def prune_glossary_backups(backup_dir, stem, **kwargs):
 def prune_database_backups(backup_dir, stem, **kwargs):
     """Retencao dos backups do banco (`<stem>-backup-<carimbo>.db`).
 
-    O limite e menor que o do glossario porque cada copia e o banco inteiro.
+    Alem de guardar menos copias que o glossario, esta e a unica familia com
+    teto de ESPACO. Contar arquivos limita o disco so quando os arquivos tem
+    tamanho parecido, e o banco cresce com o uso: as copias de junho tinham 7 MB
+    e as de julho, 107 MB. Com as 10 copias que a contagem permite, o teto real
+    passou de 70 MB para mais de 1 GB sem que nenhum limite mudasse.
     """
     kwargs.setdefault("keep_count", DATABASE_BACKUP_KEEP_COUNT)
+    kwargs.setdefault("max_total_bytes", DATABASE_BACKUP_MAX_TOTAL_MB * 1024 * 1024)
     return prune_backups(backup_dir, f"{stem}-backup-", ".db", **kwargs)
 
 

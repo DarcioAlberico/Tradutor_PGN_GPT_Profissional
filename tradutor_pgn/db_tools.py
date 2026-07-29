@@ -4,9 +4,11 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
+from .app_config import language_label
 from .database import (
     analyze_automatic_translation_updates,
     apply_automatic_translation_updates,
+    clear_all_translations,
     fetch_export_rows,
     fetch_review_rows,
     get_database_stats,
@@ -16,8 +18,14 @@ from .database import (
 )
 from .backup_retention import prune_database_backups
 from .background_task import TaskCanceled, run_with_progress
+from .confirm_dialog import ask_typed_confirmation
 from .database import AutomaticRulesCanceled
-from .glossario import apply_automatic_substitutions, load_automatic_substitutions
+from .glossario import (
+    apply_automatic_substitutions,
+    create_glossary_backup,
+    load_automatic_substitutions,
+    save_glossary_entries,
+)
 from .review_quality import summarize_quality_warnings
 
 
@@ -231,17 +239,18 @@ def _parse_verified(value):
     }
 
 
-def _fetch_comment_id(cursor, original_comment, target_language):
+def _fetch_comment_id(cursor, original_comment, target_language, source_language=""):
     row = cursor.execute(
         """
         SELECT id
         FROM comments
         WHERE original_comment = ?
+          AND source_language = ?
           AND target_language = ?
         ORDER BY id
         LIMIT 1
         """,
-        (original_comment, target_language),
+        (original_comment, source_language, target_language),
     ).fetchone()
     return row[0] if row else None
 
@@ -258,10 +267,15 @@ def _read_translation_csv_rows(csv_path):
 
 
 def _normalize_import_row(row):
+    # `source_language` e OPCIONAL na leitura, pelo mesmo motivo que a coluna
+    # `priority` do CSV do glossario e: um arquivo exportado por uma versao
+    # anterior — ou montado numa planilha — continua importavel, e a ausencia da
+    # coluna significa a mesma coisa que a coluna vazia, "origem nao informada".
     return {
         "original_comment": (row.get("original_comment") or "").strip(),
         "translated_comment": (row.get("translated_comment") or "").strip(),
         "target_language": (row.get("target_language") or "").strip(),
+        "source_language": (row.get("source_language") or "").strip(),
         "verified": _parse_verified(row.get("verified")),
     }
 
@@ -278,17 +292,18 @@ def _empty_import_stats(backup_path=None):
     }
 
 
-def _existing_translation(cursor, original_comment, target_language):
+def _existing_translation(cursor, original_comment, target_language, source_language=""):
     return cursor.execute(
         """
         SELECT translated_comment
         FROM comments
         WHERE original_comment = ?
+          AND source_language = ?
           AND target_language = ?
         ORDER BY id
         LIMIT 1
         """,
-        (original_comment, target_language),
+        (original_comment, source_language, target_language),
     ).fetchone()
 
 
@@ -331,7 +346,9 @@ def analyze_translations_csv_import(
                 stats["skipped"] += 1
                 continue
 
-            existing = _existing_translation(cursor, original, target_language)
+            existing = _existing_translation(
+                cursor, original, target_language, row["source_language"]
+            )
             if existing is None:
                 stats["inserted"] += 1
                 if row["verified"]:
@@ -401,6 +418,7 @@ def import_translations_from_csv(
                 original,
                 translated,
                 target_language,
+                row["source_language"],
             )
             if save_status == "inserted":
                 stats["inserted"] += 1
@@ -410,7 +428,9 @@ def import_translations_from_csv(
                 stats["unchanged"] += 1
 
             if save_status in {"inserted", "filled_empty"} and row["verified"]:
-                comment_id = _fetch_comment_id(cursor, original, target_language)
+                comment_id = _fetch_comment_id(
+                    cursor, original, target_language, row["source_language"]
+                )
                 if comment_id is not None:
                     stats["verified_applied"] += set_translation_verified_by_id(
                         cursor,
@@ -431,6 +451,10 @@ def import_translations_from_csv(
 EXPORT_CSV_HEADERS = [
     "original_comment",
     "translated_comment",
+    # Entre a traducao e o destino, na mesma ordem em que `fetch_export_rows`
+    # devolve as colunas: a exportacao escreve o cursor direto no `writerows`,
+    # entao cabecalho e SELECT precisam concordar posicao a posicao.
+    "source_language",
     "target_language",
     "verified",
     "created_at",
@@ -498,6 +522,7 @@ def analyze_database_automatic_rules(
     automatic_rules=None,
     progress_callback=None,
     should_cancel=None,
+    source_language=None,
 ):
     if automatic_rules is None:
         automatic_rules = load_automatic_substitutions()
@@ -511,6 +536,7 @@ def analyze_database_automatic_rules(
             target_language=target_language,
             progress_callback=progress_callback,
             should_cancel=should_cancel,
+            source_language=source_language,
         )
     finally:
         conn.close()
@@ -524,6 +550,7 @@ def apply_database_automatic_rules(
     backup_dir=None,
     progress_callback=None,
     should_cancel=None,
+    source_language=None,
 ):
     if automatic_rules is None:
         automatic_rules = load_automatic_substitutions()
@@ -541,6 +568,7 @@ def apply_database_automatic_rules(
             target_language=target_language,
             progress_callback=progress_callback,
             should_cancel=should_cancel,
+            source_language=source_language,
         )
         conn.commit()
     except Exception:
@@ -556,8 +584,17 @@ def apply_database_automatic_rules(
     return stats
 
 
-def format_automatic_rules_scope(target_language):
-    return f"idioma atual ({target_language})" if target_language else "todos os idiomas"
+def format_automatic_rules_scope(target_language, source_language=None):
+    """O escopo, em texto, para o dialogo de confirmacao.
+
+    Nomeia a ORIGEM tambem quando ha filtro dela: confirmar "vou alterar 12.000
+    traducoes do idioma pt" enquanto a janela mostra so as vindas do espanhol
+    daria um numero que nao bate com nada na tela.
+    """
+    destino = f"idioma atual ({target_language})" if target_language else "todos os idiomas"
+    if source_language is None:
+        return destino
+    return f"{destino}, origem {language_label(source_language)}"
 
 
 def _preview_line(value, limit=90):
@@ -587,10 +624,10 @@ def format_automatic_rule_examples(examples, max_items=5):
     return "\n".join(lines)
 
 
-def _format_automatic_preview(target_language, preview):
+def _format_automatic_preview(target_language, preview, source_language=None):
     return (
         "Aplicar regras automaticas nas traducoes existentes?\n\n"
-        f"Escopo: {format_automatic_rules_scope(target_language)}\n"
+        f"Escopo: {format_automatic_rules_scope(target_language, source_language)}\n"
         f"Regras automaticas: {preview['rules']}\n"
         f"Traducoes analisadas: {preview['scanned']}\n"
         f"Traducoes que serao alteradas: {preview['changed']}\n\n"
@@ -599,10 +636,10 @@ def _format_automatic_preview(target_language, preview):
     )
 
 
-def _format_automatic_result(target_language, stats):
+def _format_automatic_result(target_language, stats, source_language=None):
     return (
         "Regras automaticas aplicadas com sucesso.\n\n"
-        f"Escopo: {format_automatic_rules_scope(target_language)}\n"
+        f"Escopo: {format_automatic_rules_scope(target_language, source_language)}\n"
         f"Regras automaticas: {stats['rules']}\n"
         f"Traducoes analisadas: {stats['scanned']}\n"
         f"Traducoes alteradas: {stats['changed']}\n"
@@ -616,6 +653,7 @@ def apply_automatic_rules_to_database(
     target_language=None,
     parent=None,
     on_finish=None,
+    source_language=None,
 ):
     """Aplica as regras automaticas, com previa, backup e confirmacao.
 
@@ -672,6 +710,7 @@ def apply_automatic_rules_to_database(
                 automatic_rules=automatic_rules,
                 progress_callback=task.report,
                 should_cancel=task.cancelado,
+                source_language=source_language,
             )
 
         def aplicado(stats):
@@ -679,7 +718,7 @@ def apply_automatic_rules_to_database(
                 app.translation_cache.clear()
             messagebox.showinfo(
                 "Substituicoes automaticas",
-                _format_automatic_result(target_language, stats),
+                _format_automatic_result(target_language, stats, source_language),
                 parent=parent,
             )
             if on_finish is not None:
@@ -704,7 +743,7 @@ def apply_automatic_rules_to_database(
                 "Substituicoes automaticas",
                 (
                     "Nenhuma traducao existente precisa ser atualizada.\n\n"
-                    f"Escopo: {format_automatic_rules_scope(target_language)}\n"
+                    f"Escopo: {format_automatic_rules_scope(target_language, source_language)}\n"
                     f"Regras automaticas: {preview['rules']}\n"
                     f"Traducoes analisadas: {preview['scanned']}"
                 ),
@@ -716,7 +755,7 @@ def apply_automatic_rules_to_database(
 
         if not messagebox.askyesno(
             "Substituicoes automaticas",
-            _format_automatic_preview(target_language, preview),
+            _format_automatic_preview(target_language, preview, source_language),
             parent=parent,
         ):
             if on_finish is not None:
@@ -732,6 +771,7 @@ def apply_automatic_rules_to_database(
             automatic_rules=automatic_rules,
             progress_callback=task.report,
             should_cancel=task.cancelado,
+            source_language=source_language,
         )
 
     run_with_progress(
@@ -768,12 +808,14 @@ def show_db_stats(app):
         stats = get_database_stats(cursor)
         quality_rows_by_language = {}
         all_quality_rows = []
-        for lang, _count, _verified, _pending in stats["per_language"]:
+        for source, target, _count, _verified, _pending in stats["per_language"]:
             # Só as linhas marcadas com aviso: o resumo exibido conta apenas
             # essas, entao carregar a tabela inteira era desperdicio puro
             # (~2 s de interface congelada e ~100 MB em 195 mil linhas).
-            lang_rows = fetch_review_rows(cursor, lang, status_filter="warnings")
-            quality_rows_by_language[lang] = lang_rows
+            lang_rows = fetch_review_rows(
+                cursor, target, status_filter="warnings", source_language=source
+            )
+            quality_rows_by_language[(source, target)] = lang_rows
             all_quality_rows.extend(lang_rows)
 
         quality_summary = summarize_quality_warnings(all_quality_rows)
@@ -784,12 +826,15 @@ def show_db_stats(app):
             f"Pendentes: {stats['pending_total']}\n\n"
             "QA geral:\n"
             f"{format_quality_stats(quality_summary, '  ')}\n\n"
-            "Por idioma:\n"
+            "Por par de idiomas (origem -> destino):\n"
         )
-        for lang, count, verified, pending in stats["per_language"]:
-            language_summary = summarize_quality_warnings(quality_rows_by_language[lang])
+        for source, target, count, verified, pending in stats["per_language"]:
+            language_summary = summarize_quality_warnings(
+                quality_rows_by_language[(source, target)]
+            )
+            par = f"{language_label(source)} -> {target}"
             msg += (
-                f"  - {lang}: {count} | verificadas: {verified} | "
+                f"  - {par}: {count} | verificadas: {verified} | "
                 f"pendentes: {pending} | QA: {language_summary['warning_rows']}\n"
             )
 
@@ -1054,3 +1099,185 @@ def restore_database(app, on_finish=None):
         message="Restaurando o banco (nao interrompa)...",
         allow_cancel=False,
     )
+
+def _count_translations(db_path):
+    """Quantas linhas o banco tem hoje, para a pergunta dizer o que sera perdido."""
+    conn = None
+    try:
+        conn = initialize_database(db_path)
+        return conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def reset_translations(app, on_finish=None):
+    """Zera o banco de traducoes, apos backup e confirmacao digitada.
+
+    **O backup vem antes de perguntar, e nao depois de confirmar.** Custa 0,4 s
+    no banco real e e a unica forma de desfazer isto — deixa-lo para depois do
+    "Apagar" significaria que uma falha entre a confirmacao e a copia apaga tudo
+    sem rede. Feito antes, o pior caso e uma copia a mais em `backups/` para quem
+    desistiu, e a retencao (garantia S8) cuida dela.
+
+    Sem cancelamento no meio (`allow_cancel=False`), pela mesma razao da
+    restauracao: depois do `DROP TABLE` nao ha estado anterior para voltar, e um
+    botao que nao pode ser honrado e pior do que nenhum botao. A hora de desistir
+    e o dialogo.
+    """
+    total = _count_translations(app.output_db)
+    if total == 0:
+        messagebox.showinfo("Zerar Traduções", "O banco de traduções já está vazio.")
+        return
+
+    quantas = "um numero desconhecido de" if total is None else f"{total:,}".replace(",", ".")
+    falhou, _cancelado = _database_task_callbacks(
+        app, "Zerar Traduções", "Erro ao zerar o banco de traducoes:", on_finish
+    )
+
+    try:
+        backup_path = create_database_backup(app.output_db)
+    except Exception as exc:
+        falhou(exc)
+        return
+
+    confirmado = ask_typed_confirmation(
+        app.root,
+        "Zerar Traduções",
+        (
+            f"Isto apaga {quantas} tradução(ões) e todo o histórico de edições.\n\n"
+            "O glossário não é afetado.\n\n"
+            "Um backup acabou de ser criado em:\n"
+            f"{backup_path}\n\n"
+            "É por ele que dá para voltar atrás — depois de apagar, não há outro caminho."
+        ),
+    )
+    if not confirmado:
+        app.log_message(
+            f"Zerar traducoes cancelado. O backup criado ficou em: {backup_path}"
+        )
+        if on_finish is not None:
+            on_finish(None)
+        return
+
+    def trabalho(task):
+        task.report(0, 1)
+        conn = initialize_database(app.output_db)
+        try:
+            apagadas = clear_all_translations(conn)
+        finally:
+            conn.close()
+        task.report(1, 1)
+        return apagadas
+
+    def pronto(apagadas):
+        if hasattr(app, "translation_cache"):
+            # O cache em memoria tem precedencia sobre o banco: deixado como
+            # estava, a proxima traducao reaproveitaria exatamente o que o
+            # usuario acabou de mandar apagar.
+            app.translation_cache.clear()
+        app.log_message(
+            f"Banco de traducoes zerado: {apagadas} linha(s) removidas. "
+            f"Backup em: {backup_path}"
+        )
+        messagebox.showinfo(
+            "Zerar Traduções",
+            (
+                f"Banco de traduções zerado ({apagadas} linha(s) removidas).\n\n"
+                f"O backup anterior está em:\n{backup_path}"
+            ),
+        )
+        if on_finish is not None:
+            on_finish(apagadas)
+
+    run_with_progress(
+        app.root,
+        "Zerar Traduções",
+        trabalho,
+        on_success=pronto,
+        on_error=falhou,
+        message="Apagando as traducoes (nao interrompa)...",
+        allow_cancel=False,
+    )
+
+
+def reset_glossary(app, on_finish=None):
+    """Zera o glossario: `Substituicoes.txt` vazio e `glossario.db` reconstruido.
+
+    Sincrono, ao contrario de zerar as traducoes, e a diferenca e de escala e nao
+    de estilo: gravar uma lista vazia num arquivo de 334 KB e reconstruir um
+    indice sem nenhuma regra custa milissegundos. Uma barra de progresso para
+    isso seria um piscar de janela.
+
+    O backup sai de `save_glossary_entries`, que ja o faz em toda gravacao
+    (garantia S8) — nao ha um caminho especial aqui, e e melhor assim: zerar usa
+    exatamente a mesma escrita atomica que salvar uma regra usa.
+    """
+    total = len(app.glossary_substitutions or [])
+
+    backup_path = None
+    try:
+        backup_path = create_glossary_backup()
+    except Exception as exc:
+        messagebox.showerror("Erro", f"Erro ao criar backup do glossario:\n{exc}")
+        if on_finish is not None:
+            on_finish(None)
+        return
+
+    confirmado = ask_typed_confirmation(
+        app.root,
+        "Zerar Glossário",
+        (
+            f"Isto apaga as {total} regras do glossário: substituições, limpezas "
+            "e automáticas.\n\n"
+            "O banco de traduções não é afetado.\n\n"
+            + (
+                f"Um backup acabou de ser criado em:\n{backup_path}\n\n"
+                "É por ele que dá para voltar atrás — depois de apagar, não há outro caminho."
+                if backup_path
+                else "ATENÇÃO: não havia arquivo de glossário para copiar antes."
+            )
+        ),
+    )
+    if not confirmado:
+        if backup_path:
+            app.log_message(
+                f"Zerar glossario cancelado. O backup criado ficou em: {backup_path}"
+            )
+        if on_finish is not None:
+            on_finish(None)
+        return
+
+    try:
+        # `create_backup=False`: a copia acima ja foi feita, antes de perguntar.
+        # Fazer outra aqui deixaria duas copias identicas na pasta e faria a
+        # retencao descartar uma versao mais antiga de verdade para caber.
+        save_glossary_entries([], create_backup=False)
+    except Exception as exc:
+        messagebox.showerror("Erro", f"Erro ao zerar o glossario:\n{exc}")
+        if on_finish is not None:
+            on_finish(None)
+        return
+
+    app.glossary_substitutions = []
+    # As janelas abertas recarregam sozinhas: o editor de traducoes ainda mostra
+    # as sugestoes das regras que acabaram de deixar de existir, e a lista do
+    # editor de glossario ainda mostra as regras.
+    for callback in list(getattr(app, "glossary_change_callbacks", [])):
+        try:
+            callback([])
+        except Exception:  # pragma: no cover - defensivo
+            pass
+
+    app.log_message(f"Glossario zerado: {total} regra(s) removidas. Backup em: {backup_path}")
+    messagebox.showinfo(
+        "Zerar Glossário",
+        (
+            f"Glossário zerado ({total} regra(s) removidas).\n\n"
+            f"O backup anterior está em:\n{backup_path}"
+        ),
+    )
+    if on_finish is not None:
+        on_finish(total)

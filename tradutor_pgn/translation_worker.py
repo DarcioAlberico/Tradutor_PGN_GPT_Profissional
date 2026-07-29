@@ -5,7 +5,13 @@ from tkinter import messagebox
 
 import requests
 
-from .database import initialize_database, load_translation_cache, save_translation
+from .database import (
+    SOURCE_LANGUAGE_UNKNOWN,
+    adopt_unknown_source_language,
+    initialize_database,
+    load_translation_cache,
+    save_translation,
+)
 from .glossario import (
     apply_automatic_substitutions,
     clean_comment_for_translation,
@@ -40,13 +46,21 @@ def run_translation(
     target_language,
     process_subdirs,
     only_files=None,
+    source_language=SOURCE_LANGUAGE_UNKNOWN,
 ):
     """Traduz os comentarios dos PGN de `source_path`.
 
     `only_files` restringe a execucao a uma lista explicita, que e como o
     "Reprocessar falhas" reaproveita esta funcao inteira em vez de duplicar o
     laco (ROADMAP 7.3).
+
+    `source_language` e o idioma em que os PGN estao. Vazio significa "detectar
+    automaticamente", que e o que o programa sempre fez. Declara-lo tem dois
+    efeitos: a API recebe `sl=<idioma>` em vez de `sl=auto` — deixa de adivinhar
+    —, e a traducao e gravada dentro do par de idiomas, o que e o que permite ao
+    editor mostrar so um par de cada vez.
     """
+    source_language = source_language or SOURCE_LANGUAGE_UNKNOWN
     conn = None
     canceled = False
     http_session = requests.Session()
@@ -55,7 +69,10 @@ def run_translation(
     pacer = RequestPacer()
 
     try:
-        app.log_message(f"Iniciando traducao para idioma: {target_language}")
+        origem_dita = source_language or "detectar automaticamente"
+        app.log_message(
+            f"Iniciando traducao de {origem_dita} para o idioma: {target_language}"
+        )
         app.log_message(f"Banco de dados: {app.output_db}")
 
         conn = initialize_database(app.output_db)
@@ -109,11 +126,29 @@ def run_translation(
 
         app.log_message(f"Total de comentarios detectados: {total_comments}")
 
+        # ANTES da carga do cache, e nao depois: adotar rotula as linhas destes
+        # comentarios que ainda nao tem idioma de origem, e e isso que faz o
+        # cache ja gravado continuar valendo quando o usuario passa a declarar o
+        # idioma. Depois da carga, a adocao chegaria tarde — o cache ja teria
+        # vindo vazio e a execucao ja teria decidido pagar tudo de novo.
+        adotadas = adopt_unknown_source_language(
+            cursor, target_language, source_language, comentarios_do_lote
+        )
+        if adotadas:
+            conn.commit()
+            app.log_message(
+                f"{adotadas} traducao(oes) sem idioma de origem foram marcadas "
+                f"como '{source_language}'."
+            )
+
         # So agora, e so o que estes arquivos usam: carregar o idioma inteiro
         # trazia 195 mil traducoes (58 MB) para traduzir uma pasta com algumas
         # centenas de comentarios (ROADMAP 2.9).
         app.translation_cache = load_translation_cache(
-            cursor, target_language, comentarios_do_lote
+            cursor,
+            target_language,
+            comentarios_do_lote,
+            source_language=source_language,
         )
         # Contado sobre a lista, e nao por `len(cache)`: acima do limite a carga
         # completa sai mais barata e o dicionario vem com o idioma inteiro, entao
@@ -239,6 +274,7 @@ def run_translation(
                         app.cancel_flag,
                         session=http_session,
                         pacer=pacer,
+                        source_language=source_language,
                     )
                     batch_api_time += time.perf_counter() - api_started
                     batch_api_requests += 1
@@ -257,7 +293,8 @@ def run_translation(
                             app.translation_cache[original] = translation
                             translated_map[original] = translation
                             save_status = save_translation(
-                                cursor, original, translation, target_language
+                                cursor, original, translation, target_language,
+                                source_language,
                             )
                             if save_status == "inserted":
                                 translated_count += 1
@@ -323,6 +360,7 @@ def run_translation(
                                 app.cancel_flag,
                                 session=http_session,
                                 pacer=pacer,
+                                source_language=source_language,
                             )
                             batch_api_time += time.perf_counter() - api_started
                             batch_api_requests += 1
@@ -333,7 +371,8 @@ def run_translation(
                                 app.translation_cache[original] = translation
                                 translated_map[original] = translation
                                 save_status = save_translation(
-                                    cursor, original, translation, target_language
+                                    cursor, original, translation, target_language,
+                                    source_language,
                                 )
                                 # Comita AQUI, e nao no fim do lote (garantia
                                 # C3). O primeiro INSERT abre a transacao de
@@ -479,6 +518,7 @@ def run_translation(
                         failed_files,
                         failed_count,
                         when=datetime.now().isoformat(timespec="seconds"),
+                        source_language=source_language,
                     )
                 )
             except Exception as exc:  # pragma: no cover - defensivo

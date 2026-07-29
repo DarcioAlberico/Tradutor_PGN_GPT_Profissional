@@ -3,18 +3,16 @@ import webbrowser
 
 import customtkinter as ctk
 
-from .app_config import APP_AUTHORS, APP_REPOSITORY_URL
+from .app_config import (
+    APP_AUTHORS,
+    APP_REPOSITORY_URL,
+    AUTO_SOURCE_LABEL,
+    LANGUAGES,
+)
 
-
-LANGUAGES = [
-    ("Português", "pt"),
-    ("Inglês", "en"),
-    ("Espanhol", "es"),
-    ("Francês", "fr"),
-    ("Alemão", "de"),
-    ("Italiano", "it"),
-    ("Russo", "ru"),
-]
+# Vermelho das acoes destrutivas, em par claro/escuro como o resto do tema.
+DESTRUCTIVE_COLOR = ("#b91c1c", "#7f1d1d")
+DESTRUCTIVE_HOVER_COLOR = ("#991b1b", "#991b1b")
 
 
 def grid_button_row(parent, button_specs, columns=3):
@@ -118,10 +116,34 @@ def setup_main_ui(app):
     lang_section, lang_frame = create_section(main_frame, "Idioma de Tradução")
     lang_section.pack(fill=tk.X, pady=(0, 8))
 
-    ctk.CTkLabel(lang_frame, text="Idioma de destino:").grid(row=0, column=0, sticky=tk.W)
+    # A ORIGEM vem primeiro, e nao e so ordem de leitura: ela e a escolha que o
+    # usuario precisa rever a cada pasta nova, enquanto o destino costuma ser
+    # sempre o mesmo. Deixa-la embaixo, depois de sete botoes, e o desenho que
+    # faz alguem traduzir um PGN italiano declarando espanhol.
+    ctk.CTkLabel(lang_frame, text="Idioma de origem:").grid(row=0, column=0, sticky=tk.W)
+
+    source_sel = ctk.CTkFrame(lang_frame, fg_color="transparent")
+    source_sel.grid(row=0, column=1, sticky=tk.W, padx=(8, 0))
+    # "Detectar" e o primeiro e o padrao: e o comportamento que o programa sempre
+    # teve (`sl=auto`), entao quem nao mexer no seletor continua onde estava.
+    app.source_language_buttons = []
+    for i, (name, code) in enumerate([(AUTO_SOURCE_LABEL, "")] + LANGUAGES):
+        botao = ctk.CTkRadioButton(
+            source_sel,
+            text=name,
+            value=code,
+            variable=app.source_language,
+            width=80,
+        )
+        botao.grid(row=0, column=i, padx=(0, 8))
+        app.source_language_buttons.append(botao)
+
+    ctk.CTkLabel(lang_frame, text="Idioma de destino:").grid(
+        row=1, column=0, sticky=tk.W, pady=(6, 0)
+    )
 
     lang_sel = ctk.CTkFrame(lang_frame, fg_color="transparent")
-    lang_sel.grid(row=0, column=1, sticky=tk.W, padx=(8, 0))
+    lang_sel.grid(row=1, column=1, sticky=tk.W, padx=(8, 0), pady=(6, 0))
     for i, (name, code) in enumerate(LANGUAGES):
         ctk.CTkRadioButton(
             lang_sel,
@@ -196,6 +218,21 @@ def setup_main_ui(app):
             {"text": "Normalizar PGN", "command": app.normalize_pgn_metadata},
             {"text": "Editar Traduções", "command": app.open_edit_window},
             {"text": "Editar Glossário", "command": app.open_glossary_window},
+            # As duas ultimas, e em vermelho. Sao as unicas acoes da janela que
+            # destroem trabalho, e ficam distinguiveis a distancia de um clique
+            # apressado — a confirmacao digitada e a defesa, isto e o aviso.
+            {
+                "text": "Zerar Traduções",
+                "command": app.reset_translations,
+                "fg_color": DESTRUCTIVE_COLOR,
+                "hover_color": DESTRUCTIVE_HOVER_COLOR,
+            },
+            {
+                "text": "Zerar Glossário",
+                "command": app.reset_glossary,
+                "fg_color": DESTRUCTIVE_COLOR,
+                "hover_color": DESTRUCTIVE_HOVER_COLOR,
+            },
         ],
         columns=4,
     )

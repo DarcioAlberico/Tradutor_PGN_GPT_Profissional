@@ -14,6 +14,42 @@ LANGUAGE_OUTPUT_SUFFIXES = {
     "ru": "RU",
 }
 
+# Nome de cada idioma, na ordem em que os seletores o oferecem. Fica aqui, e nao
+# no modulo da janela principal, porque agora sao TRES seletores em duas janelas
+# (origem e destino da traducao, e os dois filtros do editor de traducoes): uma
+# lista por janela significaria descobrir a divergencia quando um idioma
+# aparecesse num lugar e nao no outro.
+LANGUAGES = [
+    ("Português", "pt"),
+    ("Inglês", "en"),
+    ("Espanhol", "es"),
+    ("Francês", "fr"),
+    ("Alemão", "de"),
+    ("Italiano", "it"),
+    ("Russo", "ru"),
+]
+
+LANGUAGE_NAMES = {code: name for name, code in LANGUAGES}
+
+# Rotulo do idioma de origem que ninguem declarou. Vale para os dois casos que o
+# compartilham: uma execucao em deteccao automatica e uma linha gravada antes de
+# o programa perguntar (ver `SOURCE_LANGUAGE_UNKNOWN` em `database.py`).
+UNKNOWN_SOURCE_LABEL = "Não informado"
+AUTO_SOURCE_LABEL = "Detectar"
+
+
+def language_label(code, unknown=UNKNOWN_SOURCE_LABEL):
+    """Nome exibivel de um codigo de idioma.
+
+    Um codigo desconhecido volta como ele mesmo em vez de virar `unknown`: o
+    banco e o `Substituicoes.txt` sobrevivem a versoes do programa, e mostrar
+    "Não informado" para uma linha marcada como `ja` esconderia justamente a
+    informacao que existe.
+    """
+    if not code:
+        return unknown
+    return LANGUAGE_NAMES.get(code, code)
+
 MAX_TRANSLATE_CHARS = 5000
 
 # Intervalo normal entre requisicoes de traducao. Baixo de proposito: rende mais.
@@ -37,6 +73,10 @@ PACE_CLEAN_STREAK = 25        # ...e so depois de 25 requisicoes sem reclamacao
 # inteiro, entao guarda-se menos. Ver `backup_retention.py`.
 GLOSSARY_BACKUP_KEEP_COUNT = 30
 DATABASE_BACKUP_KEEP_COUNT = 10
+# Teto de espaco da familia do banco. A contagem acima nao limita disco:
+# cada copia e o banco inteiro, que cresce com o uso (7 MB em junho, 107 MB
+# em julho). Com 10 copias o teto real virou mais de 1 GB sozinho.
+DATABASE_BACKUP_MAX_TOTAL_MB = 400
 BACKUP_MAX_AGE_DAYS = 60
 # Piso: nunca descartar por idade os N mais novos, para que uma pasta parada
 # por meses nao fique sem backup nenhum.

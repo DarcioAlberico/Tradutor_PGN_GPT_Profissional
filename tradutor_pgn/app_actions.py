@@ -15,6 +15,8 @@ from .db_tools import backup_database as backup_database_file
 from .db_tools import apply_automatic_rules_to_database as apply_auto_rules_to_database
 from .db_tools import export_csv as export_translations_csv
 from .db_tools import import_csv as import_translations_csv
+from .db_tools import reset_glossary as reset_glossary_file
+from .db_tools import reset_translations as reset_translations_database
 from .db_tools import restore_database as restore_database_file
 from .db_tools import show_db_stats as show_database_stats
 from .edit_window import open_translation_editor
@@ -189,6 +191,7 @@ def start_translation(app):
     threading.Thread(
         target=run_translation,
         args=(app, source_path, target_language, process_subdirs),
+        kwargs={"source_language": app.source_language.get()},
         daemon=True,
     ).start()
 
@@ -267,11 +270,22 @@ def retry_failed_translation(app):
         app.target_language.set(idioma)
         app.log_message(f"Idioma ajustado para o da execucao com falhas: {idioma}")
 
+    # O PAR inteiro vem do registro, e nao so o destino. Reprocessar declarando
+    # outra origem gravaria as traducoes que faltam numa gaveta diferente da dos
+    # comentarios que ja deram certo — o arquivo sairia dividido entre dois pares.
+    origem = record["source_language"]
+    if origem != app.source_language.get():
+        app.source_language.set(origem)
+        app.log_message(
+            f"Idioma de origem ajustado para o da execucao com falhas: "
+            f"{origem or 'detectar'}"
+        )
+
     _begin_translation_run(app)
     threading.Thread(
         target=run_translation,
         args=(app, presentes[0], idioma, False),
-        kwargs={"only_files": presentes},
+        kwargs={"only_files": presentes, "source_language": origem},
         daemon=True,
     ).start()
 
@@ -341,6 +355,27 @@ def restore_database(app):
 
 def apply_automatic_rules(app):
     apply_auto_rules_to_database(app, target_language=app.target_language.get())
+
+
+def reset_translations(app):
+    if app.is_processing:
+        messagebox.showinfo(
+            "Zerar Traduções",
+            "Há uma tradução em andamento. Aguarde ou cancele antes de zerar o banco.",
+        )
+        return
+    reset_translations_database(app)
+
+
+def reset_glossary(app):
+    if app.is_processing:
+        messagebox.showinfo(
+            "Zerar Glossário",
+            "Há uma tradução em andamento, e ela usa o glossário. Aguarde ou "
+            "cancele antes de zerá-lo.",
+        )
+        return
+    reset_glossary_file(app)
 
 
 def _finish_metadata_normalization(app, summary=None, error=None):

@@ -23,3 +23,6 @@ logs/
 # especificos da plataforma que rodou o build.
 build/
 dist/
+
+# Artefato da medicao de cobertura (coverage.py), gerado sob demanda.
+.coverage

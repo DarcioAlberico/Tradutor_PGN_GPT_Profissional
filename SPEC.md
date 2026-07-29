@@ -3,7 +3,7 @@
 Documento de referencia do comportamento do sistema. Descreve **o que** o programa
 faz e sob quais garantias, nao **como** cada funcao esta escrita.
 
-Versao do documento: 2026-07-27.
+Versao do documento: 2026-07-28.
 
 ---
 
@@ -13,7 +13,8 @@ Traduzir os comentarios (`{...}`) de arquivos PGN de xadrez, preservando
 integralmente lances, variantes e metadados, com:
 
 - cache persistente de traducoes (SQLite), para nunca pagar duas vezes pela
-  mesma frase;
+  mesma frase — indexado pelo **par de idiomas**, para que o mesmo texto vindo
+  de duas linguas nao seja tratado como uma traducao so;
 - um glossario de substituicoes controlado pelo usuario, para corrigir a
   terminologia enxadristica que o tradutor automatico erra;
 - uma etapa de revisao humana assistida.
@@ -128,7 +129,43 @@ Quando a execucao e interrompida assim, o PGN de saida do arquivo em andamento
 **nao** e gerado: ele sairia quase todo no idioma original e pareceria pronto. O
 que ja foi traduzido esta no banco, entao reexecutar paga so o que falta.
 
-### 3.3 Traducao e cache
+### 3.3 Idioma de origem
+
+O usuario declara em que idioma os PGN estao, entre os sete que o programa
+conhece, ou escolhe **"Detectar"** — que e o padrao e o comportamento que o
+programa sempre teve. A escolha tem tres efeitos:
+
+- a API recebe `sl=<idioma>` em vez de `sl=auto`, e deixa de adivinhar a partir
+  de um comentario que muitas vezes tem tres palavras;
+- a traducao e gravada dentro do **par** (origem, destino), que e o que permite
+  ao editor mostrar um par de cada vez;
+- "Reprocessar Falhas" reusa o par inteiro da execucao que falhou, e nao so o
+  destino.
+
+**Garantia P1 — o par de idiomas e a identidade da traducao.** A chave da tabela
+e `(comentario original, idioma de origem, idioma de destino)`. O mesmo texto
+vindo do espanhol e do italiano sao duas traducoes independentes, e nenhuma e
+oferecida no lugar da outra.
+
+"Detectar" nao e um idioma: as linhas que ele produz ficam com a origem **nao
+informada**, o mesmo estado das linhas gravadas antes de o programa perguntar. E
+uma string vazia, e nao `NULL`, porque num indice UNIQUE o SQLite considera todo
+`NULL` distinto de qualquer outro — com `NULL` ali, a chave deixaria de valer
+justamente para as linhas legadas e cada execucao as inseriria de novo.
+
+**Garantia P2 — declarar o idioma nao cobra o cache de novo.** As traducoes ja
+gravadas ficaram sem idioma de origem, e uma execucao que declara um idioma as
+**adota**: as linhas daqueles comentarios que ainda nao tem origem passam a ter a
+declarada. Sem isso, a primeira execucao a dizer "estes PGN estao em espanhol"
+nao acharia nenhuma das 201.607 linhas existentes e mandaria tudo de volta para
+a API.
+
+A adocao so alcanca quem **nao tinha idioma nenhum**: reetiquetar uma linha que
+ja diz de onde veio seria apagar uma declaracao do usuario com outra. E ela nunca
+derruba a execucao — se ja existir uma linha no par de destino, a linha sem
+rotulo permanece como esta.
+
+### 3.4 Traducao e cache
 
 Para cada comentario:
 
@@ -174,7 +211,7 @@ sao ignorados e informados.
 no idioma original no arquivo de saida. E um resultado aceitavel, desde que
 declarado (ver T2).
 
-### 3.4 Geracao do PGN traduzido
+### 3.5 Geracao do PGN traduzido
 
 O arquivo de origem e relido e cada comentario e substituido pela traducao, de
 tras para frente (para nao invalidar as posicoes). Chaves `{` e `}` dentro de
@@ -190,7 +227,7 @@ detectada na origem; se algum caractere nao couber nela, cai para UTF-8 e
 registra isso no log. Em nenhuma hipotese um caractere e substituido por
 `U+FFFD` no arquivo gerado.
 
-### 3.5 Controle de execucao
+### 3.6 Controle de execucao
 
 Roda em thread separada, com pausa e cancelamento cooperativos. Toda
 atualizacao de interface e agendada na thread principal do Tk.
@@ -250,6 +287,7 @@ restauracao do banco, e a importacao e a exportacao de CSV.
 | backup do banco | a copia parcial e apagada |
 | exportacao de CSV | o arquivo parcial e apagado |
 | restauracao do banco | **nao aceita cancelamento** |
+| zerar o banco de traducoes | **nao aceita cancelamento** |
 
 Um `.db` cortado no meio e um banco incompleto com cara de backup, e o proximo
 "Restaurar backup" o ofereceria na lista; um CSV cortado abre, tem cabecalho e
@@ -260,17 +298,51 @@ O backup criado **antes** de uma importacao de CSV permanece mesmo se ela for
 cancelada: e uma copia valida, e apaga-la seria destruir o unico registro de que
 a operacao chegou a comecar.
 
-A restauracao e a excecao porque o destino da copia e o **banco de trabalho**:
-interrompe-la o deixaria incompleto, e nao ha o recurso de apagar o que foi
-escrito. Oferecer um botao que nao pode ser honrado seria pior do que nao
-oferecer — o usuario clicaria achando que parou. A confirmacao avisa disso antes
-de comecar.
+A restauracao e o "zerar" sao as excecoes, e pelo mesmo motivo: as duas escrevem
+no **banco de trabalho** e nao tem o recurso de apagar o que foi escrito —
+interrompidas, deixam o banco incompleto. Oferecer um botao que nao pode ser
+honrado seria pior do que nao oferecer, porque o usuario clicaria achando que
+parou. A confirmacao avisa disso antes de comecar, e ela e a hora de desistir.
 
 ---
 
-## 4. Glossario
+## 4. Zerar o banco e zerar o glossario
 
-### 4.1 Formato
+Duas ferramentas que apagam o trabalho acumulado do usuario — as traducoes ou as
+regras — e sao as unicas do programa sem volta por dentro dele. O que existe e o
+backup.
+
+**Garantia Z1 — o backup vem antes da pergunta.** A copia e criada e o caminho
+dela aparece na propria confirmacao. Custa 0,4 s no banco real e e a unica forma
+de voltar atras; deixa-la para depois do "Apagar" significaria que uma falha
+entre a confirmacao e a copia apaga tudo sem rede. O pior caso desta ordem e uma
+copia a mais em `backups/` para quem desistiu, e a retencao (S8) cuida dela.
+
+**Garantia Z2 — a confirmacao e digitada, nao clicada.** O usuario escreve
+`delete`; ate entao o botao de apagar fica inerte **e parece inerte**. As demais
+confirmacoes do programa sao `Sim/Nao` e bastam para o que e reversivel; aqui um
+"Sim" fica a um pixel do "Nao", e o que se perde sao 201 mil traducoes ou 7 mil
+regras. Aceita-se qualquer caixa e espaco nas pontas: quem digitou `DELETE `
+decidiu tanto quanto quem digitou `delete`.
+
+Fechar a janela, apertar `Esc` ou clicar em "Cancelar" e **nao**. Nao ha caminho
+em que sumir com o dialogo signifique seguir adiante, e o proprio comando do
+botao reconfere a palavra em vez de confiar no estado dele.
+
+**Garantia Z3 — uma zera, a outra nao e afetada.** Zerar as traducoes nao toca
+no glossario e vice-versa. Zerar as traducoes leva junto o historico de edicoes
+(historico de traducoes que nao existem mais nao e historico de nada), esvazia o
+indice de busca, libera o espaco em disco (`VACUUM`) e limpa o cache em memoria —
+que tem precedencia sobre o banco e, deixado como estava, faria a proxima
+traducao reaproveitar exatamente o que acabou de ser apagado.
+
+Nenhuma das duas roda com uma traducao em andamento.
+
+---
+
+## 5. Glossario
+
+### 5.1 Formato
 
 `Substituicoes.txt` contem uma atribuicao Python com uma lista de tuplas, lida
 com `ast.literal_eval` (nunca `exec`). Cada regra tem de dois a quatro campos —
@@ -307,7 +379,7 @@ O CSV de importacao/exportacao tem as mesmas quatro colunas (`original`,
 `replacement`, `type`, `priority`), e a leitura aceita a ausencia das duas
 ultimas — um CSV de tres colunas, ou montado numa planilha, continua importavel.
 
-### 4.2 Semantica de casamento
+### 5.2 Semantica de casamento
 
 - O padrao da regra e sempre tratado como texto literal (escapado), nunca
   interpretado como expressao regular.
@@ -398,7 +470,7 @@ registra (`set_glossary_error_handler`), de modo que o modulo continua sem
 importar Tk. Como a carga tambem acontece na thread do worker, cabe ao handler
 levar o dialogo para a thread do Tk (garantia C1).
 
-### 4.3 Edicao
+### 5.3 Edicao
 
 - Toda gravacao e atomica (arquivo temporario + troca) e precedida de backup.
 - `glossario.db` e um indice derivado; pode ser reconstruido a partir do
@@ -439,6 +511,11 @@ piso de `BACKUP_KEEP_MINIMUM`. Tres limites do que a limpeza pode tocar:
 - A copia recem criada, e o backup que uma restauracao ainda vai ler, ficam
   fora do alcance da limpeza.
 
+A familia do banco tem ainda um teto de ESPACO, e nao so de contagem: cada
+copia e o banco inteiro, que cresce com o uso, entao um numero fixo de copias
+nao limita disco. Guarda-se o maior conjunto de copias recentes que cabe no
+teto, respeitando o mesmo piso minimo.
+
 A ordem "mais novo" vem do carimbo no **nome**, nao do `mtime`: a copia do
 glossario preserva o mtime da origem, entao todas teriam a mesma data.
 
@@ -453,11 +530,40 @@ underscore no carimbo, nao casam com o padrao e por isso nunca sao removidos.
 
 ---
 
-## 5. Editor de traducoes
+## 6. Editor de traducoes
 
-Lista paginada por idioma, com filtros (pendentes / verificadas / avisos de
-qualidade) e busca. Permite editar, marcar como verificada, navegar por avisos,
-consultar e restaurar historico, e aplicar sugestoes do glossario.
+Lista paginada por **par de idiomas**, com filtros (pendentes / verificadas /
+avisos de qualidade) e busca. Permite editar, marcar como verificada, navegar por
+avisos, consultar e restaurar historico, e aplicar sugestoes do glossario.
+
+**Garantia R9 — a lista mostra um par de idiomas de cada vez.** Dois seletores
+proprios, origem e destino, decidem o que e carregado; nada de outro par entra na
+lista, na contagem do rodape ou no relatorio de QA. Revisar uma traducao do
+espanhol achando que e do italiano nao produz erro nenhum — produz uma revisao
+errada, e e disso que o filtro protege.
+
+Os dois nao sao simetricos, e a diferenca tem razao:
+
+| seletor | opcoes | lembrado entre sessoes |
+|---|---|---|
+| **Origem** | Todos · Nao informado · os sete idiomas | Sim |
+| **Destino** | os sete idiomas | Nao: vem da janela principal |
+
+"Todos" so existe na origem porque a janela edita as traducoes de **um** idioma
+de destino — o rascunho, o titulo e a aplicacao das regras automaticas sao todos
+por destino. E "Nao informado" nao e sinonimo de "Todos": ele traz exatamente as
+linhas cuja origem ninguem declarou, que sao a maioria de um banco anterior a
+esta versao.
+
+O destino nao e lembrado de proposito: guarda-lo faria quem marcasse "Ingles" na
+janela principal abrir o editor em portugues, sem nada na tela explicando de onde
+aquilo veio.
+
+Trocar qualquer um dos dois grava a edicao aberta antes (a linha pertence ao par
+antigo e sai da lista na troca) e volta para a primeira pagina — a pagina 40 do
+par anterior nao quer dizer nada no novo. Com um filtro de origem ativo,
+"Aplicar automaticas" fica restrito a ele: reescrever tambem as linhas das outras
+linguas seria uma alteracao em massa que o usuario nao pediu nem consegue ver.
 
 **Garantia R1 — gravacao e sempre intencional.** Apenas uma acao deliberada do
 usuario altera o banco. Navegar pela lista nao reescreve traducoes.
@@ -466,6 +572,13 @@ usuario altera o banco. Navegar pela lista nao reescreve traducoes.
 pagina ou de filtro nunca le a tabela inteira. Os avisos de qualidade ficam
 materializados na coluna `quality_warning`, entao contar e paginar "com aviso" e
 uma consulta indexada.
+
+Isso vale **tambem com o filtro de origem ativo**, e nao de graca: o indice de
+cobertura do resumo de status precisou incluir a origem. Sem ele a agregada
+deixava de ser resolvida so no indice e voltava a tocar a tabela — medido no
+banco real, 34,9 ms sem filtro de origem contra 78,7 ms com ele. Seria uma
+regressao de R5 introduzida justamente pelo filtro que R9 veio dar. Com o indice
+sao 34,5 ms e 35,9 ms; um par sem nenhuma linha responde em 0,0 ms.
 
 **Garantia R8 — navegar custa O(pagina) tambem com busca ativa.** A busca do
 editor tem dois modos, e o usuario escolhe qual vale:
@@ -544,16 +657,23 @@ gravacao das configuracoes e atomica.
 
 ---
 
-## 6. Normalizacao de metadados PGN
+## 7. Normalizacao de metadados PGN
 
 Corrige **apenas** as tags `White`, `Black`, `Site`, `Event` e `Round`, usando
 `spelling_ssp/spelling.ssp`. Saida com sufixo `-NORM.pgn`.
 
-**Garantia N1 — comentarios, lances e variantes nao sao tocados.**
+**Garantia N1 — comentarios, lances e variantes nao sao tocados.** So as tags
+listadas acima mudam; todo o resto do arquivo sai identico, linha a linha.
+
+A lista de tags corrigidas tem uma fonte unica (`SUPPORTED_TAGS`), e o padrao
+que reconhece as linhas candidatas e derivado dela. Mantidas em dois lugares,
+as duas copias falhavam em silencio ao divergir: uma tag declarada e nao
+reconhecida simplesmente nao era corrigida, e uma tag reconhecida e nao
+declarada derrubava a normalizacao do arquivo inteiro.
 
 ---
 
-## 7. Rede
+## 8. Rede
 
 Usa o endpoint publico do Google Translate, sem autenticacao. Nao ha chave de
 API no projeto — nem deve haver.
@@ -581,7 +701,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 
 ---
 
-## 8. Invariantes que os testes devem proteger
+## 9. Invariantes que os testes devem proteger
 
 | # | Invariante | Origem |
 |---|---|---|
@@ -596,6 +716,8 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | T1 | Nao sobrescrever traducao existente | — |
 | T2 | Falhas contabilizadas e exibidas | Bug: sucesso reportado com PGN bilingue |
 | T4 | A lista de falhas sobrevive a execucao, e so ela e reprocessada | Custo: reexecutar tudo por causa de dois arquivos |
+| P1 | O par (original, origem, destino) e a identidade da traducao | Limite: o mesmo texto em duas linguas era uma linha so |
+| P2 | Declarar o idioma adota o cache existente em vez de paga-lo de novo | Risco: a mudanca de chave cobrar 201.607 traducoes ja feitas |
 | S1 | Matches disjuntos | Bug: `"de de de"` -> `"dede"` |
 | S2 | Indices do texto original | Bug: `İ` desloca offsets |
 | S3 | Regra especifica vence a generica | Bug: regra curta encobre a longa |
@@ -611,20 +733,27 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | R8 | Navegar custa O(pagina) tambem com busca ativa | Perf: `LIKE '%x%'` varre a tabela a cada interacao |
 | R6 | Cache de avisos nao diverge | Risco da coluna materializada |
 | R7 | A lista carrega o item clicado | Bug: clicar em B carregava C |
+| R9 | O editor mostra um par de idiomas de cada vez | Queixa de uso: revisar em espanhol achando que era italiano |
+| Z1 | O backup vem antes da pergunta, e o caminho dele aparece nela | Risco: a unica volta atras depender de o que vem depois do "Apagar" |
+| Z2 | Apagar exige a palavra digitada, e o botao parece inerte ate la | Risco: "Sim" a um pixel do "Nao" para 201 mil traducoes |
+| Z3 | Zerar um nao toca no outro, e leva junto historico, indice e cache | Risco: o cache em memoria reviver o que foi apagado |
+| N1 | So as cinco tags mudam; lances, variantes e comentarios saem identicos | Risco: a lista de tags vivia em dois lugares |
+| C1 | Trabalho pesado roda fora da thread do Tk, e a resposta volta nela | Bug: "Aplicar automaticas" segurava a janela por 38 s |
 | C3 | Nenhuma transacao de escrita atravessa uma chamada de rede, e um lock vira mensagem | Bug: worker travava o "Salvar" do editor por um lote inteiro |
 
 ---
 
-## 9. Limites conhecidos
+## 10. Limites conhecidos
 
 Cada item tem o numero do ROADMAP que o resolve. Estao aqui para que ninguem
 leia uma garantia acima como mais ampla do que ela e.
 
 **Concorrencia**
 
-- A restauracao do banco nao pode ser cancelada depois de comecar: interromper a
-  copia deixaria o banco de trabalho como um arquivo incompleto. O que da para
-  desistir e antes de comecar, na confirmacao. (ROADMAP 2.11)
+- A restauracao do banco e o "Zerar Traducoes" nao podem ser cancelados depois
+  de comecar: os dois escrevem no banco de trabalho e interrompe-los o deixaria
+  incompleto. O que da para desistir e antes de comecar, na confirmacao.
+  (ROADMAP 2.11, 9.1)
 - A barra de progresso pode demorar a sair do lugar em operacoes limitadas por
   CPU: a thread de trabalho segura o GIL entre dois relatos, e a atualizacao so
   chega quando a thread da interface e escalonada. A janela responde e o
@@ -634,16 +763,38 @@ leia uma garantia acima como mais ampla do que ela e.
 
 - O modo "Trecho" varre a tabela por definicao — e o preco de achar um pedaco
   literal, e a interface declara qual modo esta ativo.
+- A migracao para o schema 4 custa ~7 s uma vez, na primeira abertura apos a
+  atualizacao: a tabela de 201.607 linhas e reconstruida porque o SQLite nao
+  remove restricao de tabela, e so isso troca a UNIQUE antiga pela do par de
+  idiomas. Os ids sao preservados, entao o indice FTS5 continua valendo e nao
+  precisa ser refeito. (ROADMAP 9.2)
 
 **Rede**
 
 - Depende de um endpoint nao oficial, sujeito a bloqueio por volume.
 
+**Idioma de origem**
+
+- "Detectar" e as linhas gravadas antes desta versao compartilham o mesmo balde,
+  "nao informado". Sao coisas diferentes — uma e uma escolha, a outra e ausencia
+  de escolha — e o programa nao as distingue: guardar dois valores para "nao sei"
+  daria dois filtros que ninguem sabe escolher entre si. O que separa uma linha
+  do balde e declarar o idioma, e ai a adocao (P2) a leva para o par certo.
+- Uma execucao em "Detectar" nao reaproveita as traducoes de um par declarado, e
+  vice-versa: sao pares diferentes, e e o que P1 diz. O preco e traduzir de novo
+  um texto que existe no outro balde; o ganho e nunca entregar a traducao de uma
+  lingua para outra.
+- O idioma declarado nao e verificado contra o conteudo. Dizer "espanhol" para um
+  PGN italiano produz uma traducao ruim e uma linha rotulada errado, e o programa
+  nao tem como saber — declarar e uma afirmacao do usuario, nao uma deteccao.
+
 **Glossario e arquivos gerados**
 
 - O glossario e uma lista linear. A prioridade explicita (S10) resolve o caso de
   adiantar uma regra, mas so entre regras — nao ha grupos, escopos por idioma
-  nem condicoes: uma regra vale para todo texto do seu recorte.
+  nem condicoes: uma regra vale para todo texto do seu recorte. Em particular,
+  **o glossario nao e por par de idiomas**: as mesmas regras valem para as
+  traducoes de todas as linguas de origem.
 
 **Estrutura**
 
@@ -663,9 +814,9 @@ leia uma garantia acima como mais ampla do que ela e.
 
 ---
 
-## 10. Garantias planejadas
+## 11. Garantias planejadas
 
-Declaradas aqui para que a secao 8 continue sendo apenas o que os testes ja
+Declaradas aqui para que a secao 9 continue sendo apenas o que os testes ja
 protegem. Cada uma entra na tabela quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
