@@ -184,6 +184,11 @@ print(app.logs)                               # o log da execução
 print(dados)                                  # banco e arquivos, para inspecionar
 ```
 
+`run_worker(..., idioma_origem="en")` declara o idioma dos PGN, como o seletor da
+janela principal faria. É o que liga a gravação por par de idiomas e a correção
+das letras dos lances contra o comentário original; sem ele o worker roda em
+"detectar", que é o padrão e deixa as duas desligadas.
+
 `run_worker(..., traduzir=fn)` troca a camada de rede pela sua função — é assim
 que se exercita falha de API, resposta desalinhada, 429 e o disjuntor, sem tocar
 a rede:
@@ -213,7 +218,7 @@ bloqueia o terminal e não dá handle nenhum sobre o app.
 python -m unittest discover -s tests
 ```
 
-543 testes, ~100 s. Os de `test_editor_windows.py` e `test_main_window.py` abrem
+580 testes, ~105 s. Os de `test_editor_windows.py` e `test_main_window.py` abrem
 janelas de verdade — os editores e a janela principal — e são pulados onde não
 houver display. O harness comum deles (gate de display, silenciamento de
 diálogos, sandbox de caminhos) está em `tests/gui_harness.py`.

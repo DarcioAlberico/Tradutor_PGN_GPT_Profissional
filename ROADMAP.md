@@ -8,11 +8,18 @@ proprio item.
 **Nada pendente no momento.** As garantias que os testes protegem estao na
 [SPEC.md](SPEC.md), secao 9; ela e a lista que vale, e nao uma copia aqui.
 
-**Revisao de 2026-07-28 (secao 9).** Tres pedidos do usuario, e o que os une nao
-e o tema — e o fato de os tres serem **decisoes dele que o codigo nao tinha como
-tomar sozinho**. Qual e a lingua do PGN, qual par revisar agora, e quando o
+**Revisao de 2026-07-28 (secoes 9 e 10).** Quatro pedidos do usuario, e o que os
+une nao e o tema — e o fato de todos serem **decisoes dele que o codigo nao tinha
+como tomar sozinho**. Qual e a lingua do PGN, qual par revisar agora, e quando o
 trabalho acumulado deixou de servir. Ate aqui o programa adivinhava a primeira
 (`sl=auto`), ignorava a segunda e nao oferecia a terceira.
+
+O quarto (secao 10) e o unico que nao foi pedido como funcionalidade: veio como
+diagnostico, e um diagnostico quase certo. A queixa era que converter `K` e `R`
+em portugues depende da ordem; medindo, o problema nao e a ordem — e a
+**sequencia**, e inverte-la so troca qual peca e destruida. A secao 10 depende da
+9: so da para ler os lances do comentario original porque o idioma de origem
+passou a ser declarado.
 
 **Revisao de 2026-07-27.** Os itens 1.4, 1.5, 2.7 a 2.10 e as secoes 6, 7 e 8
 sao novos. Sairam de uma analise do codigo inteiro com o banco real (195.607
@@ -2543,3 +2550,138 @@ Origem=Nao informado                       : 1 linha
 Origem=Espanhol                            : 1 linha
 Destino=Frances, Origem=Todos              : 1 linha   · titulo "Editar traducoes (fr)"
 ```
+
+---
+
+## 10. As letras das pecas trocavam de peca na traducao — CONCLUIDO (2026-07-28)
+
+Pedido do usuario, e ele veio com o diagnostico junto: em portugues e espanhol
+converter `K` e `R` **em sequencia** nao funciona. Vale escrever o mecanismo,
+porque a formulacao exata muda a solucao.
+
+| peca | en | pt | es | fr | it | de | ru |
+|---|---|---|---|---|---|---|---|
+| Rei | K | R | R | R | R | K | Кр |
+| Dama | Q | D | D | D | D | D | Ф |
+| Torre | R | T | T | T | T | T | Л |
+| Bispo | B | B | A | F | A | L | С |
+| Cavalo | N | C | C | C | C | S | К |
+
+O `R` do ingles e Torre e o `R` do portugues e Rei. Aplicando `K -> R` e depois
+`R -> T`, a primeira regra produz `R` a partir de `K`, e a segunda **nao tem como
+distinguir** esses `R` dos que ja eram `R`: transforma os dois em `T`. O usuario
+descreveu isso como um problema de ordem; nao e — inverter a ordem so troca qual
+peca e destruida. **O problema e a sequencia.** Numa passagem so, `Kf1` vira
+`Rf1` e `Rf1` vira `Tf1`, e nao ha ambiguidade nenhuma.
+
+E o mesmo mecanismo da garantia S4 do glossario ("texto substituido e final"), o
+que explica por que isto nao podia ser resolvido com regras: S4 congela o trecho
+ja substituido dentro de UMA aplicacao, mas um glossario nao sabe que `Kf1` e
+`Rf1` sao a mesma decisao tomada duas vezes.
+
+### 10.1 A metade que o mapeamento nao resolve
+
+Feito o mapeamento numa passagem, sobra o que o usuario tambem anotou: **o
+tradutor e inconstante**. As vezes traduz o lance, as vezes deixa, as vezes erra.
+Medido no endpoint real, ingles para portugues, com o idioma de origem declarado:
+
+```
+EN      White must play Kf1 here. After Rxe4+ Nf3 the rook is lost, and e8=Q wins.
+Google  As brancas devem jogar Rf1 aqui. Depois de Txe4+ Cf3 a torre e perdida e e8=Q vence.
+
+EN      The move Rd1 doubles the rooks; Kg2 is slow.
+Google  O movimento Rd1 dobra as torres; Kg2 e lento.
+```
+
+A primeira amostra sai quase certa e erra so a promocao. A segunda erra as duas,
+e a primeira delas do pior jeito possivel: `Rd1` **parece** notacao portuguesa
+valida e nomeia a peca errada — uma Torre lida como Rei. Nada na traducao
+denuncia, e o proximo leitor e um enxadrista confiando no texto.
+
+Olhando so a traducao, `Rd1` (Torre que ficou para tras) e `Rf1` (Rei ja
+traduzido) tem exatamente a mesma cara. **Quem distingue e o comentario
+original**, e ele so e legivel porque o idioma de origem passou a ser declarado
+(secao 9.2). Os dois itens sao do mesmo dia por acaso; que o segundo dependa do
+primeiro, nao.
+
+### 10.2 A ancora, que e o que torna isto possivel
+
+Um lance tem uma parte que **nao muda de idioma**: casa, captura, desempate,
+xeque, o `=` da promocao. `Kf1` e `Rf1` diferem so na letra; `f1` e `f1` em toda
+lingua. Entao um lance do original e um lance da traducao com a mesma ancora sao
+o mesmo lance, e a letra e exatamente o que se corrige.
+
+Isso mantem o escopo minusculo, e o escopo e a seguranca do item: **a funcao so
+reescreve a letra da peca de um lance que ja estava la**. Nunca insere um lance,
+nunca apaga um, nunca mexe em lance de peao (`e4`, `exd5`) nem em roque
+(`O-O`) — que nao tem letra para trocar. O pior resultado possivel dela e deixar
+um lance como o tradutor escreveu.
+
+**Quando a ancora empata**, o desempate e a ordem: `"Rf1 ou Kf1"` da dois lances
+para a casa `f1`, e o tradutor preserva a ordem porque traduz o texto sem
+reordena-lo. Se nem a ordem resolver — contagens diferentes dos dois lados —,
+**nada e tocado**. Corrigir para o lance errado e pior do que nao corrigir.
+
+**A leitura dos dois lados e assimetrica, de proposito.** O original e lido so no
+alfabeto declarado: ali a letra e a informacao, e aceitar mais alfabetos
+devolveria a ambiguidade que declarar o idioma veio resolver. A traducao e
+varrida com **todas** as letras conhecidas: ali a letra e ruido, e o tradutor
+chega a devolver notacao inglesa num par que nao passa pelo ingles — um `Kf1`
+numa traducao es -> pt nem seria reconhecido como lance por um alfabeto restrito
+aos dois idiomas.
+
+Sem idioma de origem declarado a correcao nao roda, e o log diz isso. Corrigir a
+partir de um palpite seria trocar um erro do tradutor por um erro do programa.
+
+### 10.3 A tabela do usuario tinha um erro, e ele era fatal para o russo
+
+A tabela que veio com o pedido dava `К` para o Rei e `К` para o Cavalo — a mesma
+letra. A notacao russa usa **`Кр`** no rei (Король) justamente porque Rei e
+Cavalo (Конь) comecam igual. Com a tabela como veio, a inversao `letra -> peca`
+deixaria de ser uma bijecao e **todo lance de rei seria lido como lance de
+cavalo**. Ha teste que exige que nenhum idioma repita uma letra, entao um erro
+desses numa lingua futura quebra a suite em vez de aparecer numa traducao.
+
+O `Кр` e a unica letra de duas posicoes da tabela, e ele obrigou a alternancia do
+regex a ir da mais longa para a mais curta.
+
+### 10.4 O que a verificacao por mutacao mostrou
+
+Treze mutacoes, e **quatro sobreviveram na primeira rodada**. Nenhuma das quatro
+era "esqueci de testar": as quatro diziam alguma coisa sobre o codigo.
+
+**Duas eram testes meus que nao testavam nada**, e as duas pelo mesmo motivo — o
+cenario nao continha o caso que a guarda protege:
+
+- *Lances de peao entrando como candidatos.* Todos os meus cenarios tinham uma
+  ancora por lance, entao "corrigir" um peao o substituia por ele mesmo. O caso
+  que expoe a guarda e outro: o original tem so `Kf1`, a traducao tem `Kf1` **e**
+  um `f1` solto — com peoes como candidatos, os dois casam a ancora `f1`, o `f1`
+  solto recebe `Rf1` e **o texto ganha uma peca que nao estava la**.
+- *A fronteira de palavra da esquerda.* A palavra que eu tinha escolhido
+  (`Rebe5x`) ja era rejeitada pelo resto do padrao, entao a fronteira nunca era
+  exercitada. Refeito com um lance colado no fim de uma palavra, que e
+  sintetico e esta dito no teste: o texto real que dispara isso — um erro de
+  digitacao, uma colagem na importacao — e justamente o que nao da para
+  enumerar.
+
+**Uma era redundancia no codigo, e nao no teste.** "O original passa a ser lido
+com todos os alfabetos" nao quebrava nada porque havia **duas** guardas para a
+mesma decisao: um regex restrito ao alfabeto de origem e uma checagem na
+conversao. As duas eram equivalentes, ou seja, uma delas nao estava protegida por
+nada — a situacao que o item 3.6 corrigiu no glossario. Agora a decisao mora em
+`_explained_by`, num lugar so, e mexer nela quebra.
+
+**Uma era um comentario meu que estava errado.** Eu tinha escrito que a
+alternancia do regex ir da letra mais longa para a mais curta e o que faz o `Кр`
+funcionar. Nao e: com a ordem ingenua o regex casa `К`, tenta seguir com `рf1` no
+lugar da casa, falha e **retrocede** para `Кр`. A ordem so passaria a decidir se a
+tabela ganhasse duas letras em que a mais curta tambem levasse a um lance valido.
+A ordenacao ficou — e barata e protege esse futuro —, mas o comentario passou a
+dizer o que ela e: precaucao, e nao o mecanismo.
+
+Corrigidos os quatro, as treze mutacoes sao pegas, incluindo as duas do worker
+que importam mais: gravar o texto de antes da correcao, e corrigir so no caminho
+do lote e nao no fallback individual — essa ultima daria uma execucao cujo
+resultado depende de a rede ter respondido alinhada, que e o pior tipo de
+inconsistencia porque aparece so as vezes.

@@ -128,7 +128,14 @@ from tradutor_pgn.review_quality import (
     row_has_quality_warning,
     summarize_quality_warnings,
 )
+from tradutor_pgn import app_config
 from tradutor_pgn.background_task import BackgroundTask, TaskCanceled
+from tradutor_pgn.chess_notation import (
+    PIECE_LETTERS,
+    extract_moves,
+    fix_move_notation,
+    supports_notation,
+)
 from tradutor_pgn.confirm_dialog import CONFIRMATION_WORD, confirmation_accepted
 from tradutor_pgn.db_tools import (
     analyze_database_automatic_rules,
@@ -9071,6 +9078,470 @@ class ResetGlossaryTests(ResetToolsTestCase):
         db_tools.reset_glossary(app)
 
         self.assertEqual(avisos, [[]])
+
+# ===========================================================================
+# Letras das pecas: correcao ancorada no comentario original
+# ===========================================================================
+
+
+class ChessNotationTableTests(unittest.TestCase):
+    """A tabela de letras, antes de qualquer correcao depender dela."""
+
+    def test_every_language_the_program_offers_has_letters(self):
+        """Um idioma no seletor e fora da tabela e uma correcao que nao roda."""
+        for _nome, codigo in app_config.LANGUAGES:
+            with self.subTest(idioma=codigo):
+                self.assertTrue(supports_notation(codigo))
+
+    def test_no_language_uses_the_same_letter_for_two_pieces(self):
+        """A inversao `letra -> peca` precisa ser uma bijecao.
+
+        Com duas pecas na mesma letra, ler o original vira adivinhacao — e o
+        russo e exatamente o caso que quase estraga isto: Rei (Король) e Cavalo
+        (Конь) comecam com a mesma letra, e a notacao usa `Кр` no rei para
+        desempatar. Uma tabela com `К` nos dois tornaria todo lance de rei um
+        lance de cavalo.
+        """
+        for idioma, letras in PIECE_LETTERS.items():
+            with self.subTest(idioma=idioma):
+                self.assertEqual(
+                    len(set(letras.values())),
+                    len(letras),
+                    f"{idioma} repete uma letra: {letras}",
+                )
+
+    def test_every_language_names_the_same_five_pieces(self):
+        esperado = {"K", "Q", "R", "B", "N"}
+        for idioma, letras in PIECE_LETTERS.items():
+            with self.subTest(idioma=idioma):
+                self.assertEqual(set(letras), esperado)
+
+    def test_the_russian_king_takes_two_letters(self):
+        """Fixado porque e o unico caso multi-letra, e o que exige a alternancia
+        do regex ir da letra mais longa para a mais curta."""
+        self.assertEqual(PIECE_LETTERS["ru"]["K"], "Кр")
+        self.assertEqual(PIECE_LETTERS["ru"]["N"], "К")
+
+
+class FixMoveNotationTests(unittest.TestCase):
+    """A correcao das letras dos lances (ROADMAP 10)."""
+
+    def corrige(self, original, traduzido, origem="en", destino="pt"):
+        return fix_move_notation(original, traduzido, origem, destino)
+
+    def test_the_aliasing_that_no_sequence_of_rules_can_solve(self):
+        """O caso que originou o item, e a razao de ele nao ser glossario.
+
+        `K -> R` e `R -> T` aplicados em sequencia destroem a informacao: depois
+        da primeira regra, os `R` que vieram de `K` sao indistinguiveis dos que
+        ja eram `R`, e a segunda transforma os dois em `T`. Numa passagem so,
+        ancorado no original, os dois chegam certos.
+        """
+        texto, quantos = self.corrige(
+            "The king plays Kf1 and the rook Rf8 holds.",
+            "O rei joga Kf1 e a torre Rf8 segura.",
+        )
+
+        self.assertEqual(texto, "O rei joga Rf1 e a torre Tf8 segura.")
+        self.assertEqual(quantos, 2)
+
+    def test_the_sequential_mutation_would_turn_both_into_the_same_piece(self):
+        """A contraprova, escrita como o defeito se manifestaria.
+
+        Sem ela, o teste acima passaria igualmente com uma implementacao que so
+        acertasse por acaso — e "as duas letras ficam diferentes" e uma
+        exigencia mais forte do que "o texto bate".
+        """
+        texto, _ = self.corrige(
+            "Kf1 and Rf8.", "Kf1 e Rf8."
+        )
+
+        rei, torre = texto.split(" e ")
+        self.assertNotEqual(rei[0], torre[0], f"as duas pecas viraram a mesma: {texto}")
+
+    def test_a_move_the_translator_already_translated_is_left_correct(self):
+        """O tradutor e inconstante: as vezes traduz o lance, as vezes nao.
+
+        Os dois casos aparecem no MESMO comentario aqui, que e como a queixa
+        chegou. Olhando so a traducao, o `Rf1` traduzido e o `Rxe4+` nao
+        traduzido tem a mesma cara e significados diferentes.
+        """
+        texto, quantos = self.corrige(
+            "The king goes Kf1 and the rook Rxe4+ wins.",
+            "O rei vai Rf1 e a torre Rxe4+ ganha.",
+        )
+
+        self.assertEqual(texto, "O rei vai Rf1 e a torre Txe4+ ganha.")
+        self.assertEqual(quantos, 1, "so o lance que estava errado conta")
+
+    def test_applying_it_twice_changes_nothing_the_second_time(self):
+        """Idempotente: o texto ja corrigido e o texto certo."""
+        uma, _ = self.corrige(
+            "Kf1 and Rxe4+ and Nf3.", "Kf1 e Rxe4+ e Nf3."
+        )
+        duas, quantos = self.corrige("Kf1 and Rxe4+ and Nf3.", uma)
+
+        self.assertEqual(duas, uma)
+        self.assertEqual(quantos, 0)
+
+    def test_the_promotion_letter_is_translated_too(self):
+        texto, quantos = self.corrige(
+            "Promotion e8=Q is decisive.", "A promocao e8=Q e decisiva."
+        )
+
+        self.assertEqual(texto, "A promocao e8=D e decisiva.")
+        self.assertEqual(quantos, 1)
+
+    def test_captures_disambiguators_and_check_survive_untouched(self):
+        """So a letra da peca muda; o resto do lance sai do proprio texto."""
+        texto, _ = self.corrige(
+            "After Nbd7, Qxh5+ and Rae1#, white wins.",
+            "Depois de Nbd7, Qxh5+ e Rae1#, as brancas ganham.",
+        )
+
+        self.assertEqual(texto, "Depois de Cbd7, Dxh5+ e Tae1#, as brancas ganham.")
+
+    def test_pawn_moves_and_castling_are_never_touched(self):
+        """Nao tem letra de peca, entao sao iguais em todas as linguas.
+
+        Mexer neles seria mexer em texto que nao tem o que corrigir — e `e4` e
+        `O-O` aparecem com muito mais frequencia que qualquer lance de peca.
+        """
+        original = "After e4 exd5 and O-O, the position is equal."
+        traduzido = "Depois de e4 exd5 e O-O, a posicao esta igual."
+
+        texto, quantos = self.corrige(original, traduzido)
+
+        self.assertEqual(texto, traduzido)
+        self.assertEqual(quantos, 0)
+
+    def test_annotation_marks_stay_glued_to_the_move(self):
+        texto, _ = self.corrige("Kf1!? and Rf1?! are ideas.", "Kf1!? e Rf1?! sao ideias.")
+
+        self.assertEqual(texto, "Rf1!? e Tf1?! sao ideias.")
+
+    def test_the_same_square_with_two_pieces_is_resolved_by_order(self):
+        """A ancora empata quando duas pecas vao para a mesma casa.
+
+        `Rf1` (Torre) e `Kf1` (Rei) tem a mesma ancora `f1`, entao ela sozinha
+        nao decide. O desempate e a ORDEM, que o tradutor preserva: ele traduz o
+        texto, nao o reordena.
+        """
+        texto, _ = self.corrige(
+            "Both Rf1 and Kf1 are playable.", "Tanto Rf1 quanto Kf1 sao jogaveis."
+        )
+
+        self.assertEqual(texto, "Tanto Tf1 quanto Rf1 sao jogaveis.")
+
+    def test_an_ambiguous_anchor_with_a_different_count_is_left_alone(self):
+        """Sem pareamento seguro, nao se inventa um.
+
+        O original tem dois lances para `f1` e a traducao so um: nao ha como
+        saber qual deles sobreviveu. Deixar como esta e o pior resultado
+        possivel desta funcao, e e de proposito — corrigir para o lance errado
+        seria pior do que nao corrigir.
+        """
+        texto, quantos = self.corrige(
+            "Both Rf1 and Kf1 are playable.", "Tanto Rf1 quanto ... sao jogaveis."
+        )
+
+        self.assertEqual(texto, "Tanto Rf1 quanto ... sao jogaveis.")
+        self.assertEqual(quantos, 0)
+
+    def test_a_move_that_is_not_in_the_original_is_left_alone(self):
+        """Nao ha contra o que conferi-lo, e conferir e a unica coisa que a
+        funcao sabe fazer."""
+        texto, quantos = self.corrige("Only Kf1.", "Apenas Kf1, e talvez Rb7.")
+
+        self.assertEqual(texto, "Apenas Rf1, e talvez Rb7.")
+        self.assertEqual(quantos, 1)
+
+    def test_a_repeated_move_is_fixed_everywhere_it_appears(self):
+        texto, _ = self.corrige("Nf3 again: Nf3.", "Cf3 de novo: Nf3.")
+
+        self.assertEqual(texto, "Cf3 de novo: Cf3.")
+
+    def test_the_two_letter_russian_king_is_read_before_the_knight(self):
+        """`К` (Cavalo) e prefixo de `Кр` (Rei).
+
+        Na alternancia ingenua o cavalo casaria primeiro e todo lance de rei
+        sairia como lance de cavalo com um `р` sobrando. E o mesmo cuidado que a
+        BOM de UTF-32 exige (garantia E4), pelo mesmo motivo.
+        """
+        texto, _ = fix_move_notation("Kf1 then Nf3.", "Kf1 depois Nf3.", "en", "ru")
+
+        self.assertEqual(texto, "Крf1 depois Кf3.")
+
+    def test_it_reads_a_russian_original_back(self):
+        texto, _ = fix_move_notation("Крf1 и Кf3.", "Kf1 e Nf3.", "ru", "pt")
+
+        self.assertEqual(texto, "Rf1 e Cf3.")
+
+    def test_it_works_between_two_non_english_languages(self):
+        """O ingles nao e especial: o problema e de qualquer par cujas letras
+        divirjam. Do espanhol para o alemao, as cinco mudam."""
+        texto, _ = fix_move_notation(
+            "El rey Rf1, la torre Txe4, el alfil Ag5.",
+            "Der Konig Rf1, der Turm Txe4, der Laufer Ag5.",
+            "es",
+            "de",
+        )
+
+        self.assertEqual(texto, "Der Konig Kf1, der Turm Txe4, der Laufer Lg5.")
+
+    def test_english_notation_is_recognised_even_in_a_pair_without_english(self):
+        """O tradutor as vezes devolve a notacao inglesa de qualquer jeito.
+
+        Num par espanhol -> portugues, `K` e `N` nao pertencem a nenhum dos dois
+        alfabetos. Varrendo a traducao so com as letras dos dois idiomas em jogo,
+        esse `Kf1` nem seria reconhecido como lance — e ficaria como esta, que e
+        exatamente o defeito que a correcao veio consertar.
+        """
+        texto, quantos = fix_move_notation(
+            "El rey Rf1 y el caballo Cf3.", "O rei Kf1 e o cavalo Nf3.", "es", "pt"
+        )
+
+        self.assertEqual(texto, "O rei Rf1 e o cavalo Cf3.")
+        self.assertEqual(quantos, 2)
+
+    def test_the_original_is_read_only_in_the_declared_alphabet(self):
+        """A outra metade da assimetria, e a que nao pode ceder.
+
+        Na traducao a letra e ruido; no original ela e a informacao. Aqui o
+        original esta em ingles e diz `Rf8` — Torre. Lido com um alfabeto
+        generoso, `R` tambem seria Rei (pt/es/fr/it) e a correcao teria de
+        escolher; lido no alfabeto declarado, nao ha o que escolher.
+        """
+        texto, _ = self.corrige("The rook Rf8 holds.", "A torre Rf8 segura.")
+
+        self.assertEqual(texto, "A torre Tf8 segura.")
+
+    def test_a_move_the_declared_alphabet_cannot_explain_is_not_an_anchor(self):
+        """O `A` do alfil nao existe em ingles.
+
+        Num original declarado como ingles, `Ag5` nao e um lance que o idioma
+        explique — pode ser qualquer coisa. Aceita-lo como ancora faria a
+        correcao afirmar uma peca que ela nao tem como saber, e e por isso que
+        `extract_moves` filtra pelo alfabeto declarado.
+        """
+        self.assertEqual(
+            [m.group(0) for m in extract_moves("Kf1 and Ag5.", "en")], ["Kf1"]
+        )
+
+        texto, quantos = self.corrige("Kf1 and Ag5.", "Rf1 e Ag5.")
+
+        self.assertEqual(texto, "Rf1 e Ag5.", "o lance inexplicavel foi mexido")
+        self.assertEqual(quantos, 0)
+
+    def test_a_bare_pawn_move_in_the_translation_is_never_rewritten(self):
+        """A guarda que impede a correcao de inventar uma peca.
+
+        O original tem um so lance para a casa `f1`, o rei. Se lances de peao
+        entrassem como candidatos, o `f1` solto da traducao teria a mesma ancora
+        e receberia o `Rf1` do rei — um lance de peao viraria lance de rei, e o
+        texto ganharia uma peca que nao estava la.
+        """
+        texto, quantos = self.corrige(
+            "The king plays Kf1.", "O rei joga Kf1, e o peao vai a f1."
+        )
+
+        self.assertEqual(texto, "O rei joga Rf1, e o peao vai a f1.")
+        self.assertEqual(quantos, 1)
+
+    def test_a_move_glued_to_the_end_of_a_word_is_not_a_move(self):
+        """A fronteira da esquerda, fixada com um caso sintetico de proposito.
+
+        Texto real que dispare isto e justamente o que nao da para enumerar — um
+        erro de digitacao, uma colagem na importacao, um PGN mal formado. O que
+        se protege e a fronteira: sem ela, qualquer sequencia terminada em letra
+        de peca mais casa vira alvo de reescrita no meio de uma palavra.
+        """
+        texto, quantos = self.corrige("The rook Rf8 holds.", "A torreRf8 segura.")
+
+        self.assertEqual(texto, "A torreRf8 segura.")
+        self.assertEqual(quantos, 0)
+
+    def test_languages_that_share_the_letters_change_nothing(self):
+        """Espanhol e portugues so divergem no bispo; o resto ja esta certo."""
+        texto, quantos = fix_move_notation(
+            "El rey Rf1 y la torre Txe4.", "O rei Rf1 e a torre Txe4.", "es", "pt"
+        )
+
+        self.assertEqual(texto, "O rei Rf1 e a torre Txe4.")
+        self.assertEqual(quantos, 0)
+
+    def test_without_a_declared_source_language_nothing_is_corrected(self):
+        """E a ligacao com o seletor de origem, e ela e deliberada.
+
+        Sem saber em que alfabeto o original esta, `R` pode ser Rei ou Torre — e
+        corrigir a partir de um palpite seria trocar um erro do tradutor por um
+        erro do programa. Declarar o idioma e o que liga a correcao.
+        """
+        texto, quantos = self.corrige("Kf1 and Rf8.", "Kf1 e Rf8.", origem="")
+
+        self.assertEqual(texto, "Kf1 e Rf8.")
+        self.assertEqual(quantos, 0)
+
+    def test_the_same_language_on_both_sides_is_a_no_op(self):
+        texto, quantos = self.corrige("Kf1.", "Kf1.", origem="en", destino="en")
+
+        self.assertEqual(texto, "Kf1.")
+        self.assertEqual(quantos, 0)
+
+    def test_an_unknown_language_is_a_no_op(self):
+        texto, quantos = self.corrige("Kf1.", "Kf1.", origem="en", destino="ja")
+
+        self.assertEqual(texto, "Kf1.")
+        self.assertEqual(quantos, 0)
+
+    def test_text_without_moves_comes_back_identical(self):
+        texto, quantos = self.corrige(
+            "A quiet positional comment.", "Um comentario posicional tranquilo."
+        )
+
+        self.assertEqual(texto, "Um comentario posicional tranquilo.")
+        self.assertEqual(quantos, 0)
+
+    def test_letters_inside_words_are_not_moves(self):
+        """`Ke5` dentro de uma palavra nao e lance, e a fronteira e o que separa.
+
+        Sem ela, qualquer palavra que por acaso tenha uma letra de peca seguida
+        de casa viraria alvo de correcao — no meio de um comentario em prosa.
+        """
+        original = "The plan Kf1 works. Rebe5x is not a move."
+        traduzido = "O plano Kf1 funciona. Rebe5x nao e um lance."
+
+        texto, quantos = self.corrige(original, traduzido)
+
+        self.assertEqual(texto, "O plano Rf1 funciona. Rebe5x nao e um lance.")
+        self.assertEqual(quantos, 1)
+
+    def test_an_empty_side_is_a_no_op(self):
+        self.assertEqual(self.corrige("", "Kf1."), ("Kf1.", 0))
+        self.assertEqual(self.corrige("Kf1.", ""), ("", 0))
+
+
+class WorkerMoveNotationTests(unittest.TestCase):
+    """A correcao no caminho de verdade: antes de gravar no banco."""
+
+    def setUp(self):
+        original = translation_worker.messagebox
+
+        class SemDialogos:
+            showinfo = staticmethod(lambda *_a, **_k: None)
+            showwarning = staticmethod(lambda *_a, **_k: None)
+            showerror = staticmethod(lambda *_a, **_k: None)
+            askyesno = staticmethod(lambda *_a, **_k: True)
+
+        translation_worker.messagebox = SemDialogos
+        self.addCleanup(setattr, translation_worker, "messagebox", original)
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.db_path = self.base / "cache.db"
+
+    COMENTARIO = "The king goes Kf1 and the rook Rxe4+ wins."
+
+    def traduz_com(self, resposta):
+        original = translation_worker.translate_text
+        translation_worker.translate_text = lambda *_a, **_k: resposta
+        self.addCleanup(setattr, translation_worker, "translate_text", original)
+
+    def roda(self, resposta, source_language="en"):
+        pgn = self.base / "game.pgn"
+        pgn.write_text(
+            f'[Event "T"]\n\n1. e4 {{{self.COMENTARIO}}}\n', encoding="utf-8"
+        )
+        self.traduz_com(resposta)
+        app = FakeApp(self.db_path)
+        translation_worker.run_translation(
+            app, str(pgn), "pt", False, source_language=source_language
+        )
+        return app, pgn
+
+    def gravado(self):
+        conn = initialize_database(str(self.db_path))
+        try:
+            return conn.execute(
+                "SELECT translated_comment FROM comments"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_the_corrected_text_is_what_reaches_the_database(self):
+        """"Antes de gravar" e o pedido, e o banco e onde ele se verifica."""
+        self.roda("O rei vai Kf1 e a torre Rxe4+ ganha.")
+
+        self.assertEqual(self.gravado(), "O rei vai Rf1 e a torre Txe4+ ganha.")
+
+    def test_the_generated_pgn_carries_the_same_text(self):
+        """O PGN e o banco saem da mesma variavel; se divergissem, o arquivo
+        entregue ao usuario teria os lances errados e o banco os certos."""
+        _app, pgn = self.roda("O rei vai Kf1 e a torre Rxe4+ ganha.")
+
+        saida = pgn.with_name("game-BR.pgn").read_text(encoding="utf-8")
+        self.assertIn("{O rei vai Rf1 e a torre Txe4+ ganha.}", saida)
+
+    def test_without_a_declared_source_the_worker_stores_what_came_back(self):
+        """Contraprova do teste acima: e o idioma declarado que liga a correcao."""
+        self.roda("O rei vai Kf1 e a torre Rxe4+ ganha.", source_language="")
+
+        self.assertEqual(self.gravado(), "O rei vai Kf1 e a torre Rxe4+ ganha.")
+
+    def test_the_run_reports_how_many_moves_it_fixed(self):
+        app, _pgn = self.roda("O rei vai Kf1 e a torre Rxe4+ ganha.")
+
+        self.assertIn("Lances com a letra da peca corrigida: 2", "\n".join(app.logs))
+
+    def test_it_says_when_it_is_off_and_why(self):
+        app, _pgn = self.roda("O rei vai Kf1.", source_language="")
+
+        self.assertIn("Correcao de lances desligada", "\n".join(app.logs))
+
+    def test_the_individual_fallback_corrects_too(self):
+        """O caminho do fallback (garantia B2) grava pelo seu proprio ponto.
+
+        Sao dois `save_translation` no worker, e corrigir so num deles daria uma
+        execucao em que o resultado depende de a rede ter respondido alinhado —
+        o pior tipo de inconsistencia, porque aparece so as vezes.
+        """
+        pgn = self.base / "dois.pgn"
+        pgn.write_text(
+            '[Event "T"]\n\n1. e4 {The king goes Kf1.} e5 {The rook Rxe4+ wins.}\n',
+            encoding="utf-8",
+        )
+
+        def desalinhado(texto, *_a, **_k):
+            # Uma resposta que NAO devolve o separador force o caminho individual.
+            if " ||| " in texto:
+                return "resposta sem separador nenhum"
+            return texto.replace("The king goes", "O rei vai").replace(
+                "The rook", "A torre"
+            ).replace("wins", "ganha")
+
+        original = translation_worker.translate_text
+        translation_worker.translate_text = desalinhado
+        self.addCleanup(setattr, translation_worker, "translate_text", original)
+
+        app = FakeApp(self.db_path)
+        translation_worker.run_translation(
+            app, str(pgn), "pt", False, source_language="en"
+        )
+
+        conn = initialize_database(str(self.db_path))
+        try:
+            gravados = [
+                linha[0]
+                for linha in conn.execute(
+                    "SELECT translated_comment FROM comments ORDER BY id"
+                )
+            ]
+        finally:
+            conn.close()
+
+        self.assertIn("O rei vai Rf1.", gravados)
+        self.assertIn("A torre Txe4+ ganha.", gravados)
 
 if __name__ == "__main__":
     unittest.main()

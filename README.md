@@ -163,6 +163,7 @@ nada, e **Manter esta**, que remove as concorrentes do arquivo.
 - `tradutor_pgn/app_config.py`: constantes compartilhadas do projeto.
 - `tradutor_pgn/background_task.py`: executa operacoes longas fora da thread da interface, com progresso e cancelamento.
 - `tradutor_pgn/backup_retention.py`: politica de retencao de `backups/` e `logs/`, com a decisao separada da remocao.
+- `tradutor_pgn/chess_notation.py`: letras das pecas por idioma e correcao dos lances da traducao contra o comentario original.
 - `tradutor_pgn/confirm_dialog.py`: confirmacao que exige digitar `delete`, usada pelas duas ferramentas que apagam trabalho do usuario.
 - `tradutor_pgn/database.py`: inicializacao, conexao e cache do SQLite, indexado pelo par de idiomas (origem, destino).
 - `tradutor_pgn/db_tools.py`: estatisticas, backup/restauracao, importacao/exportacao CSV, aplicacao das regras automaticas e as duas ferramentas de zerar — todas em segundo plano.

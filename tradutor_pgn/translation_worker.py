@@ -5,6 +5,7 @@ from tkinter import messagebox
 
 import requests
 
+from .chess_notation import fix_move_notation, supports_notation
 from .database import (
     SOURCE_LANGUAGE_UNKNOWN,
     adopt_unknown_source_language,
@@ -161,8 +162,29 @@ def run_translation(
             f"traduzidos"
         )
 
+        # A correcao de lances precisa do idioma de origem declarado: ela le os
+        # lances do comentario ORIGINAL para saber o que cada letra significa, e
+        # sem saber em que alfabeto ele esta nao ha o que ler. Dito uma vez, no
+        # comeco, para o usuario saber o que ganhou (ou o que esta deixando de
+        # ganhar) ao escolher "Detectar".
+        corrige_lances = supports_notation(source_language) and supports_notation(
+            target_language
+        )
+        if corrige_lances:
+            app.log_message(
+                "Correcao de lances ligada: as letras das pecas serao conferidas "
+                f"contra o comentario original ({source_language} -> {target_language})."
+            )
+        elif not source_language:
+            app.log_message(
+                "Correcao de lances desligada: o idioma de origem nao foi "
+                "declarado, entao nao da para saber o que as letras dos lances "
+                "significam no original."
+            )
+
         processed_comments = 0
         translated_count = 0
+        move_fixes = 0
         filled_empty_count = 0
         cache_count = 0
         cleaned_empty_count = 0
@@ -290,6 +312,13 @@ def run_translation(
                     if parts:
                         for original, part in zip(originals, parts):
                             translation = apply_automatic_substitutions(part, automatic_rules)
+                            # Depois das regras automaticas e ANTES de gravar: o
+                            # que vai para o banco e para o PGN e o mesmo texto,
+                            # entao corrigir aqui cobre os dois de uma vez.
+                            translation, corrigidos = fix_move_notation(
+                                original, translation, source_language, target_language
+                            )
+                            move_fixes += corrigidos
                             app.translation_cache[original] = translation
                             translated_map[original] = translation
                             save_status = save_translation(
@@ -368,6 +397,13 @@ def run_translation(
                                 translation = apply_automatic_substitutions(
                                     translated, automatic_rules
                                 )
+                                translation, corrigidos = fix_move_notation(
+                                    original,
+                                    translation,
+                                    source_language,
+                                    target_language,
+                                )
+                                move_fixes += corrigidos
                                 app.translation_cache[original] = translation
                                 translated_map[original] = translation
                                 save_status = save_translation(
@@ -480,6 +516,8 @@ def run_translation(
         app.log_message(f"Traducoes reutilizadas do cache: {cache_count}")
         app.log_message(f"Comentarios que falharam: {failed_count}")
         app.log_message(f"Arquivos PGN traduzidos gerados: {generated_files}")
+        if corrige_lances:
+            app.log_message(f"Lances com a letra da peca corrigida: {move_fixes}")
         app.log_message(f"Banco de dados: {app.output_db}")
 
         if failed_count:
@@ -527,6 +565,11 @@ def run_translation(
                 app.log_message(f"[AVISO] Nao foi possivel anotar as falhas: {exc}")
 
         if not canceled:
+            # A linha dos lances so aparece quando houve o que corrigir: uma
+            # execucao entre idiomas que compartilham as letras (es -> pt) nunca
+            # corrige nada, e um "Lances corrigidos: 0" fixo so faria o usuario
+            # procurar um problema que nao existe.
+            linha_lances = f"\nLances corrigidos: {move_fixes}" if move_fixes else ""
             resumo = (
                 f"Total de comentarios: {total_comments}\n"
                 f"Novas traducoes: {translated_count}\n"
@@ -534,7 +577,7 @@ def run_translation(
                 f"Removidos por limpeza: {cleaned_empty_count}\n"
                 f"Reutilizados do cache: {cache_count}\n"
                 f"Falharam: {failed_count}\n"
-                f"Arquivos gerados: {generated_files}"
+                f"Arquivos gerados: {generated_files}{linha_lances}"
             )
 
             if aborted_by_api:

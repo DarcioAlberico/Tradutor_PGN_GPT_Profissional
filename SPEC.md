@@ -211,7 +211,63 @@ sao ignorados e informados.
 no idioma original no arquivo de saida. E um resultado aceitavel, desde que
 declarado (ver T2).
 
-### 3.5 Geracao do PGN traduzido
+### 3.5 Letras das pecas nos lances
+
+A notacao algebrica usa uma letra por peca, e **as letras colidem entre
+idiomas**: o `R` do ingles e Torre, o `R` do portugues e Rei.
+
+| peca | en | pt | es | fr | it | de | ru |
+|---|---|---|---|---|---|---|---|
+| Rei | K | R | R | R | R | K | Кр |
+| Dama | Q | D | D | D | D | D | Ф |
+| Torre | R | T | T | T | T | T | Л |
+| Bispo | B | B | A | F | A | L | С |
+| Cavalo | N | C | C | C | C | S | К |
+
+**Garantia P3 — as letras dos lances vem do comentario original.** Antes de
+gravar, cada lance da traducao e conferido contra o lance correspondente do
+original. So a letra da peca (e a da promocao) muda; casa, captura, desempate,
+xeque e o `=` saem do proprio texto. A funcao nunca insere um lance que nao
+estava la nem apaga um que estava — o pior resultado possivel dela e deixar um
+lance como o tradutor escreveu.
+
+**Nao da para fazer isso com regras de glossario, e o motivo e o mesmo da
+garantia S4.** Um par de regras `K -> R` e `R -> T` aplicado em sequencia
+destroi a informacao: depois da primeira, os `R` que vieram de `K` sao
+indistinguiveis dos que ja eram `R`, e a segunda transforma os dois em `T`. Nao
+e a ordem que esta errada — e a sequencia. Numa passagem so, `Kf1` vira `Rf1` e
+`Rf1` vira `Tf1`.
+
+Isso resolve metade. A outra e que o tradutor **e inconstante**: as vezes traduz
+o lance, as vezes deixa, as vezes erra. Medido no endpoint real, traduzindo do
+ingles para o portugues:
+
+```
+EN     The move Rd1 doubles the rooks; Kg2 is slow.
+Google O movimento Rd1 dobra as torres; Kg2 e lento.
+```
+
+O `Rd1` e o pior caso possivel: **parece** notacao portuguesa valida e nomeia a
+peca errada. Olhando so a traducao nao ha como distinguir um Rei ja traduzido de
+uma Torre que ficou para tras. Quem distingue e o original.
+
+**A ancora e a parte do lance que nao muda de idioma** — `f1`, `xe4+`, `bd7`.
+Um lance do original e um lance da traducao com a mesma ancora sao o mesmo lance,
+e a letra e o que se corrige. Quando a ancora empata (duas pecas para a mesma
+casa, "Rf1 ou Kf1"), o desempate e a ordem; se nem ela resolver, **nada e
+tocado**.
+
+**A leitura do original e restrita ao idioma declarado; a da traducao, nao.** No
+original a letra e a informacao, e aceitar mais alfabetos devolveria a
+ambiguidade que declarar o idioma veio resolver. Na traducao a letra e ruido —
+o tradutor pode devolver a notacao inglesa ate num par que nao passa pelo ingles
+—, entao ali vale qualquer letra conhecida.
+
+Sem idioma de origem declarado a correcao **nao roda**, e o log diz isso: sem
+saber em que alfabeto o original esta, corrigir seria trocar um erro do tradutor
+por um palpite do programa.
+
+### 3.6 Geracao do PGN traduzido
 
 O arquivo de origem e relido e cada comentario e substituido pela traducao, de
 tras para frente (para nao invalidar as posicoes). Chaves `{` e `}` dentro de
@@ -227,7 +283,7 @@ detectada na origem; se algum caractere nao couber nela, cai para UTF-8 e
 registra isso no log. Em nenhuma hipotese um caractere e substituido por
 `U+FFFD` no arquivo gerado.
 
-### 3.6 Controle de execucao
+### 3.7 Controle de execucao
 
 Roda em thread separada, com pausa e cancelamento cooperativos. Toda
 atualizacao de interface e agendada na thread principal do Tk.
@@ -718,6 +774,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | T4 | A lista de falhas sobrevive a execucao, e so ela e reprocessada | Custo: reexecutar tudo por causa de dois arquivos |
 | P1 | O par (original, origem, destino) e a identidade da traducao | Limite: o mesmo texto em duas linguas era uma linha so |
 | P2 | Declarar o idioma adota o cache existente em vez de paga-lo de novo | Risco: a mudanca de chave cobrar 201.607 traducoes ja feitas |
+| P3 | As letras dos lances vem do original, numa passagem so | Bug: `Rd1` (Torre) traduzido como `Rd1` (Rei) |
 | S1 | Matches disjuntos | Bug: `"de de de"` -> `"dede"` |
 | S2 | Indices do texto original | Bug: `İ` desloca offsets |
 | S3 | Regra especifica vence a generica | Bug: regra curta encobre a longa |
@@ -775,6 +832,14 @@ leia uma garantia acima como mais ampla do que ela e.
 
 **Idioma de origem**
 
+- A correcao das letras dos lances (P3) so roda com o idioma de origem
+  declarado. Em "Detectar" ela fica desligada, e o log diz por que.
+- Ela confere **a letra da peca**, e nao a legalidade do lance: um `Kf1` que o
+  tabuleiro nao permite continua saindo como `Rf1`. Validar lance exigiria a
+  posicao, que o programa nao le (e nao-objetivo, secao 1).
+- Um lance que o alfabeto declarado nao explica nao vira ancora. Isso deixa de
+  fora a notacao descritiva, a figurina e o PGN cujo idioma foi declarado
+  errado — nesses casos a correcao simplesmente nao acontece.
 - "Detectar" e as linhas gravadas antes desta versao compartilham o mesmo balde,
   "nao informado". Sao coisas diferentes — uma e uma escolha, a outra e ausencia
   de escolha — e o programa nao as distingue: guardar dois valores para "nao sei"

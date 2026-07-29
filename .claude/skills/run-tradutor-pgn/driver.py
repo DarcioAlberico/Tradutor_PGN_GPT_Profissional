@@ -422,7 +422,8 @@ class HeadlessApp:
         pass
 
 
-def run_worker(pgn, idioma="pt", traduzir=None, online=False, verboso=True):
+def run_worker(pgn, idioma="pt", traduzir=None, online=False, verboso=True,
+               idioma_origem=""):
     """Roda o worker de traducao de verdade sobre um PGN, sem abrir janela.
 
     `pgn` e o conteudo do arquivo. Devolve
@@ -432,6 +433,11 @@ def run_worker(pgn, idioma="pt", traduzir=None, online=False, verboso=True):
     roda — lotes, cache, regras, gravacao, geracao do PGN —, so a chamada HTTP
     que nao acontece. Use `online=True` para exercitar a rede de verdade (endpoint
     publico do Google Translate; deixe o arquivo pequeno).
+
+    `idioma_origem` e o que o usuario declararia no seletor da janela principal.
+    Vazio e "detectar", o padrao. Declara-lo liga duas coisas que so existem com
+    ele: a gravacao dentro do par de idiomas e a correcao das letras dos lances
+    contra o comentario original.
 
     O diretorio devolvido NAO e apagado: e onde estao o PGN gerado, o banco e o
     log para voce inspecionar.
@@ -467,7 +473,9 @@ def run_worker(pgn, idioma="pt", traduzir=None, online=False, verboso=True):
         # O worker termina chamando `messagebox` pela fila do Tk. Com a raiz
         # imediata isso abre um dialogo modal DE VERDADE e trava o processo.
         translation_worker.messagebox = _SemDialogos
-        translation_worker.run_translation(app, origem, idioma, False)
+        translation_worker.run_translation(
+            app, origem, idioma, False, source_language=idioma_origem
+        )
     finally:
         translation_worker.translate_text, translation_worker.messagebox = anteriores
         sys.argv[0] = argv0
