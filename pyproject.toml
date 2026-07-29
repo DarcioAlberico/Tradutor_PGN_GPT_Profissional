@@ -1,6 +1,6 @@
 [project]
 name = "pgn-tradutor-pro"
-version = "0.2.0"
+version = "0.2.1"
 description = "Aplicacao para traduzir comentarios PGN com cache SQLite e glossario."
 readme = "README.md"
 requires-python = ">=3.8"
