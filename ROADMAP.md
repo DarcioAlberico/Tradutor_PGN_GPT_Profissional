@@ -5,8 +5,8 @@ Registro das melhorias do programa. Cada item traz o motivo, o impacto medido
 verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
-**Pendentes: as secoes 14 a 20**, da revisao de 2026-07-29 (a 13 foi concluida
-no mesmo dia). As garantias que os testes ja protegem estao na
+**Pendentes: as secoes 15 a 20**, da revisao de 2026-07-29 (as secoes 13 e 14
+foram concluidas no mesmo dia). As garantias que os testes ja protegem estao na
 [SPEC.md](SPEC.md), secao 9; as que as secoes pendentes prometem estao
 declaradas na secao 11 da SPEC, e cada uma so migra para a 9 quando o item
 correspondente estiver pronto e tiver teste que falhe sem a correcao.
@@ -58,6 +58,12 @@ E o quadro geral do dicionario, medido regra a regra: 7.105 regras, das quais
 enumerando casas do tabuleiro a mao; cobertura real de 1,5 idioma dos 7
 anunciados (fr/de/it/ru: nenhuma regra). O glossario e a maior forca do programa
 e o lugar onde ha mais o que consertar — as secoes 14 e 15 sao o plano.
+
+**A secao 14 foi feita no mesmo dia, e ela corrigiu duas afirmacoes do
+diagnostico acima** (o `=/+` e sugestao e nao automatica; das 210 mortas, 166 nao
+fazem falta). O detalhe esta la; o que fica registrado aqui e o metodo: a
+diferenca saiu de medir cada afirmacao contra o glossario real, uma por uma, em
+vez de aceitar a lista.
 
 **Revisao de 2026-07-28 (secoes 9 e 10).** Quatro pedidos do usuario, e o que os
 une nao e o tema — e o fato de todos serem **decisoes dele que o codigo nao tinha
@@ -3208,40 +3214,74 @@ O que fica de fora, dito para o proximo leitor nao supor o contrario:
 
 ---
 
-## 14. O dicionario tem erros de xadrez, regras mortas e lacunas — PENDENTE
+## 14. O dicionario tem erros de xadrez, regras mortas e lacunas — CONCLUIDO (2026-07-29)
 
 O `Substituicoes.txt` foi lido regra a regra (7.105), com demonstracoes ao vivo
 usando o glossario real. E o maior ativo do programa — 7.105 decisoes tomadas
 uma a uma — e e tambem onde um tradutor profissional encontra mais o que
 consertar. Este item e a curadoria; o 15 e a estrutura.
 
-### 14.1 Um erro factual de xadrez, aplicado automaticamente
+O arquivo saiu de **7.105 para 5.919 regras**, e quase toda a diferenca e
+colapso, nao remocao: 1.203 regras que enumeravam casas do tabuleiro a mao
+viraram 20 (14.7). O que de fato saiu foram 5 regras que corrompiam portugues
+(14.3), 42 que nunca disparavam (14.4) e 5 miudezas; entraram 49 termos e 8
+regras precisas de coluna. O conjunto de regras **aplicadas** mudou pouco e de
+proposito — a verificacao esta em 14.10.
+
+**Duas correcoes ao diagnostico da revisao, e as duas importam.** A analise que
+abriu esta secao errou em dois pontos, e o que os descobriu foi medir em vez de
+supor:
+
+| o que a analise dizia | o que a medicao mostrou |
+|---|---|
+| `=/+` invertido e regra **automatica** | e `suggestion` — aplicada a pedido, nao no escuro. O erro e o mesmo, a gravidade e menor |
+| 9 regras de palavra comum sao de altissimo risco | **4 nao corrompem nada**: `the`, `if`, `with`, `by` nao sao palavras portuguesas e a fronteira de palavra as protege |
+| — | **faltava a pior de todas**: `('por', 'com')`, que estraga "venceram **por** abandono" e "vale **por** dois peões" |
+| "210 regras nunca disparam" | 210 nunca disparam, mas **166 sao inofensivas** e 44 perdem algo |
+| "`pin` (palavra inglesa): zero regras" | `('pin', 'cravada')` existe desde sempre |
+
+### 14.1 Um erro factual de xadrez
 
 ```
 ('=/+', 'com leve superioridade para as brancas')     # ERRADO
-('+/=', 'as brancas tem leve superioridade')          # certo
+('+/=', 'as brancas tem leve superioridade')          # certo, mas "tem" -> "têm"
 ```
 
-`=/+` (⩱) significa **as pretas** ligeiramente melhores. O arquivo da a mesma
-leitura para os dois simbolos, entao metade das avaliacoes `=/+` de qualquer
-livro sai **invertida** — e e regra automatica: roda sem revisao. Correcao de
-uma linha, impacto direto no sentido do texto. Junto com ela, a familia toda
-merece conferencia: `-+` esta traduzido com "negras" onde o resto do arquivo
-usa "pretas", e o congelamento (S4) impede a normalizacao posterior.
+`=/+` (⩱) significa **as pretas** ligeiramente melhores. O arquivo dava a mesma
+leitura para os dois simbolos, entao toda avaliacao `=/+` saia **invertida** —
+dizia o contrario do que o autor do livro escreveu, que e o pior tipo de erro de
+traducao possivel: nao parece erro nenhum.
+
+**A regra e `suggestion`, e nao `automatic`** — a analise inicial disse
+automatica e a medicao corrigiu. Muda a gravidade, nao o erro: o revisor
+continua vendo a sugestao errada oferecida, e "Aplicar todas" a aplica.
+
+Corrigidas as quatro da familia: `=/+` passa a nomear as pretas, `-+` troca
+"negras" pela norma "pretas" do proprio arquivo (o congelamento de S4 impedia a
+normalizacao posterior), e `+/=` ganha a concordancia ("as brancas **têm**").
+As duas que ja estavam certas — `+/-` e `-/+` — ficaram como estavam, e ha teste
+fixando as quatro.
 
 ### 14.2 Terminologia errada codificada
 
-- `('castling', 'rocado')` — particibio onde o portugues pede o substantivo
-  "roque" (a regra irma `('Castling', 'Roque')` esta certa; por caixa, a errada
-  e a que pega o texto minusculo, que e quase todo).
-- `('back rank', 'primeira fila')` e `('back-rank', 'primeira fila')` — *back
-  rank* e a **ultima** fileira de quem defende; "primeira fila" so vale para as
-  brancas, e o proprio arquivo se contradiz em outra regra ("ultima fila").
-- `('-fileira', '-coluna')` — existe porque o Google verte *file* como
-  "fileira", mas converte tambem toda "fileira" legitima (uma *rank*) em
-  "coluna". E a inversao rank/file codificada como regra.
-- `('Zwischenzug', 'Lance intermediario ganhador')` — sobretraducao: um
-  Zwischenzug nao e necessariamente ganhador.
+- `('castling', 'rocado')` -> **`'roque'`**: particibio onde o portugues pede o
+  substantivo. A regra irma `('Castling', 'Roque')` estava certa, mas por caixa
+  quem pegava o texto minusculo — quase todo — era a errada.
+- `('back rank', 'primeira fila')` -> **`'última fila'`**, e a mesma na versao
+  com hifen. *Back rank* e a ultima fileira de quem defende; "primeira fila" so
+  vale olhando do lado das brancas, e o proprio arquivo se contradizia noutra
+  regra ("ultima fila").
+- `('Zwischenzug', 'Lance intermediario ganhador')` -> **`'Lance
+  intermediário'`**: um Zwischenzug nao e necessariamente ganhador, e a
+  sobretraducao poe no texto uma avaliacao que o autor nao fez.
+- `('-fileira', '-coluna')` e `('fileira-', 'coluna-')` **removidas, e
+  substituidas por oito precisas**. As duas existiam por um motivo legitimo — o
+  Google verte *file* como "fileira" —, mas o padrao delas casa qualquer coisa
+  antes do hifen: `"sétima-fileira"`, que e uma fileira de verdade, virava
+  `"sétima-coluna"`. Quem distingue e o que vem antes: uma **letra** de coluna e
+  *file*, um ordinal e *rank*. Entraram `('a-fileira', 'coluna a')` ate
+  `('h-fileira', 'coluna h')`, que fazem o que as genericas queriam sem alcancar
+  fileira nenhuma. Remover sem repor teria trocado um erro por uma lacuna.
 
 ### 14.3 Regras de altissimo risco em palavras comuns
 
@@ -3253,12 +3293,26 @@ legitimo — confirmado ao vivo:
 ('negro', 'negras')  "O bispo negro"     -> "O bispo negras"
 ```
 
-Na mesma classe: `('the','o')`, `('if','se')`, `('with','com')`,
-`('by','pelas')`, `('Quote','')` (apaga a palavra em qualquer contexto),
-`('AD','BD')` e `('AR','BR')` (notacao descritiva espanhola de dois
-caracteres, dispara em qualquer sigla). O destino certo de cada uma e caso a
-caso — ancorar num contexto maior, restringir por escopo de idioma (secao 15)
-ou remover — mas nenhuma pode continuar como esta.
+**A lista da analise estava errada nas duas pontas, e o que decidiu foi medir.**
+Em vez de julgar cada padrao pela aparencia, apliquei o glossario real a treze
+frases de portugues enxadristico legitimo e vi quais regras estragavam quais
+frases. Resultado:
+
+| regra | veredito |
+|---|---|
+| `('for', 'para')` | **removida** — "Se **for** melhor" -> "Se **para** melhor" |
+| `('por', 'com')` | **removida** — "venceram **por** abandono" -> "**com** abandono"; "vale **por** dois peões". A analise nao a tinha visto, e e a pior de todas: `por` e uma das preposicoes mais comuns do portugues |
+| `('#', 'mate')` | **removida** — `#` e o sinal de mate do PGN, e o padrao nao tem fronteira de palavra: `Dh7#` virava `Dh7mate`. E o tema da secao 13 aparecendo no glossario |
+| `('luz', 'clara')` | **removida** — "a **luz** do sol" -> "a **clara** do sol". As sete regras especificas (`'de luz'`, `'praças de luz'`, `'quadrado luz'`...) cobrem o sentido enxadristico |
+| `('negro', 'negras')` | **removida** — "o bispo **negro**" (casas escuras) -> "o bispo **negras**". As especificas cobrem o jogador (`'o negro'`, `'os negros'`, `'rei negro'`), e a remocao **revive** `('Negro', 'as pretas')`, que estava morta por causa dela |
+| `('the','o')`, `('if','se')`, `('with','com')`, `('by','pelas')` | **ficaram** — nao corromperam frase nenhuma. Nenhuma delas e palavra portuguesa, e a checagem de fronteira exige a palavra inteira: elas so alcancam ingles que o tradutor deixou para tras, que e para o que foram escritas |
+| `('Quote','')`, `('AD','BD')`, `('AR','BR')` | **ficaram** — mesmo motivo, e as duas ultimas sao sensiveis a caixa por terem maiuscula |
+| `('asa', 'ala')` | **ficou**, com ressalva registrada: ela estraga "a **asa** do avião", mas isso nao aparece em livro de xadrez, e "asa" ali e sempre o *wing* mal traduzido |
+
+Cinco removidas, quatro absolvidas por medicao. **O criterio ficou explicito**:
+sai a regra cujo padrao e palavra portuguesa comum usada fora do sentido
+enxadristico. Isso e o que separa `for` e `por` — que qualquer texto em
+portugues contem — de `the` e `if`, que so aparecem quando a traducao falhou.
 
 ### 14.4 210 regras mortas por colisao de caixa, invisiveis ao detector
 
@@ -3273,68 +3327,169 @@ IN : Black wins the pawn.
 OUT: Pretas wins o peão.        # e nao "as pretas", como a regra de cima pedia
 ```
 
-Medido no arquivo inteiro: **389 grupos que colidem por `casefold`, cobrindo
-789 regras, das quais 210 nunca disparam.** E `glossary_conflicts` agrupa por
-texto **exato**, entao a garantia S9 — "a interface diz qual regra do conflito
-esta valendo" — e cega para 100% desses casos: a janela mostra as duas regras
-lado a lado sem dizer que uma esta morta.
+Medido no arquivo inteiro: **210 regras nunca disparavam por isso.** E
+`glossary_conflicts` agrupava por texto **exato**, entao a garantia S9 — "a
+interface diz qual regra do conflito esta valendo" — era cega para 100% desses
+casos: a janela mostrava as duas regras lado a lado sem dizer que uma estava
+morta.
 
-O conserto tem duas metades: o detector de conflitos passa a agrupar por
-`casefold` quando a regra vencedora e insensivel a caixa (e ai S9 volta a
-valer), e a curadoria decide grupo a grupo qual das versoes fica.
+**Mas 166 das 210 nao fazem falta**, e essa e a parte que a analise nao viu. A
+substituicao propaga a capitalizacao do texto encontrado, entao
+`('as pretas deve', 'as pretas devem')` aplicada a `"As pretas deve"` produz
+`"As pretas devem"` — exatamente o que a regra capitalizada ao lado dela queria.
+Ela esta morta e ninguem perde nada: e redundancia, e a redundancia ja tem aviso
+proprio ("Entrada duplicada").
 
-**Garantia planejada S12** — *conflito por diferenca de caixa e anunciado como
-o exato.*
+Isso mudou o desenho do detector. A pergunta certa nao e "as substituicoes sao
+diferentes como texto", e sim **"o que a vencedora PRODUZ aqui e diferente do
+que esta regra queria"** — e quem responde e `case_adjusted_replacement`, a
+mesma funcao que a aplicacao usa. Com esse criterio sobram **44** conflitos
+reais, que e um numero que cabe numa tela.
+
+Duas consequencias que os testes existentes acusaram, e as duas foram
+esclarecedoras:
+
+- **A duplicata exata saiu do filtro "Conflitos".** Um teste esperava 3 e passou
+  a ver 2, porque a avaliacao antiga bastava "ha duas substituicoes distintas no
+  grupo" e arrastava a duplicata junto — contra o que a propria S9 dizia. O
+  teste mudou, com o motivo escrito nele.
+- **`group` deixou de ser o conjunto em disputa.** "Manter esta" remove o
+  `group`, e se a duplicata exata ficasse fora dele a regra escolhida
+  continuaria morta depois do clique — agora sem nada na tela explicando. O
+  `group` passou a ser "quem casa o mesmo texto nos contextos em disputa", que e
+  o que faz o botao honrar o nome. Ha teste para isso, e ele falha com a versao
+  ingenua.
+
+**A curadoria das 44.** Removidas 42 — e **remover uma regra que nunca dispara
+nao muda comportamento nenhum**; o que muda e o arquivo parar de prometer um
+resultado que nao entrega. As duas restantes eram outra coisa:
+
+- `('as pretas possui', 'as bpretas possuem')` — **um typo na regra que estava
+  valendo**, achado justamente porque a morta ao lado dela estava certa. Sem o
+  detector, "as bpretas" continuaria saindo em toda traducao que casasse esse
+  padrao. Corrigido na regra viva.
+- `('nimzo-indianos', 'Nimzo-india')` — nome proprio com minuscula. Corrigido
+  para `'Nimzo-Índia'`.
+
+E uma ganhou **prioridade** em vez de sair: `('Black', 'as pretas')`. O artigo
+nao e preferencia, e gramatica — "Black is better" pede "**As** pretas estão
+melhores", e a vencedora `('black', 'pretas')` produzia "Pretas". Priorizar poe
+a capitalizada na frente sem apagar ninguem: `Black` -> "As pretas", `black` ->
+"pretas", as duas vivas. **E a primeira regra do glossario a usar a prioridade**
+— o campo existia desde o item 1.5 e estava em zero nas 7.105.
+
+As que sairam levaram junto alternativas de terminologia que nunca dispararam, e
+vale registrar quais, porque a decisao foi deliberada e e reversivel por aqui:
+`'As brancas empurra' -> 'avançam'` (contra `'empurram'`), `'Cheapo' -> 'Truque
+sujo'` (contra `'Truque'`), `'Impasse' -> 'Empate por Afogamento'` (contra
+`'Afogamento'`), `'As pretas venceu' -> 'venceram'` (contra `'ganharam'`),
+`'teve' -> 'tiveram'` (contra `'tinham'`), `'acabou' -> 'acabaram'` (contra
+`'acabam'`). Nenhuma delas era **erro** da regra viva, e reescrever a escolha de
+palavra do usuario nao e trabalho de curadoria; quem quiser qualquer uma de volta
+a redigita e clica em "Priorizar esta" — que agora funciona e diz o que faz.
+
+**Garantia S12 (nova)** — *conflito por diferenca de caixa e anunciado como o
+exato, e so quando a vencedora produz outra coisa.*
 
 ### 14.5 As 50 regras de delecao estao no tipo errado, e o CSV as perde
 
 Ha 50 regras que apagam lixo de conversao (`'== StartFEN =='`, `'@@'`,
 `'îîEndBracketîî'`) — trabalho de **limpeza** por definicao, que deveria rodar
-**antes** da API (nao pagar para traduzir lixo). Todas estao tipadas
-`suggestion`, o tipo `cleanup` esta **vazio** (zero regras), e tres defeitos se
-somam:
+**antes** da API (nao pagar para traduzir lixo). Todas estavam tipadas
+`suggestion`, o tipo `cleanup` estava **vazio** (zero regras), e tres defeitos se
+somavam:
 
-- elas so rodam se o revisor aplicar a mao, uma a uma;
+- elas so rodavam se o revisor aplicasse a mao, uma a uma;
 - `validate_glossary_entry` so tolera substituicao vazia em `cleanup`, entao o
-  editor as marca invalidas;
-- `analyze_glossary_csv_import` descarta linha com substituicao vazia, entao
-  **exportar e reimportar o glossario perde as 50**.
+  editor as marcava **invalidas** — 50 avisos permanentes na lista;
+- `analyze_glossary_csv_import` descartava linha com substituicao vazia, entao
+  **exportar e reimportar o glossario perdia as 50**, em silencio.
 
-Retipar as 50 para `cleanup` e aceitar substituicao vazia no CSV quando o tipo
-for `cleanup` fecham o ciclo.
+**Feito: as 50 retipadas para `cleanup`, e o CSV passou a aceitar substituicao
+vazia quando o tipo e `cleanup`.** O criterio agora e o mesmo nos dois lugares —
+era exatamente a divergencia de dois validadores que fazia o round-trip comer as
+regras.
 
-**Garantia planejada S14** — *exportar e reimportar o glossario preserva as
-regras de delecao.*
+**Uma consequencia, medida antes de aceitar:** regra de limpeza nao e oferecida
+no editor (o contexto interativo carrega sugestoes e automaticas), entao as 50
+deixam de aparecer como sugestao. Isso importaria se o lixo estivesse nas
+traducoes ja gravadas — e nao esta: procurei os 50 padroes nas 6.500 traducoes do
+banco de desenvolvimento e o resultado foi **zero ocorrencias, no original e na
+traducao**. Sao artefatos do PGN de origem, e e la que a limpeza age. Em troca, as
+50 pararam de ser marcadas invalidas e passaram a rodar antes da API.
+
+**Garantia S14 (nova)** — *exportar e reimportar o glossario preserva as regras
+de delecao.*
 
 ### 14.6 Um tipo mal escrito degrada em silencio
 
 `_normalize_rule_type` converte qualquer valor irreconhecivel em `suggestion`.
-A tabela de aliases tem `automatica`/`automática` mas nao `automatico`/
-`automático` (masculino) nem `auto` — entao `('x','y','automático')` vira
-sugestao, deixa de rodar depois da API, e nada avisa. O arquivo e editavel a
+A tabela de aliases tinha `automatica`/`automática` mas nao `automatico`/
+`automático` (masculino) nem `auto` — entao `('x','y','automático')` virava
+sugestao, deixava de rodar depois da API, e nada avisava. O arquivo e editavel a
 mao e sobrevive a versoes; degradar sem derrubar esta certo (mesmo principio de
-S5), **degradar sem avisar** nao. O handler de erros do glossario ja existe e e
-o lugar do aviso.
+S5), **degradar sem avisar** nao.
 
-**Garantia planejada S13** — *tipo de regra desconhecido avisa em vez de
-degradar em silencio.*
+**Feito nas duas metades.** Os aliases que faltavam entraram (`automatico`,
+`automático`, `auto`, `clean`, `limpar`, `sugestões`), e a carga do arquivo passa
+a avisar pelo handler que a garantia S5 ja instalou.
+
+Duas decisoes de desenho valem registro:
+
+- **O aviso e um, nao um por regra.** Um arquivo com cem tipos tortos precisa de
+  um aviso; cem dialogos seriam pior que o silencio. A funcao junta os valores
+  distintos e nomeia ate cinco.
+- **O aviso mora na leitura do ARQUIVO, nao no `glossario.db`.** O banco guarda
+  tipos ja normalizados: quando ele e lido, a grafia errada nao existe mais. Quem
+  ve `'automático'` escrito e so quem le o texto.
+
+E a pergunta ficou separada em duas funcoes, porque sao duas: `_rule_type_alias`
+responde "isto e um tipo que eu conheco" (devolve `None` quando nao) e
+`_normalize_rule_type` responde "com que tipo eu sigo em frente". Antes as duas
+eram a mesma expressao, e por isso nao havia como avisar.
+
+**Garantia S13 (nova)** — *tipo de regra desconhecido avisa em vez de degradar em
+silencio.*
 
 ### 14.7 1.235 regras enumeram casas a mao, com buracos
 
-17,4% do glossario (1.235 regras) contem uma casa literal (`a1`..`h8`):
-familias como `a1-peao -> peao de a1` escritas casa a casa. O levantamento
-exaustivo mostrou o preco da enumeracao manual:
+17,4% do glossario (1.235 regras) continha uma casa literal (`a1`..`h8`):
+familias como `a1-peao -> peao de a1` escritas casa a casa, em 20 familias
+uniformes. O levantamento exaustivo mostrou o preco da enumeracao manual:
 
-- a **fileira 3 inteira falta** em cinco familias (`a3-peao`..`h3-peao` etc.);
-- `torre-<casa>`, `dama-<casa>` e as duas de rei tem **zero** regras;
-- `<casa>-peao` esta partida sem criterio: 42 regras `suggestion` e 14
-  `automatic` — `a1-peao` corrige sozinho e `a4-peao` espera revisao.
+- **sete familias paravam em 56 regras** — faltava a fileira 3 inteira
+  (`a3-torre`, `e3-dama`, `d3-peao`...);
+- `<casa>-peao` estava partida sem criterio: `suggestion` e `automatic`
+  misturadas, com as automaticas indo de `a1` a `b8` em ordem alfabetica — a
+  marca de uma passagem manual que parou no meio, e nao de um criterio.
 
-O mecanismo proposto: um **placeholder de casa** (`@casa@`) expandido na carga
-para as 64 regras literais. Nao e regex — a SPEC promete que padrao de regra e
-literal, e a promessa fica de pe: a expansao gera exatamente as regras que o
-usuario escreveria a mao, so que todas, e o arquivo encolhe de 1.235 para ~20
-linhas. Editor e CSV mostram o placeholder como qualquer texto.
+**Feito: o placeholder `@casa@`, expandido na carga para as 64 casas.** Uma
+linha no arquivo, 64 regras na aplicacao. As 1.203 regras das familias uniformes
+viraram 20, e a expansao **nao tem como esquecer uma casa**: a fileira 3 passou a
+funcionar sem ninguem digitar nada (`'e3-torre'` -> `'torre de e3'`, verificado).
+
+Nao e regex, e a promessa da SPEC continua de pe: as regras que saem da expansao
+sao literais, exatamente as que o usuario escreveria a mao. O que muda e quem as
+escreve. Tres decisoes de escopo:
+
+- **O ORIGINAL manda.** Sem placeholder no padrao, a regra sai intacta mesmo que
+  a substituicao tenha um — inventar 64 regras iguais para um padrao unico
+  mudaria o que a regra casa.
+- **A expansao e na conversao entrada -> regra, nao na leitura do arquivo.** O
+  editor de glossario continua mostrando **uma** linha com o placeholder, que e o
+  que da para editar; a ordenacao por comprimento (S3) ve o padrao ja expandido,
+  com o tamanho real que ele tem no texto.
+- **As familias partidas por tipo foram colapsadas por tipo**, e nao unificadas.
+  Unificar era tentador — o tipo coerente para uma normalizacao de notacao e
+  `automatic` — mas mudaria o comportamento de 91 padroes: 49 passariam a ser
+  aplicados sem revisao, ou 14 deixariam de ser. Colapsando cada tipo separado,
+  as 28 automaticas ficam literais e o resto vira placeholder de sugestao;
+  **nada muda de comportamento**. Quem quiser a familia inteira automatica
+  agora troca uma linha, e nao 64.
+
+De quebra, `find_glossary_suggestions` passou a nao repetir o mesmo par: uma
+regra literal e a expansao de um `@casa@` podem chegar como a mesma sugestao, e
+oferece-la duas vezes nunca ajudou ninguem.
 
 ### 14.8 O nucleo terminologico do xadrez tem ~30 ausencias
 
@@ -3354,20 +3509,101 @@ rule*, *insufficient material*, *fortress* (fortaleza), *prophylaxis*
 `?!`, `∞`, `⩲`, `⩱` nao tem regra nenhuma (a familia `+-`/`-+`/`+/=`/`=/+`
 tem — com o erro do 14.1).
 
-Preencher isso e trabalho de dicionario puro, e entra junto com a semente por
-idioma da secao 15 — cada termo desses tem traducao consagrada em pt, es, fr,
-de, it e ru, e digitar as ~30 uma vez por idioma e mais barato que descobrir
-uma a uma pelo erro.
+Uma correcao a varredura: **`('pin', 'cravada')` existe** — a analise disse que
+nao. `('alfinete', 'cravada')` cobre o erro do Google e `pin` cobre o ingles que
+sobrou; as duas estavam la.
 
-### 14.9 Miudezas que a curadoria leva junto
+**Feito: 49 termos acrescentados, so na direcao ingles -> portugues.** E a
+direcao segura, e a escolha tem razao medida: um padrao em ingles nao casa texto
+portugues, entao nenhum deles pode corromper o que ja funciona — que e
+exatamente o defeito das cinco regras removidas em 14.3. E o modo de falha que
+eles cobrem **foi medido**: no banco de desenvolvimento ha 263 traducoes em que o
+tradutor deixou "White"/"Black" em ingles, ou seja, "o tradutor nao traduziu" e
+um caso real e frequente, nao hipotetico.
 
-Tres regras no-op (`('coluna a','coluna a')` e irmas); hifenizacao
-inconsistente (`Xeque-mate` vs `xeque mates`; o plural correto e
-"xeques-mate"); `('roqueemos','rocamos')` troca subjuntivo por indicativo
-("roquemos"); `('companheiros','mate')` perde o plural; tres estilos de aspas
-para a coluna "e"; docstrings do `glossario.py` citando 7.008 regras onde hoje
-ha 6.958. Nenhuma muda sentido sozinha; juntas, sao o rumor de fundo que a
-curadoria zera.
+Entraram os nucleos que faltavam: *skewer*, *outpost*, *blunder*, *smothered
+mate*, *open file*, *half-open file*, *exchange sacrifice*, *minority attack*,
+*hanging pawns*, *backward pawn*, *threefold repetition*, *fifty-move rule*,
+*insufficient material*, *fortress*, *prophylaxis*, *triangulation*,
+*underpromotion*, *deflection*, *decoy*, *overloading*, *interference*,
+*clearance*, *windmill*, *time trouble*/*Zeitnot*, *king safety*, *pawn
+structure*, *pawn chain*, *discovered attack*, *long diagonal*, *minor/major
+piece*, *good/bad bishop*, *opposite-colo(u)red bishops* — com os plurais onde
+eles mudam a forma portuguesa.
+
+**O que NAO entrou, e por que:** as correcoes do lado **portugues** (o que fazer
+quando o Google escreve "garfo" ou "impasse"). Elas exigem saber o que o tradutor
+produz de fato, e as 7.105 regras do usuario existem porque ele observou saida
+real — adivinhar aqui produziria justamente um `('for', 'para')`. Isso vai com a
+semente por idioma da secao 15, onde cada termo tem traducao consagrada em pt,
+es, fr, de, it e ru e o escopo impede que uma regra portuguesa alcance texto
+italiano. `zugzwang` e `en passant` tambem ficaram fora: sao as formas que o
+tradutor **deixa como estao**, e uma regra `('zugzwang', 'zugzwang')` seria um
+no-op — a especie que a 14.9 acabou de remover.
+
+### 14.9 Miudezas que a curadoria levou junto
+
+- **Tres no-ops removidas** (`('coluna a', 'coluna a')` e irmas): uma regra que
+  devolve o que encontrou. Ha teste garantindo que nao volte nenhuma.
+- `('roqueemos', 'rocamos')` -> **`'roquemos'`**: subjuntivo por indicativo, e
+  coerente com `('roqueiem', 'roquem')`, que o arquivo ja tinha certo.
+- `('companheiros', 'mate')` -> **`'mates'`**: o plural desaparecia.
+- `('checkmates', 'xeque mates')` -> **`'xeques-mate'`**; `('middlegames',
+  'meio jogos')` -> **`'meios-jogos'`** e o singular -> **`'meio-jogo'`**:
+  hifenizacao e plural de composto.
+- `('semi-aberta coluna', 'coluna semi-aberta')` -> **`'coluna semiaberta'`**:
+  ortografia pos-2009.
+- Docstrings do `glossario.py` citando 7.008 regras onde ha outro numero — o
+  proprio texto passou a nao depender de contagem que envelhece.
+
+Ficou de fora, de proposito: os **tres estilos de aspas** para a coluna "e"
+(`'peão "e"'`, `"coluna 'e'"`, `'coluna e'`). Padronizar exige escolher qual
+aparece no texto publicado, e isso e decisao editorial do usuario, nao correcao.
+
+### 14.10 O que a verificacao fixou
+
+Vinte e tres testes novos. Os que valem mais nao testam funcao, e sim **decisao
+de xadrez sobre o arquivo real**: que `=/+` nomeia as pretas, que `castling` e
+substantivo, que `back rank` e a ultima fila, que as cinco regras que corrompiam
+portugues nao voltaram, que nenhuma regra devolve o que encontrou, que toda
+regra de delecao e `cleanup`, e que o glossario continua sem enumerar casas. Sem
+eles, a proxima edicao do glossario desfaz a curadoria sem que nada acuse.
+
+**A verificacao de que a curadoria nao quebrou nada foi feita sobre as regras
+APLICADAS, e nao sobre o arquivo.** O arquivo encolheu 1.322 linhas, o que nao
+diz nada sozinho; o que importa e o conjunto de regras que chega ao texto,
+comparado com o do commit anterior:
+
+| contexto | antes | depois | o que mudou |
+|---|---|---|---|
+| limpeza | 0 | 50 | as 50 retipadas (14.5) |
+| automaticas | 147 | 146 | uma morta removida, e `companheiros` -> `mates` |
+| editor | 7.105 | 7.101 | 118 saem, 114 entram — as 5 nocivas, as 42 mortas, as 50 que viraram limpeza; entram 49 termos, 8 colunas, a fileira 3 e as correcoes |
+
+Nenhuma colisao entre regras expandidas nos tres contextos, e **zero conflitos**
+no glossario curado — o que devolve `test_the_real_glossary_has_no_undecided
+_conflict` ao verde. Esse teste, a proposito, foi o que **forcou** a curadoria: ele
+exige que o glossario versionado nao tenha disputa pendente, entao ligar o
+detector de S12 o deixou vermelho e ele so voltou ao verde quando as 44 foram de
+fato decididas. Um teste que obriga a decisao em vez de registrar a ausencia
+dela.
+
+Dois testes existentes mudaram, os dois no mesmo caso e pelo mesmo motivo (a
+duplicata exata saindo do filtro "Conflitos"), com a razao escrita neles. A suite
+inteira passou: **678 testes**.
+
+O que fica de fora desta secao, dito para nao ser lido como pronto:
+
+- **O glossario continua global.** Nada aqui o torna por par de idiomas, e as
+  regras portuguesas continuam alcancando uma traducao para o italiano. E a
+  secao 15, e ela nao foi feita.
+- **A curadoria olhou o que a medicao alcanca.** Treze frases de teste e 7.105
+  regras: as que corrompem construcoes que eu nao escrevi continuam la. O que
+  mudou e que o programa passou a ter como acusa-las — o detector de caixa, o
+  aviso de tipo, o QA da secao 16 quando existir.
+- **As 166 mortas inofensivas ficaram no arquivo.** Removê-las nao mudaria
+  comportamento nenhum, mas tambem nao ganharia nada, e sao 166 decisoes do
+  usuario cuja intencao esta cumprida. O detector corretamente nao as aponta.
 
 ---
 

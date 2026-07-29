@@ -137,20 +137,78 @@ def _read_substitution_assignment(code, path):
     raise ValueError("Variável 'substituições' ou 'substituicoes' não encontrada.")
 
 
+# Como o tipo pode estar escrito no arquivo, que e editado a mao. O masculino
+# (`automatico`) faltava e e o erro mais facil de cometer — a regra virava
+# sugestao, deixava de rodar depois da API, e nada avisava (ROADMAP 14.6).
+GLOSSARY_RULE_TYPE_ALIASES = {
+    "sugestao": GLOSSARY_RULE_SUGGESTION,
+    "sugestão": GLOSSARY_RULE_SUGGESTION,
+    "sugestões": GLOSSARY_RULE_SUGGESTION,
+    "suggestion": GLOSSARY_RULE_SUGGESTION,
+    "limpeza": GLOSSARY_RULE_CLEANUP,
+    "limpar": GLOSSARY_RULE_CLEANUP,
+    "cleanup": GLOSSARY_RULE_CLEANUP,
+    "clean": GLOSSARY_RULE_CLEANUP,
+    "auto": GLOSSARY_RULE_AUTOMATIC,
+    "automatica": GLOSSARY_RULE_AUTOMATIC,
+    "automática": GLOSSARY_RULE_AUTOMATIC,
+    "automatico": GLOSSARY_RULE_AUTOMATIC,
+    "automático": GLOSSARY_RULE_AUTOMATIC,
+    "automatic": GLOSSARY_RULE_AUTOMATIC,
+}
+
+
+def _rule_type_alias(value):
+    """O tipo canonico de `value`, ou `None` quando ele nao e reconhecido.
+
+    Separado de `_normalize_rule_type` porque as duas perguntas sao diferentes:
+    aquela responde "com que tipo eu seguo em frente" (e o padrao serve), esta
+    responde "isto e um tipo que eu conheco" — que e o que permite avisar em vez
+    de degradar em silencio (garantia S13).
+    """
+    texto = "" if value is None else str(value).strip()
+    if not texto:
+        return None
+    canonico = GLOSSARY_RULE_TYPE_ALIASES.get(texto.casefold(), texto)
+    return canonico if canonico in GLOSSARY_RULE_TYPES else None
+
+
 def _normalize_rule_type(rule_type):
-    value = "" if rule_type is None else str(rule_type).strip()
-    aliases = {
-        "sugestao": GLOSSARY_RULE_SUGGESTION,
-        "sugestão": GLOSSARY_RULE_SUGGESTION,
-        "suggestion": GLOSSARY_RULE_SUGGESTION,
-        "limpeza": GLOSSARY_RULE_CLEANUP,
-        "cleanup": GLOSSARY_RULE_CLEANUP,
-        "automatica": GLOSSARY_RULE_AUTOMATIC,
-        "automática": GLOSSARY_RULE_AUTOMATIC,
-        "automatic": GLOSSARY_RULE_AUTOMATIC,
-    }
-    normalized = aliases.get(value.casefold(), value)
-    return normalized if normalized in GLOSSARY_RULE_TYPES else GLOSSARY_RULE_SUGGESTION
+    return _rule_type_alias(rule_type) or GLOSSARY_RULE_SUGGESTION
+
+
+def _raw_rule_type(item):
+    """O tipo COMO ESTA ESCRITO na entrada, sem normalizar."""
+    if isinstance(item, dict):
+        return item.get("type") or item.get("rule_type")
+    if isinstance(item, (list, tuple)) and len(item) >= 3:
+        return item[2]
+    return None
+
+
+def unknown_rule_types(raw_items):
+    """Os valores de tipo que o programa nao reconhece, sem repetir.
+
+    Um tipo mal escrito continua degradando para sugestao — o arquivo e
+    editavel a mao e sobrevive a versoes do programa, e uma regra torta nao pode
+    desligar as outras milhares na carga (mesmo principio de S5). O que muda e
+    que ele **avisa**: antes, `('x', 'y', 'automático')` virava sugestao, deixava
+    de rodar depois da API, e nada na tela dizia por que.
+
+    Devolve valores distintos, e nao um por regra: um arquivo com cem tipos
+    tortos precisa de um aviso, nao de cem dialogos.
+    """
+    desconhecidos = []
+    vistos = set()
+    for item in raw_items:
+        bruto = _raw_rule_type(item)
+        texto = "" if bruto is None else str(bruto).strip()
+        if not texto or texto in vistos:
+            continue
+        if _rule_type_alias(texto) is None:
+            vistos.add(texto)
+            desconhecidos.append(texto)
+    return desconhecidos
 
 
 def _entry_pair(item):
@@ -341,6 +399,20 @@ def _load_glossary_entry_details_from_file(path, deduplicate=True):
 
     with open(path, "r", encoding="utf-8") as f:
         raw_items = _read_substitution_assignment(f.read(), path)
+
+    # Aqui, e nao no `glossario.db`: o banco guarda tipos ja normalizados, entao
+    # o que estava mal escrito no arquivo nao existe mais quando ele e lido.
+    # Quem ve a grafia original e so quem le o texto (garantia S13).
+    desconhecidos = unknown_rule_types(raw_items)
+    if desconhecidos:
+        amostra = ", ".join(repr(valor) for valor in desconhecidos[:5])
+        if len(desconhecidos) > 5:
+            amostra += f", ... (+{len(desconhecidos) - 5})"
+        report_glossary_error(
+            f"Tipo de regra desconhecido no glossario, tratado como "
+            f"'{GLOSSARY_RULE_SUGGESTION}': {amostra}. "
+            f"Os tipos validos sao {', '.join(GLOSSARY_RULE_TYPES)}."
+        )
 
     entries = _normalize_detailed_entries(raw_items)
     if deduplicate:
@@ -769,16 +841,54 @@ GLOSSARY_RULE_CONTEXTS = (
 )
 
 
+def _rule_subsumes(orig_winner, orig_other):
+    """Tudo o que `orig_other` casaria, `orig_winner` casa antes.
+
+    Duas situacoes, e as duas terminam com a segunda regra nunca disparando —
+    o congelamento de S4 impede que ela reveja o trecho:
+
+    - **padroes identicos**, o caso que a garantia S9 sempre cobriu;
+    - **o vencedor e insensivel a caixa** (escrito todo em minusculas, ver
+      `_compiled_glossary_pattern`): ele casa qualquer variante de caixa do
+      mesmo texto, entao engole `Black`, `BLACK` e o que mais caseie por
+      `casefold`.
+
+    O segundo caso era invisivel, e e o que a garantia S12 acrescenta.
+    Agrupando por padrao exato, `'black'` e `'Black'` eram padroes DIFERENTES:
+    a janela mostrava as duas lado a lado sem dizer que a segunda estava morta.
+    Medido no glossario real, 210 regras nunca disparavam por isso.
+
+    Nao e simetrico de proposito. Se a de caixa fixa vem primeiro, as duas
+    vivem: `('Black', ...)` pega o texto capitalizado e `('black', ...)` pega o
+    resto. O que mata e a insensivel chegar antes.
+    """
+    return orig_winner == orig_other or orig_winner == orig_winner.lower()
+
+
 def glossary_conflicts(entries):
     """Regras que disputam o mesmo padrao, e qual delas o programa aplica.
 
-    Duas regras com o mesmo `orig` e substituicoes diferentes nao empatam: uma
-    delas vence sempre, e a outra nunca dispara. Quem decide e `_rule_sort_key`,
-    a mesma funcao que ordena as regras na hora de aplicar: prioridade explicita
-    (garantia S10), depois comprimento do padrao (garantia S3) e, por fim, a
-    ordem do arquivo. Como os padroes em conflito sao identicos por definicao, o
-    comprimento empata sempre, e o que separa e a prioridade e, sem ela, a
-    posicao. O congelamento de S4 impede que a seguinte reveja o trecho.
+    Duas regras que casam o mesmo texto com substituicoes diferentes nao
+    empatam: uma delas vence sempre, e a outra nunca dispara. Quem decide e
+    `_rule_sort_key`, a mesma funcao que ordena as regras na hora de aplicar:
+    prioridade explicita (garantia S10), depois comprimento do padrao (garantia
+    S3) e, por fim, a ordem do arquivo.
+
+    "O mesmo texto" e mais largo do que "o mesmo padrao", e por isso o
+    agrupamento e por `casefold` com `_rule_subsumes` decidindo quem engole
+    quem (garantia S12). Para padroes identicos o comprimento empata sempre e o
+    que separa e a prioridade e, sem ela, a posicao.
+
+    **Uma regra sombreada so entra aqui quando perde algo.** A substituicao
+    propaga a capitalizacao do texto encontrado, entao `('as pretas deve', 'as
+    pretas devem')` aplicada a `"As pretas deve"` ja produz `"As pretas
+    devem"` — exatamente o que a regra capitalizada ao lado dela queria. Ela
+    esta morta e nao faz falta: e redundancia, nao conflito. A pergunta certa
+    nao e "as substituicoes sao diferentes como texto", e sim "o que a
+    vencedora PRODUZ aqui e diferente do que esta regra queria" — e quem
+    responde e `case_adjusted_replacement`, a funcao que a aplicacao usa.
+    Medido no glossario real: das 210 mortas, 166 sao redundancia e **44**
+    perdem alguma coisa.
 
     O vencedor e **por contexto**: uma regra automatica e uma de sugestao com o
     mesmo padrao competem no editor (que carrega as duas), mas na aplicacao das
@@ -787,10 +897,16 @@ def glossary_conflicts(entries):
 
     Devolve `{indice: info}` apenas para os indices em disputa, onde `info` tem:
 
-    - `pattern`: o padrao disputado;
+    - `pattern`: o padrao **desta** regra (com S12 os membros de um grupo podem
+      ter padroes que diferem na caixa, e o que interessa na mensagem e o dela);
     - `group`: todos os indices que disputam com ele (o que "manter esta" remove);
     - `contexts`: **todos** os contextos que carregam este indice, cada um com
       `key`, `label`, `members`, `winner` e `disputed`.
+
+    `winner` e relativo ao indice consultado: e a regra que dispara no lugar
+    dele, ou ele mesmo quando dispara. Isso importa com mais de duas regras no
+    grupo — em `('Black',…)`, `('black',…)`, `('BLACK',…)` a segunda e viva e a
+    terceira e morta, e uma unica "vencedora do grupo" nao descreveria as duas.
 
     `contexts` inclui os contextos sem disputa de proposito. Uma regra pode
     perder a disputa num contexto e ser a unica do padrao em outro — e la ela
@@ -800,24 +916,26 @@ def glossary_conflicts(entries):
 
     Os indices sao posicoes na lista recebida, para casarem com as do editor.
     """
-    indices_by_pattern = {}
+    indices_by_key = {}
     rule_types = []
     replacements = []
+    patterns = []
     rules = []
     for index, entry in enumerate(entries):
         orig, new = glossary_entry_pair(entry)
+        patterns.append(orig)
         rule_types.append(glossary_entry_type(entry))
         replacements.append(new)
         rules.append(_as_rule(entry))
         if orig:
-            indices_by_pattern.setdefault(orig, []).append(index)
+            indices_by_key.setdefault(orig.casefold(), []).append(index)
 
-    def vencedor(members):
-        """A regra que a aplicacao poe na frente — perguntando a ela.
+    def ordem_de_disputa(members):
+        """Os membros na ordem em que disputam o texto — perguntando a producao.
 
-        Os dois passos sao os mesmos da producao, e nao uma imitacao deles:
-        `_as_rule` e a conversao que `filter_glossary_entries_by_type` faz ao
-        carregar o glossario, e `_specificity_order` e o criterio que
+        Os dois passos sao os mesmos dela, e nao uma imitacao: `_as_rule` e a
+        conversao que `filter_glossary_entries_by_type` faz ao carregar o
+        glossario, e `_specificity_order` e o criterio que
         `order_rules_by_specificity` usa para aplicar. Aqui nao ha uma segunda
         leitura do que "prioridade e ordem do arquivo" significam — se houvesse,
         ela poderia divergir e a janela anunciaria um vencedor que o texto nunca
@@ -825,50 +943,90 @@ def glossary_conflicts(entries):
 
         As posicoes passadas sao as **do contexto**, ja filtrado por tipo, que e
         a forma como a lista chega na aplicacao. Filtrar preserva a ordem
-        relativa, entao o vencedor entre estes membros e o mesmo que sairia da
-        lista inteira — e quem garante isso agora e a ordenacao compartilhada, e
-        nao um comentario dizendo que os dois criterios coincidem.
+        relativa, entao a ordem entre estes membros e a mesma que sairia da
+        lista inteira.
         """
-        return members[_specificity_order([rules[index] for index in members])[0]]
+        return [
+            members[position]
+            for position in _specificity_order([rules[index] for index in members])
+        ]
+
+    def perdedores_do_contexto(ordenados):
+        """`{indice: vencedora}` para os membros que perdem ALGO neste contexto.
+
+        Uma regra sombreada cuja vencedora produz exatamente o que ela queria e
+        redundancia, nao conflito — ver o docstring da funcao.
+        """
+        perdas = {}
+        for posicao, index in enumerate(ordenados):
+            for anterior in ordenados[:posicao]:
+                if not _rule_subsumes(patterns[anterior], patterns[index]):
+                    continue
+                produzido = case_adjusted_replacement(
+                    patterns[index], replacements[anterior]
+                )
+                if produzido != replacements[index]:
+                    perdas[index] = anterior
+                break
+        return perdas
 
     conflicts = {}
-    for pattern, indices in indices_by_pattern.items():
+    for indices in indices_by_key.values():
         if len(indices) < 2:
             continue
 
-        contexts = []
+        avaliados = []
         disputing = set()
         for key, label, context_types in GLOSSARY_RULE_CONTEXTS:
             members = [index for index in indices if rule_types[index] in context_types]
             if not members:
                 continue
-            # Menos de duas substituicoes distintas nao e disputa: ou a regra
-            # esta sozinha neste contexto, ou o que ha sao duplicatas exatas —
-            # redundancia, que ja tem aviso proprio.
-            disputed = len({replacements[index] for index in members}) > 1
-            contexts.append(
-                {
-                    "key": key,
-                    "label": label,
-                    "members": members,
-                    "winner": vencedor(members),
-                    "disputed": disputed,
-                }
-            )
-            if disputed:
-                disputing.update(members)
+            ordenados = ordem_de_disputa(members)
+            perdas = perdedores_do_contexto(ordenados)
+            avaliados.append((key, label, members, perdas))
+            for perdedor, vencedora in perdas.items():
+                disputing.add(perdedor)
+                disputing.add(vencedora)
 
         if not disputing:
             continue
 
-        group = sorted(disputing)
-        for index in group:
+        for index in sorted(disputing):
+            contextos = [
+                {
+                    "key": key,
+                    "label": label,
+                    "members": members,
+                    "winner": perdas.get(index, index),
+                    "disputed": bool(perdas),
+                }
+                for key, label, members, perdas in avaliados
+                if index in members
+            ]
+            # `group` e o que "Manter esta" remove, e ele NAO e o conjunto dos
+            # que estao em disputa: e o dos que casam o mesmo texto nos
+            # contextos onde ha disputa. A diferenca aparece com uma duplicata
+            # exata ao lado — ela nao e conflito (a vencedora produz o mesmo que
+            # ela queria), mas continua engolindo quem vem depois. Deixando-a
+            # fora, "Manter esta" removeria a concorrente anunciada e a regra
+            # escolhida continuaria morta, agora sem nada na tela explicando.
+            #
+            # Segue restrito aos contextos em disputa: uma regra de limpeza com
+            # o mesmo padrao nunca competiu com uma de sugestao, e apaga-la
+            # seria levar junto quem nao estava na briga.
+            group = sorted(
+                {
+                    membro
+                    for context in contextos
+                    if context["disputed"]
+                    for membro in context["members"]
+                }
+                or {index}
+            )
             conflicts[index] = {
-                "pattern": pattern,
+                "pattern": patterns[index],
                 "group": group,
-                "contexts": [
-                    context for context in contexts if index in context["members"]
-                ],
+                "contexts": contextos,
             }
 
     return conflicts
@@ -1323,7 +1481,13 @@ def analyze_glossary_csv_import(path, csv_path, allow_conflicts=False):
         orig, new = glossary_entry_pair(row_entry)
         rule_type = glossary_entry_type(row_entry)
         stats["total_rows"] += 1
-        if not orig or not new:
+        # Substituicao vazia e invalida em toda regra MENOS na de limpeza, onde
+        # ela e o proprio ponto: apagar lixo de conversao (`'== StartFEN =='`)
+        # antes de mandar o comentario para a API. O criterio e o mesmo de
+        # `validate_glossary_entry`, e ate agora os dois discordavam: exportar o
+        # glossario e reimporta-lo **descartava as regras de delecao**, em
+        # silencio, porque aqui elas caiam em `invalid` (garantia S14).
+        if not orig or (not new and rule_type != GLOSSARY_RULE_CLEANUP):
             stats["invalid"] += 1
             stats["skipped"] += 1
             continue
@@ -1539,12 +1703,19 @@ def find_glossary_suggestions(text, substitutions, max_suggestions=80):
         return []
 
     suggestions = []
+    # Sem repetir o mesmo par: uma regra literal e a expansao de um `@casa@`
+    # podem chegar aqui como a mesma sugestao, e oferece-la duas vezes na lista
+    # nunca ajudou ninguem.
+    vistos = set()
     # Indexado, e nao `for orig, new in ...`: uma regra priorizada chega aqui
     # com tres elementos. As sugestoes devolvidas continuam sendo pares — quem
     # as recebe aplica o par, nao reordena.
     for rule in order_rules_by_specificity(substitutions):
         orig, new = rule[0], rule[1]
+        if (orig, new) in vistos:
+            continue
         if find_glossary_matches(text, orig):
+            vistos.add((orig, new))
             suggestions.append((orig, new))
             if len(suggestions) >= max_suggestions:
                 break
@@ -1568,13 +1739,64 @@ def _as_rule(entry):
     return (orig, new, priority)
 
 
-def filter_glossary_entries_by_type(entries, rule_type):
-    rule_type = _normalize_rule_type(rule_type)
+# Placeholder de casa do tabuleiro (ROADMAP 14.7). Uma regra escrita com ele
+# vale para as 64 casas: `('@casa@-torre', 'torre de @casa@')` e uma linha no
+# arquivo e 64 regras na aplicacao.
+#
+# Existe porque 1.235 das 7.105 regras (17,4%) enumeravam casas a mao, e a
+# enumeracao manual tem o defeito de toda enumeracao manual: **buracos**. Sete
+# familias paravam em 56 regras — faltava a fileira 3 inteira —, `torre-<casa>`
+# e `dama-<casa>` nunca existiram, e ninguem consegue ver isso lendo 7 mil
+# linhas. A expansao nao tem como esquecer uma casa.
+#
+# Nao e regex, e a promessa da SPEC continua de pe: as regras que saem daqui sao
+# literais, exatamente as que o usuario escreveria a mao. O que muda e quem as
+# escreve.
+GLOSSARY_SQUARE_PLACEHOLDER = "@casa@"
+BOARD_SQUARES = tuple(
+    f"{coluna}{fileira}" for coluna in "abcdefgh" for fileira in "12345678"
+)
+
+
+def expand_square_placeholder(rule):
+    """Uma regra com `@casa@` -> as 64 regras literais; as outras, ela mesma.
+
+    O ORIGINAL manda: se ele nao tem o placeholder, a regra sai intacta mesmo
+    que a substituicao tenha — um `@casa@` sozinho na substituicao nao teria por
+    onde ser resolvido, e inventar 64 regras iguais para um padrao unico
+    mudaria o que a regra casa.
+
+    A expansao acontece na conversao entrada -> regra, e nao na leitura do
+    arquivo: o editor de glossario continua mostrando **uma** linha com o
+    placeholder, que e o que da para editar. A ordenacao por comprimento (S3)
+    ve o padrao ja expandido, com o tamanho real que ele tem no texto.
+    """
+    orig = rule[0]
+    if GLOSSARY_SQUARE_PLACEHOLDER not in orig:
+        return [rule]
+
+    resto = tuple(rule[2:])
     return [
-        _as_rule(entry)
-        for entry in _normalize_detailed_entries(entries)
-        if glossary_entry_type(entry) == rule_type
+        (
+            orig.replace(GLOSSARY_SQUARE_PLACEHOLDER, casa),
+            rule[1].replace(GLOSSARY_SQUARE_PLACEHOLDER, casa),
+        )
+        + resto
+        for casa in BOARD_SQUARES
     ]
+
+
+def _rules_from_entries(entries, allowed_types):
+    """Entradas -> regras aplicaveis, filtradas por tipo e com `@casa@` expandido."""
+    regras = []
+    for entry in _normalize_detailed_entries(entries):
+        if glossary_entry_type(entry) in allowed_types:
+            regras.extend(expand_square_placeholder(_as_rule(entry)))
+    return regras
+
+
+def filter_glossary_entries_by_type(entries, rule_type):
+    return _rules_from_entries(entries, {_normalize_rule_type(rule_type)})
 
 
 def load_cleanup_substitutions(path=None):
@@ -1599,13 +1821,10 @@ def load_automatic_substitutions(path=None):
 
 
 def load_interactive_substitutions(path=None):
-    entries = load_glossary_entry_details(path)
-    allowed_types = {GLOSSARY_RULE_SUGGESTION, GLOSSARY_RULE_AUTOMATIC}
-    return [
-        _as_rule(entry)
-        for entry in _normalize_detailed_entries(entries)
-        if glossary_entry_type(entry) in allowed_types
-    ]
+    return _rules_from_entries(
+        load_glossary_entry_details(path),
+        {GLOSSARY_RULE_SUGGESTION, GLOSSARY_RULE_AUTOMATIC},
+    )
 
 
 def apply_substitution(text, orig, new):

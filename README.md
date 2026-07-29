@@ -142,12 +142,20 @@ substituicoes = [
     ('rook', 'torre'),                     # sugestao, prioridade 0
     ('== EndSquare ==', '', 'cleanup'),    # outro tipo
     ('torre', 'castle', 'suggestion', 1),  # com prioridade
+    ('@casa@-torre', 'torre de @casa@'),   # vale pelas 64 casas
 ]
 ```
 
 Um `Substituicoes.txt` de uma versao anterior continua valendo: o que faltar
 assume o padrao. O mesmo vale para o CSV, cuja coluna `priority` e opcional na
-leitura.
+leitura. Um tipo que o programa nao reconheca continua virando `suggestion`, mas
+agora avisa qual valor nao foi entendido.
+
+O `@casa@` no padrao vale pelas **64 casas do tabuleiro**: a linha acima e uma
+no arquivo e 64 regras na aplicacao (`a1-torre`, ... `h8-torre`). As regras que
+saem dela sao literais, exatamente as que voce escreveria a mao — nao ha
+expressao regular envolvida. Quem manda e o padrao: sem `@casa@` nele, a regra
+vale como esta. O editor de glossario mostra e edita a linha com o placeholder.
 
 Quando duas regras disputam o mesmo padrao, o editor diz qual delas o programa
 aplica e oferece duas saidas: **Priorizar esta**, que a poe na frente sem apagar

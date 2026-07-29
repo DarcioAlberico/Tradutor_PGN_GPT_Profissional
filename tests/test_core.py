@@ -3866,9 +3866,16 @@ class GlossaryTests(unittest.TestCase):
         ]
         diagnostics = build_glossary_diagnostics(entries)
 
+        # `conflicts` conta 2, e nao 3: a duplicata exata (#2) nao e conflito —
+        # a vencedora produz exatamente o que ela queria, e o aviso dela e
+        # "Entrada duplicada". Era 3 porque a avaliacao antiga bastava "ha duas
+        # substituicoes distintas no grupo" e arrastava a duplicata junto,
+        # contra o que a propria garantia S9 dizia. Com S12 a pergunta passou a
+        # ser por regra: "o que a vencedora produz AQUI e diferente do que esta
+        # regra queria?" (ROADMAP 14.4)
         self.assertEqual(
             glossary_counts(entries, diagnostics),
-            {"total": 5, "duplicates": 2, "conflicts": 3, "invalid": 5},
+            {"total": 5, "duplicates": 2, "conflicts": 2, "invalid": 5},
         )
         self.assertEqual(
             glossary_filter_indices(entries, "mate", "Todas", diagnostics),
@@ -3878,9 +3885,12 @@ class GlossaryTests(unittest.TestCase):
             glossary_filter_indices(entries, "", "Duplicadas", diagnostics),
             [0, 1],
         )
+        # A duplicata exata (#2) fica fora de "Conflitos" pelo mesmo motivo da
+        # contagem acima: a vencedora produz exatamente o que ela queria. Ela
+        # continua em "Duplicadas", que e o aviso dela.
         self.assertEqual(
             glossary_filter_indices(entries, "", "Conflitos", diagnostics),
-            [0, 1, 2],
+            [0, 2],
         )
         self.assertEqual(
             glossary_filter_indices(entries, "fork", "Inválidas", diagnostics),
@@ -10801,7 +10811,7 @@ class OutputFidelityTests(unittest.TestCase):
             )
             self.assertFalse(sem_bom.read_bytes().startswith(b"\xef\xbb\xbf"))
 
-    def test_read_output_settings_validates_types(self):
+    def test_read_output_settings_validates_types_for_output(self):
         self.assertEqual(
             settings.read_output_settings({}), {"utf8_bom": False}
         )
@@ -10818,6 +10828,315 @@ class OutputFidelityTests(unittest.TestCase):
             settings.read_output_settings({"output": "lixo"}),
             {"utf8_bom": False},
         )
+
+
+class CaseShadowConflictTests(unittest.TestCase):
+    """Conflito por diferenca de caixa (garantia S12, ROADMAP 14.4).
+
+    Uma regra escrita toda em minusculas casa sem diferenciar caixa, entao ela
+    engole a versao capitalizada que venha depois. O detector agrupava por
+    padrao EXATO: `'black'` e `'Black'` eram padroes diferentes, e a janela
+    mostrava as duas lado a lado sem dizer que a segunda estava morta.
+    """
+
+    def test_lowercase_rule_shadows_the_capitalized_one(self):
+        entradas = [("black", "pretas"), ("Black", "as pretas")]
+        conflitos = glossario.glossary_conflicts(entradas)
+
+        self.assertEqual(sorted(conflitos), [0, 1])
+        mensagem = glossario.describe_glossary_conflict(entradas, 1, conflitos)
+        self.assertIn("nunca é aplicada", mensagem)
+        self.assertIn("'pretas'", mensagem)
+
+    def test_case_sensitive_first_leaves_both_alive(self):
+        """A relacao nao e simetrica. Com a de caixa fixa na frente, cada uma
+        pega o seu: `Black` o texto capitalizado, `black` o resto."""
+        entradas = [("Black", "as pretas"), ("black", "pretas")]
+        self.assertEqual(glossario.glossary_conflicts(entradas), {})
+
+    def test_capitalization_propagation_is_not_a_conflict(self):
+        """O caso que domina o glossario real (166 das 210): a vencedora ja
+        produz o que a morta queria, porque a substituicao propaga a
+        capitalizacao do texto encontrado. E redundancia, nao conflito."""
+        entradas = [
+            ("as pretas deve", "as pretas devem"),
+            ("As pretas deve", "As pretas devem"),
+        ]
+        self.assertEqual(glossario.glossary_conflicts(entradas), {})
+
+    def test_the_middle_rule_can_be_alive_and_the_last_dead(self):
+        """Com tres variantes o vencedor e por REGRA, e nao do grupo: a
+        primeira de caixa fixa vive, a insensivel vive, e o que vem depois dela
+        morre."""
+        entradas = [("Black", "x"), ("black", "y"), ("BLACK", "z")]
+        conflitos = glossario.glossary_conflicts(entradas)
+
+        self.assertNotIn(0, conflitos)
+        self.assertIn(2, conflitos)
+        self.assertEqual(conflitos[2]["contexts"][0]["winner"], 1)
+
+    def test_priority_revives_the_shadowed_rule(self):
+        """A saida nao destrutiva: a prioridade poe a capitalizada na frente e
+        as duas passam a valer (garantia S10)."""
+        entradas = [("black", "pretas"), ("Black", "as pretas", "suggestion", 1)]
+        self.assertEqual(glossario.glossary_conflicts(entradas), {})
+
+    def test_keeping_a_rule_also_removes_the_exact_duplicate(self):
+        """`group` nao e o conjunto em disputa: a duplicata exata nao e conflito
+        (a vencedora produz o mesmo que ela), mas continua engolindo quem vem
+        depois. Fora do grupo, "Manter esta" deixaria a escolhida morta."""
+        entradas = [("x", "a"), ("x", "a"), ("x", "b")]
+        conflitos = glossario.glossary_conflicts(entradas)
+
+        self.assertEqual(conflitos[2]["group"], [0, 1, 2])
+        mantidas = glossario.resolve_glossary_conflict(entradas, 2, conflitos)
+        self.assertEqual(mantidas, [("x", "b")])
+        self.assertEqual(glossario.glossary_conflicts(mantidas), {})
+
+    def test_a_cleanup_rule_is_not_dragged_into_the_group(self):
+        entradas = [("x", "a"), ("x", "b"), ("x", "c", "cleanup")]
+        conflitos = glossario.glossary_conflicts(entradas)
+        self.assertEqual(conflitos[0]["group"], [0, 1])
+
+
+class UnknownRuleTypeTests(unittest.TestCase):
+    """Tipo de regra desconhecido avisa (garantia S13, ROADMAP 14.6)."""
+
+    def test_masculine_and_short_aliases_are_understood(self):
+        """Faltavam, e sao o erro mais facil de cometer: a regra virava
+        sugestao, deixava de rodar depois da API, e nada avisava."""
+        for escrito in ("automático", "automatico", "auto", "AUTOMÁTICO"):
+            with self.subTest(escrito=escrito):
+                self.assertEqual(
+                    glossario._normalize_rule_type(escrito),
+                    glossario.GLOSSARY_RULE_AUTOMATIC,
+                )
+        self.assertEqual(
+            glossario._normalize_rule_type("clean"), glossario.GLOSSARY_RULE_CLEANUP
+        )
+
+    def test_unknown_values_are_listed_once_each(self):
+        desconhecidos = glossario.unknown_rule_types(
+            [
+                ("a", "b", "automático"),
+                ("c", "d", "xyz"),
+                ("e", "f", "xyz"),
+                ("g", "h", "zzz"),
+                ("i", "j"),
+            ]
+        )
+        self.assertEqual(desconhecidos, ["xyz", "zzz"])
+
+    def test_loading_a_file_with_a_bad_type_warns_and_degrades(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        caminho = Path(tmp.name) / "Substituicoes.txt"
+        caminho.write_text(
+            "substituicoes = [\n"
+            "    ('rook', 'torre', 'automatico'),\n"
+            "    ('queen', 'dama', 'perto'),\n"
+            "]\n",
+            encoding="utf-8",
+        )
+
+        avisos = []
+        glossario.set_glossary_error_handler(avisos.append)
+        self.addCleanup(glossario.set_glossary_error_handler, None)
+
+        entradas = glossario.load_glossary_entry_details(
+            str(caminho), prefer_db=False
+        )
+
+        # Degrada, como S5 manda: uma regra torta nao desliga as outras.
+        self.assertEqual(
+            [(o, n, t) for o, n, t, _p in entradas],
+            [
+                ("rook", "torre", glossario.GLOSSARY_RULE_AUTOMATIC),
+                ("queen", "dama", glossario.GLOSSARY_RULE_SUGGESTION),
+            ],
+        )
+        # ...mas avisa, uma vez, dizendo qual valor nao foi entendido.
+        self.assertEqual(len(avisos), 1)
+        self.assertIn("'perto'", avisos[0])
+        self.assertNotIn("automatico", avisos[0])
+
+
+class SquarePlaceholderTests(unittest.TestCase):
+    """O placeholder de casa (ROADMAP 14.7).
+
+    1.235 das 7.105 regras enumeravam casas a mao, e a enumeracao manual tem o
+    defeito de toda enumeracao manual: buracos. Sete familias paravam em 56
+    regras — faltava a fileira 3 inteira.
+    """
+
+    def test_one_rule_becomes_sixty_four(self):
+        regras = glossario.expand_square_placeholder(
+            ("@casa@-torre", "torre de @casa@")
+        )
+        self.assertEqual(len(regras), 64)
+        self.assertIn(("a1-torre", "torre de a1"), regras)
+        self.assertIn(("e3-torre", "torre de e3"), regras)
+        self.assertIn(("h8-torre", "torre de h8"), regras)
+
+    def test_a_rule_without_the_placeholder_is_untouched(self):
+        self.assertEqual(
+            glossario.expand_square_placeholder(("rook", "torre")),
+            [("rook", "torre")],
+        )
+
+    def test_priority_survives_the_expansion(self):
+        regras = glossario.expand_square_placeholder(("@casa@ x", "y @casa@", 3))
+        self.assertEqual(regras[0], ("a1 x", "y a1", 3))
+
+    def test_the_original_decides_the_expansion(self):
+        """Sem placeholder no original nao ha o que resolver: expandir daria 64
+        regras iguais para um padrao unico, mudando o que a regra casa."""
+        self.assertEqual(
+            glossario.expand_square_placeholder(("torre", "torre de @casa@")),
+            [("torre", "torre de @casa@")],
+        )
+
+    def test_loading_expands_and_the_editor_still_sees_one_entry(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        caminho = Path(tmp.name) / "Substituicoes.txt"
+        caminho.write_text(
+            "substituicoes = [\n"
+            "    ('@casa@-torre', 'torre de @casa@'),\n"
+            "]\n",
+            encoding="utf-8",
+        )
+
+        entradas = glossario.load_glossary_entry_details(str(caminho), prefer_db=False)
+        self.assertEqual(len(entradas), 1, "o editor edita a linha com o placeholder")
+
+        regras = glossario.load_suggestion_substitutions(str(caminho))
+        self.assertEqual(len(regras), 64)
+        self.assertEqual(
+            glossario.apply_all_substitutions("o e3-torre domina", regras),
+            "o torre de e3 domina",
+        )
+
+    def test_the_real_glossary_uses_the_placeholder(self):
+        """O colapso aconteceu: o arquivo versionado nao volta a enumerar casas.
+
+        Falhar aqui significa que alguem reescreveu uma familia casa a casa —
+        1.203 linhas de volta, com os buracos de volta junto.
+        """
+        path = Path(__file__).resolve().parent.parent / "Substituicoes.txt"
+        if not path.exists():  # pragma: no cover - checkout sem o glossario
+            self.skipTest("Substituicoes.txt nao esta neste checkout")
+
+        entradas = glossario.load_glossary_entry_details(
+            str(path), deduplicate=False, prefer_db=False
+        )
+        com_placeholder = [
+            orig
+            for orig, _new, _tipo, _prio in entradas
+            if glossario.GLOSSARY_SQUARE_PLACEHOLDER in orig
+        ]
+        self.assertGreaterEqual(len(com_placeholder), 20)
+
+        casa_literal = re.compile(r"\b[a-h][1-8]\b")
+        enumeradas = [
+            orig
+            for orig, _new, _tipo, _prio in entradas
+            if casa_literal.search(orig)
+        ]
+        # Sobram so as 28 automaticas de peao, que ficaram literais de proposito
+        # para nao mudar o tipo de 91 padroes (ROADMAP 14.7).
+        self.assertLessEqual(len(enumeradas), 40)
+
+
+class CuratedGlossaryTests(unittest.TestCase):
+    """O que a curadoria da secao 14 corrigiu no `Substituicoes.txt` real.
+
+    Cada asserto fixa uma decisao de xadrez, nao uma linha de codigo: sem
+    isto, a proxima edicao do glossario pode desfazer a correcao sem que nada
+    acuse.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        path = Path(__file__).resolve().parent.parent / "Substituicoes.txt"
+        if not path.exists():  # pragma: no cover - checkout sem o glossario
+            raise unittest.SkipTest("Substituicoes.txt nao esta neste checkout")
+        cls.entradas = glossario.load_glossary_entry_details(
+            str(path), deduplicate=False, prefer_db=False
+        )
+        cls.por_padrao = {}
+        for orig, new, tipo, prio in cls.entradas:
+            cls.por_padrao.setdefault(orig, []).append((new, tipo, prio))
+
+    def substituicoes(self, padrao):
+        return [new for new, _tipo, _prio in self.por_padrao.get(padrao, [])]
+
+    def test_the_evaluation_symbols_name_the_right_side(self):
+        """`=/+` (⩱) e vantagem das PRETAS. O arquivo dava a mesma leitura para
+        ele e para `+/=`, entao metade das avaliacoes saia invertida."""
+        self.assertEqual(
+            self.substituicoes("=/+"), ["com leve superioridade para as pretas"]
+        )
+        self.assertEqual(
+            self.substituicoes("+/="), ["as brancas têm leve superioridade"]
+        )
+        self.assertEqual(
+            self.substituicoes("-+"), ["com vantagem decisiva das pretas"]
+        )
+        self.assertEqual(
+            self.substituicoes("+-"), ["com vantagem decisiva das brancas"]
+        )
+
+    def test_castling_is_a_noun_and_back_rank_is_the_last_one(self):
+        self.assertEqual(self.substituicoes("castling"), ["roque"])
+        self.assertEqual(self.substituicoes("back rank"), ["última fila"])
+        self.assertEqual(self.substituicoes("back-rank"), ["última fila"])
+
+    def test_the_rules_that_broke_portuguese_are_gone(self):
+        """Medidas, nao supostas: cada uma corrompeu uma frase de teste real.
+
+        As que o relatorio inicial acusava e a fronteira de palavra protegia
+        (`the`, `if`, `with`, `by`) ficaram — nenhuma delas e palavra
+        portuguesa, e nenhuma corrompeu frase nenhuma.
+        """
+        for padrao in ("for", "por", "#", "luz", "negro"):
+            with self.subTest(padrao=padrao):
+                self.assertEqual(self.por_padrao.get(padrao, []), [])
+
+    def test_rank_and_file_are_not_inverted_anymore(self):
+        """As genericas convertiam toda 'fileira' em 'coluna'; as precisas
+        alcancam so o que vem depois de uma letra de coluna."""
+        self.assertEqual(self.por_padrao.get("-fileira", []), [])
+        self.assertEqual(self.substituicoes("e-fileira"), ["coluna e"])
+
+    def test_the_junk_deletion_rules_are_cleanup(self):
+        """Apagar lixo de conversao e trabalho de limpeza: roda antes da API, e
+        assim para de pagar traducao de lixo (garantia S14)."""
+        delecoes = [
+            (orig, tipo) for orig, new, tipo, _prio in self.entradas if not new
+        ]
+        self.assertTrue(delecoes)
+        for orig, tipo in delecoes:
+            with self.subTest(orig=orig):
+                self.assertEqual(tipo, glossario.GLOSSARY_RULE_CLEANUP)
+
+    def test_no_rule_returns_what_it_found(self):
+        for orig, new, _tipo, _prio in self.entradas:
+            if orig:
+                with self.subTest(orig=orig):
+                    self.assertNotEqual(orig, new)
+
+    def test_the_priority_field_is_finally_in_use(self):
+        """A prioridade existia desde o item 1.5 e nunca havia sido usada em
+        regra nenhuma das 7.105. A que a usa e `('Black', 'as pretas')`, que
+        estava morta: o artigo e gramatica, e a prioridade a revive sem apagar
+        a concorrente."""
+        priorizadas = [
+            (orig, new, prio)
+            for orig, new, _tipo, prio in self.entradas
+            if prio != glossario.GLOSSARY_PRIORITY_DEFAULT
+        ]
+        self.assertIn(("Black", "as pretas", 1), priorizadas)
 
 
 if __name__ == "__main__":

@@ -550,9 +550,31 @@ Um tipo ou uma prioridade que o programa nao entenda vira o padrao, em vez de
 erro: o arquivo e editavel a mao e sobrevive a versoes do programa, e uma regra
 mal escrita nao pode desligar as outras milhares na carga.
 
+**Garantia S13 — tipo de regra desconhecido avisa em vez de degradar em
+silencio.** A degradacao para `suggestion` continua (e o que S5 manda), mas a
+carga do arquivo publica um aviso pelo handler do glossario, nomeando os valores
+que nao foram entendidos. Um `('x', 'y', 'automático')` deixava de rodar depois
+da API e nada dizia por que. O aviso e **um** por carga, com ate cinco valores
+distintos: um arquivo com cem tipos tortos precisa de um aviso, nao de cem
+dialogos. Ele mora na leitura do texto, e nao do `glossario.db` — o banco guarda
+tipos ja normalizados, onde a grafia errada nao existe mais.
+
+**Um padrao pode conter `@casa@`**, que na carga vale pelas 64 casas do
+tabuleiro: `('@casa@-torre', 'torre de @casa@')` e uma linha no arquivo e 64
+regras na aplicacao. As regras expandidas sao **literais**, exatamente as que
+seriam escritas a mao — a expansao nao introduz expressao regular nenhuma. Quem
+manda e o padrao: sem `@casa@` nele, a regra sai intacta mesmo que a substituicao
+tenha um. O editor de glossario mostra e edita **uma** linha, com o placeholder.
+
 O CSV de importacao/exportacao tem as mesmas quatro colunas (`original`,
 `replacement`, `type`, `priority`), e a leitura aceita a ausencia das duas
 ultimas — um CSV de tres colunas, ou montado numa planilha, continua importavel.
+
+**Garantia S14 — exportar e reimportar o glossario preserva as regras de
+delecao.** Substituicao vazia e invalida em toda regra menos na de `cleanup`,
+onde ela e o proprio ponto (apagar lixo de conversao). A validacao do editor e a
+da importacao de CSV usam o **mesmo** criterio; enquanto discordavam, um
+round-trip pelo CSV descartava em silencio as 50 regras de delecao do glossario.
 
 ### 5.2 Semantica de casamento
 
@@ -608,13 +630,35 @@ A segunda nao pode reverter a primeira. Cada regra entrega exatamente o que
 declarou, e a regra genérica continua valendo onde a especifica nao alcanca.
 
 **Garantia S9 — a interface diz qual regra do conflito esta valendo.** Duas
-regras com o mesmo padrao e substituicoes diferentes nao empatam. S3 ordena por
-comprimento do padrao; padroes identicos empatam sempre, entao o que decide e a
-prioridade (S10) e, sem ela, a ordem do arquivo — vence quem foi digitado
-primeiro, e o congelamento de S4 impede a outra de rever o trecho. O editor
-mostra, na regra selecionada, qual delas o programa aplica, e oferece duas
+regras que casam o mesmo texto com substituicoes diferentes nao empatam. S3
+ordena por comprimento do padrao; padroes identicos empatam sempre, entao o que
+decide e a prioridade (S10) e, sem ela, a ordem do arquivo — vence quem foi
+digitado primeiro, e o congelamento de S4 impede a outra de rever o trecho. O
+editor mostra, na regra selecionada, qual delas o programa aplica, e oferece duas
 saidas: "Priorizar esta", que a poe na frente sem apagar nada, e "Manter esta",
 que remove as concorrentes do arquivo.
+
+**Garantia S12 — conflito por diferenca de caixa e anunciado como o exato, e so
+quando a vencedora produz outra coisa.** "O mesmo texto" e mais largo do que "o
+mesmo padrao": uma regra escrita **toda em minusculas** casa sem diferenciar
+caixa, entao ela engole a variante capitalizada que venha depois — `('black',
+'pretas')` mata `('Black', 'as pretas')`, e o agrupamento por padrao exato nao
+via isso. Medido no glossario real: 210 regras nunca disparavam.
+
+A relacao **nao e simetrica**. Com a de caixa fixa na frente as duas vivem, cada
+uma no seu texto; o que mata e a insensivel chegar antes.
+
+E uma regra sombreada so e conflito **quando perde algo**. A substituicao propaga
+a capitalizacao do texto encontrado, entao `('as pretas deve', 'as pretas
+devem')` aplicada a `"As pretas deve"` ja produz `"As pretas devem"` — o que a
+regra capitalizada ao lado dela queria. Ela esta morta e nada se perde: e
+redundancia, e a redundancia tem aviso proprio. O criterio e o que a vencedora
+**produz** naquele padrao, avaliado pela mesma funcao que a aplicacao usa; das
+210 mortas, 166 sao redundancia e 44 eram conflito de verdade.
+
+O que "Manter esta" remove inclui a duplicata exata do grupo, mesmo ela nao sendo
+conflito: deixada la, ela continuaria engolindo a regra escolhida, e o clique nao
+honraria o nome.
 
 O vencedor e **por contexto**. `Substituicoes.txt` e uma lista so, mas o programa
 carrega tres recortes dela: limpeza, automaticas, e sugestoes do editor (que
@@ -909,6 +953,9 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | S8 | Retencao so apaga backup, da familia certa | Risco da limpeza automatica |
 | S9 | A interface diz qual regra do conflito vence, pelo mesmo criterio que a aplica | Bug: regras iguais lado a lado, sem dizer qual dispara |
 | S10 | Prioridade explicita decide antes do comprimento | Limite: adiantar uma regra exigia alongar o padrao |
+| S12 | Conflito por diferenca de caixa e anunciado, e so quando a vencedora produz outra coisa | Bug: 210 regras nunca disparavam, e o detector era cego a todas |
+| S13 | Tipo de regra desconhecido avisa em vez de degradar em silencio | Bug: `'automático'` virava sugestao e deixava de rodar depois da API |
+| S14 | Exportar e reimportar o glossario preserva as regras de delecao | Bug: o round-trip pelo CSV descartava as 50 em silencio |
 | R1 | Gravacao so por acao do usuario | Bug: navegar reescreve o banco |
 | R5 | Navegar custa O(pagina) | Perf: paginacao anulada por varredura |
 | R8 | Navegar custa O(pagina) tambem com busca ativa | Perf: `LIKE '%x%'` varre a tabela a cada interacao |
@@ -1026,24 +1073,32 @@ X3). O que resta declarado como limite:
   italiano e `('alfil','bispo')` uma para o espanhol, confirmado com o
   glossario real. Traduzir para qualquer lingua que nao o portugues passa o
   texto por um filtro portugues. (ROADMAP 15)
-- A sensibilidade a caixa e inferida da grafia do padrao (`orig ==
-  orig.lower()`), e isso produz **regras mortas**: `('black','pretas')` casa
-  `Black` primeiro e `('Black','as pretas')` nunca dispara. Medido no arquivo
-  real: 389 grupos colidem por `casefold`, 210 regras nunca rodam — e a
-  garantia S9 nao as ve, porque o detector de conflitos agrupa por texto
-  exato. (ROADMAP 14.4)
-- O dicionario em si tem erros de xadrez conhecidos — `=/+` lido como vantagem
-  das **brancas** (e das pretas), `back rank` como "primeira fila",
-  `castling` como "rocado" — e regras de alto risco em palavras comuns
-  (`('for','para')` quebra "Se for melhor"). Curadoria em andamento.
-  (ROADMAP 14)
-- As 50 regras de delecao de lixo estao tipadas `suggestion` (o tipo `cleanup`
-  esta vazio), o editor as marca invalidas e o round-trip CSV as descarta.
-  (ROADMAP 14.5)
+- A sensibilidade a caixa e **inferida da grafia do padrao** (`orig ==
+  orig.lower()`), e nao declarada. Escrever uma regra em minusculas e a unica
+  forma de pedir casamento sem diferenciar caixa, entao as duas decisoes —
+  "quero casar maiusculas?" e "como grafo o padrao?" — vivem no mesmo lugar. A
+  garantia S12 faz o programa **acusar** o que isso produz (a regra
+  capitalizada engolida), mas nao separa as duas decisoes.
+- As **166 regras mortas inofensivas** continuam no arquivo. Elas nunca
+  disparam, e nada se perde: a vencedora produz o que elas queriam, porque a
+  capitalizacao e propagada. O detector nao as aponta de proposito. (ROADMAP
+  14.4)
+- **A curadoria alcancou o que a medicao alcanca.** As regras que corrompem
+  construcoes que ninguem escreveu numa frase de teste continuam la; o que o
+  programa ganhou foi como acusa-las. (ROADMAP 14.10)
+- Padronizar os **tres estilos de aspas** da coluna "e" (`'peão "e"'`,
+  `"coluna 'e'"`, `'coluna e'`) ficou de fora: escolher qual aparece no texto
+  publicado e decisao editorial, nao correcao. (ROADMAP 14.9)
 - A saida com sufixo numerico de colisao (`game-BR-2.pgn`) **nao** e
   reconhecida como arquivo gerado: uma terceira execucao da mesma pasta a
   retraduz (portugues para portugues) e produz `game-BR-2-BR.pgn`. Confirmado.
   (ROADMAP 17.10)
+- **Regra de `cleanup` nao e oferecida no editor**: o contexto interativo
+  carrega sugestoes e automaticas. Para as 50 regras de delecao isso e o
+  desenho certo — elas agem no PGN de origem, antes da API —, mas significa que
+  lixo ja gravado numa traducao nao tem remocao por um clique. Medido no banco
+  de desenvolvimento: zero ocorrencias dos 50 padroes nas traducoes. (ROADMAP
+  14.5)
 
 **Revisao e qualidade**
 
@@ -1094,14 +1149,11 @@ Declaradas aqui para que a secao 9 continue sendo apenas o que os testes ja
 protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
-Da revisao de 2026-07-29 (ROADMAP 14 a 20; as garantias X1-X3 da secao 13
-foram entregues no mesmo dia e ja estao na secao 9):
+Da revisao de 2026-07-29 (ROADMAP 15 a 20; as garantias das secoes 13 e 14 —
+X1-X3, S12-S14 — foram entregues no mesmo dia e ja estao na secao 9):
 
 | # | Garantia | Item |
 |---|---|---|
-| S12 | Conflito por diferenca de caixa e anunciado como o exato | 14 |
-| S13 | Tipo de regra desconhecido avisa em vez de degradar em silencio | 14 |
-| S14 | Exportar e reimportar o glossario preserva as regras de delecao | 14 |
 | S11 | Regra com escopo de idioma so e aplicada no seu par | 15 |
 | S15 | O dicionario-semente nunca sobrepoe uma regra do usuario | 15 |
 | Q1 | Lance perdido e anotacao rompida geram aviso de qualidade | 16 |
