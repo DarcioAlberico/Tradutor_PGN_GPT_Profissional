@@ -5,13 +5,59 @@ Registro das melhorias do programa. Cada item traz o motivo, o impacto medido
 verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
-**Nada pendente no momento.** As garantias que os testes protegem estao na
-[SPEC.md](SPEC.md), secao 9; ela e a lista que vale, e nao uma copia aqui.
+**Pendentes: as secoes 13 a 20**, todas da revisao de 2026-07-29. As garantias
+que os testes ja protegem estao na [SPEC.md](SPEC.md), secao 9; as que as secoes
+pendentes prometem estao declaradas na secao 11 da SPEC, e cada uma so migra
+para a 9 quando o item correspondente estiver pronto e tiver teste que falhe sem
+a correcao.
 
-Esta frase ficou **falsa por um dia** e vale dizer como: a secao 10 conserta os
-lances na hora da traducao, e a medicao que fechou aquele item mostrou 4.144
-traducoes ja gravadas com a letra errada — um pendente que nasceu junto com a
-correcao e nao foi registrado aqui. A secao 11 e ele.
+A frase que ficava aqui — "nada pendente no momento" — ja tinha ficado **falsa
+por um dia** uma vez, e vale manter o registro: a secao 10 conserta os lances na
+hora da traducao, e a medicao que fechou aquele item mostrou 4.144 traducoes ja
+gravadas com a letra errada — um pendente que nasceu junto com a correcao e nao
+foi registrado aqui. A secao 11 e ele.
+
+**Revisao de 2026-07-29 (secoes 13 a 20).** Pedido do usuario: uma analise do
+programa inteiro com os olhos de um tradutor profissional de livros e arquivos
+de xadrez — falhas, melhorias e dicionarios. O metodo foi o da revisao de
+2026-07-27, em maior escala: tres varreduras paralelas e independentes (o
+glossario real regra a regra; o pipeline de traducao e o banco; a interface e o
+fluxo de revisao), cruzadas com duas fontes de evidencia desta maquina — o banco
+de desenvolvimento (6.500 traducoes en -> pt, uma amostra real de livro de
+xadrez) e reproducoes das corrupcoes com as funcoes reais do programa, nao com a
+API. Onde um achado veio de analise estatica e nao pode ser reproduzido, isso
+esta dito no proprio item.
+
+O tema que domina esta revisao: **o programa protege com rigor o que esta FORA
+de `{...}` e trata tudo que esta DENTRO como prosa.** Lances, variantes, NAG e
+tags saem byte a byte identicos — e sempre foi o acerto central do desenho. Mas
+dentro do comentario vivem coisas que tambem nao sao prosa: as anotacoes de
+maquina (`[%cal]`, `[%eval]`, `[%clk]`) do Lichess e do ChessBase, simbolos de
+avaliacao, numeros de lance. Nada as protege, e duas corrupcoes deterministicas
+foram confirmadas em execucao (secao 13).
+
+As tres descobertas que doem:
+
+- **A correcao de lances reescreve as setas do Lichess.** `[%cal Ra1h8]` (seta
+  vermelha de a1 a h8) vira `[%cal Ta1h8]` — o codigo de cor `R` colide com a
+  letra da Torre. Confirmado com a funcao real; e deterministico; e a ferramenta
+  "Corrigir Lances" faz o mesmo em massa, sobre linhas ja verificadas (13.1).
+- **401 das 6.500 traducoes do banco de desenvolvimento tem erro de terminologia
+  enxadristica** detectavel por padrao simples — "White" sem traduzir, "check"
+  como "cheque", "file" como "arquivo" — e o `quality_warning` marca 11 linhas,
+  **nenhuma das 401**. O glossario do usuario ja sabe corrigir praticamente
+  todas: o conhecimento existe, esta preso no tipo `suggestion`, aplicado um a
+  um, a mao (16).
+- **O dicionario tem um erro factual de xadrez**: `=/+` — vantagem das pretas —
+  esta traduzido como "com leve superioridade para as brancas". Uma regra
+  automatica que inverte a avaliacao do comentario (14.1).
+
+E o quadro geral do dicionario, medido regra a regra: 7.105 regras, das quais
+6.958 `suggestion`, 147 `automatic`, **zero** `cleanup` e zero com prioridade;
+210 mortas por colisao de caixa que o detector de conflitos nao enxerga; 1.235
+enumerando casas do tabuleiro a mao; cobertura real de 1,5 idioma dos 7
+anunciados (fr/de/it/ru: nenhuma regra). O glossario e a maior forca do programa
+e o lugar onde ha mais o que consertar — as secoes 14 e 15 sao o plano.
 
 **Revisao de 2026-07-28 (secoes 9 e 10).** Quatro pedidos do usuario, e o que os
 une nao e o tema — e o fato de todos serem **decisoes dele que o codigo nao tinha
@@ -2929,3 +2975,695 @@ levanta ele, e nao `JSONDecodeError`.
   indistinguivel, aqui achou isto.
 
 **Garantia M2 (nova):** *um BOM no arquivo de configuracoes nao apaga nada.*
+
+---
+
+## 13. A traducao corrompe o que nao e prosa — PENDENTE
+
+O desenho do programa divide o PGN em dois mundos: fora de `{...}` nada e
+tocado (e a garantia N1 e a base de tudo), dentro de `{...}` tudo e texto a
+traduzir. So que dentro do comentario vivem coisas que nao sao texto: as
+anotacoes de maquina do Lichess e do ChessBase (`[%clk 0:05:30]`,
+`[%eval +0.35]`, `[%cal Ra1h8]`, `[%csl Gd4]`), NAGs (`$14`), simbolos de
+avaliacao (`+-`, `?!`, `∞`) e numeros de lance. O pipeline nao tem o conceito
+de "token que nao se traduz" — nao ha mascara, protecao nem verificacao em
+nenhum ponto — e dois desses tokens sao corrompidos hoje, de forma
+deterministica, **antes mesmo de a API entrar**.
+
+O banco de desenvolvimento nao tem nenhum `[%...]` (a amostra veio de livro), e
+por isso o problema nunca apareceu em uso. Mas PGN de Lichess e chess.com — a
+fonte mais comum de material hoje — carrega essas anotacoes em quase todo
+comentario, e a primeira pasta vinda de la seria corrompida em silencio.
+
+### 13.1 A correcao de lances reescreve as setas coloridas
+
+`_move_pattern` casa `Ra1h8` como um lance de Torre: `R` + `a1` + `h8` formam
+`peca + casa + casa`, e o `]` seguinte nao e `\w`, entao a fronteira fecha. Mas
+em `[%cal Ra1h8]` o `R` e o codigo da cor **vermelha** (Red), nao uma peca. Os
+codigos de cor do Lichess sao `R`, `G`, `Y`, `B` — e `R` e `B` colidem com
+Torre e Bispo do ingles.
+
+Confirmado nesta maquina com a funcao real, en -> pt:
+
+```
+fix_move_notation('[%cal Ra1h8] good plan', '[%cal Ra1h8] bom plano', 'en', 'pt')
+  -> ('[%cal Ta1h8] bom plano', 1)      # seta vermelha destruida
+fix_move_notation('[%csl Rd4] weak square', '[%csl Rd4] casa fraca', 'en', 'pt')
+  -> ('[%csl Td4] casa fraca', 1)       # circulo vermelho destruido
+```
+
+Nao e caso de borda probabilistico: o original e a fonte da ancora, entao o
+pareamento e sempre 1 para 1 e a troca **sempre** acontece. `G` e `Y` escapam
+por sorte — nao sao letra de peca em idioma nenhum da tabela.
+
+Isso fere o que a garantia P3 diz de si mesma — "o pior resultado possivel dela
+e deixar um lance como o tradutor escreveu" — porque aqui o pior resultado e
+outro: reescrever uma anotacao que nunca foi lance. E a ferramenta "Corrigir
+Lances" (P4) aplica a mesma corrupcao **em massa e retroativamente**, inclusive
+sobre linhas que o usuario ja verificou (o `verified` nao e rebaixado, de
+proposito — a decisao certa para lances vira a errada para setas).
+
+### 13.2 O achatamento quebra `[%eval]` e todo decimal
+
+`flatten_comment` insere espaco depois de `.`, `!` e `?` quando o proximo
+caractere e `\w` — **e digito e `\w`**. Confirmado nesta maquina:
+
+```
+'[%eval +0.35]'   -> '[%eval +0. 35]'
+'2.5 pawns up'    -> '2. 5 pawns up'
+'14.Bxf7+ wins'   -> '14. Bxf7+ wins'
+```
+
+O `[%eval +0.35]` e destruido **antes de qualquer traducao**, e o texto
+corrompido e tres coisas ao mesmo tempo: a chave do cache, o que vai para a API
+e o que volta para o PGN gerado. Nao ha como recuperar depois.
+
+A correcao do regex e pequena (nao inserir espaco entre `digito.digito`), mas
+**muda a chave de cache**: um comentario com decimal reachatado deixa de casar
+com a linha ja gravada. A migracao precisa de plano — reachatar as chaves
+existentes na mesma transacao, como a secao 11 fez com a rotulagem — e isso
+esta no escopo do item.
+
+### 13.3 Tudo dentro do comentario vai cru para a API
+
+`[%clk]`, NAGs, simbolos: nenhum filtro antes do envio. O Google pode traduzir
+`eval`, quebrar um colchete, reformatar `+-` como `+ -` ou absorver `?!` na
+pontuacao. Nada confere a volta.
+
+**O plano e mascara com restauracao verificada.** Antes do achatamento, extrair
+os spans `\[%[a-z]+ [^\]]*\]` (e opcionalmente NAGs `\$\d+`) e substitui-los
+por sentinelas que nenhum tradutor toca; depois da resposta, restaurar e
+**conferir byte a byte** que cada sentinela voltou exatamente uma vez. Se a
+restauracao falhar, o comentario e tratado como falha (T2/T3) em vez de gravado
+corrompido. A mascara resolve 13.1 e 13.2 de uma vez para as anotacoes — e
+`extract_moves`/`fix_move_notation` ganham, por defesa em profundidade, a
+exclusao explicita dos spans `[%...]` dos candidatos, porque a ferramenta em
+massa do banco (P4) opera sobre texto ja gravado, onde a mascara nao passou.
+
+**Garantia planejada X1** — *anotacoes `[%...]` atravessam a traducao byte a
+byte.*
+
+### 13.4 Comentario esvaziado pela limpeza vira `{}` no arquivo
+
+Quando as regras de limpeza esvaziam um comentario (`{== StartFEN ==}` e lixo
+de conversao mesmo), o worker grava `translated_map[comment] = ""` e a geracao
+monta `"{" + "" + "}"`: o PGN de saida fica pontilhado de `{}`. Parsers
+tolerantes aceitam; os estritos reclamam; e visualmente e sujeira. O certo e
+remover o span inteiro, com o espaco adjacente — o que exige distinguir, no
+mapa, "traduzido para vazio" de "remover o span".
+
+**Garantia planejada X2** — *comentario esvaziado pela limpeza sai do arquivo
+sem deixar `{}` para tras.*
+
+### 13.5 Comentarios `;` nao existem para o programa
+
+O padrao PGN tem duas formas de comentario: `{...}` e `;` ate o fim da linha. O
+extrator so ve a primeira. Um PGN anotado no estilo `1. e4 ; melhor lance` sai
+com "Nenhum comentario encontrado" e o usuario conclui que o programa falhou —
+o modo de erro mais confuso possivel, porque nada esta errado e nada e dito.
+
+Traduzir `;` e desejavel mas nao e o primeiro passo; **anunciar** e. Contar os
+`;` na extracao e dizer no log e no resumo "N comentarios no formato `;` foram
+ignorados (nao suportado)" transforma silencio em informacao.
+
+**Garantia planejada X3** — *o que o pipeline ignora e contado e anunciado.*
+
+### 13.6 A saida nao respeita quem vai ler o arquivo
+
+Tres achados menores da mesma familia — o arquivo gerado e correto, mas hostil
+ao consumidor:
+
+- **Comentario multilinha vira linha unica** (o achatamento e a chave de cache,
+  e esta certo que seja), entao o PGN de saida tem linhas de centenas de
+  caracteres — fora do export format (80 colunas) que o padrao recomenda e que
+  editoras esperam. Requebrar as linhas na **gravacao** nao toca a chave.
+- **PGN ASCII de entrada sai UTF-8 sem BOM**: a traducao introduz `ç` e `ã`, e
+  o ChessBase no Windows le ANSI — mojibake. Uma opcao "gravar UTF-8 com BOM"
+  resolve o caso dominante.
+- **O fim de linha e reescrito** (`\r\n` -> `\n` na leitura, `os.linesep` na
+  escrita, sem `newline=''` em nenhum `open`): todo acervo versionado ou
+  comparado por hash muda inteiro. O tratamento cuidadoso de `\r\n` que existe
+  no normalizador de metadados e codigo morto por causa disso.
+
+---
+
+## 14. O dicionario tem erros de xadrez, regras mortas e lacunas — PENDENTE
+
+O `Substituicoes.txt` foi lido regra a regra (7.105), com demonstracoes ao vivo
+usando o glossario real. E o maior ativo do programa — 7.105 decisoes tomadas
+uma a uma — e e tambem onde um tradutor profissional encontra mais o que
+consertar. Este item e a curadoria; o 15 e a estrutura.
+
+### 14.1 Um erro factual de xadrez, aplicado automaticamente
+
+```
+('=/+', 'com leve superioridade para as brancas')     # ERRADO
+('+/=', 'as brancas tem leve superioridade')          # certo
+```
+
+`=/+` (⩱) significa **as pretas** ligeiramente melhores. O arquivo da a mesma
+leitura para os dois simbolos, entao metade das avaliacoes `=/+` de qualquer
+livro sai **invertida** — e e regra automatica: roda sem revisao. Correcao de
+uma linha, impacto direto no sentido do texto. Junto com ela, a familia toda
+merece conferencia: `-+` esta traduzido com "negras" onde o resto do arquivo
+usa "pretas", e o congelamento (S4) impede a normalizacao posterior.
+
+### 14.2 Terminologia errada codificada
+
+- `('castling', 'rocado')` — particibio onde o portugues pede o substantivo
+  "roque" (a regra irma `('Castling', 'Roque')` esta certa; por caixa, a errada
+  e a que pega o texto minusculo, que e quase todo).
+- `('back rank', 'primeira fila')` e `('back-rank', 'primeira fila')` — *back
+  rank* e a **ultima** fileira de quem defende; "primeira fila" so vale para as
+  brancas, e o proprio arquivo se contradiz em outra regra ("ultima fila").
+- `('-fileira', '-coluna')` — existe porque o Google verte *file* como
+  "fileira", mas converte tambem toda "fileira" legitima (uma *rank*) em
+  "coluna". E a inversao rank/file codificada como regra.
+- `('Zwischenzug', 'Lance intermediario ganhador')` — sobretraducao: um
+  Zwischenzug nao e necessariamente ganhador.
+
+### 14.3 Regras de altissimo risco em palavras comuns
+
+Nove regras casam palavras funcionais ou siglas curtas e destroem portugues
+legitimo — confirmado ao vivo:
+
+```
+('for', 'para')      "Se for melhor..."  -> "Se para melhor..."
+('negro', 'negras')  "O bispo negro"     -> "O bispo negras"
+```
+
+Na mesma classe: `('the','o')`, `('if','se')`, `('with','com')`,
+`('by','pelas')`, `('Quote','')` (apaga a palavra em qualquer contexto),
+`('AD','BD')` e `('AR','BR')` (notacao descritiva espanhola de dois
+caracteres, dispara em qualquer sigla). O destino certo de cada uma e caso a
+caso — ancorar num contexto maior, restringir por escopo de idioma (secao 15)
+ou remover — mas nenhuma pode continuar como esta.
+
+### 14.4 210 regras mortas por colisao de caixa, invisiveis ao detector
+
+Uma regra toda minuscula casa sem diferenciar caixa. Entao `('black','pretas')`
+tambem casa `Black`, e `('Black','as pretas')` — digitada depois, com a
+substituicao **diferente** — nunca dispara: por posicao a minuscula vem antes,
+e o congelamento (S4) impede a segunda de rever o trecho. Confirmado ao vivo
+com o glossario real:
+
+```
+IN : Black wins the pawn.
+OUT: Pretas wins o peão.        # e nao "as pretas", como a regra de cima pedia
+```
+
+Medido no arquivo inteiro: **389 grupos que colidem por `casefold`, cobrindo
+789 regras, das quais 210 nunca disparam.** E `glossary_conflicts` agrupa por
+texto **exato**, entao a garantia S9 — "a interface diz qual regra do conflito
+esta valendo" — e cega para 100% desses casos: a janela mostra as duas regras
+lado a lado sem dizer que uma esta morta.
+
+O conserto tem duas metades: o detector de conflitos passa a agrupar por
+`casefold` quando a regra vencedora e insensivel a caixa (e ai S9 volta a
+valer), e a curadoria decide grupo a grupo qual das versoes fica.
+
+**Garantia planejada S12** — *conflito por diferenca de caixa e anunciado como
+o exato.*
+
+### 14.5 As 50 regras de delecao estao no tipo errado, e o CSV as perde
+
+Ha 50 regras que apagam lixo de conversao (`'== StartFEN =='`, `'@@'`,
+`'îîEndBracketîî'`) — trabalho de **limpeza** por definicao, que deveria rodar
+**antes** da API (nao pagar para traduzir lixo). Todas estao tipadas
+`suggestion`, o tipo `cleanup` esta **vazio** (zero regras), e tres defeitos se
+somam:
+
+- elas so rodam se o revisor aplicar a mao, uma a uma;
+- `validate_glossary_entry` so tolera substituicao vazia em `cleanup`, entao o
+  editor as marca invalidas;
+- `analyze_glossary_csv_import` descarta linha com substituicao vazia, entao
+  **exportar e reimportar o glossario perde as 50**.
+
+Retipar as 50 para `cleanup` e aceitar substituicao vazia no CSV quando o tipo
+for `cleanup` fecham o ciclo.
+
+**Garantia planejada S14** — *exportar e reimportar o glossario preserva as
+regras de delecao.*
+
+### 14.6 Um tipo mal escrito degrada em silencio
+
+`_normalize_rule_type` converte qualquer valor irreconhecivel em `suggestion`.
+A tabela de aliases tem `automatica`/`automática` mas nao `automatico`/
+`automático` (masculino) nem `auto` — entao `('x','y','automático')` vira
+sugestao, deixa de rodar depois da API, e nada avisa. O arquivo e editavel a
+mao e sobrevive a versoes; degradar sem derrubar esta certo (mesmo principio de
+S5), **degradar sem avisar** nao. O handler de erros do glossario ja existe e e
+o lugar do aviso.
+
+**Garantia planejada S13** — *tipo de regra desconhecido avisa em vez de
+degradar em silencio.*
+
+### 14.7 1.235 regras enumeram casas a mao, com buracos
+
+17,4% do glossario (1.235 regras) contem uma casa literal (`a1`..`h8`):
+familias como `a1-peao -> peao de a1` escritas casa a casa. O levantamento
+exaustivo mostrou o preco da enumeracao manual:
+
+- a **fileira 3 inteira falta** em cinco familias (`a3-peao`..`h3-peao` etc.);
+- `torre-<casa>`, `dama-<casa>` e as duas de rei tem **zero** regras;
+- `<casa>-peao` esta partida sem criterio: 42 regras `suggestion` e 14
+  `automatic` — `a1-peao` corrige sozinho e `a4-peao` espera revisao.
+
+O mecanismo proposto: um **placeholder de casa** (`@casa@`) expandido na carga
+para as 64 regras literais. Nao e regex — a SPEC promete que padrao de regra e
+literal, e a promessa fica de pe: a expansao gera exatamente as regras que o
+usuario escreveria a mao, so que todas, e o arquivo encolhe de 1.235 para ~20
+linhas. Editor e CSV mostram o placeholder como qualquer texto.
+
+### 14.8 O nucleo terminologico do xadrez tem ~30 ausencias
+
+Varredura por termo, contra o vocabulario basico de anotacao em ingles. Zero
+regras para: *zugzwang*, *en passant*, *skewer* (espeto), *pin* como palavra
+inglesa (so ha `alfinete`, o erro do Google — se o tradutor deixar *pin* em
+ingles, nada corrige), *blunder*, *outpost* (posto avancado), *smothered mate*
+(mate sufocado), *open file* como expressao (coluna aberta), *exchange
+sacrifice* (sacrificio de qualidade — as 83 regras de `qualidade` existentes
+cobrem outra direcao), *hanging pawns* (peoes pendurados), *minority attack*
+(ataque de minorias), *threefold repetition* (triplice repeticao), *fifty-move
+rule*, *insufficient material*, *fortress* (fortaleza), *prophylaxis*
+(profilaxia), *opposition*, *triangulation*, *windmill* (moinho),
+*underpromotion* (subpromocao), *deflection* (desvio), *decoy* (atracao),
+*overloading* (sobrecarga), *interference*, *clearance*, *novelty*, *luft*,
+*time trouble*/*Zeitnot*, *king safety*, *pawn chain*. E os simbolos `!`,
+`?!`, `∞`, `⩲`, `⩱` nao tem regra nenhuma (a familia `+-`/`-+`/`+/=`/`=/+`
+tem — com o erro do 14.1).
+
+Preencher isso e trabalho de dicionario puro, e entra junto com a semente por
+idioma da secao 15 — cada termo desses tem traducao consagrada em pt, es, fr,
+de, it e ru, e digitar as ~30 uma vez por idioma e mais barato que descobrir
+uma a uma pelo erro.
+
+### 14.9 Miudezas que a curadoria leva junto
+
+Tres regras no-op (`('coluna a','coluna a')` e irmas); hifenizacao
+inconsistente (`Xeque-mate` vs `xeque mates`; o plural correto e
+"xeques-mate"); `('roqueemos','rocamos')` troca subjuntivo por indicativo
+("roquemos"); `('companheiros','mate')` perde o plural; tres estilos de aspas
+para a coluna "e"; docstrings do `glossario.py` citando 7.008 regras onde hoje
+ha 6.958. Nenhuma muda sentido sozinha; juntas, sao o rumor de fundo que a
+curadoria zera.
+
+---
+
+## 15. O glossario nao sabe para que lingua traduz — PENDENTE
+
+A SPEC sempre declarou o limite ("o glossario nao e por par de idiomas", secao
+10); o que a revisao acrescentou e a **prova de que ele ja custa caro**. As 147
+regras automaticas rodam sobre a resposta da API seja qual for o destino, e o
+dano foi confirmado ao vivo com o glossario real:
+
+```
+IT  'Il movimento della torre'      -> 'Il lance della torre'      # italiano corrompido
+ES  'El alfil negro domina'         -> 'El bispo negras domina'    # espanhol, duas vezes
+EN  'O-O is castling'               -> '0-0 is castling'           # ingles alterado
+```
+
+`('movimento','lance')`, `('alfil','bispo')`, `('negro','negras')`,
+`('black','pretas')` — cada uma esta **certa** para o destino portugues e
+**errada** para os outros seis. Hoje traduzir para qualquer lingua que nao o
+portugues passa o texto por um filtro portugues.
+
+E a composicao medida do arquivo mostra que nao e acidente, e historia: ~98%
+das regras corrigem saida do Google **em portugues**, ~101 sao ingles -> pt,
+**uma** e espanhol -> pt, e fr/de/it/ru tem zero. O programa anuncia 7 idiomas
+e o glossario atende 1,5.
+
+### 15.1 Escopo de idioma como quinto campo
+
+Cada regra ganha um escopo opcional — o idioma de **destino** a que ela se
+aplica (`'pt'`), ou par completo quando importar (`'en>pt'`) —, quinto campo da
+tupla, ausente = vale para todos, exatamente o padrao de retrocompatibilidade
+do quarto campo (prioridade): um `Substituicoes.txt` antigo continua valendo, e
+cada campo so e escrito quando tem algo a dizer. No CSV, coluna `lang`,
+opcional na leitura. A aplicacao filtra pelo par ativo da execucao (worker) ou
+da janela (editor); o editor de glossario mostra e edita o campo e ganha o
+filtro correspondente.
+
+A migracao do acervo atual e uma decisao de curadoria simples: as regras
+pt -> pt e en -> pt existentes recebem escopo `pt` em massa (e o dano do
+exemplo acima desaparece), as poucas globais de notacao (`('×','x')`,
+`('O-O','0-0')`) ficam sem escopo de proposito.
+
+**Garantia planejada S11** — *regra com escopo de idioma so e aplicada no seu
+par.* Sem escopo, comportamento de hoje — e nada muda para quem nao usar o
+campo.
+
+### 15.2 Dicionarios-semente por idioma
+
+Com o escopo existindo, o programa pode finalmente **vir com** dicionarios: um
+nucleo curado de terminologia enxadristica por destino — pecas, conceitos
+(cravada, garfo, espeto, afogamento, roque), nomes de abertura, simbolos — como
+regras com escopo, embarcadas num arquivo proprio (`Substituicoes-semente.txt`
+ou equivalente), carregadas junto com as do usuario mas **marcadas de onde
+vieram**. Duas decisoes de seguranca:
+
+- a semente **nunca vence** uma regra do usuario para o mesmo padrao no mesmo
+  escopo — o usuario ja decidiu, e a semente e o palpite generico;
+- a semente e versionada com o programa e atualizavel sem tocar no
+  `Substituicoes.txt` do usuario — os dois arquivos nao se misturam no disco.
+
+O conteudo inicial ja esta levantado: as ~30 ausencias da secao 14.8 para os 7
+destinos, mais as correcoes recorrentes do Google medidas no banco (16). E o
+"implementar dicionarios" do pedido do usuario, na forma que o programa ja
+sabe carregar.
+
+**Garantia planejada S15** — *a semente nunca sobrepoe uma regra do usuario.*
+
+---
+
+## 16. O aviso de qualidade nao conhece xadrez — PENDENTE
+
+As cinco heuristicas de `review_quality.py` sao genericas de traducao: vazia,
+igual ao original, chaves perdidas, curta demais, longa demais. Nenhuma sabe
+que o texto e xadrez. A medicao no banco de desenvolvimento (6.500 traducoes
+en -> pt, reais, de livro) dimensiona o buraco:
+
+| | |
+|---|---|
+| linhas com erro de terminologia detectavel por padrao simples | **401 (6,2%)** |
+| linhas que o `quality_warning` marca (banco todo) | 11 |
+| intersecao entre os dois conjuntos | **0** |
+
+Os padroes foram estreitos de proposito (subcontar, nunca inflar): "White"/
+"Black" nao traduzidos (263), *check* -> "cheque"/"verificar" (44), *exchange*
+como qualidade -> "troca" (31), *file* -> "arquivo" (18), *tempo* ->
+"andamento"/"ritmo" (11), *square* -> "quadrado" (10), *pin* -> "alfinete"/
+"fixado" (4), *piece* -> "pedaco" (3), *rank* -> "classificacao" (2), *sound*
+-> "som" (1), *castle* -> "castelo" (1). Cada um desses erros esta numa linha
+que o filtro "Avisos QA" **nao mostra** — e o glossario do usuario ja tem a
+correcao de quase todos, como sugestao, esperando alguem abrir a linha certa.
+
+### 16.1 Heuristicas de xadrez
+
+A materia-prima ja existe no programa; e questao de liga-la ao aviso:
+
+1. **Lance perdido ou inventado** — as ancoras de `extract_moves` (secao 10)
+   comparadas entre original e traducao. O original tem `Bxf7+`, `Qd5+`, `Kxf7`
+   e a traducao tem duas ancoras? O tradutor comeu um lance. E o aviso de maior
+   valor por linha de codigo do projeto inteiro.
+2. **Anotacao rompida** — os spans `[%...]` do original presentes e identicos
+   na traducao (enquanto a mascara da secao 13 nao existe, este aviso e a rede;
+   depois dela, e a prova de que a mascara funcionou).
+3. **NAGs e simbolos de avaliacao** — multiconjunto de `$n`, `!`, `?`, `+-`,
+   `∞` etc. igual dos dois lados.
+4. **Digitos** — multiconjunto dos numeros igual dos dois lados; pega
+   `0. 35`, `14` sumido e numeral por extenso.
+5. **`U+FFFD`** — o sinal direto de que `errors='replace'` engoliu bytes
+   (E4/G2 impedem na leitura nova; isto detecta o legado).
+6. **Separador vazado** — `|||` no texto gravado e evidencia de desalinhamento
+   que a contagem nao pegou.
+7. **Quase-igualdade** — hoje so igualdade exata conta; uma traducao 95%
+   identica ao original (o Google desistiu) passa limpa.
+8. **Terminologia por par** — a lista de termos suspeitos do paragrafo acima,
+   com escopo de idioma (secao 15), mantida junto do glossario: *o termo X no
+   original com a forma errada Y na traducao* gera aviso. E o que transforma as
+   6.958 sugestoes de reativas em localizaveis.
+
+**Garantia planejada Q1** — *lance perdido e anotacao rompida geram aviso.*
+
+### 16.2 As heuristicas precisam de versao
+
+`quality_warning` e materializada (R5/R6) e o backfill so preenche `NULL` —
+correto para a coluna nova, insuficiente para heuristica nova: qualquer regra
+acrescentada deixa as 200 mil linhas ja avaliadas com o veredito velho, e a
+garantia R6 ("o cache de avisos nunca diverge") passa a ser violada exatamente
+pela melhoria. Falta o mecanismo: gravar a **versao** das heuristicas
+(`PRAGMA user_version` proprio ou metadado) e reavaliar o banco quando ela
+sobe — em segundo plano, com progresso e cancelamento, como toda escrita em
+massa.
+
+**Garantia planejada Q2** — *as heuristicas de QA tem versao, e muda-las
+reavalia o banco.*
+
+---
+
+## 17. Guardas e navegacao: onde o programa erra em silencio — PENDENTE
+
+Itens pontuais de correcao, agrupados porque compartilham o modo de falha: a
+acao acontece (ou nao acontece) sem nenhuma mensagem, e o usuario segue
+confiando no resultado. Origem: varredura da interface e do worker na revisao
+de 2026-07-29. Cada um foi conferido no codigo; nenhum tem teste hoje.
+
+### 17.1 "Ir para ID" e "Proximo aviso QA" ignoram o filtro de origem
+
+Os dois caminhos consultam o banco **sem** `source_language`, embora as funcoes
+aceitem o parametro e `reload_rows` o passe. Com "Origem: Espanhol" ativo,
+digitar um ID ingles calcula o offset na lista **nao filtrada** e seleciona uma
+linha espanhola arbitraria — sem mensagem; F7 varre as primeiras N linhas da
+tabela inteira usando o total **filtrado** como limite e anuncia o aviso de uma
+linha que nao esta na tela. "Exportar QA" passa o filtro corretamente — a
+inconsistencia entre caminhos vizinhos e a prova do esquecimento. E a mesma
+classe do bug que a garantia R7 fechou: navegar pela posicao errada.
+
+**Garantia planejada R10** — *"Ir para ID" e "Proximo aviso" respeitam o
+filtro de origem.*
+
+### 17.2 Tres ferramentas de escrita em massa rodam durante uma traducao
+
+`reset_translations`, `reset_glossary` e "Corrigir Lances" verificam
+`app.is_processing` e recusam com dialogo. **Restaurar BD, Importar CSV e
+Aplicar Automaticas nao verificam** — e restaurar um backup enquanto o worker
+grava produz um banco que nao e nem o backup nem a execucao, com o cache em
+memoria apontando para linhas que ja nao existem. Agravante: os botoes de
+"Ferramentas" sao criados anonimos e nao ha como desabilita-los; a guarda tem
+de ser a primeira linha de cada acao, com a mesma mensagem das tres que ja
+fazem certo.
+
+**Garantia planejada T5** — *nenhuma ferramenta de escrita em massa roda
+durante uma traducao.*
+
+### 17.3 Botoes que engolem o clique
+
+"Reprocessar Falhas" e "Normalizar PGN" comecam com `if app.is_processing:
+return` — retorno mudo. Clicar durante uma traducao nao faz nada e nao diz
+nada ("Corrigir Lances" no mesmo caso abre um dialogo explicando). O botao de
+reprocessar tambem nunca e desabilitado junto com os outros. Trocar os dois
+`return` por mensagem e uma linha em cada.
+
+### 17.4 A verificacao em massa propaga pela traducao, nao pelo original
+
+"Marcar como verificada" propaga para as linhas do mesmo par cuja **traducao**
+e identica — e a unica propagacao possivel (originais identicos ja sao uma
+linha so pela UNIQUE), e quase sempre e o que se quer. O risco esta nas
+traducoes curtas: se o Google verteu "Checkmate." errado como "Empate.",
+verificar o "Draw." -> "Empate." legitimo marca a linha errada junto — dado
+por revisado o que ninguem viu, exatamente o que R9 existe para impedir. A
+correcao barata: a confirmacao mostra **quantos originais distintos** vao ser
+marcados (e quais, ate um limite), em vez de so "N iguais tambem verificadas".
+
+**Garantia planejada V1** — *a verificacao em massa diz o que vai marcar, por
+original.*
+
+### 17.5 A previa de "Corrigir Lances" esconde a parte irreversivel
+
+A ferramenta rotula **todas** as linhas sem origem do destino antes de corrigir
+(secao 11 explica por que), e a previa mostra contagens de correcao — mas nao
+diz **quantas linhas serao rotuladas**. Num banco com 200 mil linhas legadas, o
+"Sim" afirma "todo o meu acervo veio do espanhol" sem que esse numero tenha
+aparecido. Ele so e dito no dialogo de resultado, depois de feito. E uma linha
+na previa, com o dado que o `analyze` ja tem.
+
+### 17.6 O backup do banco migra a origem antes de copiar
+
+`create_database_backup` abre a origem com `initialize_database` — que roda a
+migracao de schema e o backfill. O "backup de seguranca" pre-restauracao pode
+entao **alterar o banco de trabalho** antes de copia-lo, e capturar o estado
+pos-migracao: se a migracao for a causa do problema que o usuario quer
+desfazer, nao ha mais volta. Abrir a origem com `sqlite3.connect` puro copia o
+que esta la, como esta.
+
+### 17.7 O CSV de traducoes e somente-exportacao na pratica
+
+O fluxo natural — exportar, corrigir 300 traducoes na planilha, importar — nao
+faz **nada**: a gravacao respeita T1 (nunca sobrescrever preenchida), entao
+toda linha volta como "Sem alteracao", e ate o `verified` editado e descartado
+(so e aplicado a linhas inseridas ou preenchidas). A previa e honesta, mas o
+usuario descobre depois do trabalho feito. Falta o modo explicito "sobrescrever
+existentes" — com backup, contagem propria na previa ("N seriam
+sobrescritas"), registro no historico (R2) e reavaliacao de QA (R6), como toda
+escrita em massa. T1 continua sendo o padrao; sobrescrever passa a ser uma
+decisao, nao um acidente.
+
+### 17.8 Buscar `[%eval` no modo "Trecho" devolve lixo
+
+O `LIKE` e montado sem `ESCAPE`: `%` e `_` do texto do usuario viram curinga.
+A busca mais natural do dominio — uma tag de comando, que **comeca** com `%` —
+e justamente a que quebra. `LIKE ? ESCAPE '\'` mais o escape dos tres
+caracteres no padrao.
+
+### 17.9 A garantia S5 morre sob `pythonw`
+
+`report_glossary_error` faz `print(...)` **antes** de chamar o handler da
+interface — e sob `pythonw`/PyInstaller windowed `sys.stdout` e `None`, entao o
+`print` levanta e o handler nunca roda. A funcao que existe para tornar a falha
+visivel e a unica que quebra no empacotado. Guarda de uma linha (`if
+sys.stdout:`), e um teste que simule `stdout=None` — que e exatamente o cenario
+que M2/S5 ja ensinaram a testar.
+
+### 17.10 Miudezas confirmadas da mesma varredura
+
+- `prefer_db=False` e ignorado quando `db_path` e passado (o argumento
+  explicito do chamador perde para a conveniencia interna).
+- **Worker**: interrompido pelo disjuntor, a barra de progresso congela no
+  valor em que estava; uma excecao geral perde a lista de falhas da execucao
+  (T4 so e gravada no caminho feliz — a lista anterior fica valendo e
+  "Reprocessar Falhas" reprocessa os arquivos errados); o lote e montado sobre
+  o texto **cru** mas enviado **limpo** — regras de limpeza que expandem furam
+  B1 por fora (a folga de 200 chars segura hoje; e acoplamento, nao garantia).
+- `game-BR-2.pgn` (saida com sufixo numerico de colisao) **nao** e reconhecido
+  como gerado — confirmado: a terceira execucao da mesma pasta traduz
+  portugues para portugues e produz `game-BR-2-BR.pgn`. O `strip_generated
+  _suffix` precisa aceitar o `-N` opcional (idem `-NORM-2` no normalizador).
+- **Normalizador de metadados**: uma secao repetida no `spelling.ssp` **apaga**
+  as 984 mil entradas da anterior (atribuicao onde devia ser merge — e o jeito
+  natural de acrescentar nomes e criar um segundo bloco `@PLAYER` no fim);
+  uma falha num arquivo derruba o lote inteiro sem estatisticas parciais; o
+  valor corrigido e inserido sem re-escapar aspas.
+- **Janelas**: os editores ignoram a geometria salva (o `maximize=True`
+  agendado a +50 ms sobrescreve a restauracao — todo o caminho de
+  `safe_geometry` esta morto na pratica); o popup "Adicionar ao glossario"
+  abre em tela cheia para tres campos e fecha sem validar nem avisar (falha =
+  janela fechada = usuario acha que gravou); a janela de historico, modeless
+  de proposito (R3), abre maximizada **cobrindo** a lista que deveria
+  continuar clicavel.
+
+---
+
+## 18. O banco nao sabe de onde cada traducao veio — PENDENTE
+
+A tabela `comments` guarda o texto e o par de idiomas — e nada mais. Nao ha
+arquivo de origem, partida, numero do lance nem execucao. Consequencias diretas
+para quem traduz um livro:
+
+- a lista do editor e `ORDER BY id` — ordem de insercao, misturando todos os
+  PGN ja processados; **nao existe ordem de leitura da obra**;
+- nao ha progresso por livro ("faltam 120 comentarios do capitulo 7");
+- nao ha como reverter "tudo que a execucao de ontem gravou";
+- nao ha como mostrar, um dia, a posicao do lance comentado — validar lance e
+  nao-objetivo (secao 1 da SPEC) e continua sendo, mas **exibir o contexto** ao
+  revisor e outra coisa, e hoje e estruturalmente impossivel.
+
+A `UNIQUE (original, origem, destino)` e o coracao do reuso — o mesmo
+comentario em 12 livros e uma linha, uma traducao, uma revisao — e **nao deve
+ser tocada**. Contexto entra por uma tabela de **ocorrencias** ao lado
+(`occurrences`: comentario -> arquivo, partida, indice), N para 1, gravada pelo
+worker que ja tem todos esses dados na mao durante a extracao. O editor ganha
+filtro por arquivo e ordenacao por ocorrencia; as estatisticas ganham progresso
+por obra; e o esquema fica pronto para o dia em que uma FEN por ocorrencia
+fizer sentido.
+
+E a unica mudanca de esquema proposta nesta revisao, e a decisao arquitetural
+que convem tomar **antes** de crescer o resto: cada melhoria do editor que
+nascer sem ela (17, 19) nasce para ser refeita.
+
+---
+
+## 19. O fluxo do tradutor profissional — PENDENTE
+
+O editor foi construido para revisar uma linha; um livro sao vinte mil. Os
+itens abaixo sao o que separa "da para revisar" de "da para trabalhar o dia
+inteiro nisso", em ordem de retorno por esforco. Nenhum exige o esquema novo
+(18); os que se beneficiam dele estao marcados.
+
+1. **Lado a lado opcional.** Original acima da traducao, em 6 linhas contra
+   12, obriga a rolar a fonte num comentario longo de livro. Um `PanedWindow`
+   horizontal alternavel (posicao persistida, como os divisores que ja
+   existem).
+2. **`Ctrl+F` no lugar certo.** Hoje foca a busca da **lista**; o gesto
+   universal e buscar **no texto aberto**. `Ctrl+F` no texto, `Ctrl+L` na
+   lista.
+3. **Voltar depois de buscar.** Usar a busca como concordancia ("como traduzi
+   *outpost* ate aqui?") descarta a pagina em que se estava, sem volta. Uma
+   pilha de ids visitados e `Alt+Backspace`.
+4. **A linha da lista diz o que importa.** 54 caracteres de cada lado, sem
+   marcador de aviso QA e sem idioma de origem — em "Origem: Todos" nao da
+   para ver de onde a linha veio sem carrega-la. O `SELECT` da pagina ja quase
+   tudo traz; e rotulo.
+5. **Diff de verdade na previa de "Aplicar todas"** — dois blocos de texto a
+   olho nu para conferir 80 substituicoes; as faixas trocadas ja sao
+   calculadas, falta pinta-las.
+6. **Contagem de palavras.** A metrica com que tradutor profissional orca,
+   mede e cobra — e nao existe em lugar nenhum do programa. Palavras do
+   original e da traducao por status, no resumo e por par; `comment_history`
+   ja tem carimbo por edicao e daria produtividade por dia sem esquema novo.
+7. **Estatisticas fora do clique.** "Estatisticas do BD" roda na thread da
+   interface e materializa as linhas com aviso de todos os pares — a unica
+   operacao pesada que ficou fora do `run_with_progress` (2.11), e o resultado
+   e um `messagebox` que nao se copia nem exporta. Janela propria, copiavel,
+   com as contagens de palavras do item 6.
+8. **Exportacao TMX.** O acervo de 200 mil pares revisados **e** uma memoria
+   de traducao — presa num formato que so este programa le. TMX 1.4 e um XML
+   simples (o `id` como `tuid`), abre em OmegaT/Trados/memoQ, e transforma o
+   trabalho acumulado em ativo portavel. Incluir o `id` no CSV atual e o passo
+   barato imediato (round-trip seguro; hoje o reimport casa por texto).
+9. **Selecao em lote na lista** (com 18: por arquivo/obra): marcar a pagina
+   como verificada, exportar so a selecao.
+10. **Rascunho fora da thread da interface.** A cada 700 ms de pausa na
+    digitacao, o JSON inteiro de configuracoes e relido, serializado e trocado
+    atomicamente — na thread do Tk. Em disco lento ou com antivirus, isso e
+    engasgo na digitacao. Debounce maior e gravacao em segundo plano.
+11. **Corretor ortografico do idioma de destino.** O `spelling.ssp` e
+    dicionario de **nomes proprios** (tags), nao serve para prosa; um
+    dicionario pt-BR (hunspell) sublinhando no editor pegaria os erros de
+    digitacao da revisao — que hoje so o proximo leitor ve.
+12. **Status alem do binario** — "rejeitada"/"em duvida" e nota do revisor por
+    linha; pendente/verificada nao expressa "voltar aqui com o autor".
+
+---
+
+## 20. Desempenho e memoria do pipeline — PENDENTE
+
+Itens medidos ou derivados na revisao de 2026-07-29, todos sem mudanca de
+comportamento — so de custo. Nenhum e urgente com os acervos atuais; todos
+viram parede com um livro grande.
+
+- **`generate_translated_pgn` e O(n·m)**: cada substituicao copia o arquivo
+  inteiro (`content[:start] + rep + content[end:]`). Um PGN de 40 MB com 15 mil
+  comentarios sao centenas de GB de copia de memoria. Os spans ja vem
+  ordenados; uma passada com `"".join` e O(n). E junto: hoje nao ha checagem de
+  `cancel_flag` nessa fase.
+- **Cada arquivo e lido 3 a 4 vezes** (deteccao de encoding le inteiro, a
+  extracao rele, a geracao rele e redetecta). Reaproveitar conteudo e encoding
+  da extracao corta metade do I/O.
+- **Duplicatas dentro do lote pagam API**: o cache so aprende depois da
+  resposta, entao um lote com "Diagram" 30 vezes envia as 30. `dict.fromkeys`
+  no lote resolve — e de quebra conserta o contador de "novas traducoes", que
+  hoje subnotifica porque a segunda gravacao da mesma chave volta "unchanged".
+- **`info_by_file` segura todos os PGN na memoria** a execucao inteira (o
+  conteudo normalizado vive duas vezes: na lista de comentarios e nas tuplas de
+  posicao). Processar e soltar por arquivo, guardando so o que a adocao (P2) e
+  a carga de cache precisam.
+- **O `spelling.ssp` e reparseado a cada uso**: 985 mil linhas, ~1,1 s e
+  centenas de MB transitorios para normalizar um PGN de 20 KB. O mesmo desenho
+  do `glossario.db` resolve — um indice SQLite derivado, com hash do fonte, e
+  o botao passa a custar milissegundos.
+- **A chave do cache de sugestoes e O(n) por consulta**: uma tupla de 6.958
+  elementos e montada e hasheada a cada tecla no editor. Um contador de versao
+  do glossario (incrementado a cada recarga) substitui a tupla por um inteiro.
+
+---
+
+## Apendice da revisao de 2026-07-29 — o metodo, para poder ser refeito
+
+- **Banco de desenvolvimento**: `traducoes.db` local, 6.500 linhas en -> pt
+  (amostra real de livro; o banco de producao do usuario, ~201 mil linhas, nao
+  foi tocado). As contagens de terminologia (16) sairam de padroes regex
+  estreitos por termo, rodados sobre `original_comment`/`translated_comment`;
+  subcontam de proposito.
+- **Glossario**: `Substituicoes.txt` na versao de 7.105 regras; contagens por
+  tipo/prioridade/familia por varredura completa; colisoes de caixa por
+  agrupamento `casefold`; regras mortas confirmadas aplicando o glossario real
+  a frases de teste.
+- **Corrupcoes (13.1, 13.2)**: reproduzidas nesta maquina chamando
+  `fix_move_notation` e `flatten_comment` reais, com os pares de entrada/saida
+  registrados no proprio item. `is_generated_pgn('game-BR-2.pgn') == False`
+  idem.
+- **Achados de codigo sem reproducao** (guardas ausentes, navegacao com filtro
+  de origem, backup que migra, CSV somente-exportacao): conferidos por leitura
+  das linhas citadas; cada um precisa de teste que falhe antes da correcao,
+  como manda a regra da secao 11 da SPEC.

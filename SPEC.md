@@ -3,7 +3,7 @@
 Documento de referencia do comportamento do sistema. Descreve **o que** o programa
 faz e sob quais garantias, nao **como** cada funcao esta escrita.
 
-Versao do documento: 2026-07-28.
+Versao do documento: 2026-07-29.
 
 ---
 
@@ -308,6 +308,14 @@ o tradutor pode devolver a notacao inglesa ate num par que nao passa pelo ingles
 Sem idioma de origem declarado a correcao **nao roda**, e o log diz isso: sem
 saber em que alfabeto o original esta, corrigir seria trocar um erro do tradutor
 por um palpite do programa.
+
+**Excecao conhecida e confirmada (ROADMAP 13.1): as anotacoes `[%cal]`/`[%csl]`
+enganam a correcao.** Os codigos de cor do Lichess (`R`ed, `G`reen, `Y`ellow,
+`B`lue) vivem dentro do comentario e `Ra1h8` tem a forma exata de um lance de
+Torre: `[%cal Ra1h8]` (seta vermelha) vira `[%cal Ta1h8]`, deterministicamente,
+na traducao nova (P3) e na ferramenta em massa (P4). Enquanto o ROADMAP 13 nao
+estiver pronto, a frase "o pior resultado possivel e deixar o lance como o
+tradutor escreveu" **nao vale** para comentarios com essas anotacoes.
 
 **Garantia P4 — o que ja estava gravado tambem alcanca a correcao.** P3 so
 protege o que passa pela traducao; o que entrou no banco antes dela continua com
@@ -889,6 +897,34 @@ leia uma garantia acima como mais ampla do que ela e.
   CPU: a thread de trabalho segura o GIL entre dois relatos, e a atualizacao so
   chega quando a thread da interface e escalonada. A janela responde e o
   "Cancelar" funciona; o que atrasa e o numero. (ROADMAP 2.11)
+- "Restaurar BD", "Importar CSV" e "Aplicar Automaticas" **nao recusam** rodar
+  com uma traducao em andamento — as tres ferramentas que ja recusam ("Zerar",
+  "Corrigir Lances") mostram o desenho certo, e estas ficaram de fora.
+  Restaurar durante uma execucao produz um banco que nao e nem o backup nem a
+  execucao. (ROADMAP 17.2)
+
+**Anotacoes embutidas e conteudo que nao e prosa**
+
+O pipeline trata tudo dentro de `{...}` como texto a traduzir. As anotacoes de
+maquina do Lichess/ChessBase e os simbolos que vivem ali dentro nao tem
+nenhuma protecao (ROADMAP 13):
+
+- `[%cal Ra1h8]`/`[%csl Rd4]` sao corrompidos pela correcao de lances — ver a
+  excecao registrada na secao 3.5. (ROADMAP 13.1)
+- `[%eval +0.35]` e quebrado pelo achatamento (`+0. 35`) **antes** de qualquer
+  traducao, e o texto quebrado e a chave de cache, o que vai a API e o que
+  volta ao PGN. Todo decimal em comentario sofre o mesmo. (ROADMAP 13.2)
+- `[%clk]`, NAGs `$n` e simbolos de avaliacao vao crus para a API, sem mascara
+  e sem conferencia na volta. (ROADMAP 13.3)
+- Um comentario esvaziado pelas regras de limpeza vira `{}` literal no arquivo
+  gerado. (ROADMAP 13.4)
+- Comentarios `;` (a segunda forma do padrao PGN) nao sao extraidos, nao
+  contam e nao geram aviso: um PGN anotado so com `;` responde "nenhum
+  comentario encontrado". (ROADMAP 13.5)
+- O arquivo gerado sai com comentarios em linha unica (fora do export format
+  de 80 colunas), com o fim de linha reescrito pela plataforma e, quando a
+  entrada era ASCII, em UTF-8 sem BOM — que o ChessBase no Windows le como
+  ANSI. (ROADMAP 13.6)
 
 **Desempenho e escala**
 
@@ -938,7 +974,54 @@ leia uma garantia acima como mais ampla do que ela e.
   adiantar uma regra, mas so entre regras — nao ha grupos, escopos por idioma
   nem condicoes: uma regra vale para todo texto do seu recorte. Em particular,
   **o glossario nao e por par de idiomas**: as mesmas regras valem para as
-  traducoes de todas as linguas de origem.
+  traducoes de todas as linguas de origem **e de destino** — e isso ja custa
+  caro, nao e so teoria: `('movimento','lance')` corrompe uma traducao para o
+  italiano e `('alfil','bispo')` uma para o espanhol, confirmado com o
+  glossario real. Traduzir para qualquer lingua que nao o portugues passa o
+  texto por um filtro portugues. (ROADMAP 15)
+- A sensibilidade a caixa e inferida da grafia do padrao (`orig ==
+  orig.lower()`), e isso produz **regras mortas**: `('black','pretas')` casa
+  `Black` primeiro e `('Black','as pretas')` nunca dispara. Medido no arquivo
+  real: 389 grupos colidem por `casefold`, 210 regras nunca rodam — e a
+  garantia S9 nao as ve, porque o detector de conflitos agrupa por texto
+  exato. (ROADMAP 14.4)
+- O dicionario em si tem erros de xadrez conhecidos — `=/+` lido como vantagem
+  das **brancas** (e das pretas), `back rank` como "primeira fila",
+  `castling` como "rocado" — e regras de alto risco em palavras comuns
+  (`('for','para')` quebra "Se for melhor"). Curadoria em andamento.
+  (ROADMAP 14)
+- As 50 regras de delecao de lixo estao tipadas `suggestion` (o tipo `cleanup`
+  esta vazio), o editor as marca invalidas e o round-trip CSV as descarta.
+  (ROADMAP 14.5)
+- A saida com sufixo numerico de colisao (`game-BR-2.pgn`) **nao** e
+  reconhecida como arquivo gerado: uma terceira execucao da mesma pasta a
+  retraduz (portugues para portugues) e produz `game-BR-2-BR.pgn`. Confirmado.
+  (ROADMAP 17.10)
+
+**Revisao e qualidade**
+
+- As heuristicas de qualidade sao genericas de traducao; nenhuma sabe que o
+  texto e xadrez. Medido no banco de desenvolvimento (6.500 linhas en -> pt):
+  401 traducoes com erro de terminologia detectavel por padrao simples, 11
+  linhas marcadas pelo `quality_warning`, intersecao zero. Lance perdido,
+  anotacao `[%...]` rompida e NAG sumido tampouco geram aviso. (ROADMAP 16)
+- As heuristicas nao tem versao: acrescentar uma regra nova deixa as linhas ja
+  avaliadas com o veredito antigo, e o backfill so preenche `NULL`. (ROADMAP
+  16.2)
+- "Ir para ID" e "Proximo aviso QA" consultam o banco **sem** o filtro de
+  origem: com "Origem: Espanhol" ativo, os dois podem selecionar uma linha
+  errada sem mensagem. (ROADMAP 17.1)
+- A verificacao em massa propaga pela **traducao** identica dentro do par (a
+  unica propagacao possivel — originais identicos ja sao uma linha so), o que
+  pode dar por revisado um original que o usuario nao viu quando duas frases
+  diferentes receberam a mesma traducao curta. A confirmacao nao mostra os
+  originais afetados. (ROADMAP 17.4)
+- O CSV de traducoes e somente-exportacao na pratica: o reimport respeita T1 e
+  devolve "Sem alteracao" para toda linha ja preenchida, inclusive descartando
+  o `verified` editado. Nao ha modo explicito de sobrescrever. (ROADMAP 17.7)
+- No modo de busca "Trecho", `%` e `_` do texto do usuario sao curingas do
+  `LIKE` (sem `ESCAPE`): buscar `[%eval` — a busca mais natural do dominio —
+  devolve lixo. (ROADMAP 17.8)
 
 **Estrutura**
 
@@ -961,10 +1044,23 @@ leia uma garantia acima como mais ampla do que ela e.
 ## 11. Garantias planejadas
 
 Declaradas aqui para que a secao 9 continue sendo apenas o que os testes ja
-protegem. Cada uma entra na tabela quando o item correspondente do ROADMAP
+protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
-Nenhuma pendente no momento.
+Da revisao de 2026-07-29 (ROADMAP 13 a 20):
 
 | # | Garantia | Item |
 |---|---|---|
+| X1 | Anotacoes `[%...]` atravessam a traducao byte a byte | 13 |
+| X2 | Comentario esvaziado pela limpeza sai do arquivo sem deixar `{}` | 13 |
+| X3 | O que o pipeline ignora (comentarios `;`) e contado e anunciado | 13 |
+| S12 | Conflito por diferenca de caixa e anunciado como o exato | 14 |
+| S13 | Tipo de regra desconhecido avisa em vez de degradar em silencio | 14 |
+| S14 | Exportar e reimportar o glossario preserva as regras de delecao | 14 |
+| S11 | Regra com escopo de idioma so e aplicada no seu par | 15 |
+| S15 | O dicionario-semente nunca sobrepoe uma regra do usuario | 15 |
+| Q1 | Lance perdido e anotacao rompida geram aviso de qualidade | 16 |
+| Q2 | As heuristicas de QA tem versao, e muda-las reavalia o banco | 16 |
+| R10 | "Ir para ID" e "Proximo aviso" respeitam o filtro de origem | 17 |
+| T5 | Nenhuma ferramenta de escrita em massa roda durante uma traducao | 17 |
+| V1 | A verificacao em massa diz o que vai marcar, por original | 17 |
