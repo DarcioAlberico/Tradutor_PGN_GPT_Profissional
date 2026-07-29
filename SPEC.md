@@ -257,6 +257,17 @@ e a letra e o que se corrige. Quando a ancora empata (duas pecas para a mesma
 casa, "Rf1 ou Kf1"), o desempate e a ordem; se nem ela resolver, **nada e
 tocado**.
 
+A captura conta como `x`, `×` ou `:`, e a ancora normaliza os tres. Nao e
+tolerancia gratuita: material publicado usa `×`, e uma regra automatica do
+glossario converte `×` em `x` — entao o original guarda `N×d4` e a traducao chega
+com `Nxd4`. Sem normalizar, os dois teriam ancoras diferentes e o lance nao seria
+pareado. Medido no banco real: 4.316 capturas com `x`, 198 com `×` e 7 com `:`.
+
+**O corpo do lance corrigido sai da TRADUCAO**, e nao do original — e o que "so a
+letra muda" quer dizer literalmente. Copiar o lance do original inteiro parece
+equivalente e nao e: devolveria ao texto o `×` que o glossario acabou de
+normalizar, desfazendo em silencio uma decisao do usuario.
+
 **A leitura do original e restrita ao idioma declarado; a da traducao, nao.** No
 original a letra e a informacao, e aceitar mais alfabetos devolveria a
 ambiguidade que declarar o idioma veio resolver. Na traducao a letra e ruido —

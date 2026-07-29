@@ -9192,6 +9192,53 @@ class FixMoveNotationTests(unittest.TestCase):
         self.assertEqual(texto, "A promocao e8=D e decisiva.")
         self.assertEqual(quantos, 1)
 
+    def test_a_capture_written_with_the_multiplication_sign_is_still_a_move(self):
+        """`N×d4` aparece em material publicado e chega assim aos comentarios.
+
+        Medido no banco real: 198 capturas escritas com `×` e 7 com `:`, contra
+        4.316 com `x`. As 205 primeiras nao eram nem reconhecidas como lance,
+        entao passavam sem correcao — o defeito mais silencioso possivel, porque
+        o lance simplesmente nao existia para a funcao.
+        """
+        texto, quantos = self.corrige(
+            "Instead of 12. N×d4 the rook R×e4 wins.",
+            "Em vez de 12. Nxd4 a torre Rxe4 ganha.",
+        )
+
+        self.assertEqual(texto, "Em vez de 12. Cxd4 a torre Txe4 ganha.")
+        self.assertEqual(quantos, 2)
+
+    def test_the_capture_mark_of_the_translation_is_the_one_that_stays(self):
+        """O corpo do lance sai da TRADUCAO, e nao do original.
+
+        Uma regra automatica do glossario do usuario converte `×` em `x`, entao
+        o original guarda `N×d4` e a traducao chega com `Nxd4`. Reescrevendo com
+        o corpo do original, a correcao devolveria o `×` ao texto — desfazendo
+        em silencio uma decisao tomada no glossario. O teste exige as duas
+        direcoes, porque so uma delas passaria por acaso.
+        """
+        do_original, _ = self.corrige(
+            "The rook R×e4 wins.", "A torre Rxe4 ganha."
+        )
+        self.assertEqual(do_original, "A torre Txe4 ganha.", "o × voltou ao texto")
+
+        da_traducao, _ = self.corrige(
+            "The rook Rxe4 wins.", "A torre R×e4 ganha."
+        )
+        self.assertEqual(da_traducao, "A torre T×e4 ganha.", "o × da traducao sumiu")
+
+    def test_a_translation_without_the_piece_letter_gains_nothing(self):
+        """A funcao substitui; ela nao acrescenta.
+
+        Se a traducao perdeu a letra da peca, inserir uma seria afirmar um lance
+        que o texto traduzido nao tem — e a garantia e que o pior resultado
+        possivel e deixar como esta.
+        """
+        texto, quantos = self.corrige("The queen Qe8=Q wins.", "A dama e8=Q ganha.")
+
+        self.assertNotIn("De8=", texto)
+        self.assertEqual(quantos, 0)
+
     def test_captures_disambiguators_and_check_survive_untouched(self):
         """So a letra da peca muda; o resto do lance sai do proprio texto."""
         texto, _ = self.corrige(
@@ -9334,19 +9381,33 @@ class FixMoveNotationTests(unittest.TestCase):
         self.assertEqual(quantos, 0)
 
     def test_a_bare_pawn_move_in_the_translation_is_never_rewritten(self):
-        """A guarda que impede a correcao de inventar uma peca.
-
-        O original tem um so lance para a casa `f1`, o rei. Se lances de peao
-        entrassem como candidatos, o `f1` solto da traducao teria a mesma ancora
-        e receberia o `Rf1` do rei — um lance de peao viraria lance de rei, e o
-        texto ganharia uma peca que nao estava la.
-        """
+        """A guarda que impede a correcao de inventar uma peca."""
         texto, quantos = self.corrige(
             "The king plays Kf1.", "O rei joga Kf1, e o peao vai a f1."
         )
 
         self.assertEqual(texto, "O rei joga Rf1, e o peao vai a f1.")
         self.assertEqual(quantos, 1)
+
+    def test_a_bare_pawn_move_does_not_count_as_a_rival_for_the_anchor(self):
+        """O caso em que ignorar o peao decide se ALGO e corrigido.
+
+        Com a ancora `f1` disputada por duas pecas, o pareamento exige que os
+        dois lados tenham a mesma contagem. Um `f1` solto na traducao entrando
+        como candidato faria tres contra dois — e ai **nada** e corrigido, nem os
+        dois lances que estavam certos para corrigir.
+
+        O teste anterior nao distinguia isto: com uma ancora so, a guarda de
+        forma ja barrava a troca do peao e o resultado saia igual dos dois
+        jeitos.
+        """
+        texto, quantos = self.corrige(
+            "Both Rf1 and Kf1 are playable.",
+            "Tanto Rf1 quanto Kf1 sao jogaveis; a casa f1 e chave.",
+        )
+
+        self.assertEqual(texto, "Tanto Tf1 quanto Rf1 sao jogaveis; a casa f1 e chave.")
+        self.assertEqual(quantos, 2)
 
     def test_a_move_glued_to_the_end_of_a_word_is_not_a_move(self):
         """A fronteira da esquerda, fixada com um caso sintetico de proposito.

@@ -2680,6 +2680,41 @@ tabela ganhasse duas letras em que a mais curta tambem levasse a um lance valido
 A ordenacao ficou — e barata e protege esse futuro —, mas o comentario passou a
 dizer o que ela e: precaucao, e nao o mecanismo.
 
+### 10.5 O que a medicao no banco real acrescentou
+
+Perguntado se faltava algo, medi a correcao contra as 201.607 traducoes ja
+gravadas (sobre o backup, em modo somente leitura — abrir o banco de trabalho
+dispararia a migracao, e isso nao e coisa de uma medicao):
+
+| | |
+|---|---|
+| traducoes com destino `pt` | 201.603 |
+| com lance de peca no original | 26.691 (13,2%) |
+| **que a correcao mudaria** | **4.144 (2,1%)** |
+
+Duas coisas sairam dai.
+
+**A primeira e um defeito que a medicao expos.** O glossario do usuario tem uma
+regra automatica `('×', 'x')`, entao o original guarda `N×d4` e a traducao chega
+com `Nxd4`. O regex so entendia `x`: aqueles lances **nem eram reconhecidos como
+lance**, e passavam sem correcao — o modo de falha mais silencioso possivel,
+porque nao havia lance nenhum para a funcao ver. Sao 198 capturas com `×` e 7 com
+`:` contra 4.316 com `x`. Aceitos os tres e normalizada a ancora, a contagem foi
+de 4.108 para 4.144.
+
+**A segunda e uma simplificacao que o `×` obrigou.** A versao anterior reescrevia
+o lance com o corpo do ORIGINAL, o que devolveria o `×` ao texto — desfazendo em
+silencio a regra do glossario. Agora o corpo sai da TRADUCAO e so as letras sao
+trocadas, que e o que a garantia P3 sempre disse em palavras. Ficou mais simples
+e mais fiel ao que estava escrito.
+
+**Uma mutacao voltou a sobreviver depois dessa mudanca**, e o motivo e o de
+sempre: a guarda de forma nova (um lado com letra, o outro sem) passou a cobrir o
+cenario do teste que protegia a exclusao dos peoes, e os dois deixaram de ser
+distinguiveis. O caso que os separa e outro — ancora disputada por duas pecas
+mais um peao solto na traducao, tres candidatos contra dois esperados, e ai
+**nada** e corrigido. Refeito assim, as dezesseis mutacoes sao pegas.
+
 Corrigidos os quatro, as treze mutacoes sao pegas, incluindo as duas do worker
 que importam mais: gravar o texto de antes da correcao, e corrigir so no caminho
 do lote e nao no fallback individual — essa ultima daria uma execucao cujo

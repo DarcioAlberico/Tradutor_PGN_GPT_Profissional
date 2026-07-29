@@ -69,6 +69,14 @@ def _all_known_letters():
     return {letra for letras in PIECE_LETTERS.values() for letra in letras.values()}
 
 
+# Como a captura pode estar escrita. O `x` e o do padrao PGN; o `×` (sinal de
+# multiplicacao) e o `:` aparecem em material publicado e chegam aos comentarios
+# como estao. Medido no banco real: 4.316 capturas com `x`, 198 com `×` e 7 com
+# `:` — os 205 ultimos passavam sem correcao nenhuma, porque o lance nem era
+# reconhecido como lance.
+CAPTURE_MARKS = "x×:"
+
+
 def _piece_ids_by_letter(language):
     """`letra -> id da peca` do idioma.
 
@@ -94,12 +102,13 @@ def _move_pattern(letters):
     retrocesso escolheria a errada em silencio.
     """
     pecas = "|".join(sorted((re.escape(l) for l in letters), key=len, reverse=True))
+    captura = f"[{re.escape(CAPTURE_MARKS)}]"
     return re.compile(
         r"(?<!\w)"
         r"(?:"
-        rf"(?P<peca>{pecas})(?P<meio>[a-h]?[1-8]?x?[a-h][1-8])"
+        rf"(?P<peca>{pecas})(?P<meio>[a-h]?[1-8]?{captura}?[a-h][1-8])"
         r"|"
-        r"(?P<peao>[a-h](?:x[a-h])?[1-8])"
+        rf"(?P<peao>[a-h](?:{captura}[a-h])?[1-8])"
         r")"
         rf"(?:(?P<igual>=)(?P<promo>{pecas}))?"
         r"(?P<fim>[+#]?)"
@@ -107,14 +116,23 @@ def _move_pattern(letters):
     )
 
 
+_CAPTURE_TO_X = {ord(marca): "x" for marca in CAPTURE_MARKS}
+
+
 def _anchor(match):
     """A parte do lance que e igual em todos os idiomas.
 
     E o que permite parear um lance do original com o mesmo lance da traducao
     sem olhar para as letras — que sao justamente o que pode estar errado.
+
+    O sinal de captura e normalizado porque ele **muda entre os dois lados sem
+    ser questao de idioma**: o original traz `N×d4` e a traducao chega com
+    `Nxd4`, porque uma regra automatica do glossario ja converteu o `×`. Sem
+    normalizar, os dois teriam ancoras diferentes e o lance nao seria pareado.
     """
+    corpo = match.group("meio") or match.group("peao")
     return (
-        match.group("meio") or match.group("peao"),
+        corpo.translate(_CAPTURE_TO_X),
         match.group("igual") or "",
         match.group("fim") or "",
     )
@@ -147,18 +165,47 @@ def _explained_by(match, letters):
     return True
 
 
-def _rendered_in(match, source_ids, target_letters):
-    """O mesmo lance escrito no idioma de destino.
+def _target_letters_for(match, source_ids, target_letters):
+    """As letras que este lance do original tem no idioma de destino.
 
-    So chamada para lances que `_explained_by` ja aprovou, entao toda letra tem
+    Devolve `(letra_da_peca, letra_da_promocao)`, com `None` onde nao ha. So
+    chamada para lances que `_explained_by` ja aprovou, entao toda letra tem
     traducao.
     """
+    def traduz(grupo):
+        letra = match.group(grupo)
+        return target_letters[source_ids[letra]] if letra else None
+
+    return traduz("peca"), traduz("promo")
+
+
+def _relettered(match, letras):
+    """O lance da TRADUCAO com as letras trocadas, ou `None` se as formas nao batem.
+
+    O corpo sai da traducao, e nao do original, e isso e o que a palavra "so a
+    letra muda" quer dizer literalmente. Copiar o lance do original inteiro
+    parecia equivalente e nao e: o original guarda `N×d4` e a traducao chega com
+    `Nxd4`, porque uma regra automatica do glossario ja normalizou o sinal de
+    captura. Reescrevendo com o corpo do original, a correcao devolveria o `×`
+    ao texto — desfazendo, em silencio, uma decisao que o usuario tomou no
+    glossario.
+
+    `None` quando um lado tem letra e o outro nao. Inserir uma peca onde a
+    traducao nao tem nenhuma seria acrescentar informacao, e esta funcao so
+    substitui.
+    """
+    peca, promo = letras
+    if bool(peca) != bool(match.group("peca")):
+        return None
+    if bool(promo) != bool(match.group("promo")):
+        return None
+
     partes = []
-    if match.group("peca"):
-        partes.append(target_letters[source_ids[match.group("peca")]])
+    if peca:
+        partes.append(peca)
     partes.append(match.group("meio") or match.group("peao"))
-    if match.group("promo"):
-        partes.append("=" + target_letters[source_ids[match.group("promo")]])
+    if promo:
+        partes.append("=" + promo)
     partes.append(match.group("fim") or "")
     return "".join(partes)
 
@@ -210,7 +257,7 @@ def fix_move_notation(original, translated, source_language, target_language):
     esperados = {}
     for match in extract_moves(original, source_language):
         esperados.setdefault(_anchor(match), []).append(
-            _rendered_in(match, origem_ids, destino_letras)
+            _target_letters_for(match, origem_ids, destino_letras)
         )
     if not esperados:
         return translated, 0
@@ -258,7 +305,10 @@ def fix_move_notation(original, translated, source_language, target_language):
     pedacos = []
     fim_anterior = 0
     corrigidos = 0
-    for match, certo in trocas:
+    for match, letras in trocas:
+        certo = _relettered(match, letras)
+        if certo is None:
+            continue
         pedacos.append(translated[fim_anterior:match.start()])
         pedacos.append(certo)
         if certo != match.group(0):
