@@ -23,7 +23,10 @@ from tradutor_pgn.app_config import (
 )
 from tradutor_pgn.database import (
     FTS_TABLE,
+    MoveNotationCanceled,
     SCHEMA_VERSION,
+    analyze_move_notation_updates,
+    apply_move_notation_updates,
     SEARCH_MODE_SUBSTRING,
     SEARCH_MODE_TERMS,
     SOURCE_LANGUAGE_UNKNOWN,
@@ -9603,6 +9606,447 @@ class WorkerMoveNotationTests(unittest.TestCase):
 
         self.assertIn("O rei vai Rf1.", gravados)
         self.assertIn("A torre Txe4+ ganha.", gravados)
+
+# ===========================================================================
+# Corrigir os lances das traducoes ja gravadas
+# ===========================================================================
+
+
+class LabelEveryUnknownRowTests(unittest.TestCase):
+    """`comments=None`: rotular tudo de um destino, e nao so o de uma execucao.
+
+    A adocao nasceu presa a uma execucao de traducao, entao uma linha so era
+    rotulada quando o comentario dela reaparecia num PGN. Para as 201.607 linhas
+    legadas isso significaria nunca.
+    """
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        conn = initialize_database(str(Path(sandbox.name) / "cache.db"))
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_it_labels_every_unlabelled_row_of_the_target(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "the rook", "a torre", "pt")
+        save_translation(cur, "the bishop", "o bispo", "pt")
+        save_translation(cur, "the knight", "le cavalier", "fr")
+        conn.commit()
+
+        rotuladas = adopt_unknown_source_language(cur, "pt", "en", None)
+        conn.commit()
+
+        self.assertEqual(rotuladas, 2)
+        self.assertEqual(
+            sorted(
+                cur.execute(
+                    "SELECT target_language, source_language FROM comments"
+                ).fetchall()
+            ),
+            [("fr", ""), ("pt", "en"), ("pt", "en")],
+        )
+
+    def test_it_still_leaves_a_declared_source_alone(self):
+        """A regra nao muda por rotular em massa."""
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "Nada", "Nothing", "en", "es")
+        save_translation(cur, "the rook", "a torre", "en")
+        conn.commit()
+
+        self.assertEqual(adopt_unknown_source_language(cur, "en", "pt", None), 1)
+        conn.commit()
+        self.assertEqual(
+            sorted(cur.execute("SELECT source_language FROM comments").fetchall()),
+            [("es",), ("pt",)],
+        )
+
+    def test_an_empty_list_is_not_the_same_as_no_list(self):
+        """`[]` e "nao ha comentarios nesta execucao"; `None` e "todos".
+
+        Confundi-los faria uma execucao sem comentario nenhum rotular a tabela
+        inteira — e o `if not comments` ingenuo faz exatamente isso.
+        """
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "the rook", "a torre", "pt")
+        conn.commit()
+
+        self.assertEqual(adopt_unknown_source_language(cur, "pt", "en", []), 0)
+        self.assertEqual(
+            cur.execute("SELECT source_language FROM comments").fetchone()[0], ""
+        )
+
+
+class MoveNotationInDatabaseTests(unittest.TestCase):
+    """A correcao de lances sobre o que ja esta gravado (ROADMAP 11)."""
+
+    def banco(self, linhas=None):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        self.db_path = Path(sandbox.name) / "cache.db"
+        conn = initialize_database(str(self.db_path))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+        for original, traduzido, origem in linhas or [
+            ("The king plays Kf1.", "O rei joga Kf1.", "en"),
+            ("The rook Rf8 holds.", "A torre Rf8 segura.", "en"),
+            ("A quiet move.", "Um lance tranquilo.", "en"),
+        ]:
+            save_translation(cur, original, traduzido, "pt", origem)
+        conn.commit()
+        return conn
+
+    def traducoes(self):
+        conn = initialize_database(str(self.db_path))
+        try:
+            return {
+                orig: trad
+                for orig, trad in conn.execute(
+                    "SELECT original_comment, translated_comment FROM comments"
+                )
+            }
+        finally:
+            conn.close()
+
+    def test_the_preview_counts_without_writing_anything(self):
+        """O usuario confirma sabendo quantas linhas serao reescritas, e a
+        previa nao pode ser o que as reescreve."""
+        conn = self.banco()
+        antes = self.traducoes()
+
+        stats = analyze_move_notation_updates(
+            conn.cursor(), "en", "pt", fix_move_notation
+        )
+
+        self.assertEqual(stats["scanned"], 3)
+        self.assertEqual(stats["changed"], 2, "o rei e a torre mudam; o lance nenhum, nao")
+        self.assertEqual(stats["moves"], 2)
+        self.assertEqual(self.traducoes(), antes, "a previa gravou")
+
+    def test_applying_rewrites_only_the_wrong_letters(self):
+        conn = self.banco()
+
+        stats = apply_move_notation_updates(
+            conn.cursor(), "en", "pt", fix_move_notation
+        )
+        conn.commit()
+
+        self.assertEqual(stats["changed"], 2)
+        self.assertEqual(
+            self.traducoes(),
+            {
+                "The king plays Kf1.": "O rei joga Rf1.",
+                "The rook Rf8 holds.": "A torre Tf8 segura.",
+                "A quiet move.": "Um lance tranquilo.",
+            },
+        )
+
+    def test_the_quality_warning_is_reevaluated(self):
+        """Garantia R6: a coluna e derivada do texto, e o texto mudou.
+
+        Aqui a correcao faz a traducao virar identica ao original — que e um
+        aviso de qualidade. Deixar a coluna como estava faria a contagem do
+        editor divergir do que a avaliacao em Python diria das mesmas linhas.
+        """
+        # O bispo e a unica peca cuja letra e a mesma em ingles e em portugues,
+        # entao corrigir `Ag5` para `Bg5` deixa a traducao IGUAL ao original —
+        # que e um aviso de qualidade que nao existia antes da correcao.
+        conn = self.banco([("Bg5", "Ag5", "en")])
+        cur = conn.cursor()
+        self.assertEqual(
+            cur.execute("SELECT quality_warning FROM comments").fetchone()[0], 0
+        )
+
+        apply_move_notation_updates(cur, "en", "pt", fix_move_notation)
+        conn.commit()
+
+        linha = cur.execute(
+            "SELECT translated_comment, quality_warning FROM comments"
+        ).fetchone()
+        self.assertEqual(linha[0], "Bg5")
+        self.assertEqual(linha[1], 1, "o aviso novo nao foi recalculado")
+
+    def test_every_change_is_in_the_history(self):
+        """Garantia R2. Isto reescreve texto que o usuario pode ter revisado a
+        mao, entao ele precisa poder ver o que era e voltar atras."""
+        conn = self.banco()
+        cur = conn.cursor()
+
+        apply_move_notation_updates(cur, "en", "pt", fix_move_notation)
+        conn.commit()
+
+        registros = cur.execute(
+            "SELECT action, previous_translation, new_translation FROM comment_history"
+            " ORDER BY id"
+        ).fetchall()
+        self.assertEqual(
+            registros,
+            [
+                ("move_notation", "O rei joga Kf1.", "O rei joga Rf1."),
+                ("move_notation", "A torre Rf8 segura.", "A torre Tf8 segura."),
+            ],
+        )
+
+    def test_a_verified_row_stays_verified(self):
+        """Corrigir a letra de um lance nao desfaz a revisao humana do resto.
+
+        Rebaixar milhares de linhas para "pendente" devolveria ao usuario um
+        trabalho que ele ja fez.
+        """
+        conn = self.banco()
+        cur = conn.cursor()
+        cur.execute("UPDATE comments SET verified = 1")
+        conn.commit()
+
+        apply_move_notation_updates(cur, "en", "pt", fix_move_notation)
+        conn.commit()
+
+        self.assertEqual(
+            cur.execute("SELECT COUNT(*) FROM comments WHERE verified = 1").fetchone()[0],
+            3,
+        )
+
+    def test_rows_of_another_pair_are_not_touched(self):
+        conn = self.banco(
+            [
+                ("The rook Rf8 holds.", "A torre Rf8 segura.", "en"),
+                ("La torre Tf8 aguanta.", "A torre Rf8 segura.", "es"),
+            ]
+        )
+
+        apply_move_notation_updates(conn.cursor(), "en", "pt", fix_move_notation)
+        conn.commit()
+
+        conn2 = initialize_database(str(self.db_path))
+        try:
+            linhas = dict(
+                conn2.execute(
+                    "SELECT source_language, translated_comment FROM comments"
+                )
+            )
+        finally:
+            conn2.close()
+        self.assertEqual(linhas["en"], "A torre Tf8 segura.")
+        self.assertEqual(linhas["es"], "A torre Rf8 segura.", "a linha do espanhol mudou")
+
+    def test_a_row_that_could_not_be_labelled_is_still_corrected(self):
+        """O caso que faz a aplicacao precisar do mesmo escopo da previa.
+
+        A rotulagem usa `UPDATE OR IGNORE`: uma linha sem rotulo cujo par de
+        destino ja esta ocupado permanece como "origem nao informada". Se a
+        correcao olhasse so o par declarado, essa linha ficaria com os lances
+        errados para sempre — e ela e indistinguivel das outras na tela.
+        """
+        conn = self.banco(
+            [
+                ("The rook Rf8 holds.", "A torre Tf8 segura.", "en"),
+                # Mesmo original, sem rotulo: a rotulagem vai esbarrar na chave.
+                ("The rook Rf8 holds.", "A torre Rf8 segura.", ""),
+            ]
+        )
+        cur = conn.cursor()
+
+        adopt_unknown_source_language(cur, "pt", "en", None)
+        apply_move_notation_updates(cur, "en", "pt", fix_move_notation)
+        conn.commit()
+
+        linhas = sorted(
+            cur.execute(
+                "SELECT source_language, translated_comment FROM comments"
+            ).fetchall()
+        )
+        self.assertEqual(
+            linhas,
+            [("", "A torre Tf8 segura."), ("en", "A torre Tf8 segura.")],
+            "a linha que nao pode ser rotulada ficou com o lance errado",
+        )
+
+    def test_cancelling_raises_instead_of_finishing_halfway(self):
+        """Precisa de mais de 200 linhas, e a primeira versao nao tinha.
+
+        A desistencia e checada a cada 200 linhas — o mesmo ritmo das regras
+        automaticas, para nao pagar uma chamada de callback por linha. Com oito
+        linhas o teste passava com o cancelamento arrancado do codigo, porque a
+        checagem nunca chegava a acontecer.
+        """
+        # Os comentarios precisam ser DISTINTOS: a chave da tabela e o texto, e
+        # repetir a lista so produziria as mesmas 64 linhas.
+        conn = self.banco(
+            [
+                (
+                    f"Line {n}: the rook R{coluna}{fila} holds.",
+                    f"Linha {n}: a torre R{coluna}{fila} segura.",
+                    "en",
+                )
+                for n in range(4)
+                for coluna in "abcdefgh"
+                for fila in range(1, 9)
+            ]
+        )
+
+        with self.assertRaises(MoveNotationCanceled):
+            apply_move_notation_updates(
+                conn.cursor(), "en", "pt", fix_move_notation,
+                should_cancel=lambda: True,
+            )
+
+    def test_it_reports_progress(self):
+        conn = self.banco()
+        relatos = []
+
+        analyze_move_notation_updates(
+            conn.cursor(), "en", "pt", fix_move_notation,
+            progress_callback=lambda feito, total: relatos.append((feito, total)),
+        )
+
+        self.assertTrue(relatos)
+        self.assertEqual(relatos[0], (0, 3))
+        self.assertEqual(relatos[-1], (3, 3))
+
+
+class FixMoveNotationToolTests(unittest.TestCase):
+    """A ferramenta inteira: rotular, corrigir, backup e desistencia."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.db_path = self.base / "traducoes.db"
+
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        # Sem idioma de origem, que e o estado das linhas anteriores a versao.
+        save_translation(cur, "The king plays Kf1.", "O rei joga Kf1.", "pt")
+        save_translation(cur, "The rook Rf8 holds.", "A torre Rf8 segura.", "pt")
+        conn.commit()
+        conn.close()
+
+        self.dialogos = []
+        self.confirma = True
+        original = db_tools.messagebox
+        db_tools.messagebox = types.SimpleNamespace(
+            showinfo=lambda t, m, **_k: self.dialogos.append(("info", t, m)),
+            showerror=lambda t, m, **_k: self.dialogos.append(("error", t, m)),
+            askyesno=lambda t, m, **_k: (
+                self.dialogos.append(("askyesno", t, m)) or self.confirma
+            ),
+        )
+        self.addCleanup(setattr, db_tools, "messagebox", original)
+
+        original_run = db_tools.run_with_progress
+        db_tools.run_with_progress = self.rodar_sincrono
+        self.addCleanup(setattr, db_tools, "run_with_progress", original_run)
+
+    def rodar_sincrono(self, _parent, _titulo, work, on_success=None, on_cancel=None, **_kw):
+        try:
+            resultado = work(BackgroundTask())
+        except TaskCanceled:
+            if on_cancel is not None:
+                on_cancel(None)
+            return
+        if on_success is not None:
+            on_success(resultado)
+
+    def app_falso(self):
+        return types.SimpleNamespace(
+            output_db=str(self.db_path),
+            root=None,
+            translation_cache={"The king plays Kf1.": "O rei joga Kf1."},
+            log_message=lambda _m: None,
+        )
+
+    def linhas(self):
+        conn = initialize_database(str(self.db_path))
+        try:
+            return {
+                orig: (trad, origem)
+                for orig, trad, origem in conn.execute(
+                    "SELECT original_comment, translated_comment, source_language"
+                    " FROM comments"
+                )
+            }
+        finally:
+            conn.close()
+
+    def test_it_labels_and_corrects_in_one_go(self):
+        """As duas coisas sao a mesma decisao do usuario, tomada uma vez.
+
+        Enquanto as linhas estiverem como "origem nao informada" elas nao
+        pertencem a par nenhum, e a correcao — que precisa saber o que `R`
+        significa no original — nao teria como alcanca-las.
+        """
+        db_tools.fix_move_notation_in_database(self.app_falso(), "en", "pt")
+
+        self.assertEqual(
+            self.linhas(),
+            {
+                "The king plays Kf1.": ("O rei joga Rf1.", "en"),
+                "The rook Rf8 holds.": ("A torre Tf8 segura.", "en"),
+            },
+        )
+
+    def test_saying_no_leaves_everything_as_it_was(self):
+        self.confirma = False
+
+        db_tools.fix_move_notation_in_database(self.app_falso(), "en", "pt")
+
+        self.assertEqual(
+            self.linhas(),
+            {
+                "The king plays Kf1.": ("O rei joga Kf1.", ""),
+                "The rook Rf8 holds.": ("A torre Rf8 segura.", ""),
+            },
+            "recusar nao pode nem rotular",
+        )
+
+    def test_a_backup_is_created_before_writing(self):
+        db_tools.fix_move_notation_in_database(self.app_falso(), "en", "pt")
+
+        copias = list((self.base / "backups").glob("traducoes-backup-*.db"))
+        self.assertEqual(len(copias), 1)
+        self.assertIn(copias[0].name, self.dialogos[-1][2])
+
+    def test_the_in_memory_cache_goes_with_it(self):
+        """Ele guarda o texto de ANTES e tem precedencia sobre o banco: a
+        proxima traducao reescreveria os lances errados no PGN gerado."""
+        app = self.app_falso()
+
+        db_tools.fix_move_notation_in_database(app, "en", "pt")
+
+        self.assertEqual(app.translation_cache, {})
+
+    def test_detecting_is_refused_with_a_reason(self):
+        """Sem saber se o `R` do original e Rei ou Torre, corrigir seria chutar."""
+        db_tools.fix_move_notation_in_database(self.app_falso(), "", "pt")
+
+        self.assertEqual([t for t, _tt, _m in self.dialogos], ["info"])
+        self.assertIn("Detectar", self.dialogos[0][2])
+        self.assertEqual(
+            self.linhas()["The rook Rf8 holds."][0], "A torre Rf8 segura."
+        )
+
+    def test_nothing_to_do_says_so_without_asking(self):
+        db_tools.fix_move_notation_in_database(self.app_falso(), "en", "pt")
+        self.dialogos.clear()
+
+        db_tools.fix_move_notation_in_database(self.app_falso(), "en", "pt")
+
+        self.assertEqual([t for t, _tt, _m in self.dialogos], ["info"])
+        self.assertIn("Nenhuma tradução precisa", self.dialogos[0][2])
+
+    def test_the_preview_shows_what_will_change(self):
+        self.confirma = False
+
+        db_tools.fix_move_notation_in_database(self.app_falso(), "en", "pt")
+
+        pergunta = next(m for t, _tt, m in self.dialogos if t == "askyesno")
+        self.assertIn("Inglês -> pt", pergunta)
+        self.assertIn("Traducoes que serao alteradas: 2", pergunta)
+        self.assertIn("A torre Rf8 segura.", pergunta)
+        self.assertIn("A torre Tf8 segura.", pergunta)
 
 if __name__ == "__main__":
     unittest.main()

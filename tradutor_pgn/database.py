@@ -543,11 +543,28 @@ def adopt_unknown_source_language(
     caso normal de quem traduziu o mesmo texto antes e depois de declarar o
     idioma.
 
+    `comments` a `None` adota **todas** as linhas do idioma de destino, e nao so
+    as de uma execucao. E o que a ferramenta "Corrigir Lances" usa: o usuario
+    declara de uma vez em que idioma esta o que ele ja traduziu, em vez de
+    esperar que cada comentario reapareca numa traducao futura para ser rotulado.
+
     Devolve quantas linhas foram adotadas. Um `source_language` vazio nao adota
     nada: "detectar automaticamente" nao e uma declaracao.
     """
-    if not source_language or not comments:
+    if not source_language or comments is not None and not comments:
         return 0
+
+    if comments is None:
+        cursor.execute(
+            """
+            UPDATE OR IGNORE comments
+            SET source_language = ?
+            WHERE target_language = ?
+              AND source_language = ?
+            """,
+            (source_language, target_language, SOURCE_LANGUAGE_UNKNOWN),
+        )
+        return max(0, cursor.rowcount)
 
     procurados = list(dict.fromkeys(comments))
     chunk_size = chunk_size or CACHE_LOOKUP_CHUNK
@@ -1550,3 +1567,216 @@ def apply_automatic_translation_updates(
         "target_language": target_language,
         "examples": examples,
     }
+
+
+class MoveNotationCanceled(Exception):
+    """A varredura da correcao de lances foi interrompida pelo usuario."""
+
+
+def _move_notation_where(source_language, include_unknown):
+    """O `WHERE` das linhas em escopo, num lugar so.
+
+    A previa e a aplicacao PRECISAM usar o mesmo criterio, e a primeira versao
+    nao usava: a previa olhava so o par declarado, mas as linhas legadas ainda
+    estavam como "origem nao informada" e so entravam no par durante a
+    aplicacao. Resultado, a previa dizia "nenhuma traducao precisa de correcao"
+    exatamente no caso para o qual a ferramenta existe.
+
+    E a mesma armadilha dos itens 2.8 e 3.6: dois criterios em dois lugares nao
+    quebram nada visivel — eles so discordam.
+    """
+    clauses = [
+        "target_language = ?",
+        "translated_comment IS NOT NULL",
+        "translated_comment <> ''",
+        "original_comment IS NOT NULL",
+        "original_comment <> ''",
+    ]
+    params = [None]  # o destino, preenchido por quem chama
+    if include_unknown:
+        clauses.insert(1, "source_language IN (?, ?)")
+        params.extend([source_language, SOURCE_LANGUAGE_UNKNOWN])
+    else:
+        clauses.insert(1, "source_language = ?")
+        params.append(source_language)
+    return " AND ".join(clauses), params
+
+
+def _move_notation_rows(cursor, source_language, target_language, include_unknown):
+    """As linhas em escopo que tem texto dos dois lados para comparar."""
+    where_sql, params = _move_notation_where(source_language, include_unknown)
+    params[0] = target_language
+    return cursor.execute(
+        f"""
+        SELECT id, original_comment, translated_comment, verified
+        FROM comments
+        WHERE {where_sql}
+        ORDER BY id
+        """,
+        params,
+    )
+
+
+def _move_notation_total(cursor, source_language, target_language, include_unknown):
+    where_sql, params = _move_notation_where(source_language, include_unknown)
+    params[0] = target_language
+    return cursor.execute(
+        f"SELECT COUNT(*) FROM comments WHERE {where_sql}", params
+    ).fetchone()[0]
+
+
+def _empty_move_notation_stats(source_language, target_language, labeled=0):
+    return {
+        "source_language": source_language,
+        "target_language": target_language,
+        "labeled": labeled,
+        "scanned": 0,
+        "changed": 0,
+        "moves": 0,
+        "examples": [],
+    }
+
+
+def analyze_move_notation_updates(
+    cursor,
+    source_language,
+    target_language,
+    fix_notation,
+    sample_limit=10,
+    progress_callback=None,
+    should_cancel=None,
+    progress_every=2000,
+    include_unknown=True,
+):
+    """Previa da correcao de lances: quantas linhas mudam, e alguns exemplos.
+
+    `fix_notation(original, traduzido, origem, destino) -> (texto, quantos)` e
+    injetada em vez de importada para manter `database.py` sem saber de xadrez —
+    a mesma separacao que `apply_substitutions` tem nas regras automaticas.
+
+    Nao grava nada. A previa existe porque o usuario precisa confirmar sabendo
+    quantas linhas serao reescritas, e isto reescreve texto ja revisado.
+    """
+    stats = _empty_move_notation_stats(source_language, target_language)
+    total = _move_notation_total(
+        cursor, source_language, target_language, include_unknown
+    )
+    if progress_callback:
+        progress_callback(0, total)
+
+    lidas = 0
+    for _id, original, traduzido, _verified in _move_notation_rows(
+        cursor, source_language, target_language, include_unknown
+    ):
+        lidas += 1
+        stats["scanned"] += 1
+        if should_cancel is not None and lidas % 200 == 0 and should_cancel():
+            raise MoveNotationCanceled()
+        if progress_callback and (lidas % progress_every == 0 or lidas == total):
+            progress_callback(lidas, total)
+
+        novo, quantos = fix_notation(original, traduzido, source_language, target_language)
+        if quantos and novo != traduzido:
+            stats["changed"] += 1
+            stats["moves"] += quantos
+            if len(stats["examples"]) < sample_limit:
+                stats["examples"].append(
+                    {
+                        "id": _id,
+                        "original_comment": original,
+                        "previous_translation": traduzido,
+                        "new_translation": novo,
+                    }
+                )
+
+    if progress_callback:
+        progress_callback(total, total)
+    return stats
+
+
+def apply_move_notation_updates(
+    cursor,
+    source_language,
+    target_language,
+    fix_notation,
+    sample_limit=10,
+    progress_callback=None,
+    should_cancel=None,
+    progress_every=2000,
+    include_unknown=True,
+):
+    """Aplica a correcao de lances nas traducoes ja gravadas do par.
+
+    Calcula e grava no mesmo laco, com um cursor proprio para o `UPDATE` —
+    escrever no cursor que esta iterando o `SELECT` invalidaria a iteracao. E a
+    licao do item 2.7, e vale igual aqui.
+
+    **A coluna `quality_warning` e reavaliada** (garantia R6): o texto mudou,
+    entao o aviso derivado dele nao pode ficar como estava. E **toda alteracao
+    entra no historico** (garantia R2), com acao propria — uma linha que o
+    usuario revisou a mao e reescrita por aqui, e ele precisa poder ver o que
+    era e voltar atras.
+
+    O `verified` **nao** e mexido: corrigir a letra de um lance nao desfaz a
+    revisao humana do resto do comentario, e rebaixar milhares de linhas para
+    "pendente" seria devolver ao usuario um trabalho que ele ja fez.
+    """
+    write_cursor = cursor.connection.cursor()
+    stats = _empty_move_notation_stats(source_language, target_language)
+    total = _move_notation_total(
+        cursor, source_language, target_language, include_unknown
+    )
+    if progress_callback:
+        progress_callback(0, total)
+
+    lidas = 0
+    for row_id, original, traduzido, verified in _move_notation_rows(
+        cursor, source_language, target_language, include_unknown
+    ):
+        lidas += 1
+        stats["scanned"] += 1
+        if should_cancel is not None and lidas % 200 == 0 and should_cancel():
+            raise MoveNotationCanceled()
+        if progress_callback and (lidas % progress_every == 0 or lidas == total):
+            progress_callback(lidas, total)
+
+        novo, quantos = fix_notation(original, traduzido, source_language, target_language)
+        if not quantos or novo == traduzido:
+            continue
+
+        verified = 1 if verified == 1 else 0
+        write_cursor.execute(
+            """
+            UPDATE comments
+            SET translated_comment = ?,
+                quality_warning = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (novo, quality_warning_flag(original, novo), row_id),
+        )
+        if write_cursor.rowcount:
+            stats["changed"] += 1
+            stats["moves"] += quantos
+            if len(stats["examples"]) < sample_limit:
+                stats["examples"].append(
+                    {
+                        "id": row_id,
+                        "original_comment": original,
+                        "previous_translation": traduzido,
+                        "new_translation": novo,
+                    }
+                )
+            record_comment_history(
+                write_cursor,
+                row_id,
+                "move_notation",
+                traduzido,
+                novo,
+                verified,
+                verified,
+            )
+
+    if progress_callback:
+        progress_callback(total, total)
+    return stats

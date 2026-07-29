@@ -278,6 +278,31 @@ Sem idioma de origem declarado a correcao **nao roda**, e o log diz isso: sem
 saber em que alfabeto o original esta, corrigir seria trocar um erro do tradutor
 por um palpite do programa.
 
+**Garantia P4 — o que ja estava gravado tambem alcanca a correcao.** P3 so
+protege o que passa pela traducao; o que entrou no banco antes dela continua com
+as letras que o tradutor deixou — 4.144 de 201.603 traducoes no banco real. A
+ferramenta "Corrigir Lances" aplica a mesma correcao ao que ja esta gravado, para
+o par de idiomas que os seletores da janela principal declaram.
+
+Ela **rotula e corrige na mesma transacao**, e a ordem importa: enquanto as
+linhas estiverem como "origem nao informada" elas nao pertencem a par nenhum, e a
+correcao — que precisa saber o que `R` significa no original — nao teria como
+alcanca-las. Cancelar desfaz as duas: uma metade aplicada, linhas rotuladas com
+os lances ainda errados, seria um estado que ninguem pediu e que nao se distingue
+do correto.
+
+Como toda escrita em massa: backup antes, previa com contagem e exemplos,
+progresso e cancelamento, `rollback` ao desistir. O `quality_warning` e
+reavaliado (R6) e cada alteracao entra no historico (R2) — isto reescreve texto
+que o usuario pode ter revisado a mao, e ele precisa poder ver o que era. O
+`verified` **nao** e mexido: corrigir a letra de um lance nao desfaz a revisao
+humana do resto do comentario.
+
+A previa e a aplicacao usam **o mesmo criterio de escopo**, num lugar so. A
+primeira versao nao usava — a previa olhava so o par declarado, e as linhas
+legadas so entravam nele durante a aplicacao —, entao ela anunciava "nenhuma
+traducao precisa de correcao" exatamente no caso para o qual a ferramenta existe.
+
 ### 3.6 Geracao do PGN traduzido
 
 O arquivo de origem e relido e cada comentario e substituido pela traducao, de
@@ -626,6 +651,10 @@ O destino nao e lembrado de proposito: guarda-lo faria quem marcasse "Ingles" na
 janela principal abrir o editor em portugues, sem nada na tela explicando de onde
 aquilo veio.
 
+A barra de status nomeia o par da **linha carregada**, que com "Origem: Todos" nao
+e o mesmo que o filtro — e e justamente ai que a informacao importa, porque e o
+unico momento em que a lista mistura idiomas de origem de proposito.
+
 Trocar qualquer um dos dois grava a edicao aberta antes (a linha pertence ao par
 antigo e sai da lista na troca) e volta para a primeira pagina — a pagina 40 do
 par anterior nao quer dizer nada no novo. Com um filtro de origem ativo,
@@ -786,6 +815,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | P1 | O par (original, origem, destino) e a identidade da traducao | Limite: o mesmo texto em duas linguas era uma linha so |
 | P2 | Declarar o idioma adota o cache existente em vez de paga-lo de novo | Risco: a mudanca de chave cobrar 201.607 traducoes ja feitas |
 | P3 | As letras dos lances vem do original, numa passagem so | Bug: `Rd1` (Torre) traduzido como `Rd1` (Rei) |
+| P4 | A correcao alcanca tambem o que ja estava gravado | Limite: P3 so valia para traducao nova, e 4.144 linhas ficariam erradas |
 | S1 | Matches disjuntos | Bug: `"de de de"` -> `"dede"` |
 | S2 | Indices do texto original | Bug: `İ` desloca offsets |
 | S3 | Regra especifica vence a generica | Bug: regra curta encobre a longa |
@@ -843,8 +873,13 @@ leia uma garantia acima como mais ampla do que ela e.
 
 **Idioma de origem**
 
-- A correcao das letras dos lances (P3) so roda com o idioma de origem
-  declarado. Em "Detectar" ela fica desligada, e o log diz por que.
+- A correcao das letras dos lances (P3 e P4) so roda com o idioma de origem
+  declarado. Em "Detectar" ela fica desligada, e o log — ou, na ferramenta, um
+  dialogo — diz por que.
+- "Corrigir Lances" rotula **todas** as linhas sem origem do idioma de destino
+  com o idioma declarado. E uma afirmacao do usuario sobre o proprio acervo, e
+  nao uma deteccao: se parte dele veio de outra lingua, essas linhas ficam
+  rotuladas errado. O backup anterior a operacao e o caminho de volta.
 - Ela confere **a letra da peca**, e nao a legalidade do lance: um `Kf1` que o
   tabuleiro nao permite continua saindo como `Rf1`. Validar lance exigiria a
   posicao, que o programa nao le (e nao-objetivo, secao 1).

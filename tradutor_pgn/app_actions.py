@@ -15,6 +15,7 @@ from .db_tools import backup_database as backup_database_file
 from .db_tools import apply_automatic_rules_to_database as apply_auto_rules_to_database
 from .db_tools import export_csv as export_translations_csv
 from .db_tools import import_csv as import_translations_csv
+from .db_tools import fix_move_notation_in_database
 from .db_tools import reset_glossary as reset_glossary_file
 from .db_tools import reset_translations as reset_translations_database
 from .db_tools import restore_database as restore_database_file
@@ -355,6 +356,28 @@ def restore_database(app):
 
 def apply_automatic_rules(app):
     apply_auto_rules_to_database(app, target_language=app.target_language.get())
+
+
+def fix_move_notation(app):
+    """Corrige os lances das traducoes ja gravadas do par selecionado.
+
+    O par sai dos MESMOS seletores que dizem em que idioma estao os PGN. Nao ha
+    dialogo proprio para escolher idioma porque nao ha uma segunda pergunta a
+    fazer: "de que idioma vieram estas traducoes" e exatamente o que aqueles
+    controles significam em todo o resto do programa.
+    """
+    if app.is_processing:
+        messagebox.showinfo(
+            "Corrigir Lances",
+            "Há uma tradução em andamento. Aguarde ou cancele antes de corrigir "
+            "as traduções já gravadas.",
+        )
+        return
+    fix_move_notation_in_database(
+        app,
+        app.source_language.get(),
+        app.target_language.get(),
+    )
 
 
 def reset_translations(app):

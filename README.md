@@ -166,7 +166,7 @@ nada, e **Manter esta**, que remove as concorrentes do arquivo.
 - `tradutor_pgn/chess_notation.py`: letras das pecas por idioma e correcao dos lances da traducao contra o comentario original.
 - `tradutor_pgn/confirm_dialog.py`: confirmacao que exige digitar `delete`, usada pelas duas ferramentas que apagam trabalho do usuario.
 - `tradutor_pgn/database.py`: inicializacao, conexao e cache do SQLite, indexado pelo par de idiomas (origem, destino).
-- `tradutor_pgn/db_tools.py`: estatisticas, backup/restauracao, importacao/exportacao CSV, aplicacao das regras automaticas e as duas ferramentas de zerar — todas em segundo plano.
+- `tradutor_pgn/db_tools.py`: estatisticas, backup/restauracao, importacao/exportacao CSV, regras automaticas, correcao dos lances do banco ja gravado e as duas ferramentas de zerar — todas em segundo plano.
 - `tradutor_pgn/edit_window.py`: janela de revisao e edicao de traducoes, com filtro por par de idiomas.
 - `tradutor_pgn/editor_common.py`: logica pura compartilhada pelas duas janelas de edicao (geometria, paginacao, preview).
 - `tradutor_pgn/editor_text.py`: busca e substituicao de texto no editor.

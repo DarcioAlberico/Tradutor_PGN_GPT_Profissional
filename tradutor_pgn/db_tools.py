@@ -5,9 +5,14 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 from .app_config import language_label
+from .chess_notation import fix_move_notation, supports_notation
 from .database import (
+    MoveNotationCanceled,
+    adopt_unknown_source_language,
     analyze_automatic_translation_updates,
+    analyze_move_notation_updates,
     apply_automatic_translation_updates,
+    apply_move_notation_updates,
     clear_all_translations,
     fetch_export_rows,
     fetch_review_rows,
@@ -1281,3 +1286,240 @@ def reset_glossary(app, on_finish=None):
     )
     if on_finish is not None:
         on_finish(total)
+
+def _cancelable_notation(work):
+    """O mesmo tradutor de `_cancelable`, para a correcao de lances.
+
+    `database.py` sinaliza desistencia com a sua propria excecao e nao pode
+    conhecer o `background_task` — aquele modulo importa Tk, e e essa separacao
+    que permite testar o banco sem display.
+    """
+    def wrapper(task):
+        try:
+            return work(task)
+        except MoveNotationCanceled:
+            raise TaskCanceled() from None
+
+    return wrapper
+
+
+def analyze_database_move_notation(
+    db_path,
+    source_language,
+    target_language,
+    progress_callback=None,
+    should_cancel=None,
+):
+    conn = initialize_database(db_path)
+    try:
+        return analyze_move_notation_updates(
+            conn.cursor(),
+            source_language,
+            target_language,
+            fix_move_notation,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
+        )
+    finally:
+        conn.close()
+
+
+def apply_database_move_notation(
+    db_path,
+    source_language,
+    target_language,
+    create_backup=True,
+    backup_dir=None,
+    label_unknown=True,
+    progress_callback=None,
+    should_cancel=None,
+):
+    """Rotula o idioma de origem e corrige os lances, nessa ordem.
+
+    A ordem e o item: enquanto as linhas estiverem como "origem nao informada"
+    elas nao pertencem a par nenhum, e a correcao — que precisa saber o que `R`
+    significa no original — nao teria como alcanca-las. Rotular primeiro e o que
+    poe as traducoes legadas dentro de um par onde a correcao trabalha.
+
+    Cancelar faz `rollback`, e ai o rotulo tambem volta atras: as duas coisas
+    acontecem na mesma transacao de proposito. Uma metade aplicada — linhas
+    rotuladas com os lances ainda errados — seria um estado que o usuario nao
+    pediu e que ele nao teria como distinguir do estado correto.
+    """
+    backup_path = None
+    if create_backup:
+        backup_path = create_database_backup(db_path, backup_dir=backup_dir)
+
+    conn = initialize_database(db_path)
+    try:
+        cursor = conn.cursor()
+        rotuladas = 0
+        if label_unknown:
+            rotuladas = adopt_unknown_source_language(
+                cursor, target_language, source_language, None
+            )
+        stats = apply_move_notation_updates(
+            cursor,
+            source_language,
+            target_language,
+            fix_move_notation,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
+        )
+        stats["labeled"] = rotuladas
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    stats["backup_path"] = backup_path
+    return stats
+
+
+def format_move_notation_scope(source_language, target_language):
+    return f"{language_label(source_language)} -> {target_language}"
+
+
+def _format_move_notation_preview(stats):
+    linhas = [
+        "Corrigir as letras das pecas nas traducoes ja gravadas?",
+        "",
+        f"Par de idiomas: {format_move_notation_scope(stats['source_language'], stats['target_language'])}",
+        f"Traducoes analisadas: {stats['scanned']}",
+        f"Traducoes que serao alteradas: {stats['changed']}",
+        f"Lances corrigidos: {stats['moves']}",
+    ]
+    if stats["examples"]:
+        linhas.append("")
+        linhas.append("Exemplos:")
+        for exemplo in stats["examples"][:5]:
+            linhas.extend(
+                [
+                    f"  ID {exemplo['id']}:",
+                    f"    Antes: {_preview_line(exemplo['previous_translation'])}",
+                    f"    Depois: {_preview_line(exemplo['new_translation'])}",
+                ]
+            )
+    linhas.extend(["", "Um backup do banco sera criado antes de alterar os dados."])
+    return "\n".join(linhas)
+
+
+NO_SOURCE_LANGUAGE_MESSAGE = (
+    "Escolha o idioma de origem em 'Idioma de Tradução' antes.\n\n"
+    "A correção lê os lances do comentário original para saber que peça cada "
+    "letra nomeia, e 'Detectar' não diz isso — o R do inglês é Torre e o do "
+    "português é Rei. Declarar o idioma é o que separa corrigir de chutar."
+)
+
+
+def fix_move_notation_in_database(app, source_language, target_language, on_finish=None):
+    """Corrige os lances das traducoes ja gravadas de um par de idiomas.
+
+    A correcao automatica (garantia P3) so alcanca o que passa pela traducao; o
+    que ja estava no banco antes dela continua com as letras que o tradutor
+    deixou. Medido no banco real: 4.144 de 201.603 traducoes.
+
+    Rotula tambem as linhas sem idioma de origem, porque sem isso a correcao nao
+    teria como alcanca-las — as duas coisas sao a mesma decisao do usuario,
+    tomada uma vez.
+    """
+    janela = app.root
+
+    if not supports_notation(source_language):
+        messagebox.showinfo("Corrigir Lances", NO_SOURCE_LANGUAGE_MESSAGE)
+        if on_finish is not None:
+            on_finish(None)
+        return
+
+    falhou, cancelado = _database_task_callbacks(
+        app, "Corrigir Lances", "Erro ao corrigir os lances:", on_finish
+    )
+
+    def aplicar(preview):
+        def trabalho(task):
+            return apply_database_move_notation(
+                app.output_db,
+                source_language,
+                target_language,
+                progress_callback=task.report,
+                should_cancel=task.cancelado,
+            )
+
+        def aplicado(stats):
+            if hasattr(app, "translation_cache"):
+                # O cache em memoria guarda o texto de ANTES da correcao e tem
+                # precedencia sobre o banco: a proxima traducao reescreveria os
+                # lances errados de volta no PGN gerado.
+                app.translation_cache.clear()
+            app.log_message(
+                f"Lances corrigidos: {stats['moves']} em {stats['changed']} "
+                f"traducao(oes); {stats['labeled']} linha(s) rotuladas como "
+                f"'{source_language}'."
+            )
+            messagebox.showinfo(
+                "Corrigir Lances",
+                (
+                    "Correção concluída.\n\n"
+                    f"Traduções alteradas: {stats['changed']}\n"
+                    f"Lances corrigidos: {stats['moves']}\n"
+                    f"Linhas rotuladas como '{source_language}': {stats['labeled']}\n\n"
+                    f"Backup criado em:\n{stats['backup_path']}"
+                ),
+            )
+            if on_finish is not None:
+                on_finish(stats)
+
+        run_with_progress(
+            janela,
+            "Corrigindo lances",
+            _cancelable_notation(trabalho),
+            on_success=aplicado,
+            on_error=falhou,
+            on_cancel=cancelado,
+            message=f"Reescrevendo {preview['changed']} traducao(oes)...",
+        )
+
+    def analisado(preview):
+        if preview["changed"] == 0:
+            messagebox.showinfo(
+                "Corrigir Lances",
+                (
+                    "Nenhuma tradução precisa de correção.\n\n"
+                    f"Par de idiomas: "
+                    f"{format_move_notation_scope(source_language, target_language)}\n"
+                    f"Traduções analisadas: {preview['scanned']}"
+                ),
+            )
+            if on_finish is not None:
+                on_finish(preview)
+            return
+
+        if not messagebox.askyesno(
+            "Corrigir Lances", _format_move_notation_preview(preview)
+        ):
+            if on_finish is not None:
+                on_finish(None)
+            return
+
+        aplicar(preview)
+
+    def analisar(task):
+        return analyze_database_move_notation(
+            app.output_db,
+            source_language,
+            target_language,
+            progress_callback=task.report,
+            should_cancel=task.cancelado,
+        )
+
+    run_with_progress(
+        janela,
+        "Corrigir Lances",
+        _cancelable_notation(analisar),
+        on_success=analisado,
+        on_error=falhou,
+        on_cancel=cancelado,
+        message="Analisando as traducoes ja gravadas...",
+    )

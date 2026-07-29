@@ -140,6 +140,9 @@ class PGNTranslatorApp:
     def normalize_pgn_metadata(self):
         app_actions.normalize_pgn_metadata(self)
 
+    def fix_move_notation(self):
+        app_actions.fix_move_notation(self)
+
     def reset_translations(self):
         app_actions.reset_translations(self)
 

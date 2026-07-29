@@ -1603,6 +1603,36 @@ class EditorLanguagePairTests(EditorWindowTestCase):
 
         self.assertEqual(outro.lang, "pt")
 
+    def test_the_status_bar_names_the_pair_of_the_selected_row(self):
+        """Com "Origem: Todos" a lista mistura pares de proposito.
+
+        E o unico momento em que o filtro nao responde de onde a linha veio —
+        e e justamente quando saber importa. Sem isto, o dado esta no banco, foi
+        buscado pela consulta e nao chega a tela.
+        """
+        self.editor.select_index(0)
+        self.pump()
+        self.assertIn("Inglês -> pt", self.editor.selection_label.cget("text"))
+
+        alvo = next(
+            i for i, linha in enumerate(self.editor.state.rows)
+            if linha[1] == "LEGADO um"
+        )
+        self.editor.select_index(alvo)
+        self.pump()
+        self.assertIn(
+            edit_window.UNKNOWN_SOURCE_LABEL, self.editor.selection_label.cget("text")
+        )
+
+    def test_clearing_the_selection_drops_the_pair(self):
+        """Anunciar o par da linha que saiu da tela e pior do que nao anunciar."""
+        self.editor.select_index(0)
+        self.pump()
+        self.editor.clear_current()
+        self.pump()
+
+        self.assertNotIn("Inglês", self.editor.selection_label.cget("text"))
+
     def test_no_two_options_mean_the_same_thing(self):
         """Duas opcoes com o mesmo efeito sao uma que nao funciona.
 

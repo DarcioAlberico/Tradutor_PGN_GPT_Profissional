@@ -218,6 +218,7 @@ def setup_main_ui(app):
             {"text": "Normalizar PGN", "command": app.normalize_pgn_metadata},
             {"text": "Editar Traduções", "command": app.open_edit_window},
             {"text": "Editar Glossário", "command": app.open_glossary_window},
+            {"text": "Corrigir Lances", "command": app.fix_move_notation},
             # As duas ultimas, e em vermelho. Sao as unicas acoes da janela que
             # destroem trabalho, e ficam distinguiveis a distancia de um clique
             # apressado — a confirmacao digitada e a defesa, isto e o aviso.

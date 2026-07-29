@@ -8,6 +8,11 @@ proprio item.
 **Nada pendente no momento.** As garantias que os testes protegem estao na
 [SPEC.md](SPEC.md), secao 9; ela e a lista que vale, e nao uma copia aqui.
 
+Esta frase ficou **falsa por um dia** e vale dizer como: a secao 10 conserta os
+lances na hora da traducao, e a medicao que fechou aquele item mostrou 4.144
+traducoes ja gravadas com a letra errada — um pendente que nasceu junto com a
+correcao e nao foi registrado aqui. A secao 11 e ele.
+
 **Revisao de 2026-07-28 (secoes 9 e 10).** Quatro pedidos do usuario, e o que os
 une nao e o tema — e o fato de todos serem **decisoes dele que o codigo nao tinha
 como tomar sozinho**. Qual e a lingua do PGN, qual par revisar agora, e quando o
@@ -2720,3 +2725,100 @@ que importam mais: gravar o texto de antes da correcao, e corrigir so no caminho
 do lote e nao no fallback individual — essa ultima daria uma execucao cujo
 resultado depende de a rede ter respondido alinhada, que e o pior tipo de
 inconsistencia porque aparece so as vezes.
+
+---
+
+## 11. A correcao de lances nao alcancava o banco ja gravado — CONCLUIDO (2026-07-29)
+
+A secao 10 conserta os lances **na hora da traducao**. Perguntado se faltava algo,
+medi a mesma correcao contra as 201.607 traducoes que ja estavam no banco:
+
+| | |
+|---|---|
+| traducoes com destino `pt` | 201.603 |
+| com lance de peca no original | 26.691 (13,2%) |
+| **com a letra errada** | **4.144 (2,1%)** |
+
+Ou seja: o trabalho da secao 10 valia so para o que viesse dali em diante. Para o
+acervo existente a escolha era ruim dos dois lados — restaurar o backup traz os
+4.144 erros de volta, nao restaurar significa repagar a API por 201.607
+traducoes.
+
+**Nao dava para corrigir sem antes rotular.** A correcao le os lances do
+comentario original, e para isso precisa saber em que alfabeto ele esta. As
+linhas legadas estavam como "origem nao informada", e a adocao (P2) so acontecia
+dentro de uma execucao de traducao — uma linha so seria rotulada quando o
+comentario dela reaparecesse num PGN, o que para a maioria significa nunca.
+
+Por isso a ferramenta faz as duas coisas, e na mesma transacao: **rotular e
+corrigir sao a mesma decisao do usuario, tomada uma vez**. Desistir desfaz as
+duas; uma metade aplicada — linhas rotuladas com os lances ainda errados — seria
+um estado que ninguem pediu e que nao se distingue do correto.
+
+**O idioma sai dos seletores da janela principal**, e nao de um dialogo proprio.
+Nao ha uma segunda pergunta a fazer: "de que idioma vieram estas traducoes" e
+exatamente o que aqueles controles significam no resto do programa. "Detectar" e
+recusado com o motivo dito — sem saber se o `R` do original e Rei ou Torre,
+corrigir seria chutar.
+
+Medido sobre uma copia do banco real:
+
+| etapa | tempo |
+|---|---|
+| previa (201.603 linhas) | 4,4 s |
+| aplicacao | 14,6 s |
+
+201.607 linhas rotuladas, 4.144 traducoes alteradas, **4.800 lances corrigidos**,
+4.144 registros de historico, e as 1.372 verificadas continuaram verificadas.
+Rodar de novo encontra zero.
+
+### 11.1 O defeito que os testes acharam antes do usuario
+
+A primeira versao tinha **previa e aplicacao discordando do escopo**. A previa
+analisava o par declarado — `(en, pt)` —, mas as linhas legadas ainda estavam
+como "origem nao informada" e so entravam nesse par durante a aplicacao.
+Resultado: a previa dizia *"nenhuma traducao precisa de correcao"* exatamente no
+caso para o qual a ferramenta existe, e o usuario nunca chegaria a ver o botao
+funcionar.
+
+E a terceira aparicao da mesma classe nesta ROADMAP — dois criterios em dois
+lugares, como nos itens 2.8 e 3.6 — e a correcao foi a mesma: um `WHERE` so,
+montado num lugar, usado pelas duas.
+
+O que o encontrou foi um teste que exercita a ferramenta inteira sobre linhas sem
+rotulo, que e o estado real do banco. Testando so as funcoes de banco com linhas
+ja rotuladas, ele nao apareceria.
+
+### 11.2 Quatro mutacoes sobreviveram, e cada uma disse uma coisa diferente
+
+**Duas eram lacunas nos testes:**
+
+- *A aplicacao ignorando as linhas sem rotulo.* Ela rotula antes de corrigir,
+  entao no caminho normal o escopo mais largo nao muda nada. O caso em que muda e
+  a linha que **nao pode** ser rotulada: a rotulagem usa `UPDATE OR IGNORE`, e
+  uma linha cujo par de destino ja esta ocupado permanece sem rotulo. Sem o
+  escopo largo ela ficaria com os lances errados para sempre, indistinguivel das
+  outras na tela.
+- *O editor voltando a nao dizer de que idioma a linha veio.* Nenhum teste olhava
+  o texto da barra de status.
+
+**Uma era um erro de ordem no proprio codigo**, e so apareceu porque o teste novo
+olha a **tela** e nao o estado: `select_index` pinta a selecao — o que ja atualiza
+o rotulo — e so depois chama `load_item`, entao a barra anunciava o par da linha
+ANTERIOR. Informacao errada com cara de certa, que e o pior tipo.
+
+**Uma nao era um defeito, e vale registrar em vez de contornar.** Trocar
+`analyze_...` por `apply_...` dentro da previa nao quebra nada — porque quem
+garante que a previa nao grava nao e o nome da funcao, e sim o chamador nao
+comitar. E uma propriedade real, so que de outro lugar; forcar um teste para ela
+afirmaria implementacao em vez de comportamento.
+
+Corrigidas as tres primeiras, as catorze mutacoes sao pegas.
+
+### 11.3 O cabo solto que sobrou da secao 9
+
+O editor buscava `source_language` e `target_language` em `fetch_translation_by_id`
+— com um comentario dizendo que era "para o editor mostrar o par" — e nunca
+exibia. Com "Origem: Todos" ativo a lista mistura pares de proposito, e nada na
+tela dizia de qual deles vinha o texto em revisao. A barra de status passou a
+nomea-lo, e o dado que ja estava sendo lido finalmente chega a algum lugar.

@@ -7,7 +7,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from .app_config import LANGUAGE_NAMES, LANGUAGES, UNKNOWN_SOURCE_LABEL
+from .app_config import LANGUAGE_NAMES, LANGUAGES, UNKNOWN_SOURCE_LABEL, language_label
 from .database import (
     SEARCH_MODE_SUBSTRING,
     SEARCH_MODE_TERMS,
@@ -259,6 +259,7 @@ class TranslationEditor:
             "created_at": "",
             "updated_at": "",
             "verified_at": "",
+            "source_language": "",
             # True quando o texto exibido difere do banco apenas por causa das regras
             # automaticas, sem o usuario ter digitado nada. Nesse estado a gravacao
             # silenciosa (a que acontece ao navegar) e suprimida: so uma acao
@@ -951,7 +952,19 @@ class TranslationEditor:
             return
 
         absolute_index = page_offset(self.state.page_index, PAGE_SIZE) + index + 1
-        self.selection_label.configure(text=f"Item {absolute_index}/{self.state.total_rows}")
+        self.selection_label.configure(
+            text=f"Item {absolute_index}/{self.state.total_rows} · {self.current_pair()}"
+        )
+
+    def current_pair(self):
+        """O par de idiomas da linha carregada, como `Inglês -> pt`.
+
+        Sai da LINHA e nao do filtro: com "Origem: Todos" os dois divergem, e e
+        justamente nesse caso que a informacao importa — e o unico momento em que
+        a lista mistura idiomas de origem.
+        """
+        origem = self.current.get("source_language") or ""
+        return f"{language_label(origem)} -> {self.lang}"
 
     def update_quality_warnings(self):
         warnings = evaluate_translation_quality(
@@ -1260,6 +1273,9 @@ class TranslationEditor:
         self.current["created_at"] = ""
         self.current["updated_at"] = ""
         self.current["verified_at"] = ""
+        # Sem isto o rotulo continuaria anunciando o par da linha que acabou de
+        # sair da tela — a informacao errada e mais cara que nenhuma.
+        self.current["source_language"] = ""
         try:
             self.trans_text.edit_reset()
             self.trans_text.edit_modified(False)
@@ -1515,6 +1531,10 @@ class TranslationEditor:
         self.current["orig"] = orig or ""
         self.current["trans"] = trans or ""
         self.current["saved_trans"] = self.current["trans"]
+        # O par de idiomas da LINHA, que nao e o mesmo que o filtro: com
+        # "Origem: Todos" ativo a lista mistura pares de proposito, e sem isto
+        # nada na tela diz de qual delas veio o texto que esta sendo revisado.
+        self.current["source_language"] = row[5] if len(row) > 5 else ""
         self.set_current_history(row)
 
         self.orig_text.configure(state="normal")
@@ -1552,6 +1572,12 @@ class TranslationEditor:
                 text_color="#64748b",
             )
             self.show_message("Rascunho restaurado")
+
+        # DEPOIS de carregar, e nao antes. `select_index` pinta a selecao — o que
+        # ja atualiza o rotulo — e so entao chama este metodo; sem esta segunda
+        # chamada o rotulo anuncia o par da linha ANTERIOR, que e o pior tipo de
+        # informacao errada porque parece certa.
+        self.update_selection_label()
 
     def update_current_row_cache(self, verified=None):
         index = self.get_index()
