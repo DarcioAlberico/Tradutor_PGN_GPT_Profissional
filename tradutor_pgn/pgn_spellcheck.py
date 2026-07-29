@@ -234,7 +234,11 @@ def normalize_pgn_metadata_content(content, spelling_data):
 
 def normalize_pgn_metadata_file(input_file, spelling_data, output_file=None, log_message=None):
     enc = detect_encoding(input_file)
-    with open(input_file, "r", encoding=enc, errors="replace") as handle:
+    # `newline=''` e o que torna real o cuidado de `normalize_pgn_metadata_content`
+    # com o `\r\n`: com universal newlines, todo `\r\n` ja chegava convertido e
+    # aquele tratamento era codigo morto — e a escrita devolvia o fim de linha
+    # DA PLATAFORMA, nao o do arquivo (ROADMAP 13.6).
+    with open(input_file, "r", encoding=enc, errors="replace", newline="") as handle:
         content = handle.read()
 
     updated_content, changes = normalize_pgn_metadata_content(content, spelling_data)

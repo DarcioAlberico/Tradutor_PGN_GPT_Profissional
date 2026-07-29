@@ -104,9 +104,11 @@ from tradutor_pgn.glossario import (
 from tradutor_pgn.pgn_utils import (
     BATCH_MAX_CHARS,
     collect_pgn_files,
+    count_semicolon_comments,
     create_comment_batches,
     detect_encoding,
     extract_comments_from_file,
+    flatten_comment,
     generate_translated_pgn,
     is_generated_pgn,
     join_comments_for_batch,
@@ -133,6 +135,7 @@ from tradutor_pgn.review_quality import (
     summarize_quality_warnings,
 )
 from tradutor_pgn import app_config
+from tradutor_pgn.annotation_mask import mask_annotations, restore_annotations
 from tradutor_pgn.background_task import BackgroundTask, TaskCanceled
 from tradutor_pgn.chess_notation import (
     PIECE_LETTERS,
@@ -3069,7 +3072,12 @@ class TranslationWorkerTests(unittest.TestCase):
             self.assertEqual(translated_inputs, ["White starts"])
             output = tmp_path / "game-BR.pgn"
             output_text = output.read_text(encoding="utf-8")
-            self.assertIn("{}", output_text)
+            # Garantia X2: o comentario esvaziado pela limpeza sai do arquivo
+            # inteiro, sem deixar um `{}` pontilhando o movetext. Este assert
+            # ja protegeu o comportamento antigo (`assertIn`), trocado de
+            # proposito no ROADMAP 13.4.
+            self.assertNotIn("{}", output_text)
+            self.assertIn("1. e4 e5", output_text)
             self.assertIn("{PT:White starts}", output_text)
 
             conn = initialize_database(str(db_path))
@@ -10301,6 +10309,516 @@ class SettingsWithBomTests(unittest.TestCase):
         caminho.write_bytes(b"\xff\xfe\x00\x00 lixo binario")
 
         self.assertEqual(load_settings(str(caminho)), {})
+
+
+class CommandAnnotationInMovesTests(unittest.TestCase):
+    """As anotacoes `[%...]` nao sao lances (ROADMAP 13.1).
+
+    Os codigos de cor do Lichess (R, G, Y, B) colidem com letras de peca:
+    `Ra1h8` dentro de `[%cal ...]` tem a forma exata de um lance de Torre, e a
+    correcao reescrevia a seta vermelha como `Ta1h8` — deterministicamente,
+    porque o original e a fonte da ancora e o pareamento nunca falha. A
+    ferramenta em massa do banco passa por estas mesmas funcoes, entao a
+    exclusao daqui cobre as duas portas.
+    """
+
+    def test_cal_arrow_color_is_not_rewritten(self):
+        texto, quantos = fix_move_notation(
+            "[%cal Ra1h8] good plan", "[%cal Ra1h8] bom plano", "en", "pt"
+        )
+        self.assertEqual(texto, "[%cal Ra1h8] bom plano")
+        self.assertEqual(quantos, 0)
+
+    def test_csl_circle_color_is_not_rewritten(self):
+        texto, quantos = fix_move_notation(
+            "[%csl Rd4] weak square", "[%csl Rd4] casa fraca", "en", "pt"
+        )
+        self.assertEqual(texto, "[%csl Rd4] casa fraca")
+        self.assertEqual(quantos, 0)
+
+    def test_real_move_beside_annotation_is_still_fixed(self):
+        """A exclusao nao pode desligar a correcao: o lance de verdade que
+        divide o comentario com a anotacao continua sendo conferido."""
+        texto, quantos = fix_move_notation(
+            "[%cal Rd4d8,Ge2e4] with Kf1 next",
+            "[%cal Rd4d8,Ge2e4] com Kf1 a seguir",
+            "en",
+            "pt",
+        )
+        self.assertEqual(texto, "[%cal Rd4d8,Ge2e4] com Rf1 a seguir")
+        self.assertEqual(quantos, 1)
+
+    def test_extract_moves_ignores_annotation_payload(self):
+        """No ORIGINAL a anotacao viraria uma ancora esperada falsa — o outro
+        lado do mesmo defeito."""
+        lances = [
+            m.group(0) for m in extract_moves("[%cal Rd4d8] and Rd1 wins", "en")
+        ]
+        self.assertEqual(lances, ["Rd1"])
+
+
+class FlattenDecimalTests(unittest.TestCase):
+    """O achatamento nao insere espaco entre digitos (ROADMAP 13.2).
+
+    `[%eval +0.35]` virava `[%eval +0. 35]` ANTES de qualquer traducao, e o
+    texto quebrado era tres coisas ao mesmo tempo: a chave de cache, o que ia
+    para a API e o que voltava ao PGN gerado.
+    """
+
+    def test_eval_annotation_survives(self):
+        self.assertEqual(flatten_comment("[%eval +0.35]"), "[%eval +0.35]")
+
+    def test_decimal_in_prose_survives(self):
+        self.assertEqual(flatten_comment("2.5 pawns up"), "2.5 pawns up")
+        self.assertEqual(flatten_comment("v1.2.3 fixed it"), "v1.2.3 fixed it")
+
+    def test_sentence_spacing_is_still_normalized(self):
+        """O que o achatamento sempre fez continua feito — inclusive depois de
+        numero de lance, onde o que segue o ponto e letra, nao digito."""
+        self.assertEqual(flatten_comment("End.Next"), "End. Next")
+        self.assertEqual(flatten_comment("ok!Next"), "ok! Next")
+        self.assertEqual(flatten_comment("14.Bxf7+ wins"), "14. Bxf7+ wins")
+
+
+class DecimalKeyMigrationTests(unittest.TestCase):
+    """A migracao 4 -> 5 reachata as chaves gravadas pelo achatamento antigo.
+
+    Roda UMA vez, e a unica vez importa: corrigido o achatamento, um
+    `digito. digito` gravado dali em diante e um espaco que estava no PGN do
+    usuario, e colapsa-lo seria reescrever texto dele (ROADMAP 13.2).
+    """
+
+    def test_spaced_decimal_key_is_collapsed_on_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "t.db")
+            conn = initialize_database(db)
+            cursor = conn.cursor()
+            save_translation(cursor, "eval of 0. 35 here", "aval de 0,35", "pt", "en")
+            conn.commit()
+            conn.execute("PRAGMA user_version = 4")
+            conn.commit()
+            conn.close()
+
+            conn = initialize_database(db)
+            try:
+                chaves = [
+                    r[0]
+                    for r in conn.execute("SELECT original_comment FROM comments")
+                ]
+                self.assertEqual(chaves, ["eval of 0.35 here"])
+                self.assertEqual(
+                    conn.execute("PRAGMA user_version").fetchone()[0],
+                    SCHEMA_VERSION,
+                )
+            finally:
+                conn.close()
+
+    def test_collapsed_twin_already_present_leaves_old_row_alone(self):
+        """Quando a chave colapsada ja existe no par, a linha antiga fica como
+        esta: fundir seria destruir uma traducao para desduplicar um cache."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "t.db")
+            conn = initialize_database(db)
+            cursor = conn.cursor()
+            save_translation(cursor, "score 1. 5 raw", "antiga", "pt", "en")
+            save_translation(cursor, "score 1.5 raw", "nova", "pt", "en")
+            conn.commit()
+            conn.execute("PRAGMA user_version = 4")
+            conn.commit()
+            conn.close()
+
+            conn = initialize_database(db)
+            try:
+                chaves = sorted(
+                    r[0]
+                    for r in conn.execute("SELECT original_comment FROM comments")
+                )
+                self.assertEqual(chaves, ["score 1. 5 raw", "score 1.5 raw"])
+            finally:
+                conn.close()
+
+    def test_spaced_decimal_written_after_upgrade_is_user_text(self):
+        """Reabrir um banco ja migrado nao pode colapsar nada: o espaco deixou
+        de ser assinatura do achatamento antigo no momento da correcao."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "t.db")
+            conn = initialize_database(db)
+            cursor = conn.cursor()
+            save_translation(cursor, "raw 0. 5 from source", "cru", "pt", "en")
+            conn.commit()
+            conn.close()
+
+            conn = initialize_database(db)
+            try:
+                chaves = [
+                    r[0]
+                    for r in conn.execute("SELECT original_comment FROM comments")
+                ]
+                self.assertEqual(chaves, ["raw 0. 5 from source"])
+            finally:
+                conn.close()
+
+
+class AnnotationMaskTests(unittest.TestCase):
+    """Mascara e restauracao verificada das anotacoes (ROADMAP 13.3)."""
+
+    def test_roundtrip_is_byte_for_byte(self):
+        original = "Good move [%cal Ra1h8] here [%clk 0:05:30] end"
+        mascarado, tokens = mask_annotations(original)
+        self.assertNotIn("[%", mascarado)
+        restaurado, ok = restore_annotations(mascarado, tokens)
+        self.assertTrue(ok)
+        self.assertEqual(restaurado, original)
+
+    def test_translator_spacing_around_sentinel_is_tolerated(self):
+        _, tokens = mask_annotations("[%cal Ra1h8] x [%clk 0:05:30]")
+        restaurado, ok = restore_annotations("⟦ 1 ⟧ y ⟦0⟧", tokens)
+        self.assertTrue(ok)
+        self.assertEqual(restaurado, "[%clk 0:05:30] y [%cal Ra1h8]")
+
+    def test_missing_sentinel_is_detected(self):
+        _, tokens = mask_annotations("[%cal Ra1h8] and [%eval +0.35]")
+        _, ok = restore_annotations("so sobrou ⟦0⟧", tokens)
+        self.assertFalse(ok)
+
+    def test_duplicated_sentinel_is_detected(self):
+        _, tokens = mask_annotations("[%cal Ra1h8]")
+        _, ok = restore_annotations("⟦0⟧ de novo ⟦0⟧", tokens)
+        self.assertFalse(ok)
+
+    def test_sentinel_leaked_from_neighbour_is_detected(self):
+        """Um sentinela num comentario que nao mascarou nada e vazamento de
+        outro comentario do lote — o rastro de um separador comido."""
+        _, ok = restore_annotations("vazou ⟦3⟧ aqui", [])
+        self.assertFalse(ok)
+
+    def test_text_without_annotations_passes_untouched(self):
+        mascarado, tokens = mask_annotations("um comentario comum")
+        self.assertEqual(mascarado, "um comentario comum")
+        self.assertEqual(tokens, [])
+        restaurado, ok = restore_annotations("um comentario comum", tokens)
+        self.assertTrue(ok)
+        self.assertEqual(restaurado, "um comentario comum")
+
+
+class WorkerAnnotationMaskTests(unittest.TestCase):
+    """A mascara de ponta a ponta no worker (garantia X1)."""
+
+    def setUp(self):
+        original = translation_worker.messagebox
+
+        class SemDialogos:
+            showinfo = staticmethod(lambda *_a, **_k: None)
+            showwarning = staticmethod(lambda *_a, **_k: None)
+            showerror = staticmethod(lambda *_a, **_k: None)
+            askyesno = staticmethod(lambda *_a, **_k: True)
+
+        translation_worker.messagebox = SemDialogos
+        self.addCleanup(setattr, translation_worker, "messagebox", original)
+
+    def test_annotations_cross_translation_byte_for_byte(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n'
+                "1. e4 {Good move [%cal Ra1h8] with [%eval +0.35] score}\n",
+                encoding="utf-8",
+            )
+
+            app = FakeApp(db_path)
+            payloads = []
+            original_translate_text = translation_worker.translate_text
+            try:
+                def fake_translate(text, *_args, **_kwargs):
+                    payloads.append(text)
+                    return (
+                        text.replace("Good move", "Bom lance")
+                        .replace("with", "com")
+                        .replace("score", "de aval")
+                    )
+
+                translation_worker.translate_text = fake_translate
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+            finally:
+                translation_worker.translate_text = original_translate_text
+
+            # O que foi para a API nao continha anotacao nenhuma (X1: a
+            # mascara protege exatamente o trecho que a API poderia mutilar).
+            self.assertTrue(payloads)
+            for payload in payloads:
+                self.assertNotIn("[%", payload)
+
+            esperado = "Bom lance [%cal Ra1h8] com [%eval +0.35] de aval"
+            conn = initialize_database(str(db_path))
+            try:
+                gravado = conn.execute(
+                    "SELECT translated_comment FROM comments"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(gravado, esperado)
+
+            output_text = (tmp_path / "game-BR.pgn").read_text(encoding="utf-8")
+            self.assertIn("{" + esperado + "}", output_text)
+
+    def test_lost_sentinel_becomes_reported_failure(self):
+        """Se a traducao comeu um sentinela, gravar seria guardar uma anotacao
+        corrompida com cara de certa: o comentario conta como falha e fica no
+        idioma original (T2/T3)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n'
+                "1. e4 {Good move [%cal Ra1h8] indeed}\n",
+                encoding="utf-8",
+            )
+
+            app = FakeApp(db_path)
+            original_translate_text = translation_worker.translate_text
+            try:
+                def fake_translate(text, *_args, **_kwargs):
+                    return "Bom lance sem sentinela nenhum"
+
+                translation_worker.translate_text = fake_translate
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+            finally:
+                translation_worker.translate_text = original_translate_text
+
+            self.assertTrue(
+                any("[FALHA] Anotacoes [%...]" in log for log in app.logs)
+            )
+            self.assertTrue(
+                any("Comentarios que falharam: 1" in log for log in app.logs)
+            )
+
+            conn = initialize_database(str(db_path))
+            try:
+                total = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(total, 0)
+            self.assertFalse((tmp_path / "game-BR.pgn").exists())
+
+
+class EmptyCleanupSpanRemovalTests(unittest.TestCase):
+    """O comentario esvaziado pela limpeza sai do arquivo (garantia X2)."""
+
+    def test_empty_translation_removes_span_and_one_space(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            entrada = tmp_path / "in.pgn"
+            conteudo = '[Event "T"]\n\n1. e4 {junk} e5 {keep} 2. Nf3\n'
+            entrada.write_text(conteudo, encoding="utf-8")
+            posicoes = extract_comments_from_file(str(entrada))["positions"]
+
+            saida = tmp_path / "out.pgn"
+            ok = generate_translated_pgn(
+                str(entrada),
+                str(saida),
+                {"junk": "", "keep": "fica"},
+                posicoes,
+            )
+            self.assertTrue(ok)
+            texto = saida.read_text(encoding="utf-8")
+            self.assertNotIn("{}", texto)
+            self.assertIn("1. e4 e5", texto)
+            self.assertIn("{fica}", texto)
+
+    def test_adjacent_spans_do_not_eat_each_other(self):
+        """`{a}{b}` colados: o espaco vizinho que sai e so espaco — nunca o
+        comeco do span seguinte."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            entrada = tmp_path / "in.pgn"
+            entrada.write_text(
+                '[Event "T"]\n\n1. e4 {junk}{keep} e5\n', encoding="utf-8"
+            )
+            posicoes = extract_comments_from_file(str(entrada))["positions"]
+
+            saida = tmp_path / "out.pgn"
+            generate_translated_pgn(
+                str(entrada), str(saida), {"junk": "", "keep": "fica"}, posicoes
+            )
+            texto = saida.read_text(encoding="utf-8")
+            self.assertIn("1. e4{fica} e5", texto)
+            self.assertNotIn("{}", texto)
+
+
+class SemicolonCommentTests(unittest.TestCase):
+    """Comentarios `;` sao contados e anunciados (garantia X3)."""
+
+    def setUp(self):
+        original = translation_worker.messagebox
+
+        class SemDialogos:
+            showinfo = staticmethod(lambda *_a, **_k: None)
+            showwarning = staticmethod(lambda *_a, **_k: None)
+            showerror = staticmethod(lambda *_a, **_k: None)
+            askyesno = staticmethod(lambda *_a, **_k: True)
+
+        translation_worker.messagebox = SemDialogos
+        self.addCleanup(setattr, translation_worker, "messagebox", original)
+
+    def test_count_skips_tags_and_brace_contents(self):
+        conteudo = (
+            '[Event "a;b"]\n'
+            "\n"
+            "1. e4 ; melhor lance\n"
+            "e5 {com ; dentro} 2. Nf3 ; outra nota\n"
+            "3. Bb5 sem nada\n"
+        )
+        self.assertEqual(count_semicolon_comments(conteudo), 2)
+
+    def test_multiline_brace_does_not_join_neighbours(self):
+        conteudo = "1. e4 ; um\n{quebra\nde linha} 2. d4 ; dois\n"
+        self.assertEqual(count_semicolon_comments(conteudo), 2)
+
+    def test_pgn_with_only_semicolon_comments_is_announced(self):
+        """Antes, um PGN anotado so com `;` terminava em "nenhum comentario
+        encontrado" — o programa parecia nao ter funcionado."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n1. e4 ; melhor lance\ne5 ; resposta\n',
+                encoding="utf-8",
+            )
+
+            app = FakeApp(db_path)
+            translation_worker.run_translation(app, str(pgn), "pt", False)
+
+            self.assertTrue(
+                any("2 comentario(s) no formato ';'" in log for log in app.logs)
+            )
+            self.assertTrue(
+                any(
+                    "que o programa nao traduz" in log
+                    for log in app.logs
+                )
+            )
+
+    def test_mixed_file_reports_ignored_count_in_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n1. e4 {White starts} e5 ; nota\n',
+                encoding="utf-8",
+            )
+
+            conn = initialize_database(str(db_path))
+            cursor = conn.cursor()
+            save_translation(cursor, "White starts", "As brancas comecam", "pt")
+            conn.commit()
+            conn.close()
+
+            app = FakeApp(db_path)
+            translation_worker.run_translation(app, str(pgn), "pt", False)
+
+            self.assertTrue(
+                any(
+                    "Comentarios ';' ignorados (nao suportado): 1" in log
+                    for log in app.logs
+                )
+            )
+
+
+class OutputFidelityTests(unittest.TestCase):
+    """Fim de linha preservado e BOM opcional na saida (ROADMAP 13.6)."""
+
+    def test_crlf_input_stays_crlf_in_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            entrada = tmp_path / "in.pgn"
+            entrada.write_bytes(
+                b'[Event "T"]\r\n\r\n1. e4 {White starts} e5\r\n'
+            )
+            posicoes = extract_comments_from_file(str(entrada))["positions"]
+
+            saida = tmp_path / "out.pgn"
+            generate_translated_pgn(
+                str(entrada),
+                str(saida),
+                {"White starts": "As brancas comecam"},
+                posicoes,
+            )
+            raw = saida.read_bytes()
+            self.assertEqual(
+                raw,
+                b'[Event "T"]\r\n\r\n1. e4 {As brancas comecam} e5\r\n',
+            )
+
+    def test_lf_input_stays_lf_even_on_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            entrada = tmp_path / "in.pgn"
+            entrada.write_bytes(b'[Event "T"]\n\n1. e4 {White starts} e5\n')
+            posicoes = extract_comments_from_file(str(entrada))["positions"]
+
+            saida = tmp_path / "out.pgn"
+            generate_translated_pgn(
+                str(entrada),
+                str(saida),
+                {"White starts": "As brancas comecam"},
+                posicoes,
+            )
+            raw = saida.read_bytes()
+            self.assertNotIn(b"\r\n", raw)
+            self.assertIn(b"{As brancas comecam}\n", raw.replace(b" e5", b""))
+
+    def test_bom_option_prefixes_utf8_output(self):
+        """Um PGN ASCII cuja traducao introduz acentos sai UTF-8; sem BOM o
+        ChessBase do Windows le ANSI e exibe mojibake. A opcao existe para
+        esse consumidor — e desligada nada muda."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            entrada = tmp_path / "in.pgn"
+            entrada.write_bytes(b'[Event "T"]\n\n1. e4 {White starts} e5\n')
+            posicoes = extract_comments_from_file(str(entrada))["positions"]
+
+            com_bom = tmp_path / "bom.pgn"
+            generate_translated_pgn(
+                str(entrada),
+                str(com_bom),
+                {"White starts": "Tradução com acento"},
+                posicoes,
+                use_bom=True,
+            )
+            self.assertTrue(com_bom.read_bytes().startswith(b"\xef\xbb\xbf"))
+
+            sem_bom = tmp_path / "sem.pgn"
+            generate_translated_pgn(
+                str(entrada),
+                str(sem_bom),
+                {"White starts": "Tradução com acento"},
+                posicoes,
+            )
+            self.assertFalse(sem_bom.read_bytes().startswith(b"\xef\xbb\xbf"))
+
+    def test_read_output_settings_validates_types(self):
+        self.assertEqual(
+            settings.read_output_settings({}), {"utf8_bom": False}
+        )
+        self.assertEqual(
+            settings.read_output_settings({"output": {"utf8_bom": True}}),
+            {"utf8_bom": True},
+        )
+        # Tipo errado cai no padrao: o arquivo e editavel a mao.
+        self.assertEqual(
+            settings.read_output_settings({"output": {"utf8_bom": "yes"}}),
+            {"utf8_bom": False},
+        )
+        self.assertEqual(
+            settings.read_output_settings({"output": "lixo"}),
+            {"utf8_bom": False},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,9 +9,29 @@ except ImportError:
     chardet = None
 
 
+_SENTENCE_SPACING_RE = re.compile(r'([.!?])\s*(\w)')
+
+
+def _sentence_spacing(match):
+    # Ponto ENTRE DIGITOS e notacao, nao fim de frase: `2.5`, `[%eval +0.35]`,
+    # a versao `1.2.3`. Inserir espaco ali quebrava a anotacao e todo decimal
+    # em prosa ANTES de qualquer traducao — e o texto quebrado era tres coisas
+    # ao mesmo tempo: a chave de cache, o que ia para a API e o que voltava ao
+    # PGN (ROADMAP 13.2). `14.Bxf7` continua ganhando o espaco de sempre: o que
+    # segue o ponto e letra, nao digito.
+    if (
+        match.group(1) == "."
+        and match.group(2).isdigit()
+        and match.start() > 0
+        and match.string[match.start() - 1].isdigit()
+    ):
+        return match.group(0)
+    return f"{match.group(1)} {match.group(2)}"
+
+
 def flatten_comment(text: str) -> str:
     text = " ".join(text.split())
-    return re.sub(r'([.!?])\s*(\w)', r'\1 \2', text)
+    return _SENTENCE_SPACING_RE.sub(_sentence_spacing, text)
 
 
 # BOMs reconhecidas, da mais longa para a mais curta. A ordem importa: a BOM de
@@ -215,6 +235,34 @@ def collect_pgn_files(source_path: str, process_subdirs: bool):
     return sorted(pgn_files), skipped_generated
 
 
+def count_semicolon_comments(content: str) -> int:
+    """Quantas linhas tem comentario `;` (a segunda forma do padrao PGN).
+
+    O programa nao traduz esses comentarios; contar e anunciar e o que impede o
+    modo de falha mais confuso — um PGN anotado so com `;` respondendo "nenhum
+    comentario encontrado" como se nada existisse (garantia X3).
+
+    Um `;` dentro de `{...}` e texto do comentario, e um numa linha de tag
+    (`[Event "a;b"]`) e parte do valor: os dois ficam de fora. As chaves sao
+    removidas preservando as quebras de linha, para que a contagem por linha
+    nao junte vizinhas.
+    """
+    sem_chaves = re.sub(
+        r'\{.*?\}',
+        lambda m: "\n" * m.group(0).count("\n"),
+        content,
+        flags=re.DOTALL,
+    )
+    total = 0
+    for line in sem_chaves.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith('['):
+            continue
+        if ';' in line:
+            total += 1
+    return total
+
+
 def extract_comments_from_file(pgn_file: str, log_message=None):
     comments = []
     positions = []
@@ -225,7 +273,12 @@ def extract_comments_from_file(pgn_file: str, log_message=None):
         if log_message:
             log_message(f"Arquivo: {os.path.basename(pgn_file)} | Codificacao detectada: {enc}")
 
-        with open(pgn_file, 'r', encoding=enc, errors='replace') as f:
+        # `newline=''` preserva o `\r\n` no conteudo: as posicoes extraidas aqui
+        # sao offsets NESTE texto, e a geracao rele o arquivo do mesmo jeito —
+        # com universal newlines, todo PGN de saida trocava o fim de linha da
+        # plataforma em silencio (ROADMAP 13.6). Dentro dos comentarios o
+        # `flatten_comment` colapsa qualquer `\r` junto com o resto do espaco.
+        with open(pgn_file, 'r', encoding=enc, errors='replace', newline='') as f:
             content = f.read()
 
         for match in comment_pattern.finditer(content):
@@ -236,12 +289,16 @@ def extract_comments_from_file(pgn_file: str, log_message=None):
             comments.append(normalized)
             positions.append((match.start(), match.end(), normalized))
 
-        return {"comments": comments, "positions": positions}
+        return {
+            "comments": comments,
+            "positions": positions,
+            "semicolon_comments": count_semicolon_comments(content),
+        }
 
     except Exception as e:
         if log_message:
             log_message(f"[ERRO] Falha ao extrair comentarios de {pgn_file}: {e}")
-        return {"comments": [], "positions": []}
+        return {"comments": [], "positions": [], "semicolon_comments": 0}
 
 
 BATCH_SEPARATOR = " ||| "
@@ -312,29 +369,80 @@ def sanitize_pgn_comment(text: str) -> str:
     return text.replace("{", "(").replace("}", ")")
 
 
-def write_translated_pgn(output_file: str, content: str, preferred_encoding: str, log_message=None):
-    try:
-        with open(output_file, 'w', encoding=preferred_encoding) as f:
-            f.write(content)
+def _output_encoding(preferred_encoding: str, use_bom: bool) -> str:
+    """A codificacao de gravacao, honrando a opcao de BOM.
+
+    A opcao existe por causa do consumidor: um PGN ASCII de entrada sai UTF-8
+    quando a traducao introduz acentos, e UTF-8 **sem BOM** o ChessBase do
+    Windows le como ANSI — mojibake (ROADMAP 13.6). So mexe em UTF-8: um BOM
+    nao significa nada em cp1252, e `utf-8-sig` ja o escreve sozinho.
+    """
+    if not use_bom:
         return preferred_encoding
+    if preferred_encoding.lower().replace("-", "").replace("_", "") == "utf8":
+        return "utf-8-sig"
+    return preferred_encoding
+
+
+def write_translated_pgn(
+    output_file: str,
+    content: str,
+    preferred_encoding: str,
+    log_message=None,
+    use_bom: bool = False,
+):
+    # `newline=''` nos dois caminhos: o conteudo carrega o fim de linha do
+    # arquivo original (lido tambem com `newline=''`), e a escrita nao pode
+    # troca-lo pelo da plataforma (ROADMAP 13.6).
+    try:
+        enc = _output_encoding(preferred_encoding, use_bom)
+        with open(output_file, 'w', encoding=enc, newline='') as f:
+            f.write(content)
+        return enc
     except UnicodeEncodeError:
-        with open(output_file, 'w', encoding='utf-8') as f:
+        enc = _output_encoding('utf-8', use_bom)
+        with open(output_file, 'w', encoding=enc, newline='') as f:
             f.write(content)
         if log_message:
             log_message(f"  - Codificacao de saida alterada para UTF-8: {output_file}")
-        return 'utf-8'
+        return enc
 
 
-def generate_translated_pgn(input_file, output_file, translated_map, positions, log_message=None):
+def generate_translated_pgn(
+    input_file,
+    output_file,
+    translated_map,
+    positions,
+    log_message=None,
+    use_bom=False,
+):
     try:
         enc = detect_encoding(input_file)
-        with open(input_file, 'r', encoding=enc, errors='replace') as f:
+        with open(input_file, 'r', encoding=enc, errors='replace', newline='') as f:
             content = f.read()
 
         replacements = []
         for start, end, norm in positions:
-            if norm in translated_map:
-                repl = "{" + sanitize_pgn_comment(translated_map[norm]) + "}"
+            if norm not in translated_map:
+                continue
+            translated = translated_map[norm]
+            if translated == "":
+                # Comentario esvaziado pelas regras de limpeza: o span sai
+                # inteiro, com um espaco vizinho junto, em vez de deixar um
+                # `{}` pontilhando o arquivo (garantia X2). So espaco ou tab —
+                # nunca a quebra de linha, que estrutura o resto do arquivo, e
+                # nunca outro span: `{a}{b}` colados nao tem espaco entre si.
+                #
+                # Uma traducao que FALHOU nunca chega aqui: ela nao entra no
+                # `translated_map`, e o comentario original fica como esta
+                # (garantia T3). O unico "" do mapa e o da limpeza.
+                if end < len(content) and content[end] in " \t":
+                    end += 1
+                elif start > 0 and content[start - 1] in " \t":
+                    start -= 1
+                replacements.append((start, end, ""))
+            else:
+                repl = "{" + sanitize_pgn_comment(translated) + "}"
                 replacements.append((start, end, repl))
 
         replacements.sort(reverse=True, key=lambda x: x[0])
@@ -342,7 +450,7 @@ def generate_translated_pgn(input_file, output_file, translated_map, positions, 
         for start, end, rep in replacements:
             content = content[:start] + rep + content[end:]
 
-        write_translated_pgn(output_file, content, enc, log_message)
+        write_translated_pgn(output_file, content, enc, log_message, use_bom=use_bom)
         return True
 
     except Exception as e:

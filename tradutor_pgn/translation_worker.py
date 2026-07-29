@@ -5,6 +5,7 @@ from tkinter import messagebox
 
 import requests
 
+from .annotation_mask import mask_annotations, restore_annotations
 from .chess_notation import fix_move_notation, supports_notation
 from .database import (
     SOURCE_LANGUAGE_UNKNOWN,
@@ -31,6 +32,7 @@ from .pgn_utils import (
 )
 from .app_config import TRANSLATION_REQUEST_DELAY_SECONDS  # noqa: F401 (compat)
 from .failed_runs import build_failed_run_record, save_failed_run
+from .settings import load_settings, read_output_settings
 from .translation_api import RequestPacer, translate_text
 
 # Disjuntor (garantia B3): tantos lotes seguidos sem NENHUMA resposta da API e a
@@ -106,8 +108,14 @@ def run_translation(
             app.log_message("Nenhum arquivo PGN encontrado.")
             return
 
+        # Opcao de gravacao lida uma vez por execucao, como as regras do
+        # glossario: e uma escolha do usuario no arquivo de configuracoes, e
+        # nao muda no meio de uma traducao (ROADMAP 13.6).
+        use_bom = read_output_settings(load_settings())["utf8_bom"]
+
         info_by_file = {}
         total_comments = 0
+        total_semicolon = 0
         comentarios_do_lote = []
 
         for pgn_file in pgn_files:
@@ -120,9 +128,26 @@ def run_translation(
             info_by_file[pgn_file] = info
             total_comments += len(info["comments"])
             comentarios_do_lote.extend(info["comments"])
+            # Garantia X3: o que o pipeline ignora e contado e anunciado. Sem
+            # isto, um PGN anotado so com `;` termina em "nenhum comentario
+            # encontrado" e o usuario conclui que o programa falhou.
+            ignorados = info.get("semicolon_comments", 0)
+            if ignorados:
+                total_semicolon += ignorados
+                app.log_message(
+                    f"  - {ignorados} comentario(s) no formato ';' ignorados "
+                    f"(nao suportado)."
+                )
 
         if total_comments == 0:
-            app.log_message("Nenhum comentario encontrado nos arquivos PGN.")
+            if total_semicolon:
+                app.log_message(
+                    f"Nenhum comentario {{...}} encontrado, mas ha "
+                    f"{total_semicolon} comentario(s) no formato ';', que o "
+                    f"programa nao traduz."
+                )
+            else:
+                app.log_message("Nenhum comentario encontrado nos arquivos PGN.")
             return
 
         app.log_message(f"Total de comentarios detectados: {total_comments}")
@@ -246,7 +271,7 @@ def run_translation(
                     return
 
                 # Fase 1: separar comentários em cache dos que precisam de tradução
-                to_translate = []  # lista de (original, cleaned)
+                to_translate = []  # lista de (original, mascarado, tokens)
                 for comment in batch:
                     batch_pause_time += wait_if_paused()
 
@@ -272,7 +297,20 @@ def run_translation(
                             processed_comments += 1
                             update_progress()
                         else:
-                            to_translate.append((comment, cleaned_comment))
+                            # DEPOIS da limpeza, para que uma regra de limpeza
+                            # ainda possa remover uma anotacao inteira se o
+                            # usuario quiser; ANTES da API, que e de quem a
+                            # mascara protege (garantia X1). As regras
+                            # automaticas e a correcao de lances rodam sobre o
+                            # texto ainda mascarado — anotacao escondida nao e
+                            # reescrita por engano — e a restauracao e o ultimo
+                            # passo antes de gravar.
+                            masked_comment, annotation_tokens = mask_annotations(
+                                cleaned_comment
+                            )
+                            to_translate.append(
+                                (comment, masked_comment, annotation_tokens)
+                            )
 
                 # Fase 2: traduzir em lote os comentários restantes
                 if to_translate:
@@ -285,8 +323,8 @@ def run_translation(
                         return
 
                     originals = [item[0] for item in to_translate]
-                    cleaned_texts = [item[1] for item in to_translate]
-                    joined = join_comments_for_batch(cleaned_texts)
+                    masked_texts = [item[1] for item in to_translate]
+                    joined = join_comments_for_batch(masked_texts)
 
                     api_started = time.perf_counter()
                     translated_joined = translate_text(
@@ -310,7 +348,7 @@ def run_translation(
                         parts = split_batch_translation(translated_joined, len(originals))
 
                     if parts:
-                        for original, part in zip(originals, parts):
+                        for (original, _masked, tokens), part in zip(to_translate, parts):
                             translation = apply_automatic_substitutions(part, automatic_rules)
                             # Depois das regras automaticas e ANTES de gravar: o
                             # que vai para o banco e para o PGN e o mesmo texto,
@@ -318,6 +356,22 @@ def run_translation(
                             translation, corrigidos = fix_move_notation(
                                 original, translation, source_language, target_language
                             )
+                            # A restauracao e o ULTIMO passo, e e verificada: se
+                            # a traducao nao devolveu cada sentinela exatamente
+                            # uma vez, gravar seria guardar uma anotacao
+                            # corrompida com cara de certa. O comentario conta
+                            # como falha e fica no idioma original (T2/T3).
+                            translation, intactas = restore_annotations(
+                                translation, tokens
+                            )
+                            if not intactas:
+                                failed_count += 1
+                                failed_files.add(pgn_file)
+                                app.log_message(
+                                    f"  - [FALHA] Anotacoes [%...] nao voltaram "
+                                    f"intactas da traducao: \"{original[:60]}\""
+                                )
+                                continue
                             move_fixes += corrigidos
                             app.translation_cache[original] = translation
                             translated_map[original] = translation
@@ -375,7 +429,7 @@ def run_translation(
                             f"  - Aviso: divisao do lote falhou "
                             f"({len(originals)} comentarios), traduzindo individualmente."
                         )
-                        for original, cleaned in to_translate:
+                        for original, masked, tokens in to_translate:
                             if app.cancel_flag.is_set():
                                 canceled = True
                                 conn.commit()
@@ -383,7 +437,7 @@ def run_translation(
                                 return
                             api_started = time.perf_counter()
                             translated = translate_text(
-                                cleaned,
+                                masked,
                                 target_language,
                                 app.log_message,
                                 app.cancel_flag,
@@ -403,6 +457,26 @@ def run_translation(
                                     source_language,
                                     target_language,
                                 )
+                                # A mesma verificacao do caminho do lote, e nao
+                                # por zelo: uma correcao que so existisse num
+                                # dos dois daria uma execucao cujo resultado
+                                # depende de a rede ter respondido alinhada — a
+                                # licao da secao 10.4 do ROADMAP.
+                                translation, intactas = restore_annotations(
+                                    translation, tokens
+                                )
+                                if not intactas:
+                                    failed_count += 1
+                                    failed_files.add(pgn_file)
+                                    app.log_message(
+                                        f"  - [FALHA] Anotacoes [%...] nao "
+                                        f"voltaram intactas da traducao: "
+                                        f"\"{original[:60]}\""
+                                    )
+                                    wait_seconds = pacer.next_delay()
+                                    time.sleep(wait_seconds)
+                                    batch_wait_time += wait_seconds
+                                    continue
                                 move_fixes += corrigidos
                                 app.translation_cache[original] = translation
                                 translated_map[original] = translation
@@ -496,7 +570,8 @@ def run_translation(
                     output_pgn,
                     translated_map,
                     positions,
-                    app.log_message
+                    app.log_message,
+                    use_bom=use_bom,
                 ):
                     generated_files += 1
                     app.log_message(f"  - Arquivo traduzido gerado: {output_pgn}")
@@ -518,6 +593,13 @@ def run_translation(
         app.log_message(f"Arquivos PGN traduzidos gerados: {generated_files}")
         if corrige_lances:
             app.log_message(f"Lances com a letra da peca corrigida: {move_fixes}")
+        if total_semicolon:
+            # So quando existe (garantia X3): um "0 ignorados" fixo faria o
+            # usuario procurar um problema que nao ha — o mesmo criterio da
+            # linha de lances acima.
+            app.log_message(
+                f"Comentarios ';' ignorados (nao suportado): {total_semicolon}"
+            )
         app.log_message(f"Banco de dados: {app.output_db}")
 
         if failed_count:
@@ -570,6 +652,11 @@ def run_translation(
             # corrige nada, e um "Lances corrigidos: 0" fixo so faria o usuario
             # procurar um problema que nao existe.
             linha_lances = f"\nLances corrigidos: {move_fixes}" if move_fixes else ""
+            linha_semicolon = (
+                f"\nComentarios ';' ignorados: {total_semicolon}"
+                if total_semicolon
+                else ""
+            )
             resumo = (
                 f"Total de comentarios: {total_comments}\n"
                 f"Novas traducoes: {translated_count}\n"
@@ -577,7 +664,7 @@ def run_translation(
                 f"Removidos por limpeza: {cleaned_empty_count}\n"
                 f"Reutilizados do cache: {cache_count}\n"
                 f"Falharam: {failed_count}\n"
-                f"Arquivos gerados: {generated_files}{linha_lances}"
+                f"Arquivos gerados: {generated_files}{linha_lances}{linha_semicolon}"
             )
 
             if aborted_by_api:

@@ -5,11 +5,11 @@ Registro das melhorias do programa. Cada item traz o motivo, o impacto medido
 verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
-**Pendentes: as secoes 13 a 20**, todas da revisao de 2026-07-29. As garantias
-que os testes ja protegem estao na [SPEC.md](SPEC.md), secao 9; as que as secoes
-pendentes prometem estao declaradas na secao 11 da SPEC, e cada uma so migra
-para a 9 quando o item correspondente estiver pronto e tiver teste que falhe sem
-a correcao.
+**Pendentes: as secoes 14 a 20**, da revisao de 2026-07-29 (a 13 foi concluida
+no mesmo dia). As garantias que os testes ja protegem estao na
+[SPEC.md](SPEC.md), secao 9; as que as secoes pendentes prometem estao
+declaradas na secao 11 da SPEC, e cada uma so migra para a 9 quando o item
+correspondente estiver pronto e tiver teste que falhe sem a correcao.
 
 A frase que ficava aqui — "nada pendente no momento" — ja tinha ficado **falsa
 por um dia** uma vez, e vale manter o registro: a secao 10 conserta os lances na
@@ -2978,22 +2978,25 @@ levanta ele, e nao `JSONDecodeError`.
 
 ---
 
-## 13. A traducao corrompe o que nao e prosa — PENDENTE
+## 13. A traducao corrompe o que nao e prosa — CONCLUIDO (2026-07-29)
 
 O desenho do programa divide o PGN em dois mundos: fora de `{...}` nada e
-tocado (e a garantia N1 e a base de tudo), dentro de `{...}` tudo e texto a
+tocado (e a garantia N1 e a base de tudo), dentro de `{...}` tudo era texto a
 traduzir. So que dentro do comentario vivem coisas que nao sao texto: as
 anotacoes de maquina do Lichess e do ChessBase (`[%clk 0:05:30]`,
 `[%eval +0.35]`, `[%cal Ra1h8]`, `[%csl Gd4]`), NAGs (`$14`), simbolos de
-avaliacao (`+-`, `?!`, `∞`) e numeros de lance. O pipeline nao tem o conceito
-de "token que nao se traduz" — nao ha mascara, protecao nem verificacao em
-nenhum ponto — e dois desses tokens sao corrompidos hoje, de forma
-deterministica, **antes mesmo de a API entrar**.
+avaliacao (`+-`, `?!`, `∞`) e numeros de lance. O pipeline nao tinha o conceito
+de "token que nao se traduz" — nenhuma mascara, protecao ou verificacao — e
+dois desses tokens eram corrompidos de forma deterministica, **antes mesmo de a
+API entrar**.
 
 O banco de desenvolvimento nao tem nenhum `[%...]` (a amostra veio de livro), e
 por isso o problema nunca apareceu em uso. Mas PGN de Lichess e chess.com — a
 fonte mais comum de material hoje — carrega essas anotacoes em quase todo
 comentario, e a primeira pasta vinda de la seria corrompida em silencio.
+
+O item entrou pendente e foi concluido no mesmo dia. O que cada metade ganhou
+esta nas subsecoes; a verificacao esta na 13.7.
 
 ### 13.1 A correcao de lances reescreve as setas coloridas
 
@@ -3016,12 +3019,22 @@ Nao e caso de borda probabilistico: o original e a fonte da ancora, entao o
 pareamento e sempre 1 para 1 e a troca **sempre** acontece. `G` e `Y` escapam
 por sorte — nao sao letra de peca em idioma nenhum da tabela.
 
-Isso fere o que a garantia P3 diz de si mesma — "o pior resultado possivel dela
-e deixar um lance como o tradutor escreveu" — porque aqui o pior resultado e
-outro: reescrever uma anotacao que nunca foi lance. E a ferramenta "Corrigir
-Lances" (P4) aplica a mesma corrupcao **em massa e retroativamente**, inclusive
-sobre linhas que o usuario ja verificou (o `verified` nao e rebaixado, de
-proposito — a decisao certa para lances vira a errada para setas).
+Isso feria o que a garantia P3 diz de si mesma — "o pior resultado possivel
+dela e deixar um lance como o tradutor escreveu" — porque aqui o pior resultado
+era outro: reescrever uma anotacao que nunca foi lance. E a ferramenta
+"Corrigir Lances" (P4) aplicava a mesma corrupcao **em massa e
+retroativamente**, inclusive sobre linhas que o usuario ja verificou (o
+`verified` nao e rebaixado, de proposito — a decisao certa para lances virava a
+errada para setas).
+
+**Feito:** `chess_notation` ganhou a exclusao dos spans `[%...]`
+(`COMMAND_TAG_RE`), aplicada **nos dois lados e pelo mesmo motivo em cada um**:
+no original, um `[%cal Rd4d8]` viraria uma ancora esperada falsa
+(`extract_moves`); na traducao, e o proprio texto que era reescrito (o filtro
+de candidatos em `fix_move_notation`). Como a ferramenta em massa do banco
+passa por estas mesmas funcoes, as duas portas fecham juntas — e um lance de
+verdade que divida o comentario com uma anotacao continua sendo corrigido, o
+que tem teste proprio.
 
 ### 13.2 O achatamento quebra `[%eval]` e todo decimal
 
@@ -3034,76 +3047,164 @@ caractere e `\w` — **e digito e `\w`**. Confirmado nesta maquina:
 '14.Bxf7+ wins'   -> '14. Bxf7+ wins'
 ```
 
-O `[%eval +0.35]` e destruido **antes de qualquer traducao**, e o texto
-corrompido e tres coisas ao mesmo tempo: a chave do cache, o que vai para a API
-e o que volta para o PGN gerado. Nao ha como recuperar depois.
+O `[%eval +0.35]` era destruido **antes de qualquer traducao**, e o texto
+corrompido era tres coisas ao mesmo tempo: a chave do cache, o que ia para a
+API e o que voltava para o PGN gerado. Nao havia como recuperar depois.
 
-A correcao do regex e pequena (nao inserir espaco entre `digito.digito`), mas
-**muda a chave de cache**: um comentario com decimal reachatado deixa de casar
-com a linha ja gravada. A migracao precisa de plano — reachatar as chaves
-existentes na mesma transacao, como a secao 11 fez com a rotulagem — e isso
-esta no escopo do item.
+**Feito, nas duas metades.** O achatamento deixou de inserir espaco quando o
+ponto esta **entre digitos** — e so nesse caso: `14.Bxf7` continua ganhando o
+espaco de sempre (o que segue o ponto e letra), `End.Next` idem, e ha teste
+fixando que o comportamento antigo continua onde ele estava certo.
 
-### 13.3 Tudo dentro do comentario vai cru para a API
+A outra metade e que a correcao **muda a chave de cache**: um comentario com
+decimal reachatado deixaria de casar com a linha ja gravada e seria pago de
+novo a API. A migracao de dados entrou como **schema 5** — a primeira versao do
+schema que nao muda coluna nenhuma — e colapsa `digito. digito` nas chaves
+existentes, uma vez, na primeira abertura:
+
+- **So na transicao 4 -> 5, nunca de novo.** Corrigido o achatamento, o espaco
+  deixa de ser assinatura dele: um `0. 5` gravado dali em diante e um espaco
+  que estava no PGN do usuario, e colapsa-lo seria reescrever texto dele. Ha
+  teste para os dois lados — a chave antiga colapsa no upgrade, a nova
+  sobrevive a reaberturas.
+- **Conflito deixa a linha antiga como esta.** Se a chave colapsada ja existe
+  no par, fundir seria destruir uma traducao (possivelmente revisada) para
+  desduplicar um cache. O preco e uma linha que nunca mais casa com arquivo
+  nenhum — peso morto, nao erro.
+- O `quality_warning` da linha alterada e reavaliado (R6), os gatilhos do FTS
+  mantem o indice em dia (a migracao roda depois deles de proposito), e
+  `updated_at` nao e tocado — nada aqui e edicao de traducao.
+
+### 13.3 Tudo dentro do comentario ia cru para a API
 
 `[%clk]`, NAGs, simbolos: nenhum filtro antes do envio. O Google pode traduzir
 `eval`, quebrar um colchete, reformatar `+-` como `+ -` ou absorver `?!` na
-pontuacao. Nada confere a volta.
+pontuacao. Nada conferia a volta.
 
-**O plano e mascara com restauracao verificada.** Antes do achatamento, extrair
-os spans `\[%[a-z]+ [^\]]*\]` (e opcionalmente NAGs `\$\d+`) e substitui-los
-por sentinelas que nenhum tradutor toca; depois da resposta, restaurar e
-**conferir byte a byte** que cada sentinela voltou exatamente uma vez. Se a
-restauracao falhar, o comentario e tratado como falha (T2/T3) em vez de gravado
-corrompido. A mascara resolve 13.1 e 13.2 de uma vez para as anotacoes — e
-`extract_moves`/`fix_move_notation` ganham, por defesa em profundidade, a
-exclusao explicita dos spans `[%...]` dos candidatos, porque a ferramenta em
-massa do banco (P4) opera sobre texto ja gravado, onde a mascara nao passou.
+**Feito: mascara com restauracao verificada** (`annotation_mask.py`, puro como
+`chess_notation` — sem Tk, sem banco). Cada anotacao `[%...]` vira um sentinela
+`⟦n⟧` antes do envio e volta byte a byte depois — os bytes voltam identicos por
+construcao, porque o texto original do span nunca saiu da maquina; o que a
+verificacao confere e que **cada sentinela voltou exatamente uma vez**. Sumiu,
+duplicou, ou apareceu um indice que o comentario nunca teve (vazamento do
+vizinho de lote, o rastro de um separador comido): o comentario e tratado como
+falha (T2/T3) e fica no idioma original — melhor do que gravar uma anotacao
+corrompida com cara de certa. A leitura tolera espacos que o tradutor insira
+em volta do numero (`⟦ 1 ⟧`); qualquer mutacao alem disso e exatamente o que a
+verificacao existe para pegar.
 
-**Garantia planejada X1** — *anotacoes `[%...]` atravessam a traducao byte a
-byte.*
+A posicao da mascara no pipeline e uma decisao, nao um acaso: **depois** da
+limpeza (uma regra de limpeza ainda pode remover uma anotacao inteira, se o
+usuario quiser) e a restauracao e o **ultimo** passo antes de gravar — as
+regras automaticas e a correcao de lances rodam sobre o texto ainda mascarado,
+entao nem elas alcancam uma anotacao escondida. A verificacao roda **nos dois
+caminhos** (lote e fallback individual), pela licao da secao 10.4: uma guarda
+que existisse so num deles daria uma execucao cujo resultado depende de a rede
+ter respondido alinhada.
 
-### 13.4 Comentario esvaziado pela limpeza vira `{}` no arquivo
+Duas escolhas de escopo, ditas para nao parecerem esquecimento:
+
+- **NAGs `$n` nao sao mascarados.** Dentro de comentario eles sao raros (NAG
+  vive no movetext, que nunca e tocado), e mascarar cada `$14` de prosa
+  encareceria a leitura do que e enviado sem um caso real medido. Se o QA da
+  secao 16 mostrar NAGs mutilados em uso, a mascara ja tem onde crescer.
+- **A exclusao de 13.1 fica mesmo com a mascara existindo.** A ferramenta em
+  massa do banco (P4) opera sobre texto ja gravado, onde a mascara nao passou —
+  e defesa em profundidade contra o dia em que um caminho novo esquecer de
+  mascarar.
+
+**Garantia X1 (nova)** — *anotacoes `[%...]` atravessam a traducao byte a byte,
+ou o comentario conta como falha.*
+
+### 13.4 Comentario esvaziado pela limpeza virava `{}` no arquivo
 
 Quando as regras de limpeza esvaziam um comentario (`{== StartFEN ==}` e lixo
 de conversao mesmo), o worker grava `translated_map[comment] = ""` e a geracao
-monta `"{" + "" + "}"`: o PGN de saida fica pontilhado de `{}`. Parsers
-tolerantes aceitam; os estritos reclamam; e visualmente e sujeira. O certo e
-remover o span inteiro, com o espaco adjacente — o que exige distinguir, no
-mapa, "traduzido para vazio" de "remover o span".
+montava `"{" + "" + "}"`: o PGN de saida ficava pontilhado de `{}`. Parsers
+tolerantes aceitam; os estritos reclamam; e visualmente e sujeira.
 
-**Garantia planejada X2** — *comentario esvaziado pela limpeza sai do arquivo
-sem deixar `{}` para tras.*
+**Feito na geracao, sem marca nova no mapa.** O `""` do mapa ja significava uma
+coisa so: `load_translation_cache` filtra traducoes vazias e uma falha nunca
+entra no mapa (T3), entao o unico `""` possivel e o da limpeza — e a geracao
+passou a remover o span inteiro ao ve-lo, levando junto **um** espaco vizinho
+(o seguinte, ou o anterior; nunca uma quebra de linha, que estrutura o resto do
+arquivo, e nunca o comeco do span colado seguinte — `{a}{b}` tem teste). O
+unico teste que ancorava o `{}` na saida afirmava o comportamento antigo de
+proposito e foi trocado junto, com o motivo escrito nele.
 
-### 13.5 Comentarios `;` nao existem para o programa
+**Garantia X2 (nova)** — *comentario esvaziado pela limpeza sai do arquivo sem
+deixar `{}` para tras.*
+
+### 13.5 Comentarios `;` nao existiam para o programa
 
 O padrao PGN tem duas formas de comentario: `{...}` e `;` ate o fim da linha. O
-extrator so ve a primeira. Um PGN anotado no estilo `1. e4 ; melhor lance` sai
-com "Nenhum comentario encontrado" e o usuario conclui que o programa falhou —
+extrator so ve a primeira. Um PGN anotado no estilo `1. e4 ; melhor lance` saia
+com "Nenhum comentario encontrado" e o usuario concluia que o programa falhou —
 o modo de erro mais confuso possivel, porque nada esta errado e nada e dito.
 
-Traduzir `;` e desejavel mas nao e o primeiro passo; **anunciar** e. Contar os
-`;` na extracao e dizer no log e no resumo "N comentarios no formato `;` foram
-ignorados (nao suportado)" transforma silencio em informacao.
+Traduzir `;` e desejavel mas nao era o primeiro passo; **anunciar** era.
 
-**Garantia planejada X3** — *o que o pipeline ignora e contado e anunciado.*
+**Feito: contar e anunciar.** A extracao conta as linhas com `;` fora de
+`{...}` e fora das linhas de tag (um `;` dentro de chaves e texto do
+comentario; um numa tag e parte do valor — e as chaves sao removidas
+preservando as quebras de linha, para a contagem por linha nao juntar
+vizinhas). O worker anuncia por arquivo, no resumo final e no dialogo — e um
+PGN **so** com `;` agora termina com a frase que explica: "nenhum comentario
+`{...}` encontrado, mas ha N comentario(s) no formato `;`, que o programa nao
+traduz". As linhas do resumo so aparecem quando a contagem nao e zero, pelo
+criterio da linha de lances da secao 10: um "0 ignorados" fixo faria o usuario
+procurar um problema que nao ha.
 
-### 13.6 A saida nao respeita quem vai ler o arquivo
+**Garantia X3 (nova)** — *o que o pipeline ignora e contado e anunciado.*
+
+### 13.6 A saida nao respeitava quem vai ler o arquivo
 
 Tres achados menores da mesma familia — o arquivo gerado e correto, mas hostil
-ao consumidor:
+ao consumidor. Dois entraram; o terceiro mudou de lugar, e esta dito.
 
-- **Comentario multilinha vira linha unica** (o achatamento e a chave de cache,
-  e esta certo que seja), entao o PGN de saida tem linhas de centenas de
-  caracteres — fora do export format (80 colunas) que o padrao recomenda e que
-  editoras esperam. Requebrar as linhas na **gravacao** nao toca a chave.
-- **PGN ASCII de entrada sai UTF-8 sem BOM**: a traducao introduz `ç` e `ã`, e
-  o ChessBase no Windows le ANSI — mojibake. Uma opcao "gravar UTF-8 com BOM"
-  resolve o caso dominante.
-- **O fim de linha e reescrito** (`\r\n` -> `\n` na leitura, `os.linesep` na
-  escrita, sem `newline=''` em nenhum `open`): todo acervo versionado ou
-  comparado por hash muda inteiro. O tratamento cuidadoso de `\r\n` que existe
-  no normalizador de metadados e codigo morto por causa disso.
+- **O fim de linha deixou de ser reescrito.** `newline=''` em todas as
+  leituras e gravacoes de PGN: um arquivo CRLF sai CRLF, um LF sai LF, byte a
+  byte fora dos spans traduzidos — ha teste com os bytes exatos dos dois
+  casos. Antes, `\r\n` virava `\n` na leitura e `os.linesep` na escrita, e
+  todo acervo versionado ou comparado por hash mudava inteiro. De quebra, o
+  tratamento de `\r\n` do normalizador de metadados — que era codigo morto por
+  causa do universal newlines — passou a ser real, e ganhou o mesmo
+  `newline=''` na leitura.
+- **UTF-8 com BOM virou opcao**: `output.utf8_bom` no
+  `pgn_tradutor_pro_settings.json`, desligada por padrao (o comportamento de
+  sempre; um BOM que ninguem pediu tambem incomoda — git, diff, parsers
+  estritos). Ligada, um PGN ASCII cuja traducao introduz acentos sai
+  `utf-8-sig` e o ChessBase do Windows para de ler ANSI e exibir mojibake. So
+  mexe em UTF-8: um BOM nao significa nada em cp1252. E opcao de arquivo, sem
+  interface — o dia em que merecer um checkbox e o dia em que a janela
+  principal ganhar uma secao de opcoes de saida.
+- **A requebra em 80 colunas (export format) NAO foi feita** e mudou de lugar:
+  e formatacao para editora, nao correcao de corrupcao, e envolve decidir onde
+  quebrar dentro de comentario traduzido. Esta na secao 19 (fluxo do tradutor
+  profissional), item 13 — registrado la para nao se perder.
+
+### 13.7 O que a verificacao fixou
+
+Vinte e oito testes novos, todos escritos para falhar sem a correcao — e os
+dois centrais **provados** contra o comportamento antigo, simulando-o com as
+funcoes reais: sem a exclusao, `[%cal Ra1h8]` volta a virar `[%cal Ta1h8]`
+(corrigidos = 1); sem a correcao do achatamento, `[%eval +0.35]` volta a virar
+`[%eval +0. 35]`. A suite inteira (655 testes, GUI inclusive) passou depois das
+mudancas.
+
+**Um unico teste existente precisou mudar, e essa mudanca e o item 13.4**: ele
+afirmava `assertIn("{}")` — protegia o comportamento antigo de proposito, como
+devia. Trocado por `assertNotIn`, com o motivo escrito no proprio teste.
+
+O que fica de fora, dito para o proximo leitor nao supor o contrario:
+
+- A mascara protege a traducao **nova**. Uma anotacao ja corrompida no banco
+  por uma execucao anterior continua la — acha-la e trabalho do QA da secao
+  16, e corrigi-la em massa seria uma ferramenta irma da "Corrigir Lances".
+- O sentinela `⟦n⟧` foi validado contra o endpoint por raciocinio e teste de
+  unidade, nao por medicao em volume no endpoint real. Se o Google mutilar
+  sentinelas com frequencia, isso aparece como falhas T2 contadas — visivel,
+  nunca silencioso — e o formato do sentinela e um lugar so para trocar.
 
 ---
 
@@ -3613,6 +3714,11 @@ inteiro nisso", em ordem de retorno por esforco. Nenhum exige o esquema novo
     digitacao da revisao — que hoje so o proximo leitor ve.
 12. **Status alem do binario** — "rejeitada"/"em duvida" e nota do revisor por
     linha; pendente/verificada nao expressa "voltar aqui com o autor".
+13. **Requebra em 80 colunas na gravacao** (export format do padrao PGN, o que
+    editoras esperam). Veio da secao 13.6, que preservou o fim de linha e deu a
+    opcao de BOM mas nao quebrou linha: requebrar exige decidir onde cortar
+    dentro do comentario traduzido sem tocar na chave de cache — que e o
+    achatado, e esta certo que seja.
 
 ---
 

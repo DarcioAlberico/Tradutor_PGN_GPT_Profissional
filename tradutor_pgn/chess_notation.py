@@ -76,6 +76,24 @@ def _all_known_letters():
 # reconhecido como lance.
 CAPTURE_MARKS = "x×:"
 
+# Anotacoes de maquina embutidas no comentario: `[%cal Ra1h8]`, `[%csl Gd4]`,
+# `[%clk 0:05:30]`. Nada dentro delas e lance — mas os codigos de cor do
+# Lichess (R, G, Y, B) colidem com letras de peca, e `Ra1h8` tem a forma exata
+# de um lance de Torre: sem esta exclusao, a correcao reescrevia a seta
+# vermelha como `Ta1h8`, deterministicamente (ROADMAP 13.1, garantia X1). A
+# exclusao vale para os DOIS lados — no original, um `[%cal Rd4d8]` viraria uma
+# ancora esperada falsa; na traducao, e o proprio texto que seria reescrito — e
+# tambem para a ferramenta em massa do banco, que passa por estas funcoes.
+COMMAND_TAG_RE = re.compile(r"\[%[a-zA-Z]+\b[^\]]*\]")
+
+
+def _command_spans(text):
+    return [m.span() for m in COMMAND_TAG_RE.finditer(text)]
+
+
+def _inside_any(position, spans):
+    return any(start <= position < end for start, end in spans)
+
 
 def _piece_ids_by_letter(language):
     """`letra -> id da peca` do idioma.
@@ -221,10 +239,13 @@ def extract_moves(text, language):
     if not text or not supports_notation(language):
         return []
     letras = _letters_of(language)
+    anotacoes = _command_spans(text)
     return [
         m
         for m in _move_pattern(_all_known_letters()).finditer(text)
-        if _has_letter(m) and _explained_by(m, letras)
+        if _has_letter(m)
+        and _explained_by(m, letras)
+        and not _inside_any(m.start(), anotacoes)
     ]
 
 
@@ -273,7 +294,12 @@ def fix_move_notation(original, translated, source_language, target_language):
     # item inteiro: ali a letra e a informacao, e aceitar mais alfabetos
     # devolveria a ambiguidade que a declaracao do idioma veio resolver.
     padrao = _move_pattern(_all_known_letters())
-    candidatos = [m for m in padrao.finditer(translated) if _has_letter(m)]
+    anotacoes = _command_spans(translated)
+    candidatos = [
+        m
+        for m in padrao.finditer(translated)
+        if _has_letter(m) and not _inside_any(m.start(), anotacoes)
+    ]
 
     por_ancora = {}
     for match in candidatos:

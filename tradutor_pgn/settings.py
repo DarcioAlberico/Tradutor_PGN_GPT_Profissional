@@ -180,6 +180,36 @@ def clear_editor_draft(settings, db_path, target_language, comment_id):
     return drafts.pop(editor_draft_key(db_path, target_language, comment_id), None) is not None
 
 
+OUTPUT_KEY = "output"
+
+OUTPUT_DEFAULTS = {
+    # UTF-8 com BOM na saida. Desligado por padrao: e o comportamento de
+    # sempre, e um BOM que ninguem pediu tambem incomoda (git, diff, parsers
+    # estritos). Quem le os PGN gerados no ChessBase do Windows — que trata
+    # UTF-8 sem BOM como ANSI e exibe mojibake — liga isto no
+    # `pgn_tradutor_pro_settings.json` (ROADMAP 13.6).
+    "utf8_bom": False,
+}
+
+
+def read_output_settings(settings):
+    """As opcoes de gravacao dos PGN gerados, validadas.
+
+    Pura como `read_main_window_settings`, e pelo mesmo motivo: o arquivo e
+    JSON editavel a mao, e um valor de tipo errado cai no padrao em vez de
+    virar um comportamento que ninguem consegue explicar.
+    """
+    guardado = settings.get(OUTPUT_KEY)
+    valores = dict(OUTPUT_DEFAULTS)
+    if not isinstance(guardado, dict):
+        return valores
+
+    bom = guardado.get("utf8_bom")
+    if isinstance(bom, bool):
+        valores["utf8_bom"] = bom
+    return valores
+
+
 MAIN_WINDOW_KEY = "main_window"
 
 MAIN_WINDOW_DEFAULTS = {

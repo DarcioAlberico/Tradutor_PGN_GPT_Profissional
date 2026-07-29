@@ -1,3 +1,4 @@
+import re
 import sqlite3
 
 from .review_quality import evaluate_translation_quality
@@ -5,7 +6,14 @@ from .review_quality import evaluate_translation_quality
 
 # Incrementar sempre que o schema mudar. Enquanto o PRAGMA user_version do
 # arquivo bater com este valor, initialize_database pula toda a migracao.
-SCHEMA_VERSION = 4
+#
+# A versao 5 nao muda coluna nenhuma: e uma migracao de DADOS — as chaves de
+# cache gravadas com o achatamento antigo, que inseria espaco em `0.35`
+# (ROADMAP 13.2). Ela precisa da versao pelo mesmo motivo das outras: rodar
+# uma vez, e nunca sobre um banco que ja passou por ela — um `0. 35` inserido
+# DEPOIS da correcao e um espaco que estava no PGN de origem, e colapsa-lo
+# seria reescrever texto do usuario.
+SCHEMA_VERSION = 5
 
 # Idioma de origem de uma linha gravada antes de o programa perguntar qual era,
 # e tambem o de uma execucao em que o usuario escolheu "detectar
@@ -106,7 +114,7 @@ def initialize_database(db_path):
         if current_version == SCHEMA_VERSION:
             return conn
 
-        _migrate_database(conn)
+        _migrate_database(conn, from_version=current_version)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
         return conn
@@ -314,7 +322,73 @@ def _add_source_language_column(conn):
         pass
 
 
-def _migrate_database(conn):
+# O achatamento antigo inseria espaco depois de `.` mesmo entre digitos, entao
+# um comentario com `0.35` entrou no banco com a chave `0. 35`. Corrigido o
+# achatamento (ROADMAP 13.2), a chave nova deixaria de casar com a linha
+# gravada e o comentario seria pago de novo a API. O padrao e o inverso exato
+# do que o achatamento fazia: `digito. digito` com UM espaco.
+_LEGACY_DECIMAL_SPACING_RE = re.compile(r"(?<=\d)\. (?=\d)")
+
+
+def _collapse_decimal_cache_keys(conn):
+    """Reachata as chaves gravadas pelo achatamento antigo: `0. 35` -> `0.35`.
+
+    Roda UMA vez, na migracao 4 -> 5. Nao pode rodar de novo porque o espaco
+    deixa de ser assinatura do achatamento antigo no momento em que ele e
+    corrigido: dali em diante um `0. 35` gravado e um espaco que existia no PGN
+    de origem, e colapsa-lo reescreveria texto do usuario.
+
+    Quando a chave colapsada JA existe no mesmo par de idiomas, a linha antiga
+    fica como esta: as duas sao conteudos que o banco conhece, e apagar ou
+    fundir seria destruir uma traducao (possivelmente revisada) para
+    desduplicar um cache. O preco e uma linha que nunca mais casa com arquivo
+    nenhum — peso morto, nao erro.
+
+    O `quality_warning` da linha alterada e reavaliado (garantia R6): o texto
+    original mudou, e a coluna materializada nao pode divergir do que a
+    avaliacao em Python diria. Os gatilhos do FTS ja existem neste ponto da
+    migracao e mantem o indice em dia sozinhos; `updated_at` nao e tocado —
+    nada aqui e uma edicao de traducao.
+    """
+    cursor = conn.cursor()
+    rows = cursor.execute(
+        """
+        SELECT id, original_comment, translated_comment,
+               source_language, target_language
+        FROM comments
+        WHERE original_comment GLOB '*[0-9]. [0-9]*'
+        """
+    ).fetchall()
+
+    changed = 0
+    for row_id, original, translated, source_language, target_language in rows:
+        collapsed = _LEGACY_DECIMAL_SPACING_RE.sub(".", original or "")
+        if collapsed == original:
+            continue
+        conflict = cursor.execute(
+            """
+            SELECT 1 FROM comments
+            WHERE original_comment = ?
+              AND source_language = ?
+              AND target_language = ?
+              AND id <> ?
+            LIMIT 1
+            """,
+            (collapsed, source_language, target_language, row_id),
+        ).fetchone()
+        if conflict:
+            continue
+        cursor.execute(
+            "UPDATE comments SET original_comment = ?, quality_warning = ? WHERE id = ?",
+            (collapsed, quality_warning_flag(collapsed, translated), row_id),
+        )
+        changed += 1
+
+    conn.commit()
+    return changed
+
+
+def _migrate_database(conn, from_version=0):
     cursor = conn.cursor()
 
     # Num banco novo isto ja cria o schema final; num que existe e um no-op, e
@@ -420,6 +494,11 @@ def _migrate_database(conn):
     # Sem FTS5 o programa continua inteiro, so que a busca por termos nao fica
     # disponivel e a interface cai no `LIKE`. Nao abrir o banco por causa de um
     # modulo opcional ausente seria desproporcional.
+
+    # Depois do FTS de proposito: a atualizacao das chaves passa pelos gatilhos,
+    # e sem eles os termos antigos ficariam no indice para sempre.
+    if from_version < 5:
+        _collapse_decimal_cache_keys(conn)
 
     conn.commit()
     backfill_quality_warnings(conn)

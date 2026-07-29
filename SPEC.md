@@ -90,10 +90,20 @@ valida a existencia e o "Iniciar Traducao", que ja o fazia.
 1. Coleta os `.pgn` do caminho escolhido (arquivo ou pasta, com ou sem
    subdiretorios). Arquivos ja gerados pelo programa (sufixo de idioma) sao
    ignorados quando a origem e uma pasta.
-2. Para cada arquivo, detecta a codificacao e le o conteudo.
+2. Para cada arquivo, detecta a codificacao e le o conteudo — com `newline=''`,
+   para que o fim de linha do original chegue intacto a geracao (ver 3.6).
 3. Extrai cada comentario `{...}` e o **achata**: colapsa espacos em branco e
-   normaliza o espaco depois de `.`, `!` e `?`. O texto achatado e a chave de
-   cache; a posicao (inicio, fim) no arquivo original e guardada.
+   normaliza o espaco depois de `.`, `!` e `?` — **exceto quando o ponto esta
+   entre dois digitos**, que e notacao (`2.5`, `[%eval +0.35]`, `v1.2.3`) e nao
+   fim de frase. O texto achatado e a chave de cache; a posicao (inicio, fim)
+   no arquivo original e guardada.
+
+**Garantia X3 — o que o pipeline ignora e contado e anunciado.** O padrao PGN
+tem uma segunda forma de comentario, `;` ate o fim da linha, que o programa nao
+traduz. As linhas com `;` fora de `{...}` e fora das tags sao contadas, ditas
+no log por arquivo e no resumo final — e um PGN anotado **so** com `;` recebe a
+explicacao inteira em vez de um "nenhum comentario encontrado" que parece
+defeito. As linhas do resumo so aparecem quando a contagem nao e zero.
 
 **Garantia E1 — deteccao de codificacao.** A codificacao e decidida analisando
 o arquivo **inteiro**, nunca uma amostra. Um arquivo cujos acentos aparecem so
@@ -203,8 +213,23 @@ Para cada comentario:
 1. Se ja esta no cache em memoria, reusa.
 2. Senao, aplica as regras de **limpeza** (`cleanup`). Se o resultado ficar
    vazio, o comentario e considerado descartavel e vira string vazia.
-3. Senao, vai para a API. A resposta recebe as regras **automaticas**
-   (`automatic`) e e gravada no cache.
+3. Senao, as anotacoes de maquina (`[%clk]`, `[%eval]`, `[%cal]`, `[%csl]`)
+   sao **mascaradas** por sentinelas e o texto vai para a API. A resposta
+   recebe as regras **automaticas** (`automatic`) e a correcao de lances (P3)
+   ainda mascarada — anotacao escondida nao e reescrita por engano —, os
+   sentinelas sao **restaurados e conferidos**, e so entao a traducao e gravada
+   no cache.
+
+**Garantia X1 — anotacoes `[%...]` atravessam a traducao byte a byte, ou o
+comentario conta como falha.** A mascara e aplicada depois da limpeza (uma
+regra de limpeza ainda pode remover uma anotacao inteira, se o usuario quiser)
+e a restauracao e o ultimo passo antes de gravar. Os bytes voltam identicos por
+construcao — o texto do span nunca sai da maquina —; o que se confere e que
+cada sentinela voltou **exatamente uma vez**. Sumiu, duplicou ou apareceu um
+que o comentario nunca teve (vazamento do vizinho de lote): o comentario e
+tratado como falha (T2/T3) e fica no idioma original, em vez de gravado com
+uma anotacao corrompida com cara de certa. A verificacao vale nos dois
+caminhos, lote e individual.
 
 O cache em memoria traz **apenas os comentarios dos arquivos desta execucao**, e
 nao o idioma inteiro: sao os unicos pelos quais o worker pergunta. Acima de
@@ -309,13 +334,15 @@ Sem idioma de origem declarado a correcao **nao roda**, e o log diz isso: sem
 saber em que alfabeto o original esta, corrigir seria trocar um erro do tradutor
 por um palpite do programa.
 
-**Excecao conhecida e confirmada (ROADMAP 13.1): as anotacoes `[%cal]`/`[%csl]`
-enganam a correcao.** Os codigos de cor do Lichess (`R`ed, `G`reen, `Y`ellow,
-`B`lue) vivem dentro do comentario e `Ra1h8` tem a forma exata de um lance de
-Torre: `[%cal Ra1h8]` (seta vermelha) vira `[%cal Ta1h8]`, deterministicamente,
-na traducao nova (P3) e na ferramenta em massa (P4). Enquanto o ROADMAP 13 nao
-estiver pronto, a frase "o pior resultado possivel e deixar o lance como o
-tradutor escreveu" **nao vale** para comentarios com essas anotacoes.
+**As anotacoes `[%cal]`/`[%csl]` nao sao lances.** Os codigos de cor do Lichess
+(`R`ed, `G`reen, `Y`ellow, `B`lue) vivem dentro do comentario e `Ra1h8` tem a
+forma exata de um lance de Torre — sem exclusao explicita, a correcao reescrevia
+a seta vermelha como `Ta1h8` (ROADMAP 13.1). Os spans `[%...]` ficam fora da
+leitura **dos dois lados**: no original, um `[%cal Rd4d8]` viraria uma ancora
+esperada falsa; na traducao, e o proprio texto que era reescrito. A exclusao
+vale tambem para a ferramenta em massa (P4), que passa pelas mesmas funcoes — e
+existe mesmo com a mascara de X1, porque a ferramenta opera sobre texto ja
+gravado, onde a mascara nao passou.
 
 **Garantia P4 — o que ja estava gravado tambem alcanca a correcao.** P3 so
 protege o que passa pela traducao; o que entrou no banco antes dela continua com
@@ -357,6 +384,23 @@ Saida: `<nome>-<SUFIXO>.pgn` ao lado do original (`BR`, `EN`, `ES`, `FR`,
 detectada na origem; se algum caractere nao couber nela, cai para UTF-8 e
 registra isso no log. Em nenhuma hipotese um caractere e substituido por
 `U+FFFD` no arquivo gerado.
+
+**Garantia X2 — comentario esvaziado pela limpeza sai do arquivo sem deixar
+`{}`.** O span inteiro e removido, com um espaco vizinho junto — nunca uma
+quebra de linha, que estrutura o resto do arquivo, e nunca o comeco de um span
+colado (`{a}{b}`). Um comentario que **falhou** nao passa por aqui: ele nao
+entra no mapa de traducoes e fica no idioma original (T3) — o unico vazio
+possivel no mapa e o da limpeza.
+
+**O fim de linha do original e preservado.** Leitura e gravacao usam
+`newline=''`: um PGN CRLF sai CRLF, um LF sai LF, byte a byte fora dos spans
+traduzidos. Antes, a saida trocava o fim de linha pelo da plataforma e um
+acervo comparado por hash mudava inteiro.
+
+**UTF-8 com BOM e opcao, desligada por padrao** (`output.utf8_bom` no
+`pgn_tradutor_pro_settings.json`). Existe pelo consumidor: um PGN ASCII cuja
+traducao introduz acentos sai UTF-8, e sem BOM o ChessBase do Windows le ANSI
+e exibe mojibake. So afeta saidas UTF-8; um BOM nao significa nada em cp1252.
 
 ### 3.7 Controle de execucao
 
@@ -879,6 +923,9 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | C3 | Nenhuma transacao de escrita atravessa uma chamada de rede, e um lock vira mensagem | Bug: worker travava o "Salvar" do editor por um lote inteiro |
 | M1 | A janela principal reabre no que foi escolhido | Risco: "Detectar" volta sozinho e desliga a correcao de lances sem avisar |
 | M2 | Um BOM no arquivo de configuracoes nao apaga nada | Bug: um caractere invisivel zerava rascunhos, lista de falhas e preferencias |
+| X1 | Anotacoes `[%...]` atravessam a traducao byte a byte, ou o comentario conta como falha | Bug: `[%cal Ra1h8]` virava `[%cal Ta1h8]`; `[%eval +0.35]` quebrado antes da API |
+| X2 | Comentario esvaziado pela limpeza sai do arquivo sem deixar `{}` | Sujeira: o PGN gerado saia pontilhado de `{}` |
+| X3 | Comentarios `;` sao contados e anunciados | Bug de percepcao: PGN so com `;` respondia "nenhum comentario encontrado" |
 
 ---
 
@@ -905,26 +952,22 @@ leia uma garantia acima como mais ampla do que ela e.
 
 **Anotacoes embutidas e conteudo que nao e prosa**
 
-O pipeline trata tudo dentro de `{...}` como texto a traduzir. As anotacoes de
-maquina do Lichess/ChessBase e os simbolos que vivem ali dentro nao tem
-nenhuma protecao (ROADMAP 13):
+A secao 13 do ROADMAP fechou as corrupcoes desta familia (garantias X1, X2 e
+X3). O que resta declarado como limite:
 
-- `[%cal Ra1h8]`/`[%csl Rd4]` sao corrompidos pela correcao de lances — ver a
-  excecao registrada na secao 3.5. (ROADMAP 13.1)
-- `[%eval +0.35]` e quebrado pelo achatamento (`+0. 35`) **antes** de qualquer
-  traducao, e o texto quebrado e a chave de cache, o que vai a API e o que
-  volta ao PGN. Todo decimal em comentario sofre o mesmo. (ROADMAP 13.2)
-- `[%clk]`, NAGs `$n` e simbolos de avaliacao vao crus para a API, sem mascara
-  e sem conferencia na volta. (ROADMAP 13.3)
-- Um comentario esvaziado pelas regras de limpeza vira `{}` literal no arquivo
-  gerado. (ROADMAP 13.4)
-- Comentarios `;` (a segunda forma do padrao PGN) nao sao extraidos, nao
-  contam e nao geram aviso: um PGN anotado so com `;` responde "nenhum
-  comentario encontrado". (ROADMAP 13.5)
-- O arquivo gerado sai com comentarios em linha unica (fora do export format
-  de 80 colunas), com o fim de linha reescrito pela plataforma e, quando a
-  entrada era ASCII, em UTF-8 sem BOM — que o ChessBase no Windows le como
-  ANSI. (ROADMAP 13.6)
+- **NAGs `$n` e simbolos de avaliacao dentro de comentarios vao crus para a
+  API.** A mascara de X1 cobre so os spans `[%...]`; um `$14` ou um `+-` na
+  prosa fica sujeito ao tradutor. NAG vive no movetext — que nunca e tocado —,
+  entao o caso e raro; se o QA (ROADMAP 16) mostrar mutilacao em uso, a
+  mascara tem onde crescer.
+- **Anotacoes ja corrompidas por execucoes anteriores continuam no banco.** X1
+  protege a traducao nova; achar o legado corrompido e trabalho do QA
+  (ROADMAP 16).
+- **O arquivo gerado sai com comentarios em linha unica**, fora do export
+  format de 80 colunas que editoras esperam. Requebrar na gravacao esta na
+  secao 19 do ROADMAP (item 13).
+- **UTF-8 com BOM e opt-in** (`output.utf8_bom`); o padrao continua sem BOM, e
+  quem le os PGN no ChessBase do Windows precisa ligar a opcao.
 
 **Desempenho e escala**
 
@@ -935,6 +978,10 @@ nenhuma protecao (ROADMAP 13):
   remove restricao de tabela, e so isso troca a UNIQUE antiga pela do par de
   idiomas. Os ids sao preservados, entao o indice FTS5 continua valendo e nao
   precisa ser refeito. (ROADMAP 9.2)
+- A migracao para o schema 5 e de dados, nao de colunas: colapsa `digito.
+  digito` com espaco nas chaves de cache gravadas pelo achatamento antigo, uma
+  vez (ROADMAP 13.2). Uma chave cujo par colapsado ja exista fica como esta —
+  peso morto que nunca mais casa com arquivo nenhum, e nao erro.
 
 **Rede**
 
@@ -1047,13 +1094,11 @@ Declaradas aqui para que a secao 9 continue sendo apenas o que os testes ja
 protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
-Da revisao de 2026-07-29 (ROADMAP 13 a 20):
+Da revisao de 2026-07-29 (ROADMAP 14 a 20; as garantias X1-X3 da secao 13
+foram entregues no mesmo dia e ja estao na secao 9):
 
 | # | Garantia | Item |
 |---|---|---|
-| X1 | Anotacoes `[%...]` atravessam a traducao byte a byte | 13 |
-| X2 | Comentario esvaziado pela limpeza sai do arquivo sem deixar `{}` | 13 |
-| X3 | O que o pipeline ignora (comentarios `;`) e contado e anunciado | 13 |
 | S12 | Conflito por diferenca de caixa e anunciado como o exato | 14 |
 | S13 | Tipo de regra desconhecido avisa em vez de degradar em silencio | 14 |
 | S14 | Exportar e reimportar o glossario preserva as regras de delecao | 14 |
