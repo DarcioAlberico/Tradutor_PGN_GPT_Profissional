@@ -27,7 +27,13 @@
 #define AppName "PGN Tradutor Pro"
 #define AppVersion "1.0.0"
 #define AppExe "PGN_Tradutor_Pro.exe"
-#define DistDir "..\dist\PGN_Tradutor_Pro"
+
+; O `#ifndef` deixa a linha de comando mandar (`ISCC /DDistDir=<pasta>`), e nao e
+; luxo: o roteiro de verificacao compila uma copia desta receita fora da pasta do
+; projeto, e um caminho relativo resolvido a partir DELA aponta para o vazio.
+#ifndef DistDir
+  #define DistDir "..\dist\PGN_Tradutor_Pro"
+#endif
 
 [Setup]
 AppId={{7C1D9F2E-5A64-4B7C-9E3D-1F2A6B8C4D50}
@@ -90,6 +96,12 @@ begin
     Dados := ExpandConstant('{userappdata}\{#AppName}');
     if DirExists(Dados) then
     begin
+      // Numa desinstalacao silenciosa (`/VERYSILENT`, que e como um atualizador
+      // ou um script chamam) nao ha ninguem para responder: o `MsgBox` ficaria
+      // esperando um clique que nunca vem, e a desinstalacao travaria sem dizer
+      // por que. Sem pergunta, a resposta e a conservadora — os dados ficam.
+      if UninstallSilent then
+        Exit;
       if MsgBox('Apagar tambem os seus dados?' + #13#10#13#10 +
                 'Isto remove o glossario, o banco de traducoes, os backups e as ' +
                 'configuracoes em:' + #13#10 + Dados + #13#10#13#10 +

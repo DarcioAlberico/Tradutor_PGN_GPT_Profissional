@@ -5474,7 +5474,7 @@ igual a um hash).
 
 ---
 
-## 21. Instalar sem perder o que ja foi feito — EM ANDAMENTO (2026-07-30)
+## 21. Instalar sem perder o que ja foi feito — CONCLUIDO (2026-07-30)
 
 O programa nunca teve instalador: distribui-lo era compactar `dist\` e mandar a
 pasta. A queixa que abriu esta secao e a que essa forma produz — **"nas proximas
@@ -5566,7 +5566,7 @@ janela em outro arquivo, sem relacao nenhuma com o assunto. Snapshot e
 restauracao, nunca `pop` — e o teste que falha longe da causa e o sintoma classico
 de estado global vazado.
 
-### 21.4 O instalador — RECEITA ESCRITA, NAO COMPILADA
+### 21.4 O instalador — CONCLUIDO E VERIFICADO
 
 `instalador\PGN_Tradutor_Pro.iss` (Inno Setup 6), com a regra que governa o
 arquivo inteiro: **ele nao distribui nem toca em nenhum arquivo de dados**. Nao
@@ -5579,19 +5579,52 @@ tem o glossario para sobrescrever.
 | desinstalar **pergunta** sobre os dados, com "Nao" como padrao | Quem desinstala para reinstalar uma versao nova nao quer perder o acervo por clicar rapido demais |
 | `instalador\saida\` no `.gitignore` | A receita e versionada; o `.exe` de 77 MB gerado por ela, nao |
 
-**Nao esta compilado.** O Inno Setup nao esta instalado nesta maquina, entao o
-`.iss` foi escrito e revisado, mas nunca passou por `ISCC.exe`. Enquanto isso nao
-acontecer, ele e uma receita plausivel e nao um instalador testado — e esta dito
-aqui para nao parecer entregue.
+**Compilado com o Inno Setup 6.7.3, e o ciclo inteiro foi rodado.** Sai um
+instalador de 23,4 MB. A primeira versao deste item dizia que o Inno Setup "nao
+esta instalado nesta maquina" — **estava**, em
+`%LOCALAPPDATA%\Programs\Inno Setup 6\`, e a busca anterior so tinha olhado o
+PATH e as duas pastas `Program Files`. Instalado por usuario nao aparece em
+nenhum dos tres.
 
-### 21.5 O que falta
+### 21.5 O ciclo, e o que ele protege — CONCLUIDO
 
-- compilar o `.iss` (instalar o Inno Setup 6) e testar o ciclo real: instalar,
-  usar, atualizar por cima, conferir que a pasta de dados sobreviveu, desinstalar;
-- decidir a versao (`AppVersion` esta em `1.0.0`) e de onde ela sai — hoje o
-  programa nao tem numero de versao em lugar nenhum;
-- as garantias I1-I4 entram na secao 9 da SPEC quando o ciclo acima for
-  verificado; ate la ficam na secao 11, como planejadas.
+`instalador\verificar-ciclo.ps1` roda o que a suite de testes nao alcanca:
+instalar, usar, atualizar por cima e desinstalar, com um `.exe` de instalacao de
+verdade. As garantias I1 e I4 so existem nesse nivel — nao ha como um teste em
+Python afirmar o que o Inno Setup faz com uma pasta.
+
+O que ele confere, na ordem:
+
+| etapa | checagem |
+|---|---|
+| instalar (`/VERYSILENT`) | o programa esta la, e **nenhum arquivo de dados** veio junto |
+| primeira execucao | a pasta de dados nasce em `%APPDATA%` e recebe o glossario inicial |
+| (edita o glossario e o banco) | e o "trabalho do usuario" que o resto tem de preservar |
+| instalar a 1.0.1 por cima | **I1**: o glossario continua byte a byte o mesmo (hash), e o banco tambem |
+| desinstalar (`/VERYSILENT`) | **I4**: a pasta de dados e o glossario sobrevivem |
+
+Ele **se recusa a rodar se ja houver dados** em `%APPDATA%\PGN Tradutor Pro`: o
+roteiro escreve nessa pasta e desinstala no fim, e usar o acervo de verdade como
+cobaia seria o oposto do que esta secao existe para garantir.
+
+Duas coisas que so apareceram ao rodar:
+
+- **o `MsgBox` do desinstalador travaria uma desinstalacao silenciosa.** Sem
+  ninguem para clicar, ele ficaria esperando para sempre — e `/VERYSILENT` e como
+  um atualizador ou um script chamam. Hoje o silencio responde o conservador (os
+  dados ficam) sem perguntar nada;
+- **a receita nao podia ser compilada de outra pasta.** O `DistDir` relativo
+  resolve a partir do `.iss`, e o roteiro compila uma copia no `%TEMP%` para
+  trocar a versao sem sujar a arvore. Virou `#ifndef`, entao a linha de comando
+  manda (`ISCC /DDistDir=...`).
+
+### 21.6 O que falta
+
+- **o numero de versao.** O `AppVersion` do instalador esta em `1.0.0` escrito a
+  mao, e o programa nao tem versao em lugar nenhum — nem na janela, nem no
+  `pyproject.toml` sendo lido por alguem. Enquanto for assim, atualizar exige
+  lembrar de trocar o numero na receita, e o instalador nao tem como recusar uma
+  instalacao mais velha por cima de uma mais nova.
 
 ---
 

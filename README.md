@@ -103,13 +103,24 @@ A receita esta em [instalador\PGN_Tradutor_Pro.iss](instalador/PGN_Tradutor_Pro.
 ISCC.exe .\instalador\PGN_Tradutor_Pro.iss
 ```
 
-Sai em `instalador\saida\`. Ele instala por usuario (sem pedir administrador),
-cria os atalhos, **nao distribui nenhum arquivo de dados** e, ao desinstalar,
-pergunta antes de apagar a pasta de dados — com "Nao" como resposta padrao.
+Sai em `instalador\saida\` (~23 MB). Ele instala por usuario (sem pedir
+administrador), cria os atalhos, **nao distribui nenhum arquivo de dados** e, ao
+desinstalar, pergunta antes de apagar a pasta de dados — com "Nao" como resposta
+padrao. Numa desinstalacao silenciosa nao ha pergunta, e os dados ficam.
 
-> **Ainda nao foi compilado nem testado.** O Inno Setup nao estava instalado na
-> maquina onde isto foi escrito, entao o `.iss` e uma receita revisada, e nao um
-> instalador verificado. O ciclo que falta esta no ROADMAP, secao 21.5.
+O ciclo completo — instalar, usar, atualizar por cima, desinstalar — tem um
+roteiro que qualquer um pode repetir:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\instalador\verificar-ciclo.ps1
+```
+
+Ele instala a 1.0.0, deixa o programa criar a pasta de dados, **edita o
+glossario**, instala uma 1.0.1 por cima e confere que o glossario continua byte a
+byte o mesmo; depois desinstala e confere que os dados sobreviveram. E o que
+protege as garantias I1 e I4 da SPEC, que a suite de testes nao alcanca. Ele se
+recusa a rodar se ja houver dados em `%APPDATA%\PGN Tradutor Pro` — nao usa o seu
+acervo como cobaia.
 
 ### O que saber antes de distribuir
 

@@ -1549,6 +1549,10 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | D5 | Conteudo, posicoes e contexto de leitura de um PGN nao atravessam a fase da API | Perf: `info_by_file` segurava o acervo inteiro pela execucao toda |
 | D6 | O indice de grafias responde como o arquivo, e um fonte trocado o reconstroi | Perf: 1,0 s e 72 MB por uso para corrigir cinco tags de um PGN de 20 KB |
 | D7 | A ordem das regras do glossario e identificada por versao, e mutar a lista renova a versao | Perf: uma tupla de 7.334 elementos montada e hasheada a cada tecla do editor |
+| I1 | Atualizar o programa nao toca em nenhum arquivo da pasta de dados | Risco: o README mandava copiar o glossario para dentro de `dist\`, e um instalador feito sobre aquela pasta o sobrescreveria (protegida por `instalador\verificar-ciclo.ps1`, e nao pela suite) |
+| I2 | A primeira execucao instala o glossario inicial so quando nao ha nenhum | Risco: "instalar o padrao" e "sobrescrever o do usuario" sao a mesma linha com a condicao errada |
+| I3 | Dados de uma instalacao anterior sao COPIADOS, e o original fica onde estava | Risco: mover impede voltar para a versao anterior |
+| I4 | Desinstalar preserva a pasta de dados, a menos que o usuario peca o contrario | Risco: desinstalar para reinstalar apagaria o acervo (protegida por `instalador\verificar-ciclo.ps1`) |
 
 ---
 
@@ -1886,16 +1890,9 @@ declara garantia planejada: ele depende de escolher um dicionario e uma dependen
 nova, que e decisao de quem mantem o programa e nao um desenho pendente. Esta como
 limite na secao 10.
 
-**Do instalador (ROADMAP 21), quatro garantias esperam o ciclo real.** O codigo
-esta pronto e testado (14 testes novos), e o executavel foi construido e
-verificado — ele grava em `%APPDATA%\PGN Tradutor Pro\` e a pasta do programa sai
-sem nenhum arquivo de usuario. O que falta e compilar o `.iss` e passar pelo
-ciclo instalar -> usar -> atualizar por cima -> desinstalar, que e o que essas
-garantias afirmam:
-
-| # | Garantia | Origem |
-|---|---|---|
-| I1 | Atualizar o programa nao toca em nenhum arquivo da pasta de dados | Risco: o README mandava copiar o glossario para dentro de `dist\`, e um instalador feito sobre aquela pasta o sobrescreveria |
-| I2 | A primeira execucao instala o glossario inicial so quando nao ha nenhum | Risco: "instalar o padrao" e "sobrescrever o do usuario" sao a mesma linha de codigo com a condicao errada |
-| I3 | Dados de uma instalacao anterior sao COPIADOS, e o original fica onde estava | Risco: mover impede voltar para a versao anterior |
-| I4 | Desinstalar preserva a pasta de dados, a menos que o usuario peca o contrario | Risco: desinstalar para reinstalar apagaria o acervo |
+**As garantias do instalador (I1-I4, ROADMAP 21) estao na secao 9**, e duas delas
+sao protegidas por um teste que **nao** fica na suite: `pytest` nao tem como
+afirmar o que o Inno Setup faz com uma pasta. O que as protege e
+`instalador\verificar-ciclo.ps1`, que instala, usa, atualiza por cima e
+desinstala com um `.exe` de verdade — e que esta dito na secao 9 ao lado delas,
+para ninguem procurar na suite o teste que as sustenta.
