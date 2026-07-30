@@ -2,7 +2,7 @@ import queue
 import threading
 import tkinter as tk
 
-from . import app_actions, app_paths, first_run
+from . import __version__, app_actions, app_paths, first_run
 from .app_config import LANGUAGE_NAMES
 from .glossario import set_glossary_error_handler
 from .main_window import setup_main_ui
@@ -17,7 +17,10 @@ from .window_utils import bring_window_to_front, install_callback_error_reporter
 class PGNTranslatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("PGN Tradutor Pro")
+        # A versao no titulo, e nao so no log: com instalador, "qual versao voce
+        # esta rodando?" e a primeira pergunta de qualquer suporte, e a barra de
+        # titulo e o unico lugar que o usuario ve sem procurar (ROADMAP 21.6).
+        self.root.title(f"PGN Tradutor Pro {__version__}")
         self.root.geometry("900x650")
         self.root.minsize(900, 600)
         bring_window_to_front(self.root, maximize=True)

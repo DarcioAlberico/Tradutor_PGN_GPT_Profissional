@@ -115,12 +115,29 @@ roteiro que qualquer um pode repetir:
 powershell -ExecutionPolicy Bypass -File .\instalador\verificar-ciclo.ps1
 ```
 
-Ele instala a 1.0.0, deixa o programa criar a pasta de dados, **edita o
-glossario**, instala uma 1.0.1 por cima e confere que o glossario continua byte a
-byte o mesmo; depois desinstala e confere que os dados sobreviveram. E o que
-protege as garantias I1 e I4 da SPEC, que a suite de testes nao alcanca. Ele se
-recusa a rodar se ja houver dados em `%APPDATA%\PGN Tradutor Pro` — nao usa o seu
-acervo como cobaia.
+Ele instala a versao do projeto, deixa o programa criar a pasta de dados, **edita
+o glossario**, instala uma versao mais nova por cima e confere que o glossario
+continua byte a byte o mesmo; tenta instalar a anterior por cima e confere que
+foi recusada; depois desinstala e confere que os dados sobreviveram. E o que
+protege as garantias I1, I4 e I5 da SPEC, que a suite de testes nao alcanca. Ele
+se recusa a rodar se ja houver dados em `%APPDATA%\PGN Tradutor Pro` — nao usa o
+seu acervo como cobaia.
+
+### A versao
+
+Ela vive num lugar so, `tradutor_pgn/__init__.py`:
+
+```python
+__version__ = "0.3.0"
+```
+
+Dela saem o titulo da janela, o cabecalho do TMX exportado, o recurso de versao
+do `.exe` e a versao do instalador — que **le do proprio executavel** em vez de
+declarar a sua. Para lancar uma versao nova, troque essa linha (e a mesma no
+`pyproject.toml`, que um teste compara) e reconstrua; o resto acompanha sozinho.
+
+Instalar uma versao mais velha por cima de uma mais nova nao acontece em
+silencio: o instalador pergunta, e numa instalacao silenciosa recusa.
 
 ### O que saber antes de distribuir
 

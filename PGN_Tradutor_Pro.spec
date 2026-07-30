@@ -21,7 +21,45 @@ de dados quando ainda nao ha nenhum la.
 """
 
 import os
+import re
 import shutil
+
+# A versao sai do codigo, e nao daqui. Lida por regex e nao por `import` porque o
+# `.spec` roda no interpretador do PyInstaller, com o diretorio do projeto fora
+# do `sys.path`: importar `tradutor_pgn` aqui funciona por acidente da pasta
+# atual, e um dia deixaria de funcionar sem aviso.
+VERSAO = re.search(
+    r'^__version__ = "([^"]+)"',
+    open(os.path.join("tradutor_pgn", "__init__.py"), encoding="utf-8").read(),
+    re.MULTILINE,
+).group(1)
+
+# O recurso de versao do Windows: e ele que aparece nas propriedades do arquivo,
+# e e dele que o instalador le a versao em vez de declarar a sua (ROADMAP 21.6).
+# Quatro numeros porque o formato exige quatro; o quarto e sempre zero.
+FILEVERS = tuple(int(p) for p in VERSAO.split(".")) + (0,)
+VERSION_INFO = os.path.join("build", "version_info.txt")
+os.makedirs("build", exist_ok=True)
+with open(VERSION_INFO, "w", encoding="utf-8") as f:
+    f.write(f"""VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={FILEVERS}, prodvers={FILEVERS},
+    mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([StringTable('041604B0', [
+      StringStruct('CompanyName', 'DarcioAlberico'),
+      StringStruct('FileDescription', 'PGN Tradutor Pro'),
+      StringStruct('FileVersion', '{VERSAO}'),
+      StringStruct('InternalName', 'PGN_Tradutor_Pro'),
+      StringStruct('OriginalFilename', 'PGN_Tradutor_Pro.exe'),
+      StringStruct('ProductName', 'PGN Tradutor Pro'),
+      StringStruct('ProductVersion', '{VERSAO}')])]),
+    VarFileInfo([VarStruct('Translation', [1046, 1200])])
+  ]
+)
+""")
+print(f"Versao embutida no executavel: {VERSAO}")
 
 from PyInstaller.utils.hooks import collect_all
 
@@ -170,6 +208,9 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # O recurso de versao gerado acima. Sem ele o `.exe` sai sem versao nenhuma
+    # nas propriedades, e o instalador nao teria de onde ler a dele.
+    version=VERSION_INFO,
 )
 
 coll = COLLECT(

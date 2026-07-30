@@ -7,6 +7,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 from xml.sax.saxutils import escape as xml_escape
 
+from . import __version__
 from .app_config import language_label
 from .chess_notation import fix_move_notation, supports_notation
 from .database import (
@@ -738,7 +739,11 @@ def export_translations_to_tmx(
                     '<?xml version="1.0" encoding="utf-8"?>\n'
                     '<tmx version="1.4">\n'
                     ' <header creationtool="PGN Tradutor Pro"\n'
-                    '         creationtoolversion="1.0"\n'
+                    # A versao de verdade, e nao um "1.0" congelado: este
+                    # cabecalho viaja para dentro do OmegaT/Trados de quem
+                    # importar a memoria, e e por ele que se descobre com qual
+                    # versao do programa um acervo foi exportado (ROADMAP 21.6).
+                    f'         creationtoolversion="{__version__}"\n'
                     '         segtype="paragraph"\n'
                     '         o-tmf="PGN Tradutor Pro"\n'
                     '         adminlang="en"\n'

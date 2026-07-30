@@ -25,8 +25,18 @@
 ; ---------------------------------------------------------------------------
 
 #define AppName "PGN Tradutor Pro"
-#define AppVersion "1.0.0"
 #define AppExe "PGN_Tradutor_Pro.exe"
+
+; O GUID da instalacao, SEM chaves, definido uma vez.
+;
+; Ele aparece em dois lugares que precisam de formas diferentes: o `AppId` quer a
+; forma escapada (`{{...}`, porque `{` inicia constante no Inno) e a chave do
+; registro quer a forma crua (`{...}`). A primeira versao usava
+; `SetupSetting("AppId")` no `[Code]`, que devolve o texto **cru da diretiva** —
+; ou seja, com o `{{` do escape — e montava um caminho de registro que nao existe.
+; A guarda contra downgrade entao saia liberando tudo, em silencio, e so o ciclo
+; de verificacao mostrou.
+#define AppGuid "7C1D9F2E-5A64-4B7C-9E3D-1F2A6B8C4D50"
 
 ; O `#ifndef` deixa a linha de comando mandar (`ISCC /DDistDir=<pasta>`), e nao e
 ; luxo: o roteiro de verificacao compila uma copia desta receita fora da pasta do
@@ -35,10 +45,28 @@
   #define DistDir "..\dist\PGN_Tradutor_Pro"
 #endif
 
+; A VERSAO E LIDA DO PROPRIO EXECUTAVEL, e nao declarada aqui (ROADMAP 21.6). O
+; `.spec` carimba nele o que `tradutor_pgn/__version__` diz, e este arquivo le de
+; la — entao nao existe um segundo numero para esquecer de atualizar. Um
+; instalador anunciando 1.0.0 sobre um programa 0.3.0 e o tipo de mentira que so
+; aparece quando alguem tenta descobrir qual versao esta instalada.
+;
+; O `#ifndef` existe para o roteiro de verificacao, que simula uma atualizacao
+; sem reconstruir o executavel (`ISCC /DAppVersion=...`).
+#ifndef AppVersion
+  #define AppVersion GetStringFileInfo(AddBackslash(DistDir) + AppExe, "ProductVersion")
+#endif
+
 [Setup]
-AppId={{7C1D9F2E-5A64-4B7C-9E3D-1F2A6B8C4D50}
+AppId={{{#AppGuid}}
 AppName={#AppName}
 AppVersion={#AppVersion}
+; O que aparece em "Programas e Recursos" e no titulo do assistente. Com o nome
+; junto, a versao instalada fica visivel sem abrir nada.
+AppVerName={#AppName} {#AppVersion}
+; A versao do proprio instalador, para que as propriedades do `.exe` de setup
+; digam o mesmo que o programa que ele carrega.
+VersionInfoVersion={#AppVersion}
 AppPublisher=DarcioAlberico
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
@@ -84,6 +112,56 @@ Filename: "{app}\{#AppExe}"; Description: "Abrir o {#AppName}"; Flags: nowait po
 Type: filesandordirs; Name: "{app}\_internal\__pycache__"
 
 [Code]
+// Instalar uma versao MAIS VELHA por cima de uma mais nova nao e recusado pelo
+// Inno sozinho, e o estrago e do tipo que ninguem associa a causa: o programa
+// volta no tempo, os dados ficam (a pasta deles nao e tocada — I1) e a versao
+// antiga pode nao entender um esquema de banco que a nova ja migrou.
+//
+// A comparacao usa `StrToVersion`/`ComparePackedVersion`, e nao texto: "0.10.0"
+// e maior que "0.9.0" e MENOR em ordem alfabetica.
+//
+// E um AVISO, e nao um bloqueio: voltar para a versao anterior de proposito e um
+// caminho legitimo quando a nova tem um defeito. O que nao pode e acontecer sem
+// que a pessoa saiba.
+function InitializeSetup(): Boolean;
+var
+  Chave, Instalada, Aviso: String;
+  Antiga, Nova: Int64;
+begin
+  Result := True;
+  Chave := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{{#AppGuid}}_is1';
+  if not RegQueryStringValue(HKA, Chave, 'DisplayVersion', Instalada) then
+    Exit;
+  if not (StrToVersion(Instalada, Antiga) and StrToVersion('{#AppVersion}', Nova)) then
+    Exit;
+  if ComparePackedVersion(Antiga, Nova) > 0 then
+  begin
+    // **Silencioso RECUSA, sem perguntar.** A primeira versao disto confiava no
+    // `/SUPPRESSMSGBOXES` responder o botao padrao ("Nao"), e o ciclo mostrou
+    // que ele responde SIM: a instalacao mais velha passava direto, em silencio,
+    // que e justamente o caso de um atualizador automatico. Quem quiser voltar
+    // de proposito roda o instalador sem `/SILENT` e responde a pergunta.
+    if WizardSilent then
+    begin
+      Log('Recusado: a versao instalada (' + Instalada + ') e mais nova que a ' +
+          'deste instalador ({#AppVersion}).');
+      Result := False;
+      Exit;
+    end;
+    // Nenhuma linha pode COMECAR com `#`: o preprocessador do Inno le a linha
+    // como diretiva e o compile aborta com "Unknown preprocessor directive" —
+    // apontando para uma linha de texto no meio de um `MsgBox`. Por isso as
+    // quebras (`#13#10`) ficam sempre no fim da linha anterior.
+    Aviso := 'Ja esta instalada a versao ' + Instalada + ', mais nova que a ' +
+             '{#AppVersion} deste instalador.' + #13#10 + #13#10 +
+             'Instalar por cima faz o programa voltar no tempo. Os seus dados ' +
+             'nao serao tocados, mas a versao antiga pode nao entender um ' +
+             'banco que a nova ja atualizou.' + #13#10 + #13#10 +
+             'Continuar mesmo assim?';
+    Result := MsgBox(Aviso, mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  end;
+end;
+
 // O desinstalador NAO apaga a pasta de dados por conta propria. Ele pergunta, e
 // o padrao e nao apagar: quem desinstala para reinstalar uma versao nova nao
 // quer perder 200 mil traducoes por ter clicado rapido demais.

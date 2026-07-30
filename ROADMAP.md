@@ -5618,13 +5618,58 @@ Duas coisas que so apareceram ao rodar:
   trocar a versao sem sujar a arvore. Virou `#ifndef`, entao a linha de comando
   manda (`ISCC /DDistDir=...`).
 
-### 21.6 O que falta
+### 21.6 A versao — CONCLUIDO
 
-- **o numero de versao.** O `AppVersion` do instalador esta em `1.0.0` escrito a
-  mao, e o programa nao tem versao em lugar nenhum — nem na janela, nem no
-  `pyproject.toml` sendo lido por alguem. Enquanto for assim, atualizar exige
-  lembrar de trocar o numero na receita, e o instalador nao tem como recusar uma
-  instalacao mais velha por cima de uma mais nova.
+**Havia tres numeros, e nenhum derivava de outro:** o `pyproject.toml` em
+`0.2.1`, parado desde o import inicial (dez secoes atras); o cabecalho
+`creationtoolversion="1.0"` do TMX exportado, que viaja para dentro do OmegaT de
+quem importa a memoria; e o `1.0.0` que eu tinha escrito no instalador. Um
+programa 0.2.1 anunciando-se como 1.0.0 e o tipo de mentira que so aparece quando
+alguem tenta descobrir qual versao esta instalada.
+
+Agora ha uma fonte: **`tradutor_pgn.__version__`**, hoje em `0.3.0` — o `0.2.1`
+antecede as secoes 13 a 21, e continuar nele seria dizer que nada aconteceu. Dela
+derivam, sem copia em lugar nenhum:
+
+| quem | como chega la |
+|---|---|
+| titulo da janela | `PGN Tradutor Pro 0.3.0` — a primeira pergunta de qualquer suporte |
+| TMX exportado | `creationtoolversion` |
+| recurso de versao do `.exe` | o `.spec` gera o `version_info` e o carimba no executavel |
+| instalador | `GetStringFileInfo(...)` **le do proprio `.exe`** |
+| `pyproject.toml` | escrito a mao (o projeto nao e empacotado como biblioteca), e um teste falha se divergir |
+
+**O instalador nao declara mais versao nenhuma.** Ele le a do executavel que
+esta empacotando, entao nao existe um segundo numero para esquecer. O `#ifndef`
+continua permitindo `ISCC /DAppVersion=...`, que e como o roteiro simula uma
+atualizacao sem reconstruir o `.exe`.
+
+**Instalar uma versao mais velha por cima nao acontece mais em silencio**
+(garantia I5): o instalador compara com `ComparePackedVersion` — e nao com texto,
+onde "0.10.0" < "0.9.0" — e, quando a instalada e mais nova, pergunta. Numa
+instalacao silenciosa ele **recusa** e diz por que no log.
+
+Tres armadilhas, todas descobertas rodando o ciclo e nenhuma delas visivel na
+leitura:
+
+- **`/SUPPRESSMSGBOXES` responde SIM, e nao o botao padrao.** A primeira versao
+  da guarda confiava no `MB_DEFBUTTON2` para recusar em modo silencioso, e a
+  versao velha entrava direto — exatamente no caso que mais importa, o do
+  atualizador automatico. Hoje o `WizardSilent` decide **antes** de qualquer
+  `MsgBox`;
+- **`SetupSetting("AppId")` devolve o texto CRU da diretiva**, com o `{{` do
+  escape. A chave de registro montada com ele nao existia, a consulta falhava e a
+  guarda saia liberando tudo — em silencio. O GUID passou a ser um `#define`
+  usado nas duas formas;
+- **uma linha do `[Code]` nao pode comecar com `#`.** O preprocessador le
+  `#13#10` no inicio da linha como diretiva e aborta com "Unknown preprocessor
+  directive", apontando para o meio de um `MsgBox`.
+
+### 21.7 O que falta
+
+Nada nesta secao. O que sobra e escolha de quem mantem: assinar o executavel
+(exige certificado pago) e decidir quando `0.3.0` vira `0.4.0` — que agora e uma
+linha em `tradutor_pgn/__init__.py`, e o resto acompanha.
 
 ---
 

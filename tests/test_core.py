@@ -16,7 +16,8 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from tradutor_pgn import app_paths, database, first_run, glossario, pgn_spellcheck, settings
+import tradutor_pgn
+from tradutor_pgn import app_paths, database, first_run, glossario, settings
 from tradutor_pgn.app_config import (
     DATABASE_BACKUP_KEEP_COUNT,
     LANGUAGES,
@@ -17022,6 +17023,71 @@ class DataDirRuleTests(unittest.TestCase):
                 os.path.abspath(tmp),
                 os.path.abspath(pgn_spellcheck.DEFAULT_SPELLING_PATH),
             )
+
+
+class VersionTests(unittest.TestCase):
+    """Uma fonte so para a versao (ROADMAP 21.6).
+
+    Havia tres numeros que nao se falavam — `pyproject.toml` em 0.2.1, o
+    cabecalho TMX em 1.0 e o instalador em 1.0.0 —, e nenhum derivava de outro.
+    O que impede que voltem a divergir e este arquivo.
+    """
+
+    RAIZ = Path(__file__).resolve().parent.parent
+
+    def test_the_version_is_three_numbers(self):
+        """O recurso de versao do Windows e a comparacao do instalador exigem
+        numeros; um sufixo teria de ser traduzido em dois lugares."""
+        self.assertRegex(tradutor_pgn.__version__, r"^\d+\.\d+\.\d+$")
+
+    def test_pyproject_says_the_same_thing(self):
+        texto = (self.RAIZ / "pyproject.toml").read_text(encoding="utf-8")
+        declarada = re.search(r'^version = "([^"]+)"', texto, re.MULTILINE)
+
+        self.assertIsNotNone(declarada, "o pyproject.toml perdeu a versao")
+        self.assertEqual(
+            declarada.group(1),
+            tradutor_pgn.__version__,
+            "pyproject.toml e tradutor_pgn.__version__ divergiram",
+        )
+
+    def test_the_installer_does_not_declare_a_version_of_its_own(self):
+        """Ele le a do executavel; declarar a sua seria o quarto numero.
+
+        O `#ifndef` continua valendo — e por onde o roteiro de verificacao
+        simula uma atualizacao sem reconstruir o `.exe`.
+        """
+        iss = (self.RAIZ / "instalador" / "PGN_Tradutor_Pro.iss").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("GetStringFileInfo", iss)
+        self.assertNotRegex(
+            iss, r'#define AppVersion "\d', "o instalador voltou a fixar a versao"
+        )
+
+    def test_the_exported_tmx_carries_the_real_version(self):
+        """O cabecalho viaja para dentro do OmegaT de quem importar a memoria."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            conn = initialize_database(str(db_path))
+            save_translation(conn.cursor(), "A comment.", "Um comentario.", "pt", "en")
+            conn.commit()
+            conn.close()
+
+            saida = Path(tmp) / "memoria.tmx"
+            db_tools.export_translations_to_tmx(str(db_path), str(saida))
+            cabecalho = saida.read_text(encoding="utf-8")
+
+        self.assertIn(
+            f'creationtoolversion="{tradutor_pgn.__version__}"', cabecalho
+        )
+
+    def test_the_window_title_shows_it(self):
+        """"Qual versao voce esta rodando?" e a primeira pergunta do suporte."""
+        fonte = (self.RAIZ / "tradutor_pgn" / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn('title(f"PGN Tradutor Pro {__version__}")', fonte)
 
 
 class FirstRunTests(unittest.TestCase):

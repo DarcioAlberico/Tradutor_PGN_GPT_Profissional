@@ -1553,6 +1553,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | I2 | A primeira execucao instala o glossario inicial so quando nao ha nenhum | Risco: "instalar o padrao" e "sobrescrever o do usuario" sao a mesma linha com a condicao errada |
 | I3 | Dados de uma instalacao anterior sao COPIADOS, e o original fica onde estava | Risco: mover impede voltar para a versao anterior |
 | I4 | Desinstalar preserva a pasta de dados, a menos que o usuario peca o contrario | Risco: desinstalar para reinstalar apagaria o acervo (protegida por `instalador\verificar-ciclo.ps1`) |
+| I5 | A versao tem uma fonte so, e instalar uma mais velha por cima nao acontece em silencio | Bug: tres numeros que nao se falavam (0.2.1 no `pyproject`, 1.0 no TMX, 1.0.0 no instalador) e nenhuma protecao contra voltar no tempo |
 
 ---
 
