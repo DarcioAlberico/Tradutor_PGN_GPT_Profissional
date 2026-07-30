@@ -26,3 +26,7 @@ dist/
 
 # Artefato da medicao de cobertura (coverage.py), gerado sob demanda.
 .coverage
+
+# Saida do compilador do instalador (Inno Setup). A receita
+# (`instalador\PGN_Tradutor_Pro.iss`) e versionada; o `.exe` gerado, nao.
+instalador/saida/

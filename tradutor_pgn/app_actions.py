@@ -1,11 +1,11 @@
 from datetime import datetime
 import os
 import queue
-import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
+from . import app_paths
 from .backup_retention import (
     prune_database_backups,
     prune_glossary_backups,
@@ -132,7 +132,7 @@ def run_startup_cleanup(app):
     janela. Falhar aqui nao pode impedir o programa de abrir — a limpeza e
     conveniencia, nao funcionalidade.
     """
-    base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    base_dir = app_paths.data_dir()
 
     def worker():
         try:
@@ -268,8 +268,7 @@ def _begin_translation_run(app):
     app.log_text.delete("1.0", tk.END)
     app.log_text.configure(state="disabled")
 
-    script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    log_dir = os.path.join(script_dir, "logs")
+    log_dir = app_paths.data_path("logs")
     os.makedirs(log_dir, exist_ok=True)
     # Mesmo formato de carimbo dos backups (`AAAAMMDD-HHMMSS`), para que
     # `prune_log_files` reconheca o arquivo. Os logs antigos, com underscore,

@@ -16,7 +16,7 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from tradutor_pgn import database, glossario, settings
+from tradutor_pgn import app_paths, database, first_run, glossario, pgn_spellcheck, settings
 from tradutor_pgn.app_config import (
     DATABASE_BACKUP_KEEP_COUNT,
     LANGUAGES,
@@ -357,9 +357,12 @@ def setUpModule():
     global _GLOSSARY_SANDBOX
     _GLOSSARY_SANDBOX = tempfile.TemporaryDirectory(prefix="glossario-sandbox-")
     base = Path(_GLOSSARY_SANDBOX.name)
-    glossario._default_substitutions_path = lambda: str(base / "Substituicoes.txt")
-    glossario._default_glossary_db_path = lambda: str(base / "glossario.db")
-    settings.default_settings_path = lambda: str(base / "settings.json")
+    # Uma alavanca so, e a MESMA que o programa usa: desde a separacao de
+    # programa e dados (ROADMAP 21), todo caminho de usuario sai de
+    # `app_paths.data_dir()`, e ele obedece a esta variavel. Antes eram tres
+    # funcoes substituidas por dublês — o que protegia o glossario real e, de
+    # quebra, escondia dos testes o codigo que de fato calcula os caminhos.
+    os.environ[app_paths.DATA_DIR_ENV] = str(base)
     # A semente tambem sai do caminho, e por uma razao diferente: ela EXISTE no
     # repositorio e e mesclada em toda carga de regras (garantia S15), entao um
     # teste que compara a lista de regras exata veria a terminologia embutida
@@ -369,6 +372,7 @@ def setUpModule():
 
 
 def tearDownModule():
+    os.environ.pop(app_paths.DATA_DIR_ENV, None)
     if _GLOSSARY_SANDBOX is not None:
         _GLOSSARY_SANDBOX.cleanup()
 
@@ -16886,6 +16890,262 @@ class GlossaryOrderingKeyTests(unittest.TestCase):
             find_glossary_suggestions(texto, versioned_rules(pares)),
             find_glossary_suggestions(texto, list(pares)),
         )
+
+
+class DataDirRuleTests(unittest.TestCase):
+    """Onde os dados moram, e por que depende de como o programa iniciou.
+
+    A regra existe para que atualizar o programa nao passe por cima do trabalho
+    do usuario (ROADMAP 21), e para que o app instalado e o checkout convivam na
+    mesma maquina sem ver os dados um do outro.
+    """
+
+    def setUp(self):
+        # `APPDATA` entra na lista, e o motivo custou uma falha: um teste que o
+        # define e depois faz `pop` **apaga do processo** o valor de verdade, e o
+        # resto da suite roda sem `%APPDATA%` — as janelas do Tk quebram lá na
+        # frente, longe daqui, e o teste que falha nao tem relacao nenhuma com
+        # este arquivo. Snapshot e restauracao, nunca `pop`.
+        self.ambiente = {
+            nome: os.environ.get(nome)
+            for nome in (app_paths.DATA_DIR_ENV, "APPDATA")
+        }
+        self.frozen_original = getattr(sys, "frozen", None)
+        self.addCleanup(self.restaurar)
+
+    def restaurar(self):
+        for nome, valor in self.ambiente.items():
+            if valor is None:
+                os.environ.pop(nome, None)
+            else:
+                os.environ[nome] = valor
+        if self.frozen_original is None:
+            if hasattr(sys, "frozen"):
+                del sys.frozen
+        else:
+            sys.frozen = self.frozen_original
+
+    def test_running_from_source_keeps_the_data_beside_the_script(self):
+        """O comportamento de sempre, e o que a suite inteira depende."""
+        os.environ.pop(app_paths.DATA_DIR_ENV, None)
+        if hasattr(sys, "frozen"):
+            del sys.frozen
+
+        self.assertEqual(app_paths.data_dir(), app_paths.program_dir())
+        self.assertFalse(app_paths.running_frozen())
+
+    def test_frozen_puts_the_data_in_appdata_and_not_beside_the_exe(self):
+        os.environ.pop(app_paths.DATA_DIR_ENV, None)
+        sys.frozen = True
+        with tempfile.TemporaryDirectory() as tmp:
+            # O `APPDATA` volta ao valor real no `restaurar` do `addCleanup`.
+            os.environ["APPDATA"] = tmp
+            pasta = app_paths.data_dir()
+
+            self.assertEqual(pasta, os.path.join(tmp, app_paths.APP_DATA_FOLDER))
+        self.assertNotEqual(pasta, app_paths.program_dir())
+
+    def test_the_environment_variable_wins_over_both(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ[app_paths.DATA_DIR_ENV] = tmp
+            sys.frozen = True
+            self.assertEqual(app_paths.data_dir(), os.path.abspath(tmp))
+            del sys.frozen
+            self.assertEqual(app_paths.data_dir(), os.path.abspath(tmp))
+
+    def test_an_empty_variable_is_absence_and_not_the_current_directory(self):
+        """`set PGN_TRADUTOR_DATA=` e o jeito natural de desligar a variavel.
+
+        Lido como caminho, o vazio viraria o diretorio de trabalho de quem
+        chamou — o acervo gravado onde o atalho por acaso apontava.
+        """
+        os.environ[app_paths.DATA_DIR_ENV] = "   "
+        if hasattr(sys, "frozen"):
+            del sys.frozen
+
+        self.assertEqual(app_paths.data_dir(), app_paths.program_dir())
+
+    def test_appdata_missing_still_does_not_fall_back_to_the_program_folder(self):
+        """Sem `%APPDATA%` — servico, conta de sistema, ambiente de build."""
+        os.environ.pop(app_paths.DATA_DIR_ENV, None)
+        os.environ.pop("APPDATA", None)   # restaurado no `addCleanup`
+        sys.frozen = True
+
+        pasta = app_paths.data_dir()
+
+        self.assertNotEqual(pasta, app_paths.program_dir())
+        self.assertIn(app_paths.APP_DATA_FOLDER, pasta)
+
+    def test_every_user_file_follows_the_data_dir(self):
+        """As seis funcoes de caminho, todas pela mesma porta.
+
+        Uma que ficasse para tras gravaria na pasta do programa, e seria
+        exatamente o arquivo perdido na atualizacao seguinte.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ[app_paths.DATA_DIR_ENV] = tmp
+            esperado = os.path.abspath(tmp)
+
+            caminhos = {
+                "glossario": glossario._default_substitutions_path(),
+                "indice do glossario": glossario._default_glossary_db_path(),
+                "configuracoes": settings.default_settings_path(),
+                "indice de grafias": pgn_spellcheck.default_spelling_db_path(),
+            }
+            for rotulo, caminho in caminhos.items():
+                self.assertEqual(
+                    os.path.dirname(os.path.abspath(caminho)), esperado, rotulo
+                )
+
+    def test_what_ships_with_the_program_does_not_follow_the_data_dir(self):
+        """Semente, termos suspeitos e `spelling.ssp` sao dados de PROGRAMA.
+
+        Eles saem de `__file__`, viajam dentro do pacote e sao substituidos por
+        uma atualizacao — que e justamente o que nao pode acontecer com o que
+        esta na pasta de dados.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ[app_paths.DATA_DIR_ENV] = tmp
+            modulo = Path(glossario.__file__).resolve().parent
+
+            # A semente fica de fora desta lista de proposito: o sandbox da
+            # suite a aponta para um arquivo inexistente (senao a terminologia
+            # embutida entraria em todo teste que compara listas de regras), e
+            # e a propria `setUpModule` que documenta isso.
+            self.assertEqual(
+                Path(chess_terms._default_terms_path()).resolve().parent, modulo
+            )
+            self.assertEqual(
+                Path(first_run.packaged_glossary_path()).resolve().parent, modulo
+            )
+            self.assertNotIn(
+                os.path.abspath(tmp),
+                os.path.abspath(pgn_spellcheck.DEFAULT_SPELLING_PATH),
+            )
+
+
+class FirstRunTests(unittest.TestCase):
+    """A primeira execucao depois de instalar (ROADMAP 21)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.dados = self.base / "dados"
+        self.programa = self.base / "programa"
+        self.programa.mkdir()
+
+        self.env_original = os.environ.get(app_paths.DATA_DIR_ENV)
+        os.environ[app_paths.DATA_DIR_ENV] = str(self.dados)
+        self.addCleanup(self.restaurar_env)
+
+        self.program_dir_original = app_paths.program_dir
+        app_paths.program_dir = lambda: str(self.programa)
+        first_run.program_dir = app_paths.program_dir
+        self.addCleanup(setattr, app_paths, "program_dir", self.program_dir_original)
+        self.addCleanup(setattr, first_run, "program_dir", self.program_dir_original)
+
+        self.pacote_original = first_run.packaged_glossary_path
+        self.pacote = self.base / "Substituicoes-inicial.txt"
+        self.pacote.write_text(
+            "substituicoes = [\n    ('knight', 'cavalo', 'suggestion'),\n]\n",
+            encoding="utf-8",
+        )
+        first_run.packaged_glossary_path = lambda: str(self.pacote)
+        self.addCleanup(
+            setattr, first_run, "packaged_glossary_path", self.pacote_original
+        )
+
+    def restaurar_env(self):
+        if self.env_original is None:
+            os.environ.pop(app_paths.DATA_DIR_ENV, None)
+        else:
+            os.environ[app_paths.DATA_DIR_ENV] = self.env_original
+
+    def test_a_fresh_install_gets_the_glossary_that_ships_in_the_package(self):
+        copiados = first_run.prepare_data_dir()
+
+        destino = self.dados / "Substituicoes.txt"
+        self.assertTrue(destino.exists())
+        self.assertIn("Substituicoes.txt", copiados)
+        self.assertIn("knight", destino.read_text(encoding="utf-8"))
+
+    def test_data_from_a_previous_install_is_copied_and_not_moved(self):
+        """Copiar, e nao mover: voltar a versao antiga tem de continuar valendo."""
+        (self.programa / "Substituicoes.txt").write_text(
+            "substituicoes = [\n    ('rook', 'torre', 'suggestion'),\n]\n",
+            encoding="utf-8",
+        )
+        (self.programa / "traducoes.db").write_bytes(b"SQLite format 3\x00")
+
+        copiados = first_run.prepare_data_dir()
+
+        self.assertIn("Substituicoes.txt", copiados)
+        self.assertIn("traducoes.db", copiados)
+        self.assertIn(
+            "rook", (self.dados / "Substituicoes.txt").read_text(encoding="utf-8")
+        )
+        self.assertTrue(
+            (self.programa / "Substituicoes.txt").exists(),
+            "o arquivo da instalacao anterior nao pode sumir",
+        )
+
+    def test_an_existing_glossary_is_never_overwritten(self):
+        """A regra que governa o modulo inteiro, e a razao de ele existir."""
+        self.dados.mkdir()
+        meu = self.dados / "Substituicoes.txt"
+        meu.write_text(
+            "substituicoes = [\n    ('minha regra', 'curada a mao', 'automatic'),\n]\n",
+            encoding="utf-8",
+        )
+        (self.programa / "Substituicoes.txt").write_text(
+            "substituicoes = [\n    ('outra', 'coisa', 'suggestion'),\n]\n",
+            encoding="utf-8",
+        )
+
+        copiados = first_run.prepare_data_dir()
+
+        self.assertEqual(copiados, [])
+        self.assertIn("curada a mao", meu.read_text(encoding="utf-8"))
+
+    def test_running_from_source_migrates_nothing(self):
+        """Pasta de dados e pasta do programa sao a mesma: nao ha de onde copiar.
+
+        Sem esta guarda, a copia teria origem e destino iguais — e o unico
+        motivo de nada quebrar hoje seria o `_copiar_se_faltar` desistir por
+        acaso, que e correcao por acidente.
+        """
+        os.environ[app_paths.DATA_DIR_ENV] = str(self.programa)
+        (self.programa / "Substituicoes.txt").write_text("substituicoes = []\n", encoding="utf-8")
+
+        copiados = first_run.prepare_data_dir()
+
+        self.assertEqual(copiados, [])
+
+    def test_the_second_run_does_nothing(self):
+        first_run.prepare_data_dir()
+        antes = (self.dados / "Substituicoes.txt").read_bytes()
+
+        copiados = first_run.prepare_data_dir()
+
+        self.assertEqual(copiados, [])
+        self.assertEqual((self.dados / "Substituicoes.txt").read_bytes(), antes)
+
+    def test_the_big_folders_are_left_behind_and_the_log_says_so(self):
+        (self.programa / "Substituicoes.txt").write_text("substituicoes = []\n", encoding="utf-8")
+        (self.programa / "backups").mkdir()
+        logs = []
+
+        first_run.prepare_data_dir(logs.append)
+
+        self.assertFalse((self.dados / "backups").exists())
+        self.assertTrue(
+            any("backups" in linha and "NAO foi copiada" in linha for linha in logs),
+            f"o usuario precisa saber onde os backups ficaram: {logs}",
+        )
+
+    def test_the_data_dir_is_announced(self):
+        self.assertIn(str(self.dados), first_run.describe_data_dir())
 
 
 if __name__ == "__main__":

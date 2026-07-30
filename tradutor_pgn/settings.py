@@ -1,8 +1,9 @@
 import json
 import os
-import sys
 import threading
 from datetime import datetime
+
+from .app_paths import data_path
 
 
 SETTINGS_FILENAME = "pgn_tradutor_pro_settings.json"
@@ -10,8 +11,7 @@ MAX_EDITOR_DRAFTS = 200
 
 
 def default_settings_path():
-    base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    return os.path.join(base_dir, SETTINGS_FILENAME)
+    return data_path(SETTINGS_FILENAME)
 
 
 def load_settings(path=None):

@@ -56,43 +56,63 @@ python -m pip install pyinstaller
 python -m PyInstaller --noconfirm .\PGN_Tradutor_Pro.spec
 ```
 
-Sai em `dist\PGN_Tradutor_Pro\` (~77 MB). **A pasta ainda nao esta completa**: o
-programa precisa do glossario ao lado do executavel.
+Sai em `dist\PGN_Tradutor_Pro\` (~77 MB), e **a pasta esta completa** — nao copie
+nada para dentro dela. O glossario, o dicionario de grafias, a semente e a lista
+de termos suspeitos ja vao embutidos em `_internal\`.
 
-```powershell
-copy .\Substituicoes.txt .\dist\PGN_Tradutor_Pro\
-copy .\glossario.db      .\dist\PGN_Tradutor_Pro\
-```
-
-O `Substituicoes.txt` e obrigatorio — sem ele o programa abre, avisa que esta sem
-regras e traduz sem glossario (garantia S5). O `glossario.db` e opcional: e um
-indice derivado, e sem ele a primeira carga o reconstroi (~110 ms em vez de
-~16 ms).
-
-O `spelling.ssp` **nao** entra nessa copia: ele ja vai embutido, em
-`_internal\spelling_ssp\`, e o "Normalizar PGN" funciona sem preparo nenhum na
-maquina de destino. A diferenca de tratamento nao e de tamanho, e de como cada
-arquivo e localizado — o glossario sai de `sys.argv[0]` (ao lado do `.exe`) e o
-dicionario sai de `__file__` (dentro do pacote). Estar embutido nao o congela: o
-build e onedir, entao o arquivo esta em disco e da para troca-lo por uma edicao
-mais nova das classificacoes sem reconstruir.
+> Ate a versao anterior estas instrucoes mandavam copiar o `Substituicoes.txt`
+> para dentro de `dist\`. Era uma armadilha: um instalador construido sobre
+> aquela pasta levaria o glossario junto e o **sobrescreveria** a cada
+> atualizacao — em silencio, e justamente o arquivo que representa meses de
+> curadoria. Hoje o glossario vai no pacote com outro nome
+> (`Substituicoes-inicial.txt`) e quem o instala e a primeira execucao, so quando
+> ainda nao ha nenhum na pasta de dados.
 
 Se o `spelling_ssp\spelling.ssp` nao existir na hora do build, o PyInstaller
 avisa e segue: o executavel sai sem o dicionario e so o "Normalizar PGN" fica
-sem funcionar.
+sem funcionar. Estar embutido nao o congela — o build e onedir, entao da para
+troca-lo por uma edicao mais nova das classificacoes sem reconstruir.
 
-**Nao copie o `traducoes.db`.** Sao 80 MB de cache de traducoes desta maquina; o
-programa cria o dele vazio na primeira execucao.
+### Onde ficam os seus dados
 
-Distribua a pasta inteira, compactada. Para instalar noutra maquina, basta
-descompactar e executar — nao ha instalador nem dependencia externa.
+**Nao e mais ao lado do `.exe`.** Quem decide e como o programa foi iniciado:
+
+| inicio | pasta de dados |
+|---|---|
+| o `.exe` instalado | `%APPDATA%\PGN Tradutor Pro\` |
+| `python PGN_Tradutor_Pro.py` | ao lado do script |
+| com `PGN_TRADUTOR_DATA=<pasta>` | a pasta que voce disser |
+
+Glossario, banco, configuracoes, `backups\` e `logs\` seguem essa pasta. E o que
+faz uma atualizacao poder trocar o programa inteiro sem tocar no seu trabalho — e
+o que permite ter o app instalado e o repositorio na mesma maquina sem que um
+enxergue os dados do outro. O programa diz no log da abertura qual pasta esta
+usando.
+
+Quem ja usava a versao distribuida como pasta nao precisa fazer nada: na primeira
+execucao o programa **copia** o que encontrar ao lado do `.exe` para a pasta de
+dados. Copia, e nao move — voltar para a versao antiga continua funcionando.
+`backups\` e `logs\` ficam onde estao (podem ter centenas de MB) e o log diz onde.
+
+### Instalador
+
+A receita esta em [instalador\PGN_Tradutor_Pro.iss](instalador/PGN_Tradutor_Pro.iss)
+(Inno Setup 6). Depois de gerar o `dist\`:
+
+```powershell
+ISCC.exe .\instalador\PGN_Tradutor_Pro.iss
+```
+
+Sai em `instalador\saida\`. Ele instala por usuario (sem pedir administrador),
+cria os atalhos, **nao distribui nenhum arquivo de dados** e, ao desinstalar,
+pergunta antes de apagar a pasta de dados — com "Nao" como resposta padrao.
+
+> **Ainda nao foi compilado nem testado.** O Inno Setup nao estava instalado na
+> maquina onde isto foi escrito, entao o `.iss` e uma receita revisada, e nao um
+> instalador verificado. O ciclo que falta esta no ROADMAP, secao 21.5.
 
 ### O que saber antes de distribuir
 
-- **Os dados ficam ao lado do `.exe`.** `traducoes.db`, `backups\` e `logs\` sao
-  criados na pasta do executavel, entao ela precisa ser gravavel — instalar em
-  `C:\Program Files` sem permissao de escrita quebra a gravacao. Uma pasta no
-  perfil do usuario ou num pendrive funciona.
 - **O executavel nao e assinado.** O SmartScreen do Windows vai avisar na
   primeira execucao ("Windows protegeu o computador" -> "Mais informacoes" ->
   "Executar assim mesmo"), e alguns antivirus marcam executaveis do PyInstaller
@@ -114,8 +134,11 @@ Para acrescentar nomes ao dicionario, basta abrir um segundo bloco `@PLAYER ""`
 no fim do arquivo: blocos repetidos da mesma secao se somam, e o primeiro a
 definir uma grafia vence.
 
-**A primeira normalizacao cria um `spelling.db` ao lado do dicionario** e leva uns
-2 segundos a mais para isso — sao 513 mil grafias indexadas. Dali em diante o
+**A primeira normalizacao cria um `spelling.db` na pasta de dados** e leva uns
+2 segundos a mais para isso — sao 513 mil grafias indexadas. (Rodando do fonte, a
+pasta de dados e a do projeto, entao ele cai ao lado do dicionario; instalado,
+ele vai para o `%APPDATA%` junto com o resto — indice e escrita, e escrita nao
+mora na pasta do programa.) Dali em diante o
 botao abre o indice em milissegundos, em vez de reler os 30 MB do arquivo a cada
 uso. Trocar o `spelling.ssp` por uma versao nova reconstroi o indice sozinho (ele
 guarda o hash do arquivo de onde veio); apagar o `spelling.db` tambem e seguro, e

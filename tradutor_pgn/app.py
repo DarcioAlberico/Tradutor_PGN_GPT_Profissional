@@ -1,10 +1,8 @@
-import os
 import queue
-import sys
 import threading
 import tkinter as tk
 
-from . import app_actions
+from . import app_actions, app_paths, first_run
 from .app_config import LANGUAGE_NAMES
 from .glossario import set_glossary_error_handler
 from .main_window import setup_main_ui
@@ -54,12 +52,27 @@ class PGNTranslatorApp:
             lambda message: app_actions.report_glossary_failure(self, message)
         )
 
+        # ANTES da primeira carga do glossario, e essa e a ordem inteira do
+        # assunto: e aqui que a pasta de dados nasce e que o glossario inicial
+        # chega nela (ROADMAP 21). Carregar primeiro faria a instalacao nova
+        # abrir sem regras e avisar que o arquivo nao existe — o arquivo que
+        # estava para ser criado uma linha depois.
+        try:
+            first_run.prepare_data_dir(self.log_message)
+        except OSError as exc:
+            # Nao pode impedir o programa de abrir: sem a pasta de dados ele
+            # degrada para "sem glossario" (garantia S5), que e recuperavel.
+            self.log_message(f"[AVISO] Nao foi possivel preparar a pasta de dados: {exc}")
+        self.log_message(first_run.describe_data_dir())
+
         self.glossary_substitutions = app_actions.load_interactive_glossary(self)
         self.log_message(f"Glossário carregado: {len(self.glossary_substitutions)} entradas")
 
-        # Banco de dados SEMPRE ao lado do script
-        script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-        self.output_db = os.path.join(script_dir, "traducoes.db")
+        # O banco fica na pasta de DADOS, que rodando do fonte e ao lado do
+        # script e empacotado e o `%APPDATA%` (ver `app_paths`). E a diferenca
+        # entre uma atualizacao que troca o programa e uma que leva o acervo
+        # junto (ROADMAP 21).
+        self.output_db = app_paths.data_path("traducoes.db")
 
         # Cache de traduções em memória (chave = comentário achatado)
         self.translation_cache = {}

@@ -26,11 +26,25 @@ variantes.
 
 ## 2. Componentes e artefatos em disco
 
-Todos os caminhos sao resolvidos a partir do diretorio de `sys.argv[0]`
-(o diretorio do `PGN_Tradutor_Pro.py`). Empacotado com PyInstaller, `sys.argv[0]`
-e o caminho do proprio `.exe` — e nao a pasta temporaria de extracao —, entao os
-artefatos abaixo ficam ao lado do executavel, e a pasta dele precisa ser
-gravavel.
+**Dado de usuario e dado de programa moram em lugares diferentes, e quem decide
+e como o programa foi iniciado** (ROADMAP 21):
+
+| inicio | pasta de dados do usuario |
+|---|---|
+| empacotado (`sys.frozen`) | `%APPDATA%\PGN Tradutor Pro\` |
+| do fonte (`python PGN_Tradutor_Pro.py`) | ao lado do script |
+| `PGN_TRADUTOR_DATA=<pasta>` | vence os dois |
+
+E o que permite atualizar o programa sem tocar no trabalho de quem usa: a
+instalacao troca a pasta do programa inteira, e a de dados nem e vista. E e o que
+permite ter o app instalado e o repositorio na mesma maquina sem que um enxergue
+os dados do outro — a suite de testes, que roda do fonte, nao alcanca o acervo.
+
+O que vem COM o programa (`spelling.ssp`, dicionario-semente,
+`Termos-suspeitos.txt` e o glossario inicial) sai de `__file__`, viaja dentro do
+pacote e **e** substituido por uma atualizacao. A regra tem as duas pontas: o que
+sai de `__file__` a atualizacao troca, o que sai da pasta de dados ela nunca
+toca.
 
 | Artefato | Papel | Versionado |
 |---|---|---|
@@ -46,8 +60,9 @@ gravavel.
 | `pgn_tradutor_pro_settings.json` | Estado da UI e rascunhos de edicao | Nao |
 | `backups/` | Copias automaticas do glossario e do banco, com retencao (S8) | Nao |
 | `logs/` | Log por execucao de traducao (`traducao-<carimbo>.log`), com retencao | Nao |
-| `spelling_ssp/spelling.ssp` | Dicionario de nomes proprios do "Normalizar PGN" | Sim |
-| `spelling_ssp/spelling.db` | Indice SQLite derivado dele, construido na primeira normalizacao (D6) | Nao |
+| `spelling_ssp/spelling.ssp` | Dicionario de nomes proprios do "Normalizar PGN" — dado de PROGRAMA, vai dentro do pacote | Sim |
+| `spelling.db` (na pasta de dados) | Indice SQLite derivado dele, construido na primeira normalizacao (D6). Fica com os dados porque e escrita: na pasta do programa, um `Program Files` o barraria e a normalizacao ficaria no caminho lento para sempre | Nao |
+| `tradutor_pgn/Substituicoes-inicial.txt` (no pacote) | Copia do glossario feita no build; a primeira execucao a instala na pasta de dados quando nao ha glossario la | — |
 | `spelling.db` (`schema_version`, `source_hash`, `entry_count`) | Marcas do indice; a do hash e gravada por ultimo e significa "construcao concluida" | — |
 
 O `pgn_tradutor_pro_settings.json` guarda tambem a lista de arquivos que ficaram
@@ -1870,3 +1885,17 @@ delas sao medidas com cronometro e `tracemalloc`, porque em teste de igualdade
 declara garantia planejada: ele depende de escolher um dicionario e uma dependencia
 nova, que e decisao de quem mantem o programa e nao um desenho pendente. Esta como
 limite na secao 10.
+
+**Do instalador (ROADMAP 21), quatro garantias esperam o ciclo real.** O codigo
+esta pronto e testado (14 testes novos), e o executavel foi construido e
+verificado — ele grava em `%APPDATA%\PGN Tradutor Pro\` e a pasta do programa sai
+sem nenhum arquivo de usuario. O que falta e compilar o `.iss` e passar pelo
+ciclo instalar -> usar -> atualizar por cima -> desinstalar, que e o que essas
+garantias afirmam:
+
+| # | Garantia | Origem |
+|---|---|---|
+| I1 | Atualizar o programa nao toca em nenhum arquivo da pasta de dados | Risco: o README mandava copiar o glossario para dentro de `dist\`, e um instalador feito sobre aquela pasta o sobrescreveria |
+| I2 | A primeira execucao instala o glossario inicial so quando nao ha nenhum | Risco: "instalar o padrao" e "sobrescrever o do usuario" sao a mesma linha de codigo com a condicao errada |
+| I3 | Dados de uma instalacao anterior sao COPIADOS, e o original fica onde estava | Risco: mover impede voltar para a versao anterior |
+| I4 | Desinstalar preserva a pasta de dados, a menos que o usuario peca o contrario | Risco: desinstalar para reinstalar apagaria o acervo |

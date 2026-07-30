@@ -4,6 +4,7 @@ import re
 import sqlite3
 from pathlib import Path
 
+from .app_paths import data_path
 from .pgn_utils import available_output_path, read_pgn_text, write_translated_pgn
 
 
@@ -250,14 +251,26 @@ def parse_spelling_file(path=DEFAULT_SPELLING_PATH):
 
 
 def default_spelling_db_path(spelling_path=DEFAULT_SPELLING_PATH):
-    """O indice fica ao lado do fonte, e nao numa pasta de cache do sistema.
+    """O indice vai para a pasta de DADOS; o fonte fica onde estiver.
 
-    E a mesma escolha do `glossario.db`: o derivado mora junto do que o gerou,
-    entao apagar um e obvio quando se apaga o outro, e ninguem procura por um
-    cache invisivel quando quer forcar a reconstrucao.
+    O `spelling.ssp` e dado de programa: vem dentro do pacote, em `_internal`, e
+    uma atualizacao o substitui. O indice derivado dele e **escrita**, e escrita
+    nao pode morar na pasta do programa — instalado em `C:\\Program Files` ela
+    nao e gravavel, e a normalizacao cairia no caminho degradado (1,0 s e 72 MB
+    por uso) em toda execucao, para sempre, so avisando no log (ROADMAP 21).
+
+    Rodando do fonte a pasta de dados e a do projeto, entao o indice continua
+    caindo ao lado do dicionario, que e onde ele sempre esteve.
+
+    Um `spelling_path` fora do lugar padrao — o que os testes usam — mantem o
+    indice ao lado dele: sao dicionarios de mentira em pasta temporaria, e
+    espalhar os indices deles pela pasta de dados do usuario seria sujeira.
     """
-    return os.path.join(os.path.dirname(os.path.abspath(spelling_path)),
-                        SPELLING_DB_FILENAME)
+    if os.path.abspath(spelling_path) != os.path.abspath(DEFAULT_SPELLING_PATH):
+        return os.path.join(
+            os.path.dirname(os.path.abspath(spelling_path)), SPELLING_DB_FILENAME
+        )
+    return data_path(SPELLING_DB_FILENAME)
 
 
 def spelling_source_fingerprint(path):

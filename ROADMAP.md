@@ -5474,6 +5474,127 @@ igual a um hash).
 
 ---
 
+## 21. Instalar sem perder o que ja foi feito — EM ANDAMENTO (2026-07-30)
+
+O programa nunca teve instalador: distribui-lo era compactar `dist\` e mandar a
+pasta. A queixa que abriu esta secao e a que essa forma produz — **"nas proximas
+atualizacoes eu nao perderia o que ja fiz de correcoes"** —, e ela nao e um
+detalhe de empacotamento: e onde os dados moram.
+
+**O problema, medido.** Ate aqui todo caminho saia de `sys.argv[0]`, ou seja, da
+pasta do executavel: glossario, banco, `backups\`, `logs\` e as configuracoes.
+Nesta maquina isso e **~350 MB de dados dentro da pasta do programa**, e
+atualizar o programa significa trocar essa pasta. Pior: o README mandava copiar
+o `Substituicoes.txt` para dentro de `dist\` antes de distribuir, entao um
+instalador construido sobre aquela pasta **levaria o glossario junto e o
+sobrescreveria** — em silencio, e justamente o arquivo que representa a curadoria
+de 5.910 regras.
+
+| o que | tamanho aqui | perder significa |
+|---|---|---|
+| `Substituicoes.txt` | 294 KB | as 5.910 regras curadas |
+| `traducoes.db` | 4,8 MB (6.500 linhas) | o acervo de traducoes |
+| `backups\` | 346 MB | as copias de seguranca de tudo acima |
+| `pgn_tradutor_pro_settings.json` | 803 B | preferencias e rascunhos |
+| `glossario.db`, `spelling.db` | 1,1 MB + 25,5 MB | nada: derivados, voltam sozinhos |
+
+### 21.1 A regra: quem decide e como o programa foi iniciado — CONCLUIDO
+
+| inicio | pasta de dados |
+|---|---|
+| empacotado (`sys.frozen`) | `%APPDATA%\PGN Tradutor Pro\` |
+| do fonte (`python PGN_Tradutor_Pro.py`) | ao lado do script — como sempre foi |
+| `PGN_TRADUTOR_DATA=<pasta>` | vence os dois |
+
+A regra dos dois modos e o que atende ao pedido de usar **os dois** ao mesmo
+tempo: o app instalado nao enxerga o checkout, o checkout nao enxerga o acervo, e
+nenhuma atualizacao toca em nenhum dos dois. A suite continua valendo sem
+adaptacao porque ela roda do fonte.
+
+`sys.frozen` e a pergunta certa, e nao o nome do executavel (que pode ser
+renomeado) nem `sys.argv[0]` (que muda com o jeito de invocar). A variavel de
+ambiente existe para o pendrive, para o teste e para apontar o checkout ao acervo
+de verdade de proposito; um valor **vazio** e tratado como ausencia, senao um
+`set PGN_TRADUTOR_DATA=` sem valor gravaria o acervo no diretorio de trabalho de
+quem chamou.
+
+**Sete lugares derivavam caminho, e um deles so apareceu ao olhar:** o
+`spelling.db`. Ele e escrita, e escrita nao pode morar na pasta do programa —
+instalado em `C:\Program Files` ela nao e gravavel, e a normalizacao cairia no
+caminho degradado (1,0 s e 72 MB por uso, ROADMAP 20.5) em toda execucao, para
+sempre, so avisando no log.
+
+O que vem COM o programa nao se moveu: `spelling.ssp`, dicionario-semente e
+`Termos-suspeitos.txt` continuam saindo de `__file__`. A distincao ja existia no
+codigo e agora tem as duas pontas nomeadas — dado de programa e substituido por
+uma atualizacao, dado de usuario nunca.
+
+### 21.2 A primeira execucao depois de instalar — CONCLUIDO
+
+`first_run.prepare_data_dir` cobre as duas situacoes, e **nunca sobrescreve**: a
+condicao e sempre "o destino nao existe", e nao "a origem e mais nova" — data de
+arquivo nao diz quem tem razao.
+
+- **quem ja usava a pasta distribuida** tem os dados ao lado do `.exe`; eles sao
+  **copiados** para a pasta de dados. Copiados, e nao movidos: voltar a versao
+  antiga tem de continuar encontrando o que ela espera;
+- **quem instalou agora** recebe o glossario que vai dentro do pacote
+  (`Substituicoes-inicial.txt`, com outro nome de proposito — um
+  `Substituicoes.txt` dentro do pacote seria confundido com o do usuario por
+  quem estivesse procurando onde o dele foi parar).
+
+`backups\` e `logs\` **nao** sao copiados: sao centenas de MB, e a primeira
+abertura depois de instalar pareceria travada. Ficam onde estao, e o log diz
+onde.
+
+A pasta de dados e anunciada no log da abertura. Uma pergunta que o usuario nao
+consegue responder olhando a tela ("onde esta meu glossario?") vira chamado de
+suporte.
+
+### 21.3 O sandbox dos testes virou o mecanismo do programa — CONCLUIDO
+
+A suite protegia o glossario real substituindo tres funcoes por dublês. Com uma
+porta unica, ela passou a usar **a mesma variavel que o programa usa** — e isso
+nao e so arrumacao: os dublês escondiam dos testes justamente o codigo que
+calcula os caminhos. Duas linhas a menos no `setUpModule` e no `gui_harness`, e o
+caminho real exercitado em cada um dos 1.140 testes.
+
+**Um vazamento meu apareceu, e o jeito como ele apareceu vale mais que ele:** um
+teste novo definia `%APPDATA%` e depois fazia `pop`, o que **apaga do processo** o
+valor de verdade. A suite seguiu sem `%APPDATA%`, e quem falhou foi um teste de
+janela em outro arquivo, sem relacao nenhuma com o assunto. Snapshot e
+restauracao, nunca `pop` — e o teste que falha longe da causa e o sintoma classico
+de estado global vazado.
+
+### 21.4 O instalador — RECEITA ESCRITA, NAO COMPILADA
+
+`instalador\PGN_Tradutor_Pro.iss` (Inno Setup 6), com a regra que governa o
+arquivo inteiro: **ele nao distribui nem toca em nenhum arquivo de dados**. Nao
+tem o glossario para sobrescrever.
+
+| decisao | por que |
+|---|---|
+| `PrivilegesRequired=lowest` | Instala por usuario, sem pedir administrador. O programa nao e assinado, e cada dialogo a menos e um passo a menos de SmartScreen. Com os dados fora, `Program Files` tambem funcionaria — o que nao funcionava era a versao anterior |
+| nenhum arquivo de dados no `[Files]` | O glossario inicial vai dentro do pacote e quem o instala e a primeira execucao, so quando nao ha nenhum. O instalador nao tem como errar naquilo que ele nao carrega |
+| desinstalar **pergunta** sobre os dados, com "Nao" como padrao | Quem desinstala para reinstalar uma versao nova nao quer perder o acervo por clicar rapido demais |
+| `instalador\saida\` no `.gitignore` | A receita e versionada; o `.exe` de 77 MB gerado por ela, nao |
+
+**Nao esta compilado.** O Inno Setup nao esta instalado nesta maquina, entao o
+`.iss` foi escrito e revisado, mas nunca passou por `ISCC.exe`. Enquanto isso nao
+acontecer, ele e uma receita plausivel e nao um instalador testado — e esta dito
+aqui para nao parecer entregue.
+
+### 21.5 O que falta
+
+- compilar o `.iss` (instalar o Inno Setup 6) e testar o ciclo real: instalar,
+  usar, atualizar por cima, conferir que a pasta de dados sobreviveu, desinstalar;
+- decidir a versao (`AppVersion` esta em `1.0.0`) e de onde ela sai — hoje o
+  programa nao tem numero de versao em lugar nenhum;
+- as garantias I1-I4 entram na secao 9 da SPEC quando o ciclo acima for
+  verificado; ate la ficam na secao 11, como planejadas.
+
+---
+
 ## Apendice da revisao de 2026-07-29 — o metodo, para poder ser refeito
 
 - **Banco de desenvolvimento**: `traducoes.db` local, 6.500 linhas en -> pt

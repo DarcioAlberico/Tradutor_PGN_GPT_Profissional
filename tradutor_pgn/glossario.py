@@ -13,6 +13,7 @@ import sqlite3
 import sys
 
 from .app_config import LANGUAGE_NAMES
+from .app_paths import data_path
 from .backup_retention import prune_glossary_backups
 
 
@@ -153,14 +154,17 @@ def report_glossary_error(message):
 
 
 def _default_substitutions_path():
-    """Retorna o caminho padrão do arquivo Substituicoes.txt."""
-    base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    return os.path.join(base_dir, "Substituicoes.txt")
+    """O `Substituicoes.txt` do usuario, na pasta de dados (ver `app_paths`).
+
+    Rodando do fonte isso continua sendo "ao lado do script", que e o que sempre
+    foi; empacotado, e `%APPDATA%\\PGN Tradutor Pro\\`, para que atualizar o
+    programa nao passe por cima do glossario que o usuario curou (ROADMAP 21).
+    """
+    return data_path("Substituicoes.txt")
 
 
 def _default_glossary_db_path():
-    base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    return os.path.join(base_dir, GLOSSARY_DB_FILENAME)
+    return data_path(GLOSSARY_DB_FILENAME)
 
 
 def _is_default_substitutions_path(path):

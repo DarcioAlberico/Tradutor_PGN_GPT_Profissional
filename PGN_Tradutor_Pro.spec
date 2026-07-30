@@ -3,22 +3,25 @@
 
     python -m PyInstaller PGN_Tradutor_Pro.spec
 
-Sai em `dist/PGN_Tradutor_Pro/`. O que precisa ficar ao lado do `.exe` para o
-programa funcionar esta no README, secao "Executavel" — em resumo, o
-`Substituicoes.txt`. Ele **nao** e embutido de proposito: o glossario e editavel
-pelo usuario e o programa grava backups ao lado dele, enquanto o conteudo
-embutido pelo PyInstaller e descartavel (em `--onefile` ele vive numa pasta
-temporaria que o Windows apaga). Dado de usuario mora junto do executavel; dado
-de programa vai embutido.
+Sai em `dist/PGN_Tradutor_Pro/`, e a pasta esta COMPLETA — nada precisa ser
+copiado para dentro dela depois (ROADMAP 21). Ate a versao anterior era preciso
+copiar o `Substituicoes.txt` a mao, e essa instrucao era uma armadilha: um
+instalador que a seguisse sobrescreveria o glossario curado do usuario na
+primeira atualizacao.
 
-Isso funciona porque `_default_substitutions_path()` deriva tudo de
-`dirname(abspath(sys.argv[0]))`, e sob PyInstaller `sys.argv[0]` e o caminho do
-proprio `.exe`, e nao a pasta de extracao. Verificado com uma sonda antes de
-empacotar. Se algum dia deixar de valer, o sintoma e o programa abrir com o
-glossario vazio e gravar os dados do usuario numa pasta temporaria.
+**Dados de usuario nao ficam mais ao lado do `.exe`.** O programa empacotado os
+guarda em `%APPDATA%\\PGN Tradutor Pro\\` (ver `tradutor_pgn/app_paths.py`), o
+que e o que permite substituir a pasta do programa inteira numa atualizacao sem
+tocar em nada que seja dele.
+
+O que vai DENTRO do pacote continua sendo dado de programa: o `spelling.ssp`, o
+dicionario-semente, o `Termos-suspeitos.txt` — e agora o glossario INICIAL, uma
+copia do `Substituicoes.txt` do projeto que a primeira execucao instala na pasta
+de dados quando ainda nao ha nenhum la.
 """
 
 import os
+import shutil
 
 from PyInstaller.utils.hooks import collect_all
 
@@ -46,13 +49,54 @@ datas, binaries, hiddenimports = collect_all("customtkinter")
 # continua fora, ao lado do `.exe`, onde ele pode edita-lo. Sao dois arquivos
 # de glossario com donos diferentes, e mantê-los em pastas diferentes e o que
 # impede a atualizacao do programa de tocar o trabalho de quem usa.
-SEED = os.path.join("tradutor_pgn", "Substituicoes-semente.txt")
-if os.path.exists(SEED):
-    datas += [(SEED, "tradutor_pgn")]
+# O glossario INICIAL: uma copia do `Substituicoes.txt` do projeto, embutida com
+# outro nome. O nome diferente nao e capricho — dentro do pacote ele e dado de
+# programa, e um arquivo chamado `Substituicoes.txt` la dentro seria confundido
+# com o do usuario justamente por quem estivesse procurando onde o dele foi
+# parar. A primeira execucao o copia para a pasta de dados, e so quando nao ha
+# glossario nenhum (ver `tradutor_pgn/first_run.py`).
+#
+# A copia sai para `build/`, e nao para dentro de `tradutor_pgn/`: gerar arquivo
+# na arvore de fontes durante o build suja o `git status` e, mais cedo ou mais
+# tarde, alguem commita a copia.
+GLOSSARIO = "Substituicoes.txt"
+if os.path.exists(GLOSSARIO):
+    os.makedirs("build", exist_ok=True)
+    INICIAL = os.path.join("build", "Substituicoes-inicial.txt")
+    shutil.copyfile(GLOSSARIO, INICIAL)
+    datas += [(INICIAL, "tradutor_pgn")]
 else:
     print(
-        "AVISO: Substituicoes-semente.txt nao encontrado; o executavel sai sem "
-        "a terminologia embutida e so o glossario do usuario vale."
+        "AVISO: Substituicoes.txt nao encontrado; o executavel sai sem glossario "
+        "inicial e a primeira execucao abre sem regras (garantia S5)."
+    )
+
+# TODO `.txt` que mora ao lado do modulo, por varredura e nao por lista.
+#
+# A lista escrita a mao falhou: o `Termos-suspeitos.txt` entrou no programa na
+# secao 16 e ninguem lembrou de acrescenta-lo aqui. No empacotado ele
+# simplesmente nao existia, e `load_suspect_terms` devolve vazio **em silencio**
+# quando o arquivo falta — o executavel perdia a heuristica de terminologia da
+# garantia Q1 sem uma linha de aviso, e so um build examinado arquivo a arquivo
+# mostraria isso.
+#
+# A varredura tem a propriedade que a lista nao tinha: acrescentar um dado de
+# programa ao pacote passa a ser copiar o arquivo para `tradutor_pgn/`, e nao
+# lembrar de dois lugares.
+DADOS_DO_MODULO = sorted(
+    os.path.join("tradutor_pgn", nome)
+    for nome in os.listdir("tradutor_pgn")
+    if nome.lower().endswith(".txt")
+)
+if DADOS_DO_MODULO:
+    datas += [(caminho, "tradutor_pgn") for caminho in DADOS_DO_MODULO]
+    print("Dados do modulo embutidos: " + ", ".join(
+        os.path.basename(c) for c in DADOS_DO_MODULO
+    ))
+else:
+    print(
+        "AVISO: nenhum .txt em tradutor_pgn/; o executavel sai sem a terminologia "
+        "embutida e sem a lista de termos suspeitos."
     )
 
 SPELLING = os.path.join("spelling_ssp", "spelling.ssp")

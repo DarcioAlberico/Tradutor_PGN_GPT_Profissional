@@ -6,12 +6,13 @@ display, o silenciamento dos dialogos e o sandbox de caminhos — e uma segunda
 copia de `SilentDialogs` seria a armadilha que o item 3.2 do ROADMAP descreve
 nos editores: corrigir uma e esquecer a outra.
 
-O sandbox de caminhos nao e preciosismo. `sys.argv[0]` decide onde ficam o
+O sandbox de caminhos nao e preciosismo. A pasta de dados decide onde ficam o
 banco, o glossario, as configuracoes, `backups/` e `logs/`, e a abertura do
 programa roda a retencao de `backups/` (garantia S8): um teste que abra o app
 sobre o diretorio do projeto **apaga backups de verdade**.
 """
 
+import os
 import sys
 import tempfile
 import tkinter as tk
@@ -20,11 +21,11 @@ from pathlib import Path
 
 from tradutor_pgn import (
     app_actions,
+    app_paths,
     db_tools,
     edit_window,
     glossario,
     glossary_editor,
-    settings,
     translation_worker,
 )
 
@@ -153,22 +154,22 @@ class GuiTestCase(unittest.TestCase):
         self.base = Path(self.sandbox.name)
         self.addCleanup(self.sandbox.cleanup)
 
-        # Nada aqui pode tocar os arquivos reais. `sys.argv[0]` vai junto: e dele
-        # que saem `output_db`, `backups/` e `logs/`.
+        # Nada aqui pode tocar os arquivos reais. `PGN_TRADUTOR_DATA` e a porta
+        # unica desde a separacao de programa e dados (ROADMAP 21): glossario,
+        # indice, configuracoes, banco, `backups/` e `logs/` saem todos dela.
+        # `sys.argv[0]` continua trocado porque a pasta do PROGRAMA sai dele — e
+        # dela que a migracao da primeira execucao tenta copiar.
         self._paths = (
-            glossario._default_substitutions_path,
-            glossario._default_glossary_db_path,
             glossario._default_seed_path,
-            settings.default_settings_path,
+            os.environ.get(app_paths.DATA_DIR_ENV),
             sys.argv[0],
         )
-        glossario._default_substitutions_path = lambda: str(self.base / "Substituicoes.txt")
-        glossario._default_glossary_db_path = lambda: str(self.base / "glossario.db")
-        # A semente tambem, e por outra razao: ela EXISTE no repositorio e e
+        os.environ[app_paths.DATA_DIR_ENV] = str(self.base)
+        # A semente e a excecao, e por outra razao: ela EXISTE no repositorio e e
         # mesclada em toda carga de regras (garantia S15), entao sem desliga-la a
         # terminologia embutida apareceria nas sugestoes de toda janela testada.
+        # Ela vem com o programa, entao nao segue a pasta de dados.
         glossario._default_seed_path = lambda: str(self.base / "semente-inexistente.txt")
-        settings.default_settings_path = lambda: str(self.base / "settings.json")
         sys.argv[0] = str(self.base / "PGN_Tradutor_Pro.py")
         self.addCleanup(self._restore_paths)
 
@@ -186,13 +187,11 @@ class GuiTestCase(unittest.TestCase):
         self.addCleanup(self.file_dialogs.restore)
 
     def _restore_paths(self):
-        (
-            glossario._default_substitutions_path,
-            glossario._default_glossary_db_path,
-            glossario._default_seed_path,
-            settings.default_settings_path,
-            sys.argv[0],
-        ) = self._paths
+        glossario._default_seed_path, dados, sys.argv[0] = self._paths
+        if dados is None:
+            os.environ.pop(app_paths.DATA_DIR_ENV, None)
+        else:
+            os.environ[app_paths.DATA_DIR_ENV] = dados
 
     def _destroy_root(self):
         # As janelas agendam trabalho com `after` (levantar a janela, restaurar a
