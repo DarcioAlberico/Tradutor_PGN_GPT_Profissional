@@ -33,14 +33,23 @@ def flash_message(label, window, text, milliseconds=1500, **configure):
 def collect_sash_positions(sashes):
     """`{chave: posicao}` dos divisores que ainda existem.
 
+    Cada item e `(chave, pane, indice)` ou `(chave, pane, indice, eixo)`. O eixo e
+    0 para divisor HORIZONTAL (a posicao e uma largura, em x) e 1 para VERTICAL (e
+    uma altura, em y) — `sash_coord` devolve o par, e o outro valor e sempre 1. Sem
+    o eixo, um divisor vertical gravaria constantemente a mesma posicao inutil, que
+    e o que aconteceria com o divisor dos dois textos (ROADMAP 19, item 1). O
+    padrao e 0 porque os divisores que ja existiam sao todos horizontais.
+
     Um `PanedWindow` que ainda nao foi desenhado (ou que ja foi destruido) nao
     responde `sash_coord`. Perder a posicao de um divisor e irrelevante; nao
     gravar as configuracoes por causa disso, nao.
     """
     posicoes = {}
-    for chave, pane, indice in sashes:
+    for item in sashes:
+        chave, pane, indice = item[:3]
+        eixo = item[3] if len(item) > 3 else 0
         try:
-            posicoes[chave] = pane.sash_coord(indice)[0]
+            posicoes[chave] = pane.sash_coord(indice)[eixo]
         except tk.TclError:
             continue
     return posicoes
@@ -83,17 +92,25 @@ def save_window_section(local_settings, section, values, window=None, sashes=())
     return dados
 
 
-def restore_sash(pane, value, minimum, maximum=None):
+def restore_sash(pane, value, minimum, maximum=None, axis=0):
     """Recoloca um divisor na posicao gravada. `True` se recolocou.
 
     Onde colocar e decisao de `clamped_sash_position`, que e pura; aqui so
     sobra o que precisa do Tk — inclusive o painel que ja nao existe mais.
+
+    `axis` diz em que coordenada a posicao vale, e o par de `sash_place` e
+    posicional: com o eixo errado, o divisor vertical seria empurrado na horizontal
+    e ficaria onde estava. E o mesmo eixo de `collect_sash_positions`, pelo mesmo
+    motivo.
     """
-    largura = clamped_sash_position(value, minimum, maximum)
-    if largura is None:
+    posicao = clamped_sash_position(value, minimum, maximum)
+    if posicao is None:
         return False
     try:
-        pane.sash_place(0, largura, 0)
+        if axis:
+            pane.sash_place(0, 0, posicao)
+        else:
+            pane.sash_place(0, posicao, 0)
     except tk.TclError:
         return False
     return True

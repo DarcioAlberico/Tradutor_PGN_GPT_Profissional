@@ -1,5 +1,6 @@
 import os
 import re
+from bisect import bisect_right
 
 from .app_config import LANGUAGE_OUTPUT_SUFFIXES, MAX_TRANSLATE_CHARS
 
@@ -95,22 +96,18 @@ def _looks_like_bomless_utf16(raw: bytes) -> str:
     return ''
 
 
-def detect_encoding(file_path: str) -> str:
-    """Detecta a codificacao de um PGN analisando o arquivo inteiro.
+def detect_encoding_from_bytes(raw: bytes) -> str:
+    """A codificacao dos bytes de um PGN, sem tocar no disco.
 
-    Ler apenas uma amostra e inseguro: um PGN costuma comecar com milhares de
-    linhas ASCII puro e so trazer acentos bem depois. Uma amostra desse trecho
-    faz o chardet responder 'ascii', e a leitura seguinte destroi todos os
-    acentos do arquivo (garantias E1 e E2 da SPEC.md).
+    Separada de `detect_encoding` para que quem ja tem os bytes na mao nao
+    precise de uma segunda leitura do arquivo (ROADMAP 20.2): cada PGN era lido
+    quatro vezes por execucao — a deteccao lia inteiro, a extracao relia, e a
+    geracao repetia as duas.
 
-    Nenhuma codificacao e devolvida sem que ela decodifique o arquivo inteiro
-    (garantia E4) — inclusive a que o `chardet` sugerir. Antes, so o fallback
-    final verificava, e o palpite do `chardet` era aceito no escuro.
+    O criterio e o de sempre, e continua sendo o do arquivo INTEIRO: ver
+    `detect_encoding`.
     """
     try:
-        with open(file_path, 'rb') as f:
-            raw = f.read()
-
         for bom, encoding in _BOMS:
             if raw.startswith(bom):
                 # A BOM e uma declaracao explicita de quem gravou o arquivo. So
@@ -165,13 +162,68 @@ def detect_encoding(file_path: str) -> str:
     return 'utf-8'
 
 
+def detect_encoding(file_path: str) -> str:
+    """Detecta a codificacao de um PGN analisando o arquivo inteiro.
+
+    Ler apenas uma amostra e inseguro: um PGN costuma comecar com milhares de
+    linhas ASCII puro e so trazer acentos bem depois. Uma amostra desse trecho
+    faz o chardet responder 'ascii', e a leitura seguinte destroi todos os
+    acentos do arquivo (garantias E1 e E2 da SPEC.md).
+
+    Nenhuma codificacao e devolvida sem que ela decodifique o arquivo inteiro
+    (garantia E4) — inclusive a que o `chardet` sugerir. Antes, so o fallback
+    final verificava, e o palpite do `chardet` era aceito no escuro.
+    """
+    try:
+        with open(file_path, 'rb') as f:
+            raw = f.read()
+    except Exception:
+        return 'utf-8'
+
+    return detect_encoding_from_bytes(raw)
+
+
+def read_pgn_text(file_path: str):
+    """`(texto, codificacao)` do PGN, com UMA leitura do arquivo (garantia G4).
+
+    A codificacao e detectada sobre os bytes que acabaram de ser lidos, e o
+    texto sai desses mesmos bytes. O caminho antigo — `detect_encoding` lendo o
+    arquivo inteiro e o `open` em modo texto lendo de novo — pagava duas
+    leituras por chamada, e a execucao chamava as duas duas vezes: uma na
+    extracao e outra na geracao (ROADMAP 20.2).
+
+    `errors='replace'` e o mesmo do `open` que isto substitui, e vale a mesma
+    observacao de `_decodes_completely`: a deteccao ja exige que a codificacao
+    escolhida decodifique o arquivo inteiro, entao o `replace` so age no
+    fallback, quando nao ha codificacao que sirva.
+
+    Nao ha traducao de fim de linha, como no `open(..., newline='')` que isto
+    substitui: o `\\r\\n` do arquivo sobrevive ate a gravacao (ROADMAP 13.6).
+    """
+    with open(file_path, 'rb') as f:
+        raw = f.read()
+
+    enc = detect_encoding_from_bytes(raw)
+    return raw.decode(enc, errors='replace'), enc
+
+
 def output_suffix_for_language(target_language: str) -> str:
     return LANGUAGE_OUTPUT_SUFFIXES.get(target_language, target_language.upper())
 
 
 def strip_generated_suffix(filename_without_ext: str) -> str:
+    """Tira o sufixo de idioma de um nome de PGN gerado por este programa.
+
+    O `-\\d+` opcional no fim e o sufixo de colisao que `available_output_path`
+    acrescenta quando o arquivo de saida ja existe. Sem ele, `game-BR-2.pgn` nao
+    era reconhecido como gerado: a terceira execucao sobre a mesma pasta pegava
+    aquele arquivo como ENTRADA e traduzia portugues para portugues, produzindo
+    `game-BR-2-BR.pgn` — e cada execucao seguinte acrescentava mais um.
+    """
     suffixes = "|".join(re.escape(s) for s in LANGUAGE_OUTPUT_SUFFIXES.values())
-    return re.sub(rf"-({suffixes})$", "", filename_without_ext, flags=re.IGNORECASE)
+    return re.sub(
+        rf"-({suffixes})(-\d+)?$", "", filename_without_ext, flags=re.IGNORECASE
+    )
 
 
 def is_generated_pgn(file_path: str) -> bool:
@@ -263,42 +315,251 @@ def count_semicolon_comments(content: str) -> int:
     return total
 
 
-def extract_comments_from_file(pgn_file: str, log_message=None):
-    comments = []
-    positions = []
-    comment_pattern = re.compile(r'\{(.*?)\}', re.DOTALL)
+# Uma partida comeca na tag `Event`: o padrao PGN exige que ela seja a primeira
+# do par de tags, entao contar `[Event` e contar partidas. Ancorada no comeco da
+# linha porque e la que a tag mora — e a busca roda sobre o texto com os
+# comentarios apagados (ver `_blank_spans`), entao um `[Event` DENTRO de um
+# comentario nao vira partida nova.
+_GAME_START_RE = re.compile(r'^[ \t]*\[[ \t]*Event\b', re.MULTILINE)
 
+# Numero de lance no movetext: digitos seguidos de ponto (`12.`, `12...`, e
+# tambem `12 .`, que alguns exportadores escrevem). Tres recortes, e cada um pega
+# um caso diferente:
+#
+# `(?<![\w.])` separa o numero de lance de um numero DENTRO de outra coisa: em
+# `0.35` o `35` nao casa (vem depois de um ponto) e em `12345.` nada casa (o
+# `2345` vem depois de um digito).
+#
+# `(?!\d)` depois do ponto e o que impede um DECIMAL de virar lance. Sem ele,
+# um `+0.35` solto no movetext dava "lance 0" — um numero errado e visivel na
+# tela, encontrado pelo teste deste caso. E o mesmo criterio de `flatten_comment`
+# (ROADMAP 13.2): ponto entre digitos e notacao, nao pontuacao. Exige o digito
+# COLADO no ponto de proposito: `1. 0-0` — roque escrito com zeros, que aparece em
+# PGN antigo — continua sendo o lance 1.
+#
+# O limite de quatro digitos e o argumento do primeiro recorte pelo outro lado:
+# nenhuma partida chega ao lance 10.000, e uma data solta no movetext deixa de ser
+# confundida com lance.
+_MOVE_NUMBER_RE = re.compile(r'(?<![\w.])(\d{1,4})[ \t]*\.(?!\d)')
+
+
+def _blank_spans(content: str, spans) -> str:
+    """Copia de `content` com os spans trocados por espaco, nos MESMOS offsets.
+
+    Existe para que a leitura do movetext — partidas e numeros de lance — nunca
+    veja o texto dos comentarios. Um comentario de livro cita lances a vontade
+    ("melhor era 14. Bxf7"), e sem apagar os spans o lance citado passaria a
+    valer como a posicao do comentario seguinte.
+
+    As quebras de linha DENTRO do span ficam de pe: as checagens seguintes sao
+    por linha (uma linha de tag, um comentario `;`), e engolir o `\\n` de um
+    comentario multilinha juntaria duas linhas que nao sao vizinhas.
+
+    Os offsets se preservam porque cada caractere apagado e trocado por um, e nao
+    por nada: as posicoes dos comentarios ja foram medidas no texto original e
+    precisam continuar valendo aqui.
+    """
+    pedacos = []
+    ultimo = 0
+    for start, end in spans:
+        pedacos.append(content[ultimo:start])
+        trecho = content[start:end]
+        if "\n" in trecho:
+            pedacos.append("".join("\n" if c == "\n" else " " for c in trecho))
+        else:
+            pedacos.append(" " * len(trecho))
+        ultimo = end
+    pedacos.append(content[ultimo:])
+    return "".join(pedacos)
+
+
+def _outside_movetext(content: str, pos: int) -> bool:
+    """A posicao esta numa linha de tag, ou depois de um `;` na propria linha?
+
+    Os dois casos tem numeros com ponto que nao sao lance: `[Date "2011.05.12"]`
+    e o resto de linha de um comentario `;`, que este programa nao traduz mas que
+    continua sendo texto e nao movetext.
+    """
+    inicio = content.rfind("\n", 0, pos) + 1
+    prefixo = content[inicio:pos]
+    return prefixo.lstrip().startswith("[") or ";" in prefixo
+
+
+def comment_reading_context(content: str, spans):
+    """Para cada span de comentario, `(partida, numero do lance)`.
+
+    E o contexto que o banco nao tinha (ROADMAP 18): sem ele a lista do editor e
+    ordem de insercao, e nao ordem de leitura da obra.
+
+    A partida sai da contagem de tags `Event` que vem ANTES do comentario. Um
+    comentario antes da primeira delas conta como da partida 1: em ordem de
+    leitura nao existe partida zero, e um PGN de movetext solto — sem tag nenhuma
+    — e uma partida so.
+
+    O lance e o ultimo numero de lance antes do comentario, DENTRO da mesma
+    partida. O recorte por partida e o que impede o pior erro possivel aqui: um
+    comentario colado nas tags da partida 2 herdaria o lance 41 da partida 1 e
+    diria com confianca uma posicao que nao existe. Sem nenhum lance antes dele,
+    o lance e `None` — que e o que o banco grava, em vez de um zero que se
+    confundiria com medicao.
+
+    Devolve uma lista paralela a `spans`. Nao le nem valida lance nenhum: validar
+    e nao-objetivo (secao 1 da SPEC), e o que se registra aqui e onde o
+    comentario estava, nao o que o tabuleiro dizia.
+    """
+    limpo = _blank_spans(content, spans)
+    inicios_de_partida = [m.start() for m in _GAME_START_RE.finditer(limpo)]
+    lances = [
+        (m.start(), int(m.group(1)))
+        for m in _MOVE_NUMBER_RE.finditer(limpo)
+        if not _outside_movetext(limpo, m.start())
+    ]
+    posicoes_de_lance = [pos for pos, _numero in lances]
+
+    contexto = []
+    for start, _end in spans:
+        partida = bisect_right(inicios_de_partida, start)
+        # O comeco da partida do comentario. Fora de qualquer partida declarada
+        # (movetext solto), o limite e o comeco do arquivo.
+        limite = inicios_de_partida[partida - 1] if partida else 0
+        anterior = bisect_right(posicoes_de_lance, start)
+        lance = None
+        if anterior and lances[anterior - 1][0] >= limite:
+            lance = lances[anterior - 1][1]
+        contexto.append((max(1, partida), lance))
+    return contexto
+
+
+_COMMENT_RE = re.compile(r'\{(.*?)\}', re.DOTALL)
+
+
+def extract_comment_texts(content: str):
+    """So os TEXTOS dos comentarios e a contagem de `;`. A metade barata.
+
+    A primeira passada da execucao precisa apenas disto: quantos comentarios ha
+    (para a barra de progresso) e quais textos sao (para adotar as linhas sem
+    idioma e para carregar o cache). Posicao e contexto de leitura sao caros — o
+    contexto sozinho custa 174 ms dos 263 ms da extracao completa num PGN de
+    3,2 MB — e so servem na vez do arquivo, ja perto da gravacao.
+
+    Medir isto foi o que decidiu o desenho de 20.4: a alternativa era a extracao
+    completa nas duas passadas, que custaria a parte cara duas vezes por arquivo.
+    """
+    textos = [flatten_comment(m.group(1)) for m in _COMMENT_RE.finditer(content)]
+    return {
+        "comments": [texto for texto in textos if texto],
+        "semicolon_comments": count_semicolon_comments(content),
+    }
+
+
+def extract_comment_texts_from_file(pgn_file: str, log_message=None):
+    """Le o PGN e devolve so os textos. Ver `extract_comment_texts`.
+
+    A codificacao e anunciada aqui, e nao na segunda passada: e o momento em que
+    o programa a descobre, e repetir a linha por arquivo diria duas vezes a mesma
+    coisa.
+    """
     try:
-        enc = detect_encoding(pgn_file)
+        content, enc = read_pgn_text(pgn_file)
         if log_message:
             log_message(f"Arquivo: {os.path.basename(pgn_file)} | Codificacao detectada: {enc}")
 
-        # `newline=''` preserva o `\r\n` no conteudo: as posicoes extraidas aqui
-        # sao offsets NESTE texto, e a geracao rele o arquivo do mesmo jeito —
-        # com universal newlines, todo PGN de saida trocava o fim de linha da
-        # plataforma em silencio (ROADMAP 13.6). Dentro dos comentarios o
-        # `flatten_comment` colapsa qualquer `\r` junto com o resto do espaco.
-        with open(pgn_file, 'r', encoding=enc, errors='replace', newline='') as f:
-            content = f.read()
-
-        for match in comment_pattern.finditer(content):
-            normalized = flatten_comment(match.group(1))
-            if not normalized:
-                continue
-
-            comments.append(normalized)
-            positions.append((match.start(), match.end(), normalized))
-
-        return {
-            "comments": comments,
-            "positions": positions,
-            "semicolon_comments": count_semicolon_comments(content),
-        }
+        return extract_comment_texts(content)
 
     except Exception as e:
         if log_message:
             log_message(f"[ERRO] Falha ao extrair comentarios de {pgn_file}: {e}")
-        return {"comments": [], "positions": [], "semicolon_comments": 0}
+        return {"comments": [], "semicolon_comments": 0}
+
+
+def extract_comments_from_content(
+    content: str, count_semicolons: bool = True, known_texts=None
+):
+    """Os comentarios `{...}` de um PGN JA LIDO, com posicao e contexto.
+
+    Separada de `extract_comments_from_file` para que a segunda passada da
+    execucao — a que gera o PGN — aproveite o texto que acabou de ler em vez de
+    reler o arquivo (ROADMAP 20.2). Nao toca no disco, e e por isso que ela nao
+    tem tratador de excecao: quem le decide o que fazer com um arquivo ilegivel.
+
+    `occurrences` e a lista de `(indice, partida, lance, texto)` na ordem em que
+    os comentarios aparecem no arquivo — o que o worker grava na tabela
+    `occurrences` para que o banco saiba de onde cada traducao veio (ROADMAP 18).
+    O indice conta os comentarios APROVEITADOS, na mesma ordem de `comments` e
+    `positions`: um `{}` vazio nao ocupa posicao porque nao vira linha nenhuma no
+    banco.
+
+    `count_semicolons=False` devolve zero em `semicolon_comments` em vez de
+    recontar: a execucao ja contou na primeira passada (garantia X3 e cumprida
+    la), e a contagem custa 29 ms por 3,2 MB de arquivo.
+
+    `known_texts` e um mapa `{texto: texto}` do que quem chama JA TEM em memoria.
+    Um comentario que esta la sai como **o objeto que ja existe**, e nao como um
+    segundo objeto de igual conteudo. E o que impede o texto de viver duas vezes
+    quando a execucao le o arquivo em duas passadas (ROADMAP 20.4): num livro com
+    8 mil comentarios de 400 caracteres, sao 3,9 MB de texto duplicado no momento
+    exato em que o arquivo esta sendo gravado. As chaves da traducao continuam
+    casando de qualquer jeito — o `dict` compara por valor —, entao isto e so
+    memoria, e nunca comportamento.
+    """
+    comments = []
+    positions = []
+    occurrences = []
+
+    # TODOS os spans entram na leitura do contexto, inclusive os que serao
+    # descartados: o que interessa ali e apagar o texto dos comentarios do
+    # movetext, e um `{}` vazio tambem nao e movetext.
+    encontrados = list(_COMMENT_RE.finditer(content))
+    contexto = comment_reading_context(
+        content, [(m.start(), m.end()) for m in encontrados]
+    )
+
+    for match, (partida, lance) in zip(encontrados, contexto):
+        normalized = flatten_comment(match.group(1))
+        if not normalized:
+            continue
+        if known_texts is not None:
+            normalized = known_texts.get(normalized, normalized)
+
+        comments.append(normalized)
+        positions.append((match.start(), match.end(), normalized))
+        occurrences.append((len(comments), partida, lance, normalized))
+
+    return {
+        "comments": comments,
+        "positions": positions,
+        "occurrences": occurrences,
+        "semicolon_comments": (
+            count_semicolon_comments(content) if count_semicolons else 0
+        ),
+    }
+
+
+def extract_comments_from_file(pgn_file: str, log_message=None):
+    """Le o PGN e extrai os comentarios dele. Ver `extract_comments_from_content`.
+
+    O texto sai de `read_pgn_text`, que preserva o `\\r\\n` do arquivo: as
+    posicoes extraidas aqui sao offsets NESTE texto, e o mesmo texto vai para a
+    geracao — com universal newlines, todo PGN de saida trocava o fim de linha da
+    plataforma em silencio (ROADMAP 13.6). Dentro dos comentarios o
+    `flatten_comment` colapsa qualquer `\\r` junto com o resto do espaco.
+    """
+    try:
+        content, enc = read_pgn_text(pgn_file)
+        if log_message:
+            log_message(f"Arquivo: {os.path.basename(pgn_file)} | Codificacao detectada: {enc}")
+
+        return extract_comments_from_content(content)
+
+    except Exception as e:
+        if log_message:
+            log_message(f"[ERRO] Falha ao extrair comentarios de {pgn_file}: {e}")
+        return {
+            "comments": [],
+            "positions": [],
+            "occurrences": [],
+            "semicolon_comments": 0,
+        }
 
 
 BATCH_SEPARATOR = " ||| "
@@ -310,33 +571,55 @@ _SEP_LEN = len(BATCH_SEPARATOR)
 BATCH_MAX_CHARS = MAX_TRANSLATE_CHARS - 200
 
 
-def create_comment_batches(comments, max_chars=BATCH_MAX_CHARS):
-    batches = []
+def batch_index_groups(texts, max_chars=BATCH_MAX_CHARS):
+    """Os grupos de `create_comment_batches`, na forma de indices.
+
+    Existe porque o lote e montado sobre o texto CRU e enviado LIMPO e
+    MASCARADO: as regras de limpeza podem encurtar (o caso comum) mas tambem
+    expandir, e a mascara troca cada `[%cal ...]` por uma sentinela de tamanho
+    diferente. O texto medido, portanto, nao e o texto enviado — e a garantia B1
+    (`BATCH_MAX_CHARS < MAX_TRANSLATE_CHARS`) vinha sendo sustentada pela folga
+    de 200 caracteres, o que e acoplamento, nao garantia. Estourar o limite faz a
+    camada de API dividir por sentenca, e o corte pode cair no meio de um `|||`:
+    o realinhamento se torna impossivel.
+
+    Com os grupos como indices, o worker reagrupa o que ja transformou usando o
+    MESMO algoritmo, sem uma segunda copia dele para divergir.
+    """
+    groups = []
     current = []
     length = 0
 
-    for comment in comments:
-        l = len(comment)
+    for index, text in enumerate(texts):
+        l = len(text)
         # Account for separator that will be inserted between items
         extra = _SEP_LEN if current else 0
         if l > max_chars:
             if current:
-                batches.append(current)
-            batches.append([comment])
+                groups.append(current)
+            groups.append([index])
             current = []
             length = 0
         elif length + extra + l > max_chars:
-            batches.append(current)
-            current = [comment]
+            groups.append(current)
+            current = [index]
             length = l
         else:
-            current.append(comment)
+            current.append(index)
             length += extra + l
 
     if current:
-        batches.append(current)
+        groups.append(current)
 
-    return batches
+    return groups
+
+
+def create_comment_batches(comments, max_chars=BATCH_MAX_CHARS):
+    comments = list(comments)
+    return [
+        [comments[i] for i in group]
+        for group in batch_index_groups(comments, max_chars)
+    ]
 
 
 def join_comments_for_batch(comments):
@@ -369,6 +652,58 @@ def sanitize_pgn_comment(text: str) -> str:
     return text.replace("{", "(").replace("}", ")")
 
 
+# Um `[%...]` conta como UMA palavra na requebra. Ele tem espacos dentro
+# (`[%cal Ra1h8,Rb2b7]`, `[%eval +0.35]`) e ferramentas que o leem esperam a
+# anotacao inteira numa linha; quebra-la no meio nao corrompe o texto, mas produz um
+# arquivo em que um leitor estrito deixa de reconhecer o comando. Como a garantia X1
+# gastou uma secao inteira protegendo esses spans, quebra-los na gravacao seria
+# desfazer o trabalho no ultimo passo.
+_WRAP_TOKEN_RE = re.compile(r"\[%[^\]]*\]|\S+")
+
+# Largura do export format do padrao PGN, e o que editora espera receber.
+PGN_EXPORT_LINE_WIDTH = 80
+
+
+def wrap_pgn_comment(text: str, width: int, first_line_room: int) -> str:
+    """Requebra o comentario para caber em `width` colunas (ROADMAP 19, item 13).
+
+    `first_line_room` e quanto sobra na linha em que o comentario COMECA — depois de
+    `12. Nf3 {`, a primeira linha tem menos espaco que as seguintes. Sem isso, a
+    requebra acertaria todas as linhas menos a primeira, que e a unica em que o
+    comentario divide espaco com o movetext.
+
+    **So o espaco em branco muda.** As palavras saem na mesma ordem e com os mesmos
+    caracteres: um espaco entre duas delas vira uma quebra de linha, e nada mais. E
+    o que permite requebrar sem tocar na chave de cache — que e o texto ACHATADO, e
+    continua sendo (ROADMAP 13.2).
+
+    Uma palavra mais longa que a linha inteira (um URL, um `[%cal]` gigante) fica
+    inteira e estoura a coluna: cortar no meio dela produziria um token que nao
+    existe. Requebrar e formatacao; inventar palavra, nao.
+    """
+    tokens = _WRAP_TOKEN_RE.findall(text or "")
+    if not tokens:
+        return text or ""
+
+    linhas = []
+    atual = ""
+    espaco = max(1, first_line_room)
+    for token in tokens:
+        if not atual:
+            candidato = token
+        else:
+            candidato = f"{atual} {token}"
+        if atual and len(candidato) > espaco:
+            linhas.append(atual)
+            atual = token
+            espaco = max(1, width)
+        else:
+            atual = candidato
+    if atual:
+        linhas.append(atual)
+    return "\n".join(linhas)
+
+
 def _output_encoding(preferred_encoding: str, use_bom: bool) -> str:
     """A codificacao de gravacao, honrando a opcao de BOM.
 
@@ -384,6 +719,45 @@ def _output_encoding(preferred_encoding: str, use_bom: bool) -> str:
     return preferred_encoding
 
 
+def write_pgn_pieces(
+    output_file: str,
+    pieces_factory,
+    preferred_encoding: str,
+    log_message=None,
+    use_bom: bool = False,
+):
+    """Grava os pedacos do PGN em sequencia, sem junta-los numa string.
+
+    `pieces_factory` e uma funcao que devolve um iteravel de pedacos — e uma
+    funcao, e nao o iteravel, porque o fallback de codificacao precisa percorrer
+    tudo de novo, e um gerador esgotado nao serve. Guardar os pedacos numa lista
+    resolveria o mesmo problema pagando exatamente o que isto evita: uma copia do
+    arquivo inteiro na memoria (ROADMAP 20.1).
+
+    `newline=''` nos dois caminhos: o conteudo carrega o fim de linha do arquivo
+    original (lido tambem sem traducao de linha), e a escrita nao pode troca-lo
+    pelo da plataforma (ROADMAP 13.6).
+
+    O segundo `open` trunca o que a primeira tentativa deixou pela metade — um
+    `UnicodeEncodeError` acontece no meio da gravacao, e o arquivo parcial nao
+    pode sobreviver ao lado do bom.
+    """
+    try:
+        enc = _output_encoding(preferred_encoding, use_bom)
+        with open(output_file, 'w', encoding=enc, newline='') as f:
+            for pedaco in pieces_factory():
+                f.write(pedaco)
+        return enc
+    except UnicodeEncodeError:
+        enc = _output_encoding('utf-8', use_bom)
+        with open(output_file, 'w', encoding=enc, newline='') as f:
+            for pedaco in pieces_factory():
+                f.write(pedaco)
+        if log_message:
+            log_message(f"  - Codificacao de saida alterada para UTF-8: {output_file}")
+        return enc
+
+
 def write_translated_pgn(
     output_file: str,
     content: str,
@@ -391,21 +765,43 @@ def write_translated_pgn(
     log_message=None,
     use_bom: bool = False,
 ):
-    # `newline=''` nos dois caminhos: o conteudo carrega o fim de linha do
-    # arquivo original (lido tambem com `newline=''`), e a escrita nao pode
-    # troca-lo pelo da plataforma (ROADMAP 13.6).
-    try:
-        enc = _output_encoding(preferred_encoding, use_bom)
-        with open(output_file, 'w', encoding=enc, newline='') as f:
-            f.write(content)
-        return enc
-    except UnicodeEncodeError:
-        enc = _output_encoding('utf-8', use_bom)
-        with open(output_file, 'w', encoding=enc, newline='') as f:
-            f.write(content)
-        if log_message:
-            log_message(f"  - Codificacao de saida alterada para UTF-8: {output_file}")
-        return enc
+    """Grava um PGN que ja esta inteiro numa string. Ver `write_pgn_pieces`."""
+    return write_pgn_pieces(
+        output_file,
+        lambda: (content,),
+        preferred_encoding,
+        log_message,
+        use_bom=use_bom,
+    )
+
+
+def _comment_line_room(content, start, width):
+    """Quantas colunas sobram na linha em que o comentario comeca.
+
+    O `{` conta: ele entra na linha junto com o texto.
+
+    A coluna e medida no texto ORIGINAL, e nao no texto final. Na esmagadora
+    maioria dos casos da no mesmo — o que vem antes do comentario na linha e
+    movetext, que a traducao nao toca. Da diferente quando dois comentarios
+    dividem a linha: o primeiro pode encolher ou crescer, e a coluna do segundo
+    muda com ele. Nao ha conta exata a fazer aqui sem gerar o arquivo duas vezes
+    (a largura do primeiro depende da requebra dele, que depende da coluna dele),
+    e o erro so desloca uma quebra de linha — formatacao, nunca texto.
+
+    Era isto que a versao anterior fazia tambem, apesar de o comentario dela
+    dizer o contrario ("o conteudo antes do comentario ja e final"): a requebra
+    sempre foi calculada nesta fase, antes de qualquer substituicao.
+    """
+    inicio_da_linha = content.rfind("\n", 0, start) + 1
+    coluna = start - inicio_da_linha
+    return width - coluna - 1
+
+
+# De quantos em quantos comentarios a geracao olha o `cancel_flag`. A fase toda
+# custa 23 ms num PGN de 3,2 MB com 15 mil comentarios (ROADMAP 20.1), entao o
+# intervalo nao precisa ser curto; ele existe para o caso extremo — livro de
+# dezenas de MB com requebra ligada —, em que a fase deixa de ser instantanea.
+_CANCEL_CHECK_EVERY = 512
 
 
 def generate_translated_pgn(
@@ -415,15 +811,75 @@ def generate_translated_pgn(
     positions,
     log_message=None,
     use_bom=False,
+    wrap_columns=0,
+    content=None,
+    encoding=None,
+    cancel_flag=None,
 ):
+    """Grava o PGN traduzido. `wrap_columns` requebra os comentarios (item 13).
+
+    Zero desliga a requebra, que e o comportamento de sempre: o comentario sai em
+    linha unica, como o programa sempre escreveu.
+
+    `content` e `encoding` sao o texto e a codificacao que quem chama JA LEU. Sem
+    eles o arquivo e lido aqui, como sempre foi; com eles a execucao economiza
+    uma releitura e uma redeteccao por arquivo (ROADMAP 20.2). O texto tem de ser
+    o mesmo em que `positions` foi medido — sao offsets nele.
+
+    `cancel_flag` interrompe a fase sem gravar nada. Ela nao tinha checagem
+    nenhuma: num acervo grande, "Cancelar" ficava sem efeito visivel enquanto o
+    arquivo era montado (ROADMAP 20.1).
+    """
     try:
-        enc = detect_encoding(input_file)
-        with open(input_file, 'r', encoding=enc, errors='replace', newline='') as f:
-            content = f.read()
+        if content is None:
+            content, enc = read_pgn_text(input_file)
+        else:
+            enc = encoding or detect_encoding(input_file)
+
+        # O fim de linha do arquivo, para a requebra usar o mesmo. `\r\n` presente
+        # em qualquer lugar decide: um PGN meio-a-meio nao existe na pratica, e na
+        # duvida entre os dois o do Windows e o que ChessBase e editora esperam.
+        eol = "\r\n" if "\r\n" in content else "\n"
 
         replacements = []
-        for start, end, norm in positions:
+        # O fim do span anterior JA AJUSTADO. Ele existe por causa do espaco
+        # vizinho que um comentario esvaziado leva junto: sem esse limite,
+        # `{a} {b}` com os dois esvaziados fazia o segundo span reclamar para tras
+        # um caractere que o primeiro ja havia levado, e dois spans sobrepostos,
+        # com a substituicao da direita para a esquerda, apagavam o RESTO DO
+        # ARQUIVO.
+        #
+        # Hoje ele e a segunda tranca, e nao a unica: na passada unica abaixo, uma
+        # sobreposicao de um caractere daria uma fatia vazia e nao estrago. Fica
+        # porque e o que mantem `replacements` sem sobreposicao, que e o
+        # invariante de que a montagem depende — confiar na fatia vazia seria
+        # correcao por acidente. A rodada de mutacao registra isso (ROADMAP 20.8).
+        fim_anterior = 0
+        # Em ordem crescente, que e como a extracao entrega e o que permite montar
+        # o arquivo numa passada. O `sorted` esta aqui porque `positions` e
+        # parametro: um chamador pode passar outra ordem, e ai a passada unica
+        # produziria um arquivo embaralhado em silencio.
+        for indice, (start, end, norm) in enumerate(
+            sorted(positions, key=lambda posicao: posicao[0])
+        ):
+            if cancel_flag is not None and indice % _CANCEL_CHECK_EVERY == 0:
+                if cancel_flag.is_set():
+                    if log_message:
+                        log_message("  - Geracao do PGN traduzido cancelada.")
+                    return False
             if norm not in translated_map:
+                continue
+            if start < fim_anterior:
+                # Spans sobrepostos. Nao acontece com o que a extracao produz —
+                # os `{...}` sao disjuntos, e o ajuste do espaco vizinho abaixo
+                # respeita o span anterior —, mas aplicar o segundo por cima do
+                # primeiro corromperia o arquivo em silencio, e e isso que o aviso
+                # evita.
+                if log_message:
+                    log_message(
+                        f"[AVISO] Comentario em posicao sobreposta ignorado na "
+                        f"gravacao: offset {start}."
+                    )
                 continue
             translated = translated_map[norm]
             if translated == "":
@@ -438,19 +894,49 @@ def generate_translated_pgn(
                 # (garantia T3). O unico "" do mapa e o da limpeza.
                 if end < len(content) and content[end] in " \t":
                     end += 1
-                elif start > 0 and content[start - 1] in " \t":
+                elif start > fim_anterior and content[start - 1] in " \t":
                     start -= 1
                 replacements.append((start, end, ""))
+                fim_anterior = end
             else:
-                repl = "{" + sanitize_pgn_comment(translated) + "}"
+                texto = sanitize_pgn_comment(translated)
+                if wrap_columns:
+                    texto = wrap_pgn_comment(
+                        texto,
+                        wrap_columns,
+                        _comment_line_room(content, start, wrap_columns),
+                    )
+                    # A quebra tem de ser a DO ARQUIVO. O conteudo foi lido com
+                    # `newline=''` justamente para o `\r\n` do original sobreviver
+                    # (ROADMAP 13.6); inserir `\n` puro no meio de um arquivo CRLF
+                    # produziria um PGN de fim de linha misturado — e a requebra,
+                    # que existe para agradar editora, entregaria um arquivo pior
+                    # do que o sem requebra.
+                    if eol != "\n":
+                        texto = texto.replace("\n", eol)
+                repl = "{" + texto + "}"
                 replacements.append((start, end, repl))
+                fim_anterior = end
 
-        replacements.sort(reverse=True, key=lambda x: x[0])
+        # Uma passada, gravando pedaco por pedaco (ROADMAP 20.1). O laco anterior
+        # refazia o arquivo INTEIRO a cada comentario (`content[:start] + rep +
+        # content[end:]`), da direita para a esquerda: 15 mil comentarios num PGN
+        # de 3,2 MB custavam 27 s de copia de memoria, e o custo cresce com o
+        # PRODUTO dos dois — num livro de 40 MB sao centenas de GB copiados.
+        #
+        # Direto para o arquivo, e nao por um `"".join`: juntar produziria o PGN de
+        # saida inteiro na memoria ao lado do de entrada, e num livro de 9 MB isso
+        # media 8 MB de pico a mais do que a versao lenta gastava. O tempo era o
+        # problema do item; trocar tempo por pico seria consertar metade.
+        def pedacos():
+            ultimo = 0
+            for inicio, fim, texto in replacements:
+                yield content[ultimo:inicio]
+                yield texto
+                ultimo = fim
+            yield content[ultimo:]
 
-        for start, end, rep in replacements:
-            content = content[:start] + rep + content[end:]
-
-        write_translated_pgn(output_file, content, enc, log_message, use_bom=use_bom)
+        write_pgn_pieces(output_file, pedacos, enc, log_message, use_bom=use_bom)
         return True
 
     except Exception as e:

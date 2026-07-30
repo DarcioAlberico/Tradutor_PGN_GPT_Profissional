@@ -61,7 +61,7 @@ from .editor_widgets import (
     restore_sash,
     save_window_section,
 )
-from .window_utils import bring_window_to_front
+from .window_utils import restore_or_maximize
 
 
 INVALID_PRIORITY_WARNING = "Prioridade precisa ser um número inteiro."
@@ -283,19 +283,19 @@ class GlossaryEditor:
         self.win.title("Editor de Glossário")
         self.win.geometry("1120x700")
         self.win.minsize(1040, 640)
-        bring_window_to_front(self.win, self.app.root, maximize=True)
 
         self.settings = load_settings()
         self.editor_settings = self.settings.get("glossary_editor", {})
         if not isinstance(self.editor_settings, dict):
             self.editor_settings = {}
 
+        # Restaurar a geometria salva OU maximizar — nunca as duas, que era o que
+        # estava escrito aqui e fazia a restauracao perder sempre (o maximizar e
+        # agendado e roda depois). Ver `restore_or_maximize`.
         saved_geometry = self.editor_settings.get("geometry")
         if isinstance(saved_geometry, str) and saved_geometry:
-            try:
-                self.win.geometry(safe_geometry(self.win, saved_geometry))
-            except tk.TclError:
-                pass
+            saved_geometry = safe_geometry(self.win, saved_geometry)
+        restore_or_maximize(self.win, self.app.root, saved_geometry)
 
         self.state = GlossaryEditorState()
         self.row_buttons = []

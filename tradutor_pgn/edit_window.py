@@ -1,4 +1,7 @@
 import csv
+import os
+import threading
+from collections import Counter
 from contextlib import closing
 from datetime import datetime
 import tkinter as tk
@@ -9,23 +12,34 @@ import customtkinter as ctk
 
 from .app_config import LANGUAGE_NAMES, LANGUAGES, UNKNOWN_SOURCE_LABEL, language_label
 from .database import (
+    ORDER_BY_ID,
+    ORDER_BY_OCCURRENCE,
+    REVIEW_STATUS_DOUBT,
+    REVIEW_STATUS_PENDING,
+    REVIEW_STATUS_REJECTED,
     SEARCH_MODE_SUBSTRING,
     SEARCH_MODE_TERMS,
     SOURCE_LANGUAGE_UNKNOWN,
     count_from_status_counts,
     count_review_rows,
+    fetch_comment_occurrences,
+    fetch_exact_translation_match_candidates,
     fetch_review_rows,
     fetch_review_rows_page,
+    fetch_review_status_by_id,
     fetch_translation_by_id,
     get_review_row_offset,
     get_review_status_counts,
     initialize_database,
+    list_occurrence_files,
+    quality_warning_flag,
     set_exact_translation_matches_verified,
+    set_review_status_by_id,
     set_translation_verified_by_id,
     update_translation_by_id,
 )
-from .db_tools import apply_automatic_rules_to_database
-from .editor_text import find_text_ranges, replace_all_text
+from .db_tools import apply_automatic_rules_to_database, export_translations_to_csv
+from .editor_text import diff_spans, find_text_ranges, replace_all_text
 from .glossario import (
     add_to_glossary,
     apply_automatic_substitutions,
@@ -35,6 +49,7 @@ from .glossario import (
     find_glossary_suggestions,
     load_automatic_substitutions,
     load_interactive_substitutions,
+    versioned_rules,
 )
 from .editor_common import (
     ROW_COLOR,
@@ -66,6 +81,8 @@ from .review_quality import (
     evaluate_translation_quality,
     find_first_quality_warning,
     row_has_quality_warning,
+    row_language_pair,
+    row_quality_flag,
 )
 from .settings import (
     clear_editor_draft,
@@ -74,7 +91,7 @@ from .settings import (
     set_editor_draft,
     update_settings,
 )
-from .window_utils import bring_window_to_front
+from .window_utils import bring_window_to_front, restore_or_maximize
 
 
 ROW_COLOR = ("#f8fafc", "#1f2937")
@@ -94,6 +111,54 @@ MIN_HEIGHT = 680
 # as linhas cuja origem ninguem declarou. Confundir os dois foi exatamente o que
 # esta janela passou a existir para evitar.
 SOURCE_FILTER_ALL = "Todos"
+
+# O mesmo para o filtro por arquivo. O rotulo diz "arquivos" no plural porque este
+# menu convive com o de origem na mesma barra, e dois "Todos" lado a lado nao
+# dizem de que.
+FILE_FILTER_ALL = "Todos os arquivos"
+
+# Os filtros de status da lista: rotulo na tela -> filtro que o banco entende
+# (ROADMAP 19, item 12). Um dicionario, e nao dois lugares (a lista de valores do
+# botao segmentado e um `if/elif` traduzindo), porque era assim antes e acrescentar
+# um filtro exigia mexer nos dois — esquecer um dava um botao que nao filtra nada.
+#
+# "Rejeitadas" e "Em duvida" sao RECORTES das pendentes, e a ordem na tela diz isso:
+# elas vem depois de "Pendentes".
+STATUS_FILTER_LABELS = {
+    "Todas": "all",
+    "Pendentes": "pending",
+    "Rejeitadas": REVIEW_STATUS_REJECTED,
+    "Em dúvida": REVIEW_STATUS_DOUBT,
+    "Verificadas": "verified",
+    "Avisos QA": "warnings",
+}
+
+# Pausa na digitacao que dispara a gravacao do rascunho. Eram 700 ms (ROADMAP 19,
+# item 10): quem digita uma frase de comentario para varias vezes por mais de 700 ms
+# — para pensar, para ler o original —, e cada parada custava uma releitura e uma
+# regravacao do JSON inteiro. 2,5 s ainda salva antes de qualquer coisa que se possa
+# perder (fechar a janela grava na hora) e reduz as gravacoes de uma revisao longa a
+# uma fracao.
+DRAFT_SAVE_DELAY_MS = 2500
+
+# Quantos saltos a pilha do "voltar" guarda. Uma sessao de revisao dura horas e
+# cada busca empilha um retrato; sem limite, a pilha cresce com a sessao. Cinquenta
+# cobre qualquer ida-e-volta de concordancia — e o corte e pelo comeco, que e a
+# parte a que ninguem mais volta.
+HISTORY_STACK_LIMIT = 50
+
+# Quantas ocorrencias o rodape do original mostra por extenso. **Uma**, e o numero
+# saiu de uma captura de tela: com duas, o texto passava da linha do "Original:" e
+# o Tk cortava o COMECO dele — o rotulo aparecia sem o "Lido em: cap01.pgn", e o
+# que sobrava na tela era um "· comentário 2 | cap02.pgn ..." colado no rotulo,
+# ilegivel. A posicao mostrada e a do arquivo que esta sendo lido, e as outras
+# viram contagem — que e o que informa mesmo, porque editar ali muda todas.
+OCCURRENCE_PREVIEW_LIMIT = 1
+
+# Quantos originais a confirmacao da propagacao lista por extenso. Acima disso a
+# lista deixa de ser legivel num dialogo e o que fica e a contagem — mas os
+# primeiros ja mostram DO QUE se trata, que e o que a contagem sozinha nao diz.
+PROPAGATION_PREVIEW_LIMIT = 8
 
 
 def source_filter_labels():
@@ -129,14 +194,139 @@ def target_language_code(label):
     return None
 
 
+def occurrence_file_labels(paths):
+    """`{rotulo: caminho}` — nome curto e UNICO para cada arquivo do menu.
+
+    O banco guarda o caminho inteiro (e a chave da ocorrencia), e o caminho
+    inteiro nao cabe num menu de 200 pixels. O que o tradutor chama de capitulo e
+    o nome do arquivo, entao e ele que aparece.
+
+    Quando dois caminhos tem o mesmo nome, o rotulo ganha a pasta imediata: sem
+    isso, `Livro A/cap01.pgn` e `Livro B/cap01.pgn` viriam como duas opcoes com o
+    mesmo texto, e escolher uma seria sorteio. Se a pasta tambem repetir — duas
+    arvores com a mesma estrutura —, o rotulo passa a ser o caminho inteiro, feio
+    e correto.
+
+    A ordem de entrada e preservada: ela vem ordenada por nome de arquivo do
+    banco, que e a ordem em que capitulo se le.
+    """
+    repetidos = Counter(os.path.basename(caminho) for caminho in paths)
+    rotulos = {}
+    for caminho in paths:
+        nome = os.path.basename(caminho) or caminho
+        rotulo = nome
+        if repetidos[nome] > 1:
+            pasta = os.path.basename(os.path.dirname(caminho))
+            rotulo = f"{pasta}/{nome}" if pasta else caminho
+        if rotulo in rotulos:
+            rotulo = caminho
+        rotulos[rotulo] = caminho
+    return rotulos
+
+
+def format_occurrence_context(occurrences, total):
+    """"Onde este comentario foi lido", para o rodape do original.
+
+    Vazio quando nao ha ocorrencia — que e o estado de toda linha gravada antes
+    desta versao (ROADMAP 18) e o de toda linha importada por CSV. Um rotulo fixo
+    dizendo "sem arquivo" apareceria em 201.607 linhas do banco real e nao
+    informaria nada.
+
+    As posicoes que nao cabem viram contagem, e a contagem diz que a traducao e a
+    mesma nelas: e a informacao que muda o que o revisor faz. Cabe UMA por vez —
+    ver `OCCURRENCE_PREVIEW_LIMIT` para o que a tela fez com duas.
+
+    **Um localizador por posicao, e nao dois.** O lance e o que um leitor de xadrez
+    usa para achar o comentario no PGN; o indice do comentario e a ordem da
+    extracao, que ninguem ve em lugar nenhum — ele entra so quando nao ha lance
+    (um comentario antes do primeiro lance da partida). Levar os dois somava ~90 px
+    a uma linha que ja estourava.
+    """
+    if not occurrences:
+        return ""
+
+    partes = []
+    for source_file, game_index, comment_index, move_number in occurrences:
+        pedaco = os.path.basename(source_file) or source_file
+        if game_index:
+            pedaco += f" · partida {game_index}"
+        if move_number:
+            pedaco += f" · lance {move_number}"
+        else:
+            pedaco += f" · comentário {comment_index}"
+        partes.append(pedaco)
+
+    texto = "Lido em: " + " | ".join(partes)
+    restantes = total - len(occurrences)
+    if restantes > 0:
+        plural = "posição" if restantes == 1 else "posições"
+        texto += f" · e mais {restantes} {plural} (a mesma tradução)"
+    return texto
+
+
+def format_propagation_confirmation(translation, candidates, limit=PROPAGATION_PREVIEW_LIMIT):
+    """A pergunta da verificacao em massa, por ORIGINAL (garantia V1).
+
+    A mensagem antiga era um aviso depois do fato: "N iguais também verificadas".
+    "Iguais" descreve as traducoes, e e justamente por isso que ela nao alarmava
+    ninguem — o que esta sendo dado por revisado sao N originais DIFERENTES, cada
+    um com um texto que o usuario nao leu.
+
+    O caso que isto existe para pegar e o das traducoes curtas: se o tradutor
+    verteu "Checkmate." errado como "Empate.", verificar o "Draw." -> "Empate."
+    legitimo marca a linha errada junto. Com os originais na tela, quem revisa ve
+    "Checkmate." na lista e responde "Nao".
+    """
+    linhas = [
+        f"Esta tradução também está gravada para {len(candidates)} "
+        f"original(is) diferente(s), ainda não verificado(s):",
+        "",
+        f'  Tradução: "{preview(translation, 90)}"',
+        "",
+        "Originais que seriam marcados como verificados:",
+    ]
+    for _row_id, original in candidates[:limit]:
+        linhas.append(f'  - "{preview(original, 90)}"')
+    if len(candidates) > limit:
+        linhas.append(f"  ... e mais {len(candidates) - limit}.")
+    linhas.extend(
+        [
+            "",
+            "Marcar todos como verificados?",
+            "Não: verifica só a linha aberta.",
+        ]
+    )
+    return "\n".join(linhas)
+
+
 def safe_geometry(win, geometry):
     return window_safe_geometry(win, geometry, MIN_WIDTH, MIN_HEIGHT)
 
 
 def row_label(row):
+    """As tres linhas de um item da lista (ROADMAP 19, item 4).
+
+    A primeira linha carrega o que decide se vale abrir a linha, e nada mais: o
+    status, o id, o **marcador de aviso QA** e o **idioma de origem**. Os dois
+    ultimos faltavam, e cada um por um motivo diferente:
+
+    - sem o marcador, achar as linhas com aviso exigia trocar o filtro para
+      "Avisos QA" — e ai a lista deixava de mostrar o resto da obra, que e
+      justamente o contexto de quem revisa;
+    - sem a origem, em "Origem: Todos" nao havia como saber de que lingua a linha
+      veio sem carrega-la. O rodape diz, mas so depois de clicar.
+
+    O marcador sai da COLUNA materializada, e nao de reavaliar o texto: e a mesma
+    resposta que o filtro usa (garantia R6). Uma linha que nao traz a coluna — as
+    tuplas de sete campos — nao ganha marcador nenhum, em vez de ganhar "sem
+    aviso", que seria uma afirmacao que ninguem fez.
+    """
     status = "OK" if len(row) > 3 and row[3] == 1 else "PEND"
+    aviso = " ⚠ QA" if row_quality_flag(row) == 1 else ""
+    origem, _destino = row_language_pair(row)
+    idioma = f"  {language_label(origem)}" if origem is not None else ""
     return (
-        f"{status}  #{row[0]}\n"
+        f"{status}  #{row[0]}{aviso}{idioma}\n"
         f"O: {preview(row[1], 54)}\n"
         f"T: {preview(row[2], 54)}"
     )
@@ -184,6 +374,10 @@ class EditorState:
         # Selecao.
         self.selected_index = None
         self.selected_suggestion = None
+        # Selecao em LOTE (ROADMAP 19, item 9), por id: ela sobrevive a trocar de
+        # pagina, que e o que torna "exportar so a selecao" util — juntar 30 linhas
+        # de tres paginas e o caso real de quem prepara uma entrega.
+        self.selected_ids = set()
 
         # Edicao em andamento. `loading` suprime o marcador de "nao salvo"
         # enquanto o proprio programa preenche os campos.
@@ -195,6 +389,12 @@ class EditorState:
         self.font_size = font_size
         self.bold_view = False
         self.current_find_match = None
+
+        # Pilha do "voltar" (ROADMAP 19, item 3). Cada item e um retrato do que a
+        # janela mostrava antes de um SALTO — a linha aberta e os filtros que a
+        # traziam —, e nao so o id: usar a busca como concordancia troca a lista, e
+        # voltar para um id que a busca nova nao contem nao e voltar.
+        self.history_stack = []
 
 
 class TranslationEditor:
@@ -223,6 +423,10 @@ class TranslationEditor:
         # o recorte do glossario depende dos dois (garantia S11).
         self.glossary = self.load_scoped_interactive_glossary()
         self.automatic_glossary = self.load_scoped_automatic_glossary()
+        # Antes da primeira pagina: o filtro por arquivo participa da consulta que
+        # a carrega, e restaurar a escolha depois faria a janela abrir na lista
+        # inteira e recarregar em seguida.
+        self.refresh_file_filter(restore=self.editor_settings.get("file_filter"))
         self.load_first_page()
 
     def build_state(self):
@@ -236,21 +440,27 @@ class TranslationEditor:
         self.win.title(f"Editar traduções ({self.lang})")
         self.win.geometry("1280x760")
         self.win.minsize(1120, 680)
-        bring_window_to_front(self.win, self.app.root, maximize=True)
 
         self.settings = load_settings()
         self.editor_settings = self.settings.get("editor", {})
         if not isinstance(self.editor_settings, dict):
             self.editor_settings = {}
 
+        # Restaurar a geometria salva OU maximizar — nunca as duas, que era o que
+        # estava escrito aqui e fazia a restauracao perder sempre (o maximizar e
+        # agendado e roda depois). Ver `restore_or_maximize`.
         saved_geometry = self.editor_settings.get("geometry")
         if isinstance(saved_geometry, str) and saved_geometry:
-            try:
-                self.win.geometry(safe_geometry(self.win, saved_geometry))
-            except tk.TclError:
-                pass
+            saved_geometry = safe_geometry(self.win, saved_geometry)
+        restore_or_maximize(self.win, self.app.root, saved_geometry)
 
         self.row_buttons = []
+        self.row_checkboxes = []
+        # `{rotulo do menu: caminho no banco}`. Refeito a cada troca de par, e nao
+        # a cada consulta: agrupar as ocorrencias por arquivo custa O(ocorrencias),
+        # e faze-lo por tecla digitada seria a regressao de R5 que o proprio filtro
+        # veio evitar.
+        self.file_options = {}
         saved_font_size = self.editor_settings.get("font_size", 12)
         if not isinstance(saved_font_size, int):
             saved_font_size = 12
@@ -264,6 +474,10 @@ class TranslationEditor:
             "updated_at": "",
             "verified_at": "",
             "source_language": "",
+            "target_language": "",
+            # Status de revisao e nota da linha aberta (ROADMAP 19, item 12).
+            "review_status": REVIEW_STATUS_PENDING,
+            "reviewer_note": "",
             # True quando o texto exibido difere do banco apenas por causa das regras
             # automaticas, sem o usuario ter digitado nada. Nesse estado a gravacao
             # silenciosa (a que acontece ao navegar) e suprimida: so uma acao
@@ -283,6 +497,7 @@ class TranslationEditor:
         self.editor_case_sensitive = tk.BooleanVar(master=self.win, value=False)
         self.go_page_text = tk.StringVar(master=self.win, value="")
         self.go_id_text = tk.StringVar(master=self.win, value="")
+        self.reviewer_note_text = tk.StringVar(master=self.win, value="")
         self.body_font = tkfont.Font(family="Segoe UI", size=self.state.font_size)
         self.body_bold_font = tkfont.Font(family="Segoe UI", size=self.state.font_size, weight="bold")
         self.row_font = ctk.CTkFont(family="Segoe UI", size=11)
@@ -311,7 +526,9 @@ class TranslationEditor:
         self.list_frame = ctk.CTkFrame(self.main_pane, corner_radius=8, width=400)
         self.main_pane.add(self.list_frame, minsize=320)
         self.list_frame.columnconfigure(0, weight=1)
-        self.list_frame.rowconfigure(6, weight=1)
+        # A lista e a unica que cresce. Ela desceu para a linha 7 quando a barra da
+        # selecao em lote entrou na 6 (ROADMAP 19, item 9).
+        self.list_frame.rowconfigure(7, weight=1)
 
         self.header = ctk.CTkFrame(self.list_frame, fg_color="transparent")
         self.header.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
@@ -374,28 +591,66 @@ class TranslationEditor:
         self.id_entry.grid(row=0, column=4, sticky="ew", padx=(6, 4))
         self.btn_go_id = ctk.CTkButton(self.jump_bar, text="Ir", width=46)
         self.btn_go_id.grid(row=0, column=5)
+        # O "voltar" tem botao alem do `Alt+Backspace` (ROADMAP 19, item 3): um
+        # atalho que ninguem descobre nao devolve a pagina a ninguem.
+        self.btn_go_back = ctk.CTkButton(self.jump_bar, text="< Voltar", width=76)
+        self.btn_go_back.grid(row=0, column=6, padx=(10, 0))
 
         self.status_segment = ctk.CTkSegmentedButton(
             self.list_frame,
-            values=["Todas", "Pendentes", "Verificadas", "Avisos QA"],
+            values=list(STATUS_FILTER_LABELS),
         )
         saved_status = self.editor_settings.get("status_filter", "Todas")
-        if saved_status not in {"Todas", "Pendentes", "Verificadas", "Avisos QA"}:
+        if saved_status not in STATUS_FILTER_LABELS:
             saved_status = "Todas"
         self.status_segment.set(saved_status)
         self.status_segment.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 6))
 
         self.build_language_bar()
+        self.build_batch_bar()
 
         self.rows_frame = ctk.CTkScrollableFrame(self.list_frame, height=420)
-        self.rows_frame.grid(row=6, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.rows_frame.grid(row=7, column=0, sticky="nsew", padx=10, pady=(0, 10))
+
+    def build_batch_bar(self):
+        """A barra da selecao em lote, entre os filtros e a lista.
+
+        Fica ai porque e onde ela se explica: as acoes valem para o que esta
+        marcado NA LISTA, e a lista comeca logo abaixo. No rodape da janela ela
+        ficaria junto das acoes da linha ABERTA, e as duas seriam confundidas —
+        "Marcar como verificada" e "Marcar selecionadas" fazem coisas diferentes.
+        """
+        self.batch_bar = ctk.CTkFrame(self.list_frame, fg_color="transparent")
+        self.batch_bar.grid(row=6, column=0, sticky="ew", padx=10, pady=(0, 6))
+
+        self.batch_label = ctk.CTkLabel(
+            self.batch_bar, text="nenhuma selecionada", text_color="#64748b"
+        )
+        self.batch_label.pack(side=tk.LEFT)
+
+        self.btn_batch_page = ctk.CTkButton(self.batch_bar, text="Página", width=64)
+        self.btn_batch_page.pack(side=tk.LEFT, padx=(10, 4))
+        self.btn_batch_clear = ctk.CTkButton(self.batch_bar, text="Limpar", width=64)
+        self.btn_batch_clear.pack(side=tk.LEFT, padx=(0, 4))
+        self.btn_batch_verify = ctk.CTkButton(
+            self.batch_bar, text="Verificar", width=80
+        )
+        self.btn_batch_verify.pack(side=tk.LEFT, padx=(0, 4))
+        self.btn_batch_export = ctk.CTkButton(
+            self.batch_bar, text="Exportar", width=80
+        )
+        self.btn_batch_export.pack(side=tk.LEFT)
 
     def build_language_bar(self):
-        """Os dois seletores de idioma, acima da lista.
+        """Os seletores de idioma e o de arquivo, acima da lista.
 
         Ficam junto dos outros filtros, e nao numa barra propria no topo da
         janela, porque e isso que eles sao: filtram a mesma lista que o status e
         a busca filtram, e a lista e o que muda quando qualquer um dos tres muda.
+
+        O de ARQUIVO tem uma linha propria porque ele nao e um par com os outros
+        dois — e mais largo (nome de capitulo) e escolher um muda tambem a ORDEM
+        da lista, que e o que a secao 18 do ROADMAP existe para dar.
 
         **Sao menus, e nao botoes segmentados como o status.** Oito idiomas em
         botoes lado a lado nao cabem na largura do painel, e a forma segmentada so
@@ -411,6 +666,19 @@ class TranslationEditor:
         self.language_bar.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 6))
         self.language_bar.columnconfigure(1, weight=1)
         self.language_bar.columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(self.language_bar, text="Arquivo").grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        self.file_menu = ctk.CTkOptionMenu(
+            self.language_bar,
+            values=[FILE_FILTER_ALL],
+            command=lambda _value: self.change_file_filter(),
+        )
+        self.file_menu.set(FILE_FILTER_ALL)
+        self.file_menu.grid(
+            row=1, column=1, columnspan=3, sticky="ew", padx=(6, 0), pady=(6, 0)
+        )
 
         ctk.CTkLabel(self.language_bar, text="Origem").grid(row=0, column=0, sticky="w")
         self.source_menu = ctk.CTkOptionMenu(
@@ -452,8 +720,8 @@ class TranslationEditor:
         self.text_frame = ctk.CTkFrame(self.bottom_pane, corner_radius=8)
         self.bottom_pane.add(self.text_frame, minsize=520)
         self.text_frame.columnconfigure(0, weight=1)
-        self.text_frame.rowconfigure(1, weight=1, minsize=120)
-        self.text_frame.rowconfigure(3, weight=3, minsize=180)
+        # Row 0 e o divisor dos dois textos; as barras que sobram vem depois dele.
+        self.text_frame.rowconfigure(0, weight=1, minsize=300)
 
         self.text_bg = "#111827" if ctk.get_appearance_mode() == "Dark" else "#f9fafb"
         self.text_fg = "#e5e7eb" if ctk.get_appearance_mode() == "Dark" else "#111827"
@@ -463,16 +731,75 @@ class TranslationEditor:
         self.find_bg = "#334155" if ctk.get_appearance_mode() == "Dark" else "#fde68a"
         self.find_fg = "#f8fafc" if ctk.get_appearance_mode() == "Dark" else "#111827"
         self.current_find_bg = "#ea580c" if ctk.get_appearance_mode() == "Dark" else "#fb923c"
+        # As duas cores do diff da previa (ROADMAP 19, item 5). Vermelho e verde
+        # apagados, e nao os saturados: o que se le ali e texto, e um fundo forte
+        # atras de uma frase inteira e ilegivel.
+        self.diff_removed_bg = "#7f1d1d" if ctk.get_appearance_mode() == "Dark" else "#fecaca"
+        self.diff_added_bg = "#14532d" if ctk.get_appearance_mode() == "Dark" else "#bbf7d0"
 
-        ctk.CTkLabel(self.text_frame, text="Original:").grid(
-            row=0, column=0, sticky="w", padx=10, pady=(10, 2)
+        # Os dois textos vivem num divisor proprio (ROADMAP 19, item 1). Empilhados,
+        # o original tem 6 linhas contra as 12 da traducao, e um comentario longo de
+        # livro obriga a rolar a FONTE enquanto se escreve a traducao. Lado a lado,
+        # os dois crescem juntos. E um divisor, e nao dois layouts alternativos,
+        # porque assim a proporcao entre eles continua sendo do usuario nas duas
+        # orientacoes — e trocar a orientacao e uma linha (`configure(orient=...)`),
+        # sem destruir os widgets e perder o texto e o desfazer de dentro deles.
+        self.side_by_side = bool(self.editor_settings.get("side_by_side", False))
+        self.texts_pane = tk.PanedWindow(
+            self.text_frame,
+            orient=tk.HORIZONTAL if self.side_by_side else tk.VERTICAL,
+            sashwidth=8,
+            sashrelief=tk.FLAT,
+            bd=0,
+            bg=self.pane_bg,
         )
-        self.orig_text = self.create_text_editor(self.text_frame, 1, readonly=True)
-        self.translation_header = ctk.CTkFrame(self.text_frame, fg_color="transparent")
-        self.translation_header.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 2))
+        self.texts_pane.grid(row=0, column=0, sticky="nsew")
+
+        self.original_block = ctk.CTkFrame(self.texts_pane, fg_color="transparent")
+        self.texts_pane.add(self.original_block, minsize=120)
+        self.original_block.columnconfigure(0, weight=1)
+        self.original_block.rowconfigure(1, weight=1)
+
+        self.translation_block = ctk.CTkFrame(self.texts_pane, fg_color="transparent")
+        self.texts_pane.add(self.translation_block, minsize=180)
+        self.translation_block.columnconfigure(0, weight=1)
+        self.translation_block.rowconfigure(1, weight=1)
+
+        # "Original:" e, embaixo dele, de onde este original foi lido. O lugar e
+        # aqui e nao no rodape da janela porque a procedencia e do ORIGINAL: e o
+        # texto do livro que tem arquivo, partida e lance — a traducao e a do
+        # acervo, e pode servir a doze livros (ROADMAP 18).
+        self.original_header = ctk.CTkFrame(self.original_block, fg_color="transparent")
+        self.original_header.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 2))
+        self.original_header.columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.original_header, text="Original:").grid(
+            row=0, column=0, sticky="w"
+        )
+        # **Linha propria, e medida.** Na mesma linha do rotulo, um nome de capitulo
+        # de verdade ("Move by Move - Sicilian - capitulo 01.pgn") pedia 728 px numa
+        # faixa de 596: o Tk cortava o texto e, encostado a direita, cortava o
+        # COMECO dele — o nome do arquivo, que e a parte que responde a pergunta.
+        # Em linha propria e ancorado a oeste, a faixa inteira e dele e o que falta
+        # sai do fim.
+        self.origin_label = ctk.CTkLabel(
+            self.original_header,
+            text="",
+            anchor="w",
+            justify=tk.LEFT,
+            text_color="#64748b",
+        )
+        self.orig_text = self.create_text_editor(self.original_block, 1, readonly=True)
+        self.translation_header = ctk.CTkFrame(
+            self.translation_block, fg_color="transparent"
+        )
+        self.translation_header.grid(row=0, column=0, sticky="ew", padx=10, pady=(0, 2))
         ctk.CTkLabel(self.translation_header, text="Tradução:").pack(side=tk.LEFT)
         self.font_controls = ctk.CTkFrame(self.translation_header, fg_color="transparent")
         self.font_controls.pack(side=tk.RIGHT)
+        # O primeiro dos controles, e nao um item de menu: a orientacao e uma
+        # escolha que se experimenta — o revisor a troca, olha, e decide.
+        self.btn_layout = ctk.CTkButton(self.font_controls, text="", width=42)
+        self.btn_layout.pack(side=tk.LEFT, padx=(0, 8))
         self.btn_font_down = ctk.CTkButton(self.font_controls, text="A-", width=42)
         self.btn_font_down.pack(side=tk.LEFT, padx=(0, 4))
         self.font_label = ctk.CTkLabel(self.font_controls, text=f"{self.state.font_size} pt", width=46)
@@ -486,10 +813,13 @@ class TranslationEditor:
             font=ctk.CTkFont(weight="bold"),
         )
         self.btn_bold.pack(side=tk.LEFT, padx=(4, 0))
-        self.trans_text = self.create_text_editor(self.text_frame, 3, bottom_pad=4)
+        self.trans_text = self.create_text_editor(
+            self.translation_block, 1, bottom_pad=4
+        )
+        self.update_layout_button()
 
         self.find_bar = ctk.CTkFrame(self.text_frame, fg_color="transparent")
-        self.find_bar.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 4))
+        self.find_bar.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 4))
         self.find_bar.columnconfigure(0, weight=1)
         self.find_bar.columnconfigure(1, weight=1)
 
@@ -523,6 +853,29 @@ class TranslationEditor:
         )
         self.case_check.pack(side=tk.LEFT, padx=(4, 0))
 
+        # A nota do revisor (ROADMAP 19, item 12). Uma linha de entrada, e nao um
+        # bloco de texto: ela e um recado curto — "conferir com o autor", "termo
+        # inventado" —, e um campo alto roubaria altura da traducao para um texto que
+        # quase sempre tem cinco palavras.
+        self.note_bar = ctk.CTkFrame(self.text_frame, fg_color="transparent")
+        self.note_bar.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 4))
+        self.note_bar.columnconfigure(1, weight=1)
+        ctk.CTkLabel(self.note_bar, text="Nota:").grid(row=0, column=0, sticky="w")
+        self.note_entry = ctk.CTkEntry(
+            self.note_bar,
+            textvariable=self.reviewer_note_text,
+            placeholder_text="Por que esta linha volta (rejeitada ou em dúvida)",
+        )
+        self.note_entry.grid(row=0, column=1, sticky="ew", padx=(6, 6))
+        self.btn_reject = ctk.CTkButton(self.note_bar, text="Rejeitar", width=90)
+        self.btn_reject.grid(row=0, column=2, padx=(0, 4))
+        self.btn_doubt = ctk.CTkButton(self.note_bar, text="Em dúvida", width=96)
+        self.btn_doubt.grid(row=0, column=3, padx=(0, 4))
+        self.btn_clear_status = ctk.CTkButton(
+            self.note_bar, text="Limpar", width=76
+        )
+        self.btn_clear_status.grid(row=0, column=4)
+
         self.qa_label = ctk.CTkLabel(
             self.text_frame,
             text="",
@@ -530,14 +883,14 @@ class TranslationEditor:
             justify=tk.LEFT,
             text_color="#16a34a",
         )
-        self.qa_label.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 2))
+        self.qa_label.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 2))
         self.history_label = ctk.CTkLabel(
             self.text_frame,
             text="",
             anchor="w",
             justify=tk.LEFT,
         )
-        self.history_label.grid(row=6, column=0, sticky="ew", padx=10, pady=(0, 10))
+        self.history_label.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 10))
 
 
     def create_text_editor(self, parent, row, readonly=False, bottom_pad=8):
@@ -742,10 +1095,25 @@ class TranslationEditor:
         self.btn_font_down.configure(command=lambda: self.adjust_font(-1))
         self.btn_font_up.configure(command=lambda: self.adjust_font(1))
         self.btn_bold.configure(command=self.toggle_bold_view)
+        self.btn_layout.configure(command=self.toggle_side_by_side)
         self.btn_search.configure(command=self.apply_search)
         self.btn_clear_search.configure(command=self.clear_search)
         self.btn_go_page.configure(command=self.go_to_page)
         self.btn_go_id.configure(command=self.go_to_id)
+        self.btn_go_back.configure(command=self.go_back)
+        self.btn_batch_page.configure(command=self.select_page_rows)
+        self.btn_batch_clear.configure(command=self.clear_row_selection)
+        self.btn_batch_verify.configure(command=self.verify_selected_rows)
+        self.btn_batch_export.configure(command=self.export_selected_rows)
+        self.btn_reject.configure(
+            command=lambda: self.set_review_status(REVIEW_STATUS_REJECTED)
+        )
+        self.btn_doubt.configure(
+            command=lambda: self.set_review_status(REVIEW_STATUS_DOUBT)
+        )
+        self.btn_clear_status.configure(
+            command=lambda: self.set_review_status(REVIEW_STATUS_PENDING)
+        )
         self.btn_page_prev.configure(command=lambda: self.change_page(-1))
         self.btn_page_next.configure(command=lambda: self.change_page(1))
         self.btn_prev.configure(command=lambda: self.navigate(-1))
@@ -789,8 +1157,13 @@ class TranslationEditor:
         self.trans_text.bind("<Control-Y>", lambda _event: (self.redo_translation(), "break")[1])
         self.trans_text.bind("<Control-b>", self.toggle_bold_selection)
         self.trans_text.bind("<Control-B>", self.toggle_bold_selection)
-        self.win.bind("<Control-f>", self.focus_search)
-        self.win.bind("<Control-F>", self.focus_search)
+        # `Ctrl+F` no TEXTO e `Ctrl+L` na LISTA (ROADMAP 19, item 2).
+        self.win.bind("<Control-f>", self.focus_editor_find)
+        self.win.bind("<Control-F>", self.focus_editor_find)
+        self.win.bind("<Control-l>", self.focus_search)
+        self.win.bind("<Control-L>", self.focus_search)
+        # Voltar de onde a busca tirou o revisor (ROADMAP 19, item 3).
+        self.win.bind("<Alt-BackSpace>", self.go_back_shortcut)
         self.win.bind("<Control-h>", lambda _event: (self.open_history_window(), "break")[1])
         self.win.bind("<Control-H>", lambda _event: (self.open_history_window(), "break")[1])
         self.win.bind("<Control-s>", self.save_shortcut)
@@ -840,11 +1213,30 @@ class TranslationEditor:
                 # "Inglês" na janela principal abrir o editor em portugues, sem
                 # nada na tela explicando de onde veio aquilo.
                 "source_filter": self.source_menu.get(),
+                # O arquivo e lembrado pelo CAMINHO, e nao pelo rotulo do menu:
+                # o rotulo depende de quais outros arquivos existem hoje (ele
+                # ganha a pasta quando dois nomes coincidem), e guardar um rotulo
+                # que amanha significa outro arquivo seria guardar a resposta
+                # errada. Revisar um livro leva dias — reabrir no capitulo em que
+                # se estava e o ponto.
+                "file_filter": self.selected_source_file() or "",
+                # A orientacao dos dois textos (ROADMAP 19, item 1).
+                "side_by_side": self.side_by_side,
             },
             window=self.win,
             sashes=(
                 ("main_sash_y", self.main_pane, 0),
                 ("bottom_sash_x", self.bottom_pane, 0),
+                # O divisor dos textos grava sob a chave da orientacao ATIVA, e no
+                # eixo dela: as duas posicoes convivem no arquivo, e trocar de
+                # orientacao devolve a proporcao que o usuario escolheu para
+                # aquela — e nao a da outra, que mediria a dimensao errada.
+                (
+                    self.texts_sash_key(),
+                    self.texts_pane,
+                    0,
+                    0 if self.side_by_side else 1,
+                ),
             ),
         )
 
@@ -855,6 +1247,7 @@ class TranslationEditor:
         restore_sash(
             self.bottom_pane, self.editor_settings.get("bottom_sash_x"), 520
         )
+        self.restore_texts_sash()
 
     def cancel_draft_save(self):
         if self.state.draft_save_after is None:
@@ -895,6 +1288,21 @@ class TranslationEditor:
         self.draft_label.configure(text="", text_color="#64748b")
 
     def persist_current_draft(self):
+        """Grava o rascunho da linha aberta — o disco, fora da thread do Tk.
+
+        Cada gravacao rele o JSON inteiro de configuracoes, serializa tudo e troca o
+        arquivo de nome (garantia R4). Na thread do Tk, isso e um engasgo na
+        digitacao em disco lento ou com antivirus no caminho — o programa parava
+        entre duas teclas (ROADMAP 19, item 10).
+
+        O que roda na thread e SO o disco. Os valores sao capturados aqui, na thread
+        principal, e o resultado volta por `after`: a thread nao le widget e nao
+        escreve rotulo, que e a garantia C1.
+
+        O snapshot em memoria (`self.settings`) e atualizado AQUI, e nao la: ele e
+        lido pela propria janela — se a linha for reaberta antes de a gravacao
+        terminar, o rascunho tem de estar visivel.
+        """
         self.state.draft_save_after = None
         if not self.current["id"]:
             self.draft_label.configure(text="")
@@ -904,33 +1312,63 @@ class TranslationEditor:
         text = self.draft_text()
         base = self.current["saved_trans"]
 
-        try:
-            if text == base:
-                self.clear_current_draft(persist=True)
-                return
+        if text == base:
+            self.clear_current_draft(persist=True)
+            return
 
-            set_editor_draft(self.settings, self.app.output_db, self.lang, comment_id, text, base)
-            update_settings(
-                lambda disk: set_editor_draft(
-                    disk, self.app.output_db, self.lang, comment_id, text, base
+        set_editor_draft(
+            self.settings, self.app.output_db, self.lang, comment_id, text, base
+        )
+        db_path = self.app.output_db
+        lang = self.lang
+
+        def gravar():
+            try:
+                update_settings(
+                    lambda disk: set_editor_draft(
+                        disk, db_path, lang, comment_id, text, base
+                    )
                 )
-            )
-            self.draft_label.configure(
-                text=f"Rascunho salvo {datetime.now().strftime('%H:%M:%S')}",
-                text_color="#64748b",
-            )
-        except OSError:
-            self.draft_label.configure(
-                text="Falha ao salvar rascunho",
-                text_color="#dc2626",
-            )
+            except OSError:
+                self.report_draft_saved(False)
+                return
+            self.report_draft_saved(True)
+
+        threading.Thread(target=gravar, daemon=True).start()
+
+    def report_draft_saved(self, ok):
+        """Volta para a thread do Tk e escreve o rotulo (garantia C1).
+
+        Tolera a janela ter sumido no meio da gravacao: fechar o editor durante um
+        `after` pendente levanta `TclError`, e nao ha mais ninguem a quem avisar.
+        """
+        def aplicar():
+            if not self.win.winfo_exists():
+                return
+            if ok:
+                self.draft_label.configure(
+                    text=f"Rascunho salvo {datetime.now().strftime('%H:%M:%S')}",
+                    text_color="#64748b",
+                )
+            else:
+                self.draft_label.configure(
+                    text="Falha ao salvar rascunho",
+                    text_color="#dc2626",
+                )
+
+        try:
+            self.win.after(0, aplicar)
+        except (tk.TclError, RuntimeError):  # pragma: no cover - janela ja fechada
+            pass
 
     def schedule_draft_save(self):
         if self.state.loading or not self.current["id"]:
             return
         self.cancel_draft_save()
         self.draft_label.configure(text="Salvando rascunho...", text_color="#64748b")
-        self.state.draft_save_after = self.win.after(700, self.persist_current_draft)
+        self.state.draft_save_after = self.win.after(
+            DRAFT_SAVE_DELAY_MS, self.persist_current_draft
+        )
 
     def set_dirty(self, value, autosave_draft=True):
         self.state.dirty = value
@@ -943,12 +1381,23 @@ class TranslationEditor:
             self.dirty_label.configure(text="Salvo", text_color="#16a34a")
 
     def update_counts_label(self):
+        contagens = self.state.status_counts
+        # Rejeitadas e em duvida so aparecem quando existem: um "Rejeitadas: 0" fixo
+        # no rodape de quem nunca usou o recurso e ruido, e o rodape ja e a linha mais
+        # cheia da janela.
+        extras = ""
+        rejeitadas = contagens.get(REVIEW_STATUS_REJECTED, 0)
+        duvidas = contagens.get(REVIEW_STATUS_DOUBT, 0)
+        if rejeitadas:
+            extras += f" · Rejeitadas: {rejeitadas}"
+        if duvidas:
+            extras += f" · Em dúvida: {duvidas}"
         self.counts_label.configure(
             text=(
-                f"Todas: {self.state.status_counts['total']} · "
-                f"Pendentes: {self.state.status_counts['pending']} · "
-                f"Verificadas: {self.state.status_counts['verified']} · "
-                f"QA: {self.state.status_counts['qa']}"
+                f"Todas: {contagens['total']} · "
+                f"Pendentes: {contagens['pending']} · "
+                f"Verificadas: {contagens['verified']} · "
+                f"QA: {contagens['qa']}{extras}"
             )
         )
 
@@ -962,6 +1411,21 @@ class TranslationEditor:
         self.selection_label.configure(
             text=f"Item {absolute_index}/{self.state.total_rows} · {self.current_pair()}"
         )
+
+    def set_origin_text(self, texto):
+        """Poe (ou tira) a linha de procedencia do original.
+
+        Sem procedencia ela **sai do grid**, e nao fica como rotulo vazio: as
+        linhas gravadas antes desta versao sao a maioria de um banco antigo, e uma
+        faixa em branco acima do texto em todas elas seria altura roubada do
+        comentario para nao dizer nada. E o mesmo padrao do aviso de conflito do
+        editor de glossario.
+        """
+        self.origin_label.configure(text=texto)
+        if texto:
+            self.origin_label.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        else:
+            self.origin_label.grid_remove()
 
     def current_pair(self):
         """O par de idiomas da linha carregada, como `Inglês -> pt`.
@@ -1203,6 +1667,46 @@ class TranslationEditor:
             self.update_quality_warnings()
             self.refresh_find_matches()
 
+    def update_layout_button(self):
+        """O botao mostra o que ele VAI fazer, e nao o estado atual.
+
+        Um botao que anuncia o estado obriga a decorar qual desenho significa o
+        que; anunciando o destino, ele se le como um comando. O texto vai junto do
+        simbolo no tooltip — que o CustomTkinter nao tem —, entao o simbolo carrega
+        a orientacao de destino: colunas para lado a lado, linhas para empilhado.
+        """
+        self.btn_layout.configure(text="▤" if self.side_by_side else "▥")
+
+    def toggle_side_by_side(self):
+        """Troca a orientacao dos dois textos (ROADMAP 19, item 1).
+
+        `configure(orient=...)` em vez de reconstruir os painéis: o texto digitado,
+        a pilha de desfazer do Tk, a selecao e as marcas de busca vivem DENTRO dos
+        widgets, e recria-los perderia os quatro — no meio de uma edicao nao
+        salva.
+        """
+        self.side_by_side = not self.side_by_side
+        self.texts_pane.configure(
+            orient=tk.HORIZONTAL if self.side_by_side else tk.VERTICAL
+        )
+        self.update_layout_button()
+        # A posicao gravada e por orientacao: o divisor horizontal mede largura e o
+        # vertical mede altura, e reaproveitar o numero de um no outro poria o
+        # divisor num lugar sem relacao com o que o usuario escolheu.
+        self.win.after_idle(self.restore_texts_sash)
+        self.save_editor_settings()
+
+    def texts_sash_key(self):
+        return "texts_sash_x" if self.side_by_side else "texts_sash_y"
+
+    def restore_texts_sash(self):
+        restore_sash(
+            self.texts_pane,
+            self.editor_settings.get(self.texts_sash_key()),
+            120,
+            axis=0 if self.side_by_side else 1,
+        )
+
     def apply_font_size(self):
         size = self.state.font_size
         self.body_font.configure(size=size)
@@ -1283,6 +1787,7 @@ class TranslationEditor:
         # Sem isto o rotulo continuaria anunciando o par da linha que acabou de
         # sair da tela — a informacao errada e mais cara que nenhuma.
         self.current["source_language"] = ""
+        self.current["target_language"] = ""
         try:
             self.trans_text.edit_reset()
             self.trans_text.edit_modified(False)
@@ -1291,6 +1796,15 @@ class TranslationEditor:
         self.set_dirty(False)
         self.clear_find_highlights()
         self.draft_label.configure(text="")
+        # Mesma razao do par de idiomas acima: a procedencia da linha anterior na
+        # tela, sem linha nenhuma aberta, e uma afirmacao sobre o vazio. A nota do
+        # revisor sai junto, e por um motivo mais grave: deixada na tela, o proximo
+        # "Rejeitar" a gravaria na linha errada.
+        self.set_origin_text("")
+        self.current["review_status"] = REVIEW_STATUS_PENDING
+        self.current["reviewer_note"] = ""
+        self.reviewer_note_text.set("")
+        self.update_review_status_label()
         self.refresh_suggestions()
         self.update_selection_label()
         self.update_quality_warnings()
@@ -1300,17 +1814,10 @@ class TranslationEditor:
         return compute_page_count(self.state.total_rows, PAGE_SIZE)
 
     def selected_status_filter(self):
-        value = self.status_segment.get()
-        if value == "Pendentes":
-            return "pending"
-        if value == "Verificadas":
-            return "verified"
-        if value == "Avisos QA":
-            # "warnings" e resolvido em SQL pela coluna quality_warning, entao o
-            # filtro de avisos usa exatamente o mesmo caminho paginado dos
-            # demais — nada de carregar a tabela inteira para depois fatiar.
-            return "warnings"
-        return "all"
+        # "warnings" e os dois status de revisao sao resolvidos em SQL, cada um pela
+        # sua coluna, entao todos os filtros usam exatamente o mesmo caminho
+        # paginado — nada de carregar a tabela inteira para depois fatiar.
+        return STATUS_FILTER_LABELS.get(self.status_segment.get(), "all")
 
     def selected_search_mode(self):
         """O modo escolhido no seletor, na forma que o banco entende.
@@ -1335,6 +1842,168 @@ class TranslationEditor:
         """
         return source_filter_code(self.source_menu.get())
 
+    def selected_source_file(self):
+        """O arquivo escolhido, como o banco o guarda, ou `None` para todos."""
+        return self.file_options.get(self.file_menu.get())
+
+    def selected_order(self):
+        """A ordem da lista, que segue o filtro por arquivo.
+
+        Nao ha um seletor de ordem, e a ausencia e a decisao: escolher um arquivo E
+        pedir a obra em ordem de leitura, e ninguem quer o capitulo 7 na ordem em
+        que as traducoes dele foram inseridas no cache. Sem arquivo, a ordem de
+        leitura nao existe — o mesmo comentario esta em varios — e a lista volta ao
+        `id`, que e o que ela sempre foi.
+        """
+        if self.selected_source_file():
+            return ORDER_BY_OCCURRENCE
+        return ORDER_BY_ID
+
+    def list_filters(self):
+        """Os filtros da lista, num lugar so.
+
+        TODA consulta da lista — o resumo por status, o total, a pagina, o offset
+        do "Ir para ID", a varredura do "Proximo aviso QA" — tem de receber
+        EXATAMENTE estes filtros. A garantia R10 nasceu de duas que recebiam um a
+        menos, e o sintoma nao foi erro: foi uma posicao calculada na lista errada,
+        que na tela parece uma selecao qualquer. Montar aqui e o que impede a
+        proxima — o filtro por arquivo teria sido a terceira.
+        """
+        return {
+            "search_text": self.state.active_search,
+            "search_mode": self.selected_search_mode(),
+            "source_language": self.selected_source_language(),
+            "source_file": self.selected_source_file(),
+        }
+
+    def list_query_args(self):
+        """`list_filters` mais a ORDEM, para quem posiciona linha.
+
+        Sao dois metodos porque sao duas perguntas: o resumo por status conta
+        linhas e nao se importa com a ordem; contar, paginar e achar a posicao de
+        um id se importam, e para esses a ordem faz parte do resultado.
+        """
+        return dict(self.list_filters(), order=self.selected_order())
+
+    def current_view(self):
+        """Retrato do que a janela mostra: a linha aberta e os filtros que a trazem.
+
+        Guardar so o id nao serviria (ROADMAP 19, item 3): quem usa a busca como
+        concordancia — "como traduzi *outpost* ate aqui?" — troca a lista, e o id
+        de antes pode nao estar no resultado novo. Voltar so e voltar se os filtros
+        voltarem com ele.
+        """
+        return {
+            "id": self.current["id"],
+            "search": self.state.active_search,
+            "status": self.status_segment.get(),
+            "source": self.source_menu.get(),
+            "file": self.file_menu.get(),
+            "page": self.state.page_index,
+        }
+
+    def remember_position(self):
+        """Empilha o retrato atual, antes de um salto.
+
+        Chamada pelas operacoes que **trocam a lista** — buscar, limpar a busca, ir
+        para um id ou uma pagina, trocar de filtro, de arquivo, de par, e o salto
+        para o proximo aviso QA. Navegar de uma linha para a vizinha nao empilha: a
+        pilha existe para desfazer o salto que descarta a pagina, e um "voltar" que
+        andasse linha por linha nao devolveria nada a quem revisa um livro.
+
+        Nao empilha sem linha aberta (nao ha para onde voltar) nem o mesmo retrato
+        duas vezes seguidas — dois cliques em "Buscar" com o mesmo texto sao um
+        salto, nao dois.
+        """
+        if not self.current["id"]:
+            return
+        retrato = self.current_view()
+        if self.state.history_stack and self.state.history_stack[-1] == retrato:
+            return
+        self.state.history_stack.append(retrato)
+        # A pilha e memoria de sessao, e uma sessao de revisao dura horas: sem
+        # limite ela cresce com cada salto. O corte e pelo comeco, que e a parte a
+        # que ninguem mais volta.
+        if len(self.state.history_stack) > HISTORY_STACK_LIMIT:
+            del self.state.history_stack[0]
+
+    def restore_view(self, retrato):
+        """Repoe os filtros do retrato e seleciona a linha dele.
+
+        Devolve `True` se a linha foi encontrada. Os seletores sao repostos ANTES
+        da consulta porque e deles que `list_filters` le — e o `refresh_file_filter`
+        entra no meio porque trocar de par muda quais arquivos existem.
+        """
+        self.search_text.set(retrato["search"])
+        self.state.active_search = retrato["search"]
+        self.status_segment.set(retrato["status"])
+        self.source_menu.set(retrato["source"])
+        self.refresh_file_filter()
+        if retrato["file"] in self.file_menu.cget("values"):
+            self.file_menu.set(retrato["file"])
+        self.state.page_index = retrato["page"]
+        return self.jump_to_id(retrato["id"])
+
+    def go_back(self):
+        """Volta ao ultimo retrato empilhado (`Alt+Backspace`)."""
+        self.save_changes()
+        while self.state.history_stack:
+            retrato = self.state.history_stack.pop()
+            if self.restore_view(retrato):
+                self.show_message("Voltou para o ponto anterior")
+                return True
+            # A linha pode ter deixado de existir — o "Zerar Traducoes" de outra
+            # janela, ou uma importacao. Um retrato que nao da para repor nao pode
+            # travar a pilha: o proximo assume.
+        self.show_message("Nada para voltar")
+        return False
+
+    def refresh_file_filter(self, restore=None):
+        """Reconstroi o menu de arquivos do par atual.
+
+        `restore` e um caminho a reselecionar — a escolha da sessao anterior, ou a
+        da sessao atual quando o par muda. Um arquivo que nao esta mais na lista
+        (outro par de idiomas, banco zerado) cai em "Todos os arquivos" em vez de
+        deixar o menu apontando para um filtro que nao devolve linha nenhuma: uma
+        lista vazia sem explicacao e o pior desfecho possivel de um filtro
+        lembrado.
+        """
+        anterior = restore if restore is not None else self.selected_source_file()
+        with closing(initialize_database(self.app.output_db)) as conn:
+            arquivos = list_occurrence_files(
+                conn.cursor(), self.lang, self.selected_source_language()
+            )
+
+        self.file_options = occurrence_file_labels([linha[0] for linha in arquivos])
+        self.file_menu.configure(values=[FILE_FILTER_ALL] + list(self.file_options))
+
+        escolhido = FILE_FILTER_ALL
+        if anterior:
+            for rotulo, caminho in self.file_options.items():
+                if caminho == anterior:
+                    escolhido = rotulo
+                    break
+        self.file_menu.set(escolhido)
+
+    def change_file_filter(self):
+        """Troca de obra: grava o que estava aberto e recomeca na primeira pagina.
+
+        Nao reconstroi a lista de arquivos, de proposito: quem acabou de escolher
+        um item de um menu nao espera que o menu mude sozinho embaixo do dedo. A
+        lista e refeita quando o PAR muda, que e quando ela pode de fato ter outro
+        conteudo.
+        """
+        if self.current["id"]:
+            self.save_changes()
+
+        self.remember_position()
+        self.state.page_index = 0
+        self.clear_current()
+        self.reload_rows()
+        if self.state.rows:
+            self.select_index(0)
+        self.save_editor_settings()
+
     def change_language_filter(self):
         """Troca de par de idiomas: grava o que estava aberto e recomeca.
 
@@ -1350,6 +2019,7 @@ class TranslationEditor:
         if self.current["id"]:
             self.save_changes()
 
+        self.remember_position()
         novo_destino = target_language_code(self.target_menu.get())
         if novo_destino and novo_destino != self.lang:
             self.lang = novo_destino
@@ -1360,6 +2030,17 @@ class TranslationEditor:
         # janela continuaria propondo a terminologia do par anterior.
         self.glossary = self.load_scoped_interactive_glossary()
         self.automatic_glossary = self.load_scoped_automatic_glossary()
+
+        # E decide quais ARQUIVOS existem: um par sem execucao nenhuma nao tem
+        # obra, e manter no menu os arquivos do par anterior daria um filtro que
+        # devolve zero linhas sempre. A escolha atual e reposta quando o arquivo
+        # existe nos dois pares — um mesmo PGN traduzido para dois idiomas.
+        self.refresh_file_filter()
+
+        # A selecao em lote morre na troca de par (ROADMAP 19, item 9). Ela e por
+        # id, e um id do par anterior nao esta na lista nova: "Verificar" marcaria
+        # linhas que o revisor nao ve, que e o oposto do que a selecao serve.
+        self.state.selected_ids.clear()
 
         self.state.page_index = 0
         self.clear_current()
@@ -1373,10 +2054,8 @@ class TranslationEditor:
         return fetch_review_rows(
             cur,
             self.lang,
-            search_text=self.state.active_search,
             status_filter="warnings",
-            search_mode=self.selected_search_mode(),
-            source_language=self.selected_source_language(),
+            **self.list_query_args(),
         )
 
     def update_page_controls(self):
@@ -1384,10 +2063,19 @@ class TranslationEditor:
         current_page = self.state.page_index + 1 if pages else 0
         search_suffix = " · busca ativa" if self.state.active_search else ""
         status_suffix = f" · {self.status_segment.get().lower()}"
+        # A ordem muda quando um arquivo e escolhido, e uma lista que reordena sem
+        # dizer nada parece embaralhada. O rotulo e o unico lugar em que isso cabe
+        # sem um controle novo na tela.
+        order_suffix = (
+            " · ordem de leitura"
+            if self.selected_order() == ORDER_BY_OCCURRENCE
+            else ""
+        )
         self.page_label.configure(
             text=(
                 f"Página {current_page}/{pages} · "
-                f"{self.state.total_rows} traduções{status_suffix}{search_suffix}"
+                f"{self.state.total_rows} traduções"
+                f"{status_suffix}{search_suffix}{order_suffix}"
             )
         )
         self.btn_page_prev.configure(
@@ -1399,6 +2087,7 @@ class TranslationEditor:
 
     def render_rows(self):
         self.row_buttons.clear()
+        self.row_checkboxes.clear()
         self.state.selected_index = None
         self.update_page_controls()
         self.update_counts_label()
@@ -1411,15 +2100,41 @@ class TranslationEditor:
         else:
             vazio = "Nenhuma tradução encontrada."
 
-        self.row_buttons.extend(
-            render_row_buttons(
-                self.rows_frame, self.state.rows, self.build_row_button, vazio
-            )
+        # O retorno de `render_row_buttons` sao os QUADROS; os botoes e as marcas
+        # foram guardados por `build_row_button`, que e quem sabe qual e qual.
+        render_row_buttons(
+            self.rows_frame, self.state.rows, self.build_row_button, vazio
         )
+        self.update_selection_controls()
 
     def build_row_button(self, parent, index, row):
-        return ctk.CTkButton(
-            parent,
+        """A linha da lista: uma marca de selecao e o botao (ROADMAP 19, item 9).
+
+        Devolve o QUADRO, que e o que `render_row_buttons` empacota; o botao vai
+        para `self.row_buttons` e a marca para `self.row_checkboxes`, porque quem
+        pinta a selecao mexe no botao e quem le a selecao em lote le as marcas.
+
+        A marca fica FORA do botao porque um `CTkButton` nao aceita filho: clicar
+        nela nao pode carregar a linha, e clicar na linha nao pode marcar. Sao duas
+        acoes diferentes no mesmo lugar, e confundi-las faria o revisor marcar como
+        verificada uma linha que ele so queria ler.
+        """
+        quadro = ctk.CTkFrame(parent, fg_color="transparent")
+        quadro.columnconfigure(1, weight=1)
+
+        marcada = tk.BooleanVar(master=self.win, value=row[0] in self.state.selected_ids)
+        marca = ctk.CTkCheckBox(
+            quadro,
+            text="",
+            width=24,
+            variable=marcada,
+            command=lambda i=index: self.toggle_row_selection(i),
+        )
+        marca.grid(row=0, column=0, sticky="n", padx=(2, 4), pady=2)
+        marca.selection_var = marcada
+
+        botao = ctk.CTkButton(
+            quadro,
             text=row_label(row),
             anchor="w",
             height=64,
@@ -1429,19 +2144,73 @@ class TranslationEditor:
             font=self.row_font,
             command=lambda i=index: self.select_index(i, save_previous=True),
         )
+        botao.grid(row=0, column=1, sticky="ew")
+
+        self.row_buttons.append(botao)
+        self.row_checkboxes.append(marca)
+        return quadro
+
+    def toggle_row_selection(self, index):
+        """Marca ou desmarca a linha `index`, pelo ID.
+
+        Por id, e nao por posicao: a selecao sobrevive a trocar de pagina, que e o
+        que torna "exportar so a selecao" util em vez de uma curiosidade — juntar 30
+        linhas de tres paginas diferentes e o caso real.
+        """
+        if not (0 <= index < len(self.state.rows)):
+            return
+        row_id = self.state.rows[index][0]
+        if row_id in self.state.selected_ids:
+            self.state.selected_ids.discard(row_id)
+        else:
+            self.state.selected_ids.add(row_id)
+        self.update_selection_controls()
+
+    def select_page_rows(self):
+        """Marca todas as linhas da pagina (o "marcar a pagina" do item 9)."""
+        for row in self.state.rows:
+            self.state.selected_ids.add(row[0])
+        self.sync_row_checkboxes()
+        self.update_selection_controls()
+
+    def clear_row_selection(self):
+        self.state.selected_ids.clear()
+        self.sync_row_checkboxes()
+        self.update_selection_controls()
+
+    def sync_row_checkboxes(self):
+        for indice, marca in enumerate(self.row_checkboxes):
+            if indice >= len(self.state.rows):
+                break
+            if self.state.rows[indice][0] in self.state.selected_ids:
+                marca.select()
+            else:
+                marca.deselect()
+
+    def update_selection_controls(self):
+        """Habilita as acoes em lote so quando ha selecao, e diz quantas.
+
+        Um botao "Marcar selecionadas" clicavel com nada marcado nao tem resposta
+        boa: ou ele nao faz nada em silencio, ou avisa que nao ha selecao — e as
+        duas sao piores do que um botao apagado que se explica pelo contador ao
+        lado.
+        """
+        quantas = len(self.state.selected_ids)
+        self.batch_label.configure(
+            text=f"{quantas} selecionada(s)" if quantas else "nenhuma selecionada"
+        )
+        estado = "normal" if quantas else "disabled"
+        self.btn_batch_verify.configure(state=estado)
+        self.btn_batch_export.configure(state=estado)
+        self.btn_batch_clear.configure(state=estado)
 
     def reload_rows(self):
-        source_language = self.selected_source_language()
+        filtros = self.list_filters()
+        consulta = self.list_query_args()
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
             self.state.status_counts.update(
-                get_review_status_counts(
-                    cur,
-                    self.lang,
-                    self.state.active_search,
-                    search_mode=self.selected_search_mode(),
-                    source_language=source_language,
-                )
+                get_review_status_counts(cur, self.lang, **filtros)
             )
             # A contagem de avisos ja vem agregada junto com as demais.
             self.state.status_counts["qa"] = self.state.status_counts.get("warnings", 0)
@@ -1457,12 +2226,7 @@ class TranslationEditor:
             )
             if self.state.total_rows is None:
                 self.state.total_rows = count_review_rows(
-                    cur,
-                    self.lang,
-                    search_text=self.state.active_search,
-                    status_filter=status_filter,
-                    search_mode=self.selected_search_mode(),
-                    source_language=source_language,
+                    cur, self.lang, status_filter=status_filter, **filtros
                 )
             self.state.page_index = clamp_page(
                 self.state.page_index, self.state.total_rows, PAGE_SIZE
@@ -1474,10 +2238,8 @@ class TranslationEditor:
                     self.lang,
                     limit=PAGE_SIZE,
                     offset=offset,
-                    search_text=self.state.active_search,
-                    status_filter=self.selected_status_filter(),
-                    search_mode=self.selected_search_mode(),
-                    source_language=source_language,
+                    status_filter=status_filter,
+                    **consulta,
                 )
             )
         self.render_rows()
@@ -1535,9 +2297,27 @@ class TranslationEditor:
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
             row = fetch_translation_by_id(cur, comment_id)
+            # Na MESMA conexao da linha: sao duas consultas indexadas por id, e
+            # abrir o banco de novo custaria mais do que as duas juntas.
+            ocorrencias, total_ocorrencias = fetch_comment_occurrences(
+                cur,
+                comment_id,
+                limit=OCCURRENCE_PREVIEW_LIMIT,
+                preferred_file=self.selected_source_file(),
+            )
+            status_revisao, nota_revisao = fetch_review_status_by_id(cur, comment_id)
 
         if row is None:
             return
+
+        self.current["review_status"] = status_revisao
+        self.current["reviewer_note"] = nota_revisao
+        self.reviewer_note_text.set(nota_revisao)
+        self.update_review_status_label()
+
+        self.set_origin_text(
+            format_occurrence_context(ocorrencias, total_ocorrencias)
+        )
 
         orig, trans = row[0], row[1]
         self.current["id"] = comment_id
@@ -1548,6 +2328,11 @@ class TranslationEditor:
         # "Origem: Todos" ativo a lista mistura pares de proposito, e sem isto
         # nada na tela diz de qual delas veio o texto que esta sendo revisado.
         self.current["source_language"] = row[5] if len(row) > 5 else ""
+        # O destino tambem sai da LINHA, e nao de `self.lang`: os dois coincidem
+        # hoje (a lista e filtrada por destino), e guardar o da linha e o que
+        # mantem a avaliacao de qualidade da tela igual a da coluna materializada
+        # se algum dia a lista misturar destinos (garantia R6).
+        self.current["target_language"] = row[6] if len(row) > 6 else self.lang
         self.set_current_history(row)
 
         self.orig_text.configure(state="normal")
@@ -1600,6 +2385,17 @@ class TranslationEditor:
         if verified is None:
             verified = self.state.rows[index][3] if len(self.state.rows[index]) > 3 else 0
 
+        # O par de idiomas vai junto, nas duas ultimas posicoes, como nas linhas
+        # que vem do banco. Sem ele a linha reconstruida aqui seria avaliada sem
+        # par e a mesma linha relida do banco seria avaliada com par: a contagem
+        # de avisos da tela passaria a depender de a linha ter sido editada nesta
+        # sessao (garantia R6).
+        #
+        # E o bit de aviso vai junto pelo mesmo motivo, agora que o rotulo da linha
+        # o mostra: calculado pela MESMA funcao que a gravacao usa. Copiar o bit
+        # antigo faria o marcador da lista ficar mostrando o veredito de antes da
+        # edicao — a linha corrigida continuaria marcada, e a que passou a ter aviso
+        # nao apareceria.
         self.state.rows[index] = (
             self.current["id"],
             self.current["orig"],
@@ -1608,6 +2404,14 @@ class TranslationEditor:
             self.current["created_at"],
             self.current["updated_at"],
             self.current["verified_at"],
+            self.current["source_language"],
+            self.current["target_language"],
+            quality_warning_flag(
+                self.current["orig"],
+                self.current["trans"],
+                self.current["source_language"],
+                self.current["target_language"],
+            ),
         )
         self.row_buttons[index].configure(text=row_label(self.state.rows[index]))
         if self.state.selected_index == index:
@@ -1620,6 +2424,38 @@ class TranslationEditor:
                 fg_color=row_color(self.state.rows[index]),
                 text_color=row_text_color(self.state.rows[index]),
             )
+
+    def confirm_and_propagate(self, translation, candidates):
+        """Pergunta, e so entao propaga a verificacao. Devolve quantas marcou.
+
+        Garantia V1. A propagacao acontecia sem nenhuma pergunta e era anunciada
+        depois — "N iguais também verificadas" —, e o que ela marca sao N
+        originais DIFERENTES que ninguem leu. Marcar por acidente e o oposto exato
+        do que "verificada" quer dizer.
+
+        Os ids sao os que a previa mostrou (`only_ids`): se o worker gravar uma
+        linha nova com a mesma traducao enquanto o dialogo estiver aberto, ela nao
+        entra na propagacao — o usuario nao a viu.
+        """
+        if not candidates:
+            return 0
+
+        if not messagebox.askyesno(
+            "Verificar traduções iguais",
+            format_propagation_confirmation(translation, candidates),
+            parent=self.win,
+        ):
+            return 0
+
+        with closing(initialize_database(self.app.output_db)) as conn:
+            cur = conn.cursor()
+            propagated = set_exact_translation_matches_verified(
+                cur,
+                self.current["id"],
+                only_ids=[row_id for row_id, _original in candidates],
+            )
+            conn.commit()
+        return propagated
 
     def save_changes(self, silent=True, mark_verified=False):
         if not self.current["id"]:
@@ -1636,14 +2472,23 @@ class TranslationEditor:
         new_trans = self.trans_text.get("1.0", tk.END).rstrip("\n")
 
         updated_row = None
-        propagated_rows = 0
+        propagation_candidates = []
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
             update_translation_by_id(cur, self.current["id"], new_trans, mark_verified)
             if mark_verified:
-                propagated_rows = set_exact_translation_matches_verified(cur, self.current["id"])
+                propagation_candidates = fetch_exact_translation_match_candidates(
+                    cur, self.current["id"]
+                )
             updated_row = fetch_translation_by_id(cur, self.current["id"])
             conn.commit()
+
+        # A pergunta vem com a conexao JA fechada e a transacao comitada
+        # (garantia C3): um dialogo modal aberto sobre uma transacao de escrita
+        # seguraria o banco enquanto ninguem clica, e o "Salvar" do worker
+        # esperaria o `busy_timeout` inteiro. O que ficou gravado ate aqui e o que
+        # o usuario pediu — a propagacao e uma segunda decisao.
+        propagated_rows = self.confirm_and_propagate(new_trans, propagation_candidates)
 
         self.current["trans"] = new_trans
         self.current["saved_trans"] = new_trans
@@ -1670,7 +2515,8 @@ class TranslationEditor:
                 self.clear_current()
             if not silent:
                 self.show_message(
-                    f"Tradução salva e verificada; {propagated_rows} iguais também verificadas"
+                    f"Tradução salva e verificada; {propagated_rows} outro(s) "
+                    f"original(is) também verificado(s)"
                 )
             return propagated_rows
 
@@ -1760,10 +2606,42 @@ class TranslationEditor:
             self.show_message("Página fora do intervalo")
             return
 
+        self.remember_position()
         self.state.page_index = target_page - 1
         self.reload_rows()
         if self.state.rows:
             self.select_index(0)
+
+    def jump_to_id(self, target_id):
+        """Seleciona a linha `target_id` dentro dos filtros ativos. `True` se achou.
+
+        Extraida de `go_to_id` para que o "voltar" (item 3) use a MESMA maquina:
+        offset calculado na lista filtrada e na ordem ativa, pagina derivada dele.
+        Duas implementacoes de "posicionar num id" divergiriam no dia em que uma
+        das duas ganhasse um filtro novo — que e a historia da garantia R10.
+        """
+        if not target_id:
+            return False
+
+        with closing(initialize_database(self.app.output_db)) as conn:
+            offset = get_review_row_offset(
+                conn.cursor(),
+                self.lang,
+                target_id,
+                status_filter=self.selected_status_filter(),
+                **self.list_query_args(),
+            )
+
+        if offset is None:
+            return False
+
+        self.state.page_index = page_of_offset(offset, PAGE_SIZE)
+        self.reload_rows()
+        target_index = local_index_for_offset(offset, PAGE_SIZE, len(self.state.rows))
+        if target_index is None:
+            return False
+        self.select_index(target_index)
+        return True
 
     def go_to_id(self):
         self.save_changes()
@@ -1773,17 +2651,26 @@ class TranslationEditor:
             self.show_message("ID inválido")
             return
 
+        self.remember_position()
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
             # Vale para todos os filtros, inclusive "Avisos QA": o offset sai de
             # um COUNT indexado em vez de uma varredura ate achar o ID.
+            #
+            # Os filtros entram aqui pelo mesmo motivo que entram no `reload_rows`
+            # (garantia R10): o offset e uma posicao NA LISTA FILTRADA. Sem eles,
+            # digitar um ID ingles com "Origem: Espanhol" ativo calculava a posicao
+            # na tabela inteira e selecionava uma linha espanhola arbitraria — sem
+            # mensagem nenhuma. E a mesma classe do bug que a garantia R7 fechou:
+            # navegar pela posicao errada. A ORDEM vai junto: com a obra em ordem
+            # de leitura, "quantas linhas vem antes" nao e mais "quantas tem id
+            # menor".
             offset = get_review_row_offset(
                 cur,
                 self.lang,
                 target_id,
-                search_text=self.state.active_search,
                 status_filter=self.selected_status_filter(),
-                search_mode=self.selected_search_mode(),
+                **self.list_query_args(),
             )
 
         if offset is None:
@@ -1797,10 +2684,19 @@ class TranslationEditor:
             self.select_index(target_index)
 
     def find_quality_warning_offset(self, start_offset, stop_offset):
+        """Varre da posicao `start_offset` ate `stop_offset` procurando um aviso.
+
+        As posicoes sao offsets NA LISTA FILTRADA, e `stop_offset` vem de
+        `state.total_rows` — que ja e o total filtrado. Sem passar o filtro de
+        origem para a consulta (garantia R10), F7 varria as primeiras N linhas da
+        tabela INTEIRA usando o total filtrado como limite, e anunciava o aviso de
+        uma linha que nao esta na tela.
+        """
         if start_offset >= stop_offset:
             return None
 
         offset = start_offset
+        consulta = self.list_query_args()
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
             while offset < stop_offset:
@@ -1812,9 +2708,8 @@ class TranslationEditor:
                         self.lang,
                         limit=PAGE_SIZE,
                         offset=page_start,
-                        search_text=self.state.active_search,
                         status_filter=self.selected_status_filter(),
-                        search_mode=self.selected_search_mode(),
+                        **consulta,
                     )
                 )
                 if not page_rows:
@@ -1839,6 +2734,9 @@ class TranslationEditor:
         if total == 0:
             self.show_message("Nenhum item nos filtros atuais")
             return
+
+        # F7 tambem e um salto: ele pode atravessar a obra inteira e dar a volta.
+        self.remember_position()
 
         index = self.get_index()
         base_offset = page_offset(self.state.page_index, PAGE_SIZE)
@@ -1932,7 +2830,10 @@ class TranslationEditor:
 
         if self.selected_status_filter() == "pending":
             if propagated:
-                self.show_message(f"Verificada; {propagated} iguais também verificadas")
+                self.show_message(
+                    f"Verificada; {propagated} outro(s) original(is) também "
+                    f"verificado(s)"
+                )
             else:
                 self.show_message("Marcada como verificada" if self.current["id"] else "Sem traduções pendentes")
             return
@@ -1961,7 +2862,9 @@ class TranslationEditor:
             return
 
         if propagated:
-            self.show_message(f"Verificada; {propagated} iguais também verificadas")
+            self.show_message(
+                f"Verificada; {propagated} outro(s) original(is) também verificado(s)"
+            )
         else:
             self.show_message("Marcada como verificada")
 
@@ -1995,6 +2898,137 @@ class TranslationEditor:
                 self.update_counts_label()
 
         self.show_message("Marcada como pendente")
+
+    def verify_selected_rows(self):
+        """Marca como verificadas as linhas selecionadas (ROADMAP 19, item 9).
+
+        Passa pelo MESMO caminho de uma linha so (`set_translation_verified_by_id`),
+        entao cada uma ganha carimbo e entrada de historico. Um `UPDATE` em massa
+        seria mais rapido e deixaria N linhas verificadas sem historico — e a
+        garantia R2 existe porque a pergunta "quem marcou isto, e quando" e a
+        primeira que se faz numa revisao que deu errado.
+
+        **NAO propaga para traducoes iguais.** A propagacao tem confirmacao propria
+        (garantia V1) porque marca originais que ninguem leu; encadea-la aqui faria
+        um clique em "Verificar" com 100 linhas marcadas abrir 100 dialogos, ou —
+        pior — nenhum.
+        """
+        if not self.state.selected_ids:
+            return
+        self.save_changes()
+        alvos = sorted(self.state.selected_ids)
+
+        if not messagebox.askyesno(
+            "Verificar selecionadas",
+            f"Marcar {len(alvos)} tradução(oes) selecionada(s) como verificada(s)?\n\n"
+            "Traduções iguais em outras linhas NÃO são afetadas.",
+            parent=self.win,
+        ):
+            return
+
+        marcadas = 0
+        with closing(initialize_database(self.app.output_db)) as conn:
+            cur = conn.cursor()
+            for comment_id in alvos:
+                marcadas += set_translation_verified_by_id(cur, comment_id) or 0
+            conn.commit()
+
+        self.clear_row_selection()
+        self.reload_rows()
+        if self.state.rows:
+            self.select_index(0)
+        self.show_message(f"{marcadas} tradução(oes) verificada(s)")
+        return marcadas
+
+    def export_selected_rows(self):
+        """Exporta so as linhas selecionadas para CSV (ROADMAP 19, item 9)."""
+        if not self.state.selected_ids:
+            return
+        self.save_changes()
+        alvos = sorted(self.state.selected_ids)
+
+        save_path = filedialog.asksaveasfilename(
+            title="Exportar selecao",
+            defaultextension=".csv",
+            filetypes=[("Arquivos CSV", "*.csv"), ("Todos os arquivos", "*.*")],
+        )
+        if not save_path:
+            return
+
+        try:
+            escritas = export_translations_to_csv(
+                self.app.output_db, save_path, only_ids=alvos
+            )
+        except OSError as exc:
+            messagebox.showerror("Erro", f"Erro ao exportar a selecao:\n{exc}")
+            return
+
+        messagebox.showinfo(
+            "Exportar selecao",
+            f"{escritas} tradução(oes) exportada(s) para:\n{save_path}",
+        )
+
+    def set_review_status(self, status):
+        """Grava o status de revisao e a nota da linha aberta (item 12).
+
+        A nota vai junto com o status na mesma gravacao porque na tela e um gesto so:
+        quem rejeita escreve por que. Uma linha rejeitada ou em duvida deixa de estar
+        verificada — dizer que a verificacao estava errada e o proposito do botao.
+        """
+        if not self.current["id"]:
+            return 0
+
+        comment_id = self.current["id"]
+        nota = self.reviewer_note_text.get().strip()
+        with closing(initialize_database(self.app.output_db)) as conn:
+            cur = conn.cursor()
+            mudou = set_review_status_by_id(cur, comment_id, status, note=nota)
+            conn.commit()
+
+        self.current["review_status"] = status
+        self.current["reviewer_note"] = nota
+        self.update_review_status_label()
+
+        if status:
+            self.show_message(
+                "Marcada como rejeitada" if status == REVIEW_STATUS_REJECTED
+                else "Marcada como em dúvida"
+            )
+        else:
+            self.show_message("Status de revisão limpo")
+
+        # A linha pode ter saido do filtro ativo (era verificada e deixou de ser, ou
+        # o filtro e "Rejeitadas"), entao a lista e recarregada e a posicao
+        # reencontrada pelo id — a mesma regra de `mark_and_next`.
+        if mudou:
+            indice = self.get_index()
+            self.reload_rows()
+            if self.state.rows:
+                self.select_index(
+                    row_index_for_id(
+                        self.state.rows, comment_id, fallback=indice or 0
+                    )
+                )
+            else:
+                self.clear_current()
+        return mudou
+
+    def update_review_status_label(self):
+        """Pinta o campo de nota conforme o status, e diz qual e no rodape.
+
+        A cor esta no CAMPO, e nao num rotulo separado, porque e ali que o olho vai
+        quando a pergunta e "esta linha volta para alguem?". Sem status, o campo fica
+        neutro: a nota de uma linha pendente e um lembrete, nao um alarme.
+        """
+        status = self.current.get("review_status") or REVIEW_STATUS_PENDING
+        cor = {
+            REVIEW_STATUS_REJECTED: "#dc2626",
+            REVIEW_STATUS_DOUBT: "#f59e0b",
+        }.get(status, self.text_border)
+        try:
+            self.note_entry.configure(border_color=cor)
+        except tk.TclError:  # pragma: no cover - tema sem essa propriedade
+            pass
 
     def open_history_window(self):
         if not self.current["id"]:
@@ -2044,6 +3078,7 @@ class TranslationEditor:
         self.show_message("Original copiado para tradução")
 
     def toggle_filter(self):
+        self.remember_position()
         self.state.page_index = 0
         self.save_editor_settings()
         self.reload_rows()
@@ -2054,6 +3089,9 @@ class TranslationEditor:
 
     def apply_search(self):
         self.save_changes()
+        # Antes de trocar a lista: e este o salto que o item 3 existe para desfazer
+        # — usar a busca como concordancia descartava a pagina em que se estava.
+        self.remember_position()
         self.state.active_search = self.search_text.get().strip()
         self.state.page_index = 0
         self.reload_rows()
@@ -2065,6 +3103,7 @@ class TranslationEditor:
     def clear_search(self):
         if not self.state.active_search and not self.search_text.get():
             return
+        self.remember_position()
         self.search_text.set("")
         self.state.active_search = ""
         self.state.page_index = 0
@@ -2255,11 +3294,34 @@ class TranslationEditor:
         after_text.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=(0, 10))
         before_text.insert("1.0", text)
         after_text.insert("1.0", preview_text)
+
+        # As faixas trocadas, pintadas (ROADMAP 19, item 5). Sem isto, conferir 80
+        # substituicoes era comparar dois blocos de texto a olho nu — que e o mesmo
+        # que nao conferir. As cores sao as duas que a janela ja usa para "mudou":
+        # a de remocao no lado de antes, a de acerto no lado de depois.
+        faixas_antes, faixas_depois = diff_spans(text, preview_text)
+        for caixa, faixas, cor in (
+            (before_text, faixas_antes, self.diff_removed_bg),
+            (after_text, faixas_depois, self.diff_added_bg),
+        ):
+            caixa.tag_config("diff", background=cor)
+            for inicio, fim in faixas:
+                caixa.tag_add(
+                    "diff",
+                    f"1.0+{inicio}c",
+                    f"1.0+{fim}c",
+                )
+        # DEPOIS de pintar: um `CTkTextbox` desabilitado nao aceita `tag_add`.
         before_text.configure(state="disabled")
         after_text.configure(state="disabled")
 
         actions = ctk.CTkFrame(pop, fg_color="transparent")
         actions.grid(row=2, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
+        ctk.CTkLabel(
+            actions,
+            text=f"{len(faixas_depois)} trecho(s) alterado(s)",
+            text_color="#64748b",
+        ).pack(side=tk.LEFT, padx=(0, 12))
 
         def confirm():
             self.set_translation_text(
@@ -2319,7 +3381,11 @@ class TranslationEditor:
         # `updated_entries` vem do editor de glossario e nao tem escopo aplicado:
         # ele edita o arquivo inteiro. O que esta janela oferece e o recorte do
         # par dela, entao a lista dela e recarregada com filtro.
-        self.app.glossary_substitutions = list(updated_entries)
+        #
+        # `versioned_rules` e nao `list`: esta lista e a que a PROXIMA janela do
+        # editor adota como glossario inicial, e sem a marca de versao a ordenacao
+        # dela volta a custar a chave por conteudo em cada tecla (ROADMAP 20.6).
+        self.app.glossary_substitutions = versioned_rules(updated_entries)
         self.glossary = self.load_scoped_interactive_glossary()
         self.automatic_glossary = self.load_scoped_automatic_glossary()
         self.refresh_suggestions()
@@ -2352,7 +3418,10 @@ class TranslationEditor:
         pop = ctk.CTkToplevel(self.win)
         pop.title("Adicionar ao glossário")
         pop.geometry("380x255")
-        bring_window_to_front(pop, self.win, maximize=True)
+        # `maximize=False`: sao tres campos e um botao. Maximizado, o formulario
+        # ficava num canto de uma janela do tamanho da tela, cobrindo o editor —
+        # e o texto que o usuario acabou de selecionar para copiar dali.
+        bring_window_to_front(pop, self.win, maximize=False)
 
         ctk.CTkLabel(pop, text="Texto original:").pack(anchor="w", padx=12, pady=(12, 2))
         original_entry = ctk.CTkEntry(pop, width=350)
@@ -2374,20 +3443,70 @@ class TranslationEditor:
         _type_map = {"Sugestão": "suggestion", "Automático": "automatic", "Limpeza": "cleanup"}
 
         def confirm():
+            """Grava a regra, e nao fecha a janela sem dizer o que aconteceu.
+
+            Antes, os tres desfechos — gravou, campo vazio, gravacao falhou —
+            terminavam na MESMA coisa: a janela fechada. Sem regra nenhuma no
+            glossario e sem uma palavra na tela, o usuario tinha todo motivo para
+            achar que gravou.
+            """
             orig = original_entry.get().strip()
             new = replacement_entry.get().strip()
             rule_type = _type_map.get(type_var.get(), "suggestion")
-            if orig and (new or rule_type == "cleanup"):
-                if add_to_glossary(orig, new, rule_type=rule_type):
-                    self.reload_glossary(show_feedback=False)
-                    self.show_message("Entrada adicionada ao glossário")
+
+            if not orig:
+                messagebox.showwarning(
+                    "Adicionar ao glossário",
+                    "Informe o texto original da regra.",
+                    parent=pop,
+                )
+                return
+            if not new and rule_type != "cleanup":
+                messagebox.showwarning(
+                    "Adicionar ao glossário",
+                    "Informe a substituição.\n\n"
+                    "Só as regras de limpeza podem ter substituição vazia — elas "
+                    "existem justamente para remover o trecho.",
+                    parent=pop,
+                )
+                return
+
+            if not add_to_glossary(orig, new, rule_type=rule_type):
+                messagebox.showerror(
+                    "Adicionar ao glossário",
+                    "Não foi possível gravar a regra no glossário.\n\n"
+                    "Nada foi adicionado.",
+                    parent=pop,
+                )
+                return
+
+            self.reload_glossary(show_feedback=False)
+            self.show_message("Entrada adicionada ao glossário")
             pop.destroy()
 
         ctk.CTkButton(pop, text="Adicionar", command=confirm).pack(pady=14)
 
     def focus_search(self, _event=None):
+        """`Ctrl+L`: busca da LISTA (ROADMAP 19, item 2).
+
+        Era o que `Ctrl+F` fazia. A troca nao e questao de gosto: `Ctrl+F` e o
+        gesto universal de "procurar no que estou lendo", e quem revisa um
+        comentario longo de livro o aperta para achar uma palavra NO TEXTO. Caindo
+        no campo da lista, ele fazia a coisa mais destrutiva possivel — a busca da
+        lista TROCA a pagina, e o revisor perdia o lugar em que estava.
+        """
         self.search_entry.focus_set()
         self.search_entry.select_range(0, tk.END)
+        return "break"
+
+    def focus_editor_find(self, _event=None):
+        """`Ctrl+F`: busca dentro da traducao aberta."""
+        self.editor_find_entry.focus_set()
+        self.editor_find_entry.select_range(0, tk.END)
+        return "break"
+
+    def go_back_shortcut(self, _event=None):
+        self.go_back()
         return "break"
 
     def save_shortcut(self, _event=None):

@@ -5,11 +5,11 @@ Registro das melhorias do programa. Cada item traz o motivo, o impacto medido
 verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
-**Pendentes: as secoes 16 a 20**, da revisao de 2026-07-29 (as secoes 13, 14 e
-15 foram concluidas no mesmo dia). As garantias que os testes ja protegem estao
-na [SPEC.md](SPEC.md), secao 9; as que as secoes pendentes prometem estao
-declaradas na secao 11 da SPEC, e cada uma so migra para a 9 quando o item
-correspondente estiver pronto e tiver teste que falhe sem a correcao.
+**Pendentes: as secoes 18, 19 e 20**, da revisao de 2026-07-29 (as secoes 13 a 17
+foram concluidas no mesmo dia). As garantias que os testes ja protegem estao na
+[SPEC.md](SPEC.md), secao 9 — e nao ha mais nenhuma declarada na secao 11: as tres
+secoes que restam pedem estrutura de dados e fluxo, e as garantias delas serao
+escritas quando o desenho existir.
 
 A frase que ficava aqui — "nada pendente no momento" — ja tinha ficado **falsa
 por um dia** uma vez, e vale manter o registro: a secao 10 conserta os lances na
@@ -64,6 +64,25 @@ diagnostico acima** (o `=/+` e sugestao e nao automatica; das 210 mortas, 166 na
 fazem falta). O detalhe esta la; o que fica registrado aqui e o metodo: a
 diferenca saiu de medir cada afirmacao contra o glossario real, uma por uma, em
 vez de aceitar a lista.
+
+**As secoes 16 e 17 foram feitas no mesmo dia, e as duas repetiram o padrao.** Na
+17, tres das dez afirmacoes nao sobreviveram a tentativa de implementa-las: 17.4
+falava de uma confirmacao que nao existia, 17.5 dizia que o dado ja estava
+calculado e ele nao estava, e 17.10 inflava em 92% o tamanho do dicionario que
+estava sendo apagado. Na 16, **duas das oito heuristicas planejadas morreram na
+medicao** — o multiconjunto de digitos marcava 3 linhas e as 3 eram formatacao
+correta em portugues; `exchange` -> `troca` marcava 178 e a maioria estava certa.
+
+E cada uma das duas secoes tem um tema proprio que vale destacar:
+
+- **17:** as seis ferramentas de escrita em massa tinham tres guardas iguais
+  escritas tres vezes, e as outras tres nao tinham nenhuma. A correcao nao foi
+  acrescentar tres copias — foi tirar as tres que existiam de onde estavam.
+- **16:** o conhecimento que faltava ao aviso de qualidade **ja estava no
+  programa**. As ancoras de lance vieram da secao 10, o padrao de anotacao da 13, a
+  terminologia da 14 — e o item foi quase todo ligar uma coisa na outra. O que
+  precisou ser escrito de novo foi o mecanismo de VERSAO (16.2), que e o que impede
+  a melhoria de violar a garantia R6 nas 200 mil linhas ja avaliadas.
 
 **Revisao de 2026-07-28 (secoes 9 e 10).** Quatro pedidos do usuario, e o que os
 une nao e o tema — e o fato de todos serem **decisoes dele que o codigo nao tinha
@@ -979,6 +998,13 @@ aparecem em caminhos quentes:
 A ordenacao passou a ser memorizada por **conteudo** das regras — a lista nao e
 hashavel e o `id()` dela nao serve (uma lista nova pode reaproveitar o endereco
 de uma coletada), entao a chave e a tupla dos pares.
+
+> A chave por conteudo saiu em 2026-07-30: montar uma tupla de 7.334 elementos e
+> hashea-la era 1,75 ms dos 9,15 ms de cada tecla. A lista carregada passou a
+> trazer um numero de versao, e a chave e ele (garantia D7, ROADMAP 20.6). O
+> `test_ordering_cache_never_changes_the_result` continua sendo o forcante: os
+> quatro jeitos de errar sao os mesmos, e o quarto — mutacao que precisa mudar a
+> ordem — e o que exige renovar a versao a cada mutacao da lista.
 
 Um cache aqui e delicado: S3 depende inteiramente desta ordem, e um cache que
 devolva a lista errada quebra a garantia sem quebrar nada visivel — as regras
@@ -3806,7 +3832,7 @@ O que fica de fora, dito para nao ser lido como pronto:
 
 ---
 
-## 16. O aviso de qualidade nao conhece xadrez — PENDENTE
+## 16. O aviso de qualidade nao conhece xadrez — CONCLUIDO (2026-07-29)
 
 As cinco heuristicas de `review_quality.py` sao genericas de traducao: vazia,
 igual ao original, chaves perdidas, curta demais, longa demais. Nenhuma sabe
@@ -3828,7 +3854,15 @@ como qualidade -> "troca" (31), *file* -> "arquivo" (18), *tempo* ->
 que o filtro "Avisos QA" **nao mostra** — e o glossario do usuario ja tem a
 correcao de quase todos, como sugestao, esperando alguem abrir a linha certa.
 
-### 16.1 Heuristicas de xadrez
+**Os numeros deste paragrafo sao do diagnostico, e a implementacao mediu de novo:
+o item 16.3 tem a lista final e diz o que mudou.** O total foi de 401 para 347
+(com heuristica a mais e dois candidatos a menos), e a maior divergencia individual
+esta em *exchange*: o diagnostico afirmou 31 linhas com ele "como qualidade", e
+"como qualidade" e uma leitura de sentido, nao um padrao de texto. O padrao que da
+para escrever — o termo no original e "troca" na traducao — marca **178**, e a
+maioria delas esta certa.
+
+### 16.1 Heuristicas de xadrez — CONCLUIDO
 
 A materia-prima ja existe no programa; e questao de liga-la ao aviso:
 
@@ -3854,9 +3888,33 @@ A materia-prima ja existe no programa; e questao de liga-la ao aviso:
    original com a forma errada Y na traducao* gera aviso. E o que transforma as
    6.958 sugestoes de reativas em localizaveis.
 
-**Garantia planejada Q1** — *lance perdido e anotacao rompida geram aviso.*
+**Garantia Q1** — *lance perdido e anotacao rompida geram aviso.* As oito
+candidatas foram medidas uma por uma nas 6.500 linhas reais antes de virarem
+codigo, e **duas nao sobreviveram a medicao** — os numeros estao em 16.3. As que
+entraram marcam **347 linhas (5,3%)**, contra as 11 de antes, e nenhuma das 11
+deixou de ser marcada.
 
-### 16.2 As heuristicas precisam de versao
+Tres decisoes de desenho que a implementacao obrigou a tomar, e que o plano nao
+previa:
+
+- **A ancora nao precisa de idioma, e por isso o aviso vale nas linhas
+  legadas.** A ancora e exatamente a parte do lance que nao muda de lingua, entao
+  comparar as dos dois lados dispensa saber a origem. O plano falava de "as
+  ancoras de `extract_moves`", e aquela funcao filtra por alfabeto declarado — usa-la
+  como esta deixaria de fora justamente o acervo antigo, que e a maior parte do
+  banco. `move_anchors` reusa a MESMA `_anchor` (duas definicoes divergindo seria a
+  armadilha dos itens 2.8 e 3.6) e dispensa o filtro.
+- **A ancora do QA inclui lance de peao; a da correcao nao.** `extract_moves`
+  descarta `e4` porque nao ha letra para corrigir; aqui um `h5` que sumiu importa
+  tanto quanto um `Nf3` — e sao 2 dos 6 casos reais.
+- **O par de idiomas teve de ser levado ate a avaliacao**, porque a heuristica de
+  terminologia depende dele. Isso e uma mudanca em R6, e nao um detalhe: as linhas
+  do editor ganharam origem e destino nas duas ULTIMAS posicoes (o editor le as
+  sete primeiras por posicao), e todo ponto que grava a coluna passou a ler o par
+  da propria linha. Um caminho avaliando com par e o outro sem faria a contagem do
+  rodape parar de bater com a lista, sem erro nenhum.
+
+### 16.2 As heuristicas precisam de versao — CONCLUIDO
 
 `quality_warning` e materializada (R5/R6) e o backfill so preenche `NULL` —
 correto para a coluna nova, insuficiente para heuristica nova: qualquer regra
@@ -3867,19 +3925,147 @@ pela melhoria. Falta o mecanismo: gravar a **versao** das heuristicas
 sobe — em segundo plano, com progresso e cancelamento, como toda escrita em
 massa.
 
-**Garantia planejada Q2** — *as heuristicas de QA tem versao, e muda-las
-reavalia o banco.*
+**Garantia Q2** — *as heuristicas de QA tem versao, e muda-las reavalia o
+banco.* A marca vive em `db_metadata`, tabela nova da migracao 6 — e nao num
+PRAGMA: o `user_version` ja e do schema, e um `application_id` com numero de
+versao seria usar um campo que significa outra coisa. Uma tabela de chave/valor
+tambem aceita a proxima marca sem migracao nenhuma, que e o desenho que o
+`glossario.db` ja usava.
+
+Medido: a migracao 5 -> 6 custa 0,04 s (e so a tabela) e a reavaliacao custa
+0,127 ms por linha — 0,89 s nas 6.500 do banco de desenvolvimento, ~25 s nas 200
+mil do real, uma vez por mudanca de heuristica. Roda na abertura, com barra de
+progresso e cancelamento, como toda escrita em massa.
+
+**Tres decisoes que o plano nao tinha, e a terceira saiu de um defeito que os
+testes acharam:**
+
+- **A versao so e gravada quando a reavaliacao TERMINA.** Cancelar deixa a marca
+  antiga de proposito: o banco esta metade reavaliado, e dizer que ele esta em dia
+  seria mentir de um jeito que ninguem descobre depois — a coluna nao tem como
+  acusar que esta velha.
+- **E a unica escrita em massa sem backup.** `quality_warning` nao guarda nada que
+  o usuario escreveu e e recomputavel a partir do texto, que e exatamente o que a
+  operacao faz. Um backup de 115 MB para proteger um bit derivado por linha seria
+  custo sem risco correspondente.
+- **Banco vazio nao abre janela de progresso.** A primeira versao abria: com a
+  marca ausente num banco novo, a abertura montava um dialogo modal para varrer
+  zero linha. Quem mostrou foi a suite de janela, que passou de 2 minutos para
+  mais de 10 e teve de ser interrompida — o caminho mais comum de todos (banco
+  recem-criado) era o unico que ninguem tinha em mente ao escrever a condicao.
+
+### 16.3 O que a medicao mostrou, e as duas candidatas que ela derrubou
+
+**O metodo foi o da secao 14: rodar cada candidata no banco real e LER o que ela
+marcava.** Nao contar — ler. Duas das oito passavam por qualquer contagem e
+morrem na leitura.
+
+| candidata | marcava | veredito |
+|---|---|---|
+| **multiconjunto de DIGITOS** | 3 linhas | **fora.** As 3 sao formatacao correta em portugues: `2500` -> `2.500` (separador de milhar) e "19th and early 20th centuries" -> "seculo XIX e inicio do seculo XX" (numeral romano). O caso que o plano citava, `0. 35`, foi corrigido na origem pela secao 13 e migrado do banco pelo schema 5 — nao ha mais nenhum, e o que sobra da heuristica e ruido |
+| `exchange` -> `troca` | 178 linhas | **fora.** A maioria esta CERTA: "to exchange the knight" -> "troca o cavalo" e a traducao boa do VERBO. So o substantivo "the exchange" (a qualidade: torre por peca menor) e erro, e separar um do outro exige o CONTEXTO, nao o termo. O diagnostico dizia 31 porque contava so o sentido de qualidade — que e uma leitura, e nao algo que um padrao de texto alcance. Este e o unico ponto em que a medicao achou MAIS do que o diagnostico previa, e o "mais" era ruido |
+| `rank` -> `classificacao` | 2 linhas | **estreitada para `back rank`.** Uma das duas estava certa: "reached the rank of master player" e o sentido de titulo. "back rank" e sempre a ultima fila |
+
+As que ficaram, com o numero de linhas de cada uma no banco de desenvolvimento:
+
+| aviso | linhas |
+|---|---|
+| terminologia `Black` -> `Black` (nao traduzido) | 153 |
+| terminologia `White` -> `White` | 107 |
+| terminologia `check` -> `cheque` | 32 |
+| terminologia `file` -> `arquivo` | 18 |
+| traducao igual ao original (das cinco antigas) | 11 |
+| terminologia `tempo` -> `ritmo` / `andamento` | 11 |
+| terminologia `square` -> `quadrado` | 8 |
+| **lance perdido ou inventado** | 6 |
+| terminologia `piece` -> `pedaco`, `pin` -> `alfinete` | 6 |
+| terminologia `castle` -> `castelo`, `sound` -> `som`, `back rank` -> `classificacao` | 3 |
+| anotacao rompida, NAG, simbolo, `U+FFFD`, `\|\|\|`, quase-igualdade | 0 |
+
+**Os seis zeros nao sao heuristicas inuteis** — sao a medida de que este banco nao
+tem essas corrupcoes, o que era o esperado depois da secao 13. Elas existem para o
+que vier, e a de anotacao rompida e a unica forma de achar o que execucoes
+anteriores a X1 deixaram gravado.
+
+**Duas correcoes de curso durante a implementacao**, as duas achadas por teste:
+
+- **O termo em ingles precisava aceitar plural.** Escrito com `termo`, ele
+  perdia "squares", "checks", "files" — e a medicao inicial, feita com o mesmo
+  padrao, subcontava. Corrigido com um `s?` opcional, `square` -> `quadrado` saltou
+  de 2 para 8 linhas, `check` de 30 para 32, `file` de 16 para 18 e `castle` de 0
+  para 1. **Todas as 12 novas foram lidas, e as 12 sao erro de verdade** ("dark
+  squares" -> "quadrados escuros", "perpetual checks" -> "cheques perpetuos",
+  "switches files" -> "troca de arquivos", "castles queenside" -> "fazem o
+  castelo").
+- **Nao foi `\w*` generico, e essa e a parte que importa.** Um sufixo livre no
+  termo ingles pareceria mais completo e traria um erro caro: `tempo` passaria a
+  casar "temporary". O `s?` cobre o que existe (plural) sem abrir a porta para o
+  que nao existe.
+
+**A quase-igualdade precisou de duas contas, e a primeira sozinha dava falso
+positivo.** `quick_ratio` compara multiconjuntos de caracteres: barato, e nunca
+subestima. A unica linha que ele marcava era `is about equal, Z. Hracek-G. Jones,
+Porto Carras 2011.` -> `é quase igual, ...` — e a prosa FOI traduzida; os 40
+caracteres de citacao e que dominam a contagem. O `ratio`, que compara sequencias,
+ve o bloco comum e responde 0,822. Encadeados (o barato filtrando o caro, que e a
+forma documentada de usar `difflib`), a heuristica marca zero falso positivo e o
+custo fica no do barato: 0,027 ms por linha.
+
+**O que a secao 16 NAO fez**, dito para nao ser lido como mais amplo do que e:
+
+- **`!` e `?` sozinhos ficaram fora dos simbolos de avaliacao.** Sao pontuacao:
+  "Is this sound?" -> "Isso e correto?" tem um `?` de cada lado por acidente, e uma
+  frase que ganha ou perde um ponto de interrogacao na traducao e prosa normal.
+- **A terminologia de es/fr/de/it/ru tem so `White`/`Black`.** Aquele caso nao
+  depende de saber a forma consagrada de cada lingua — o que se detecta e o termo
+  ter ficado em ingles. Os demais estao ausentes de proposito: nao ha medicao
+  deles nesta maquina, e a licao da secao 14 e que uma lacuna e melhor do que uma
+  regra errada.
+- **A versao das heuristicas e uma constante, e nao um hash do arquivo de
+  termos.** Um hash pareceria mais automatico e reavaliaria 200 mil linhas a cada
+  atualizacao que mexesse num comentario do `Termos-suspeitos.txt`. Quem editar a
+  lista a mao sobe a constante ou clica em "Reavaliar QA".
+- **Nada aqui corrige nada.** As 347 linhas passam a aparecer no filtro "Avisos
+  QA"; corrigi-las continua sendo trabalho de quem revisa, uma linha por vez — com
+  o glossario ao lado, que e onde as sugestoes ja estavam.
+
+### 16.4 O que a verificacao fixou
+
+**65 testes novos** (649 -> 706 em `test_core.py`, 69 -> 77 na janela principal) e
+**27 mutacoes**, uma por heuristica e uma por decisao do mecanismo de versao. Duas
+sobreviveram na primeira rodada, e as duas por motivos que valem registro porque
+sao diferentes entre si:
+
+| mutacao | por que ela sobreviveu |
+|---|---|
+| o termo casar no meio de palavra | **O exemplo do teste nao continha o termo.** Ele afirmava que `pin` nao casa "opening" — e "opening" nao tem "pin" nenhum (o-p-e-n-i-n-g). O teste passava com a fronteira de palavra e sem ela. Corrigido para "opinion" e "spinning", que a tem |
+| banco vazio abrir progresso modal | **O script de mutacao errou o alvo.** `if total == 0:` aparece DUAS vezes em `db_tools.py`, e a primeira e do "Zerar Traducoes"; a substituicao pegou aquela. O teste estava certo desde o inicio — o que falhou foi a verificacao dele |
+
+A segunda e a mais util das duas, e nao pelo codigo: **uma mutacao que sobrevive
+tambem pode significar que a mutacao esta errada, e nao o teste.** Distinguir os
+dois casos exigiu aplicar a mutacao a mao e rodar o teste sozinho. Sem isso, a
+conclusao teria sido "falta um teste" e o teste que ja existia teria ganhado um
+irmao inutil.
+
+O primeiro caso e o mesmo padrao que a secao 17 encontrou duas vezes (17.11): o
+teste partia de um cenario em que a producao quebrada e a correta produzem o mesmo
+observavel. Aqui a forma foi nova — nao um valor padrao, e um **exemplo que nao
+exercitava a regra**.
 
 ---
 
-## 17. Guardas e navegacao: onde o programa erra em silencio — PENDENTE
+## 17. Guardas e navegacao: onde o programa erra em silencio — CONCLUIDO (2026-07-29)
 
 Itens pontuais de correcao, agrupados porque compartilham o modo de falha: a
 acao acontece (ou nao acontece) sem nenhuma mensagem, e o usuario segue
 confiando no resultado. Origem: varredura da interface e do worker na revisao
-de 2026-07-29. Cada um foi conferido no codigo; nenhum tem teste hoje.
+de 2026-07-29. Cada um foi conferido no codigo; nenhum tinha teste.
 
-### 17.1 "Ir para ID" e "Proximo aviso QA" ignoram o filtro de origem
+**Entregue: as tres garantias planejadas (R10, T5, V1) e os dez itens.** As
+garantias estao na secao 9 da SPEC; o que a verificacao mostrou esta em 17.11, e
+inclui duas correcoes ao proprio diagnostico deste item.
+
+### 17.1 "Ir para ID" e "Proximo aviso QA" ignoram o filtro de origem — CONCLUIDO
 
 Os dois caminhos consultam o banco **sem** `source_language`, embora as funcoes
 aceitem o parametro e `reload_rows` o passe. Com "Origem: Espanhol" ativo,
@@ -3890,10 +4076,18 @@ linha que nao esta na tela. "Exportar QA" passa o filtro corretamente — a
 inconsistencia entre caminhos vizinhos e a prova do esquecimento. E a mesma
 classe do bug que a garantia R7 fechou: navegar pela posicao errada.
 
-**Garantia planejada R10** — *"Ir para ID" e "Proximo aviso" respeitam o
-filtro de origem.*
+**Garantia R10** — *"Ir para ID" e "Proximo aviso" respeitam o filtro de
+origem.* Uma linha em cada um dos dois caminhos: `source_language=
+self.selected_source_language()` na consulta de offset e na leitura da pagina.
 
-### 17.2 Tres ferramentas de escrita em massa rodam durante uma traducao
+O que o teste precisou ter para valer: o banco de teste tem **seis linhas
+inglesas com ids baixos e tres espanholas depois**. Com uma linha de cada, o
+offset errado e o certo dao zero, e a producao quebrada fica indistinguivel da
+correta — a armadilha que tres testes desta suite ja tinham caido antes (ver a
+"Segunda rodada" de 2026-07-27). Com esse desenho, o offset de `ES 0` e 0 no
+filtro e 6 na tabela inteira, e as duas mutacoes (uma por caminho) morrem.
+
+### 17.2 Tres ferramentas de escrita em massa rodam durante uma traducao — CONCLUIDO
 
 `reset_translations`, `reset_glossary` e "Corrigir Lances" verificam
 `app.is_processing` e recusam com dialogo. **Restaurar BD, Importar CSV e
@@ -3904,10 +4098,19 @@ memoria apontando para linhas que ja nao existem. Agravante: os botoes de
 de ser a primeira linha de cada acao, com a mesma mensagem das tres que ja
 fazem certo.
 
-**Garantia planejada T5** — *nenhuma ferramenta de escrita em massa roda
-durante uma traducao.*
+**Garantia T5** — *nenhuma ferramenta de escrita em massa roda durante uma
+traducao.* A guarda virou uma funcao (`_busy_with_translation`) e as **seis**
+ferramentas passam por ela — inclusive as tres que ja faziam certo, cada uma com
+a sua propria copia da mensagem. Deixar as tres copias de pe seria manter viva
+exatamente a divergencia que produziu este item.
 
-### 17.3 Botoes que engolem o clique
+**"Backup BD" ficou de fora, e por decisao.** Ele so LE o banco, e a API de
+backup do SQLite ve o banco logico — a copia sai consistente com o worker
+escrevendo. Recusar negaria a copia justamente a quem quer guardar o estado de
+uma execucao longa. Isso esta declarado como limite na secao 10 da SPEC e tem
+teste proprio, para nao parecer esquecimento na proxima varredura.
+
+### 17.3 Botoes que engolem o clique — CONCLUIDO
 
 "Reprocessar Falhas" e "Normalizar PGN" comecam com `if app.is_processing:
 return` — retorno mudo. Clicar durante uma traducao nao faz nada e nao diz
@@ -3915,7 +4118,12 @@ nada ("Corrigir Lances" no mesmo caso abre um dialogo explicando). O botao de
 reprocessar tambem nunca e desabilitado junto com os outros. Trocar os dois
 `return` por mensagem e uma linha em cada.
 
-### 17.4 A verificacao em massa propaga pela traducao, nao pelo original
+**Feito**, pela mesma `_busy_with_translation`. O botao de reprocessar entrou nas
+duas listas de estado (`_begin_translation_run` e `reset_buttons`) e tambem na do
+normalizador, que poe `is_processing` de pe sem passar por aquela funcao — outra
+lista paralela, e vale registrar que ela existe.
+
+### 17.4 A verificacao em massa propaga pela traducao, nao pelo original — CONCLUIDO
 
 "Marcar como verificada" propaga para as linhas do mesmo par cuja **traducao**
 e identica — e a unica propagacao possivel (originais identicos ja sao uma
@@ -3926,10 +4134,30 @@ por revisado o que ninguem viu, exatamente o que R9 existe para impedir. A
 correcao barata: a confirmacao mostra **quantos originais distintos** vao ser
 marcados (e quais, ate um limite), em vez de so "N iguais tambem verificadas".
 
-**Garantia planejada V1** — *a verificacao em massa diz o que vai marcar, por
-original.*
+**Garantia V1** — *a verificacao em massa diz o que vai marcar, por original.*
 
-### 17.5 A previa de "Corrigir Lances" esconde a parte irreversivel
+**A analise dizia "a confirmacao mostra", e nao havia confirmacao nenhuma.** A
+propagacao acontecia junto com a gravacao e era anunciada DEPOIS, no rodape:
+"N iguais também verificadas". Entao o item nao foi mudar uma mensagem — foi criar
+o dialogo que faltava, com tres consequencias de desenho:
+
+- **A previa e a escrita leem a mesma consulta** (`_exact_translation_matches`), e
+  a escrita recebe os ids que a previa mostrou (`only_ids`). Se o worker gravar
+  uma linha com a mesma traducao enquanto o dialogo esta aberto, ela nao entra: o
+  usuario nao a viu. Duas consultas em dois lugares nao quebrariam nada visivel —
+  elas so discordariam, que e a licao dos itens 2.8, 3.6 e 11.1.
+- **A pergunta acontece com a transacao ja comitada e a conexao fechada.** Um
+  modal aberto sobre uma transacao de escrita seguraria o banco enquanto ninguem
+  clica, e o "Salvar" do worker esperaria o `busy_timeout` inteiro — seria uma
+  regressao de C3 introduzida por uma melhoria de V1.
+- **A pergunta so aparece quando ha consequencia.** Uma traducao sem gemeas nao
+  abre dialogo nenhum: um modal por verificacao viraria ruido e passaria a ser
+  clicado no automatico, que e o oposto do que este item quer.
+
+O criterio da propagacao **nao mudou** — continua sendo a traducao identica dentro
+do par, que e a unica possivel. O que mudou e que ela se anuncia.
+
+### 17.5 A previa de "Corrigir Lances" esconde a parte irreversivel — CONCLUIDO
 
 A ferramenta rotula **todas** as linhas sem origem do destino antes de corrigir
 (secao 11 explica por que), e a previa mostra contagens de correcao — mas nao
@@ -3938,7 +4166,22 @@ diz **quantas linhas serao rotuladas**. Num banco com 200 mil linhas legadas, o
 aparecido. Ele so e dito no dialogo de resultado, depois de feito. E uma linha
 na previa, com o dado que o `analyze` ja tem.
 
-### 17.6 O backup do banco migra a origem antes de copiar
+**A analise errou aqui, e o erro e instrutivo.** O `analyze` **nao** tinha o
+dado: ele conhece o escopo (as linhas sem origem entram na varredura), e nunca
+contou quantas sao. A contagem teve de ser escrita — `count_adoptable_unknown
+_source` — e escrevendo-a apareceu uma segunda coisa que a nota nao previa: um
+`COUNT(*)` do escopo do `UPDATE` seria um **teto**, e nao o numero. A adocao usa
+`UPDATE OR IGNORE`, que pula a linha cuja adocao esbarraria na propria chave (ja
+existe o mesmo comentario no par declarado). Num dialogo que nao tem volta, um
+numero aproximado e pior do que nenhum, entao a consulta desconta essas linhas
+com um `NOT EXISTS` — indexado pela UNIQUE — e o teste confere o numero da previa
+contra o que a adocao de verdade faz.
+
+A linha so aparece quando ha o que rotular: um "0 linhas serao rotuladas" fixo
+faria o usuario procurar um problema que nao existe, que e o mesmo criterio das
+linhas de lances e de comentarios `;` no resumo do worker.
+
+### 17.6 O backup do banco migra a origem antes de copiar — CONCLUIDO
 
 `create_database_backup` abre a origem com `initialize_database` — que roda a
 migracao de schema e o backfill. O "backup de seguranca" pre-restauracao pode
@@ -3947,7 +4190,18 @@ pos-migracao: se a migracao for a causa do problema que o usuario quer
 desfazer, nao ha mais volta. Abrir a origem com `sqlite3.connect` puro copia o
 que esta la, como esta.
 
-### 17.7 O CSV de traducoes e somente-exportacao na pratica
+**Feito**, e a correcao levou junto um segundo motivo que a nota nao mencionava:
+`open_database` tambem esta fora. Ele grava `journal_mode = WAL` no arquivo, e
+num banco antigo em modo `delete` o "backup" reconfiguraria o original. Ler para
+copiar nao precisa de nenhum dos dois.
+
+O teste usa o `_schema3_database` que a secao 9 deixou pronto — um banco escrito a
+mao no schema antigo — e afirma tres coisas: a origem continua na versao 3 e sem a
+coluna nova, a copia tambem, e o conteudo chega. A terceira e a defesa contra "nao
+migrar" virar "nao copiar". Um quarto teste confere que a migracao continua
+acontecendo onde ela deve: no banco de trabalho, **depois** da restauracao.
+
+### 17.7 O CSV de traducoes e somente-exportacao na pratica — CONCLUIDO
 
 O fluxo natural — exportar, corrigir 300 traducoes na planilha, importar — nao
 faz **nada**: a gravacao respeita T1 (nunca sobrescrever preenchida), entao
@@ -3959,14 +4213,46 @@ sobrescritas"), registro no historico (R2) e reavaliacao de QA (R6), como toda
 escrita em massa. T1 continua sendo o padrao; sobrescrever passa a ser uma
 decisao, nao um acidente.
 
-### 17.8 Buscar `[%eval` no modo "Trecho" devolve lixo
+**Feito, com o dialogo de tres botoes.** A previa passou a contar as duas coisas
+numa passagem so — o que a importacao faria e o que ela deixaria de fazer
+(`overwritable`) —, e e isso que permite oferecer a sobrescrita no MESMO dialogo em
+que os numeros aparecem, em vez de fazer o usuario escolher o modo antes de ver.
+Sim sobrescreve, Nao importa respeitando T1, Cancelar nao importa nada.
+
+Duas decisoes que o item nao previa apareceram ao escrever a gravacao, as duas
+sobre o `verified`:
+
+- **Texto identico nao e sobrescrita.** Num CSV exportado e corrigido em parte, o
+  igual e a grande maioria; contar essas linhas inflaria o numero do dialogo com
+  o que a exportacao devolveu intacto.
+- **A coluna `verified` so PROMOVE.** A nota pedia que o `verified` editado
+  deixasse de ser descartado, e a leitura ingenua disso — aplicar o valor da
+  coluna — teria sido um desastre: um CSV montado a mao nao tem a coluna, e
+  `_normalize_import_row` devolve `False` para a ausencia. Aplicada, uma
+  importacao de rotina rebaixaria para "pendente" cada linha que voltou igual. A
+  ausencia de uma afirmacao nao e a afirmacao contraria. Quando o TEXTO muda, ai
+  sim o `verified` cai — a revisao era do texto anterior, e essa demissao e a
+  regra que `save_translation` ja aplica ao preencher uma linha vazia.
+
+### 17.8 Buscar `[%eval` no modo "Trecho" devolve lixo — CONCLUIDO
 
 O `LIKE` e montado sem `ESCAPE`: `%` e `_` do texto do usuario viram curinga.
 A busca mais natural do dominio — uma tag de comando, que **comeca** com `%` —
 e justamente a que quebra. `LIKE ? ESCAPE '\'` mais o escape dos tres
 caracteres no padrao.
 
-### 17.9 A garantia S5 morre sob `pythonw`
+**Feito**, e o escape ficou junto do `ESCAPE` de proposito (`LIKE_MATCH_SQL` e
+`escape_like_pattern` no mesmo lugar): um sem o outro nao da erro nenhum, so
+volta a tratar o texto do usuario como curinga. A ordem dentro do escape tambem
+importa e esta comentada — a barra primeiro, senao as barras recem-inseridas
+seriam escapadas de novo.
+
+O teste que fecha o buraco de verdade nao e o do resultado da busca, e o que
+confere que **a contagem e a lista concordam** sob o escape: as duas usam o mesmo
+`WHERE`, e escapar em uma so faria a lista paginar por um numero que a tela nao
+mostra (garantia R5).
+
+### 17.9 A garantia S5 morre sob `pythonw` — CONCLUIDO
 
 `report_glossary_error` faz `print(...)` **antes** de chamar o handler da
 interface — e sob `pythonw`/PyInstaller windowed `sys.stdout` e `None`, entao o
@@ -3975,7 +4261,14 @@ visivel e a unica que quebra no empacotado. Guarda de uma linha (`if
 sys.stdout:`), e um teste que simule `stdout=None` — que e exatamente o cenario
 que M2/S5 ja ensinaram a testar.
 
-### 17.10 Miudezas confirmadas da mesma varredura
+**Feito**, e a guarda cobriu mais do que uma linha: os outros dois `print` crus do
+`glossario.py` passaram pela mesma funcao. O do `except` de `add_to_glossary` era
+o pior deles — sob `pythonw` ele transformava "nao consegui gravar a regra" num
+`AttributeError` no meio do popup do editor, que e justamente o caminho do item
+17.10 sobre aquele popup. O `try` em volta cobre tambem um `stdout` fechado (pipe
+rompido), que levanta por outro motivo e tem o mesmo efeito.
+
+### 17.10 Miudezas confirmadas da mesma varredura — CONCLUIDO
 
 - `prefer_db=False` e ignorado quando `db_path` e passado (o argumento
   explicito do chamador perde para a conveniencia interna).
@@ -4002,9 +4295,64 @@ que M2/S5 ja ensinaram a testar.
   de proposito (R3), abre maximizada **cobrindo** a lista que deveria
   continuar clicavel.
 
+**As dez foram feitas.** O que vale registrar de cada uma:
+
+| miudeza | o que a correcao teve de resolver |
+|---|---|
+| `prefer_db=False` ignorado | Nao basta a resposta bater: o teste confere que o indice **nao e nem aberto**, senao `prefer_db=False` continuaria pagando o custo dele |
+| barra congelada | Ela passou a terminar num estado que SIGNIFICA algo: cheia se concluiu, vazia se nao — cancelada, interrompida ou morta por excecao. O `finally` decide, entao o caminho novo nao pode ser esquecido por um `return` |
+| T4 perdida na excecao | `failed_count` e `failed_files` foram declarados FORA do `try`: sem isso o tratador nao os alcanca quando a excecao acontece antes da atribuicao. O registro virou uma funcao, com a regra do cancelamento dentro dela — agora ha duas chamadas, e a regra tem de valer para as duas |
+| lote medido no cru | Reagrupado pelo MESMO algoritmo, exposto como indices (`batch_index_groups`), com `create_comment_batches` passando a ser uma casca dele. No caminho comum sai um grupo so e nada muda |
+| `-BR-2` nao reconhecido | `(-\d+)?` no regex, e o mesmo para `-NORM-2`. Um `torneio-2.pgn` continua sendo arquivo do usuario: o `-N` so conta depois de um sufixo de idioma |
+| secao repetida apaga | `setdefault` no lugar da atribuicao. Entre blocos vale a regra de dentro de um bloco: o primeiro a definir a chave vence. **O numero da nota estava errado**: o `spelling.ssp` do projeto tem 512.668 grafias de jogador, e nao 984 mil (medido parsear o arquivo real: 1,06 s). O defeito e o mesmo; a escala e a do README |
+| aspas nao re-escapadas | A conversao tinha de entrar nas DUAS pontas — desescapar para comparar com o dicionario, reescapar para gravar. So a segunda era o bug; sem a primeira, um nome com aspas nunca casava |
+| falha derruba o lote | Cada arquivo num `try`, com o motivo contado e logado, e o resultado virando AVISO em vez de "concluida" |
+| geometria ignorada | `restore_or_maximize`: sao alternativas, e nao duas configuracoes que se somam. O teste confere tambem que nenhum dos dois editores volta a pedir as duas |
+| popup em tela cheia | `maximize=False` e as tres validacoes com mensagem propria. O teste exige que a mensagem nomeie o campo que falta — sem isso ele passava com a validacao do original removida |
+
+### 17.11 O que a verificacao fixou
+
+**131 testes novos** — 549 -> 649 em `test_core.py`, 79 -> 98 no editor de
+traducoes e 57 -> 69 na janela principal — e **23 mutacoes**, uma por correcao.
+
+As duas que sobreviveram na primeira rodada disseram a mesma coisa, por caminhos
+diferentes: **o teste afirmava o efeito colateral, e nao o efeito.**
+
+| mutacao | por que ela sobreviveu |
+|---|---|
+| a previa de "Corrigir Lances" sem a contagem de rotulos | Havia teste para `count_adoptable_unknown_source` e para o campo `labeled` do `analyze`. Nenhum lia o **texto do dialogo** — o numero podia ser calculado com exatidao e nunca aparecer na tela |
+| o popup do glossario sem a validacao do original | Com os dois campos vazios, a validacao da SUBSTITUICAO dispara: um aviso, a janela aberta e nenhuma regra gravada. O teste afirmava exatamente esses tres, e eles valiam com e sem a correcao |
+
+A segunda e a mais util das duas, porque o padrao dela e velho: e o mesmo de
+"afirmar que um botao esta habilitado sem nunca te-lo desabilitado" (5.1). O teste
+partia de um cenario em que a producao quebrada e a correta produzem o mesmo
+observavel. As correcoes foram exigir que a mensagem **nomeie o campo que falta**
+e acrescentar os dois cenarios que so a validacao do original pega — original
+vazio com substituicao preenchida, e original vazio numa regra de limpeza (que
+dispensa a substituicao, e nao o padrao).
+
+**Tres afirmacoes do diagnostico nao sobreviveram**, e as tres ficaram
+registradas no proprio item — a conclusao certa so se entende ao lado da errada:
+
+| onde | o que a nota dizia | o que era |
+|---|---|---|
+| 17.4 | "a confirmacao mostra os originais" | Nao havia confirmacao nenhuma: a propagacao acontecia junto com a gravacao e era anunciada depois |
+| 17.5 | "com o dado que o `analyze` ja tem" | Ele nao tinha, e escrever a contagem revelou um segundo problema — um `COUNT(*)` do escopo seria um teto, e nao o numero |
+| 17.10 | "apaga as 984 mil entradas da anterior" | 512.668, medido no arquivo real. O defeito era exatamente o descrito; so a escala estava inflada |
+
+A terceira e a mais barata de todas de evitar, e por isso vale registra-la: o
+numero certo estava escrito no README (`~513 mil nomes de jogadores`) desde antes
+da varredura.
+
+**O que a verificacao NAO alcanca**, dito para nao ser lido como mais amplo do que
+e: os testes de janela conferem `maximize=False` interceptando a chamada, e nao o
+tamanho real da janela na tela. Medir geometria de verdade depende do gerenciador
+de janelas e seria um teste que falha por motivo alheio; o que se protege aqui e a
+decisao no codigo.
+
 ---
 
-## 18. O banco nao sabe de onde cada traducao veio — PENDENTE
+## 18. O banco nao sabe de onde cada traducao veio — CONCLUIDO (2026-07-29)
 
 A tabela `comments` guarda o texto e o par de idiomas — e nada mais. Nao ha
 arquivo de origem, partida, numero do lance nem execucao. Consequencias diretas
@@ -4031,14 +4379,329 @@ E a unica mudanca de esquema proposta nesta revisao, e a decisao arquitetural
 que convem tomar **antes** de crescer o resto: cada melhoria do editor que
 nascer sem ela (17, 19) nasce para ser refeita.
 
+**Entregue: o esquema 7, quatro garantias novas (O1-O4) e os tres consumidores
+— filtro por arquivo com ordem de leitura no editor, progresso por obra nas
+estatisticas e o registro pelo worker.** Reverter uma execucao ficou de fora e
+esta dito em 18.7. O que a medicao mudou no desenho esta em 18.6.
+
+### 18.1 A tabela: o contexto entra AO LADO, e nao dentro
+
+```sql
+CREATE TABLE occurrences (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    comment_id    INTEGER NOT NULL,   -- -> comments.id
+    source_file   TEXT NOT NULL,      -- caminho absoluto do PGN
+    game_index    INTEGER,            -- 1..n, contado pelas tags [Event ...]
+    comment_index INTEGER NOT NULL,   -- 1..n, ordem de leitura NO arquivo
+    move_number   INTEGER,            -- ultimo lance antes do comentario
+    recorded_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_file, comment_index),
+    FOREIGN KEY(comment_id) REFERENCES comments(id) ON DELETE CASCADE
+)
+```
+
+Quatro decisoes, cada uma com o que ela impede:
+
+- **A chave natural e `(source_file, comment_index)`, sem `comment_id`.** Uma
+  posicao da obra tem um dono. Com o `comment_id` na chave, reprocessar um
+  arquivo cujo comentario da posicao 5 mudou de texto deixaria as duas
+  afirmacoes no banco, e a ordem de leitura escolheria por sorteio qual
+  aparece.
+- **`game_index` e `move_number` aceitam nulo** porque podem faltar de
+  verdade: um comentario antes do primeiro lance da partida nao tem lance
+  anterior. Um zero ali se confundiria com medicao — e apareceria na tela como
+  "lance 0".
+- **A `FOREIGN KEY` e declarativa.** O SQLite so a aplica com `PRAGMA
+  foreign_keys = ON`, que este programa nao liga (mesmo caso de
+  `comment_history`). Quem apaga comentario em massa e o "Zerar Traducoes", e
+  ele derruba as tabelas juntas — ver O4.
+- **Nao ha coluna de FEN.** O item pedia o esquema "pronto para o dia em que
+  uma FEN fizer sentido", e pronto significa **existir a linha em que ela
+  penduraria**, nao uma coluna que ninguem escreve. Uma coluna sempre nula em
+  200 mil linhas nao e preparo; e peso morto com cara de recurso.
+
+**Um indice novo, `(comment_id, source_file, comment_index)`.** A UNIQUE ja
+indexa o caminho de ida (arquivo -> posicoes, que e o filtro e a ordem); este e
+o de volta (comentario -> onde ele aparece), e cobre a consulta inteira. **Um
+terceiro indice, `(source_file, comment_id)`, foi medido e recusado**: ele
+economizou 3 ms de 207 no progresso por obra e 20 ms de 121 no menu de
+arquivos — nao paga o custo de escrita numa tabela que o worker grava em lote.
+
+### 18.2 O contexto sai do PGN, e o movetext e lido sem os comentarios
+
+`comment_reading_context` recebe o conteudo do arquivo e os spans dos
+comentarios, e devolve `(partida, lance)` para cada um. Ela roda sobre uma
+copia do texto com **os spans trocados por espaco nos mesmos offsets**
+(`_blank_spans`), e essa e a decisao que faz o resultado valer:
+
+- comentario de livro cita lance a vontade ("melhor era 14. Bxf7"). Lido junto
+  com o movetext, o lance CITADO no comentario 1 seria a posicao do comentario
+  2 — um numero errado com cara de medido;
+- um `[Event` dentro de um comentario nao inventa partida nova.
+
+O lance e recortado **pela partida**: sem isso, um comentario colado nas tags
+da partida 2 herdaria o lance 41 da partida 1 e afirmaria com confianca uma
+posicao que nao existe. Sem lance antes dele, o valor e `None`.
+
+Tres recortes do que conta como numero de lance, e todos vieram de casos reais:
+
+| recusado | por que |
+|---|---|
+| `+0.35` no movetext | Decimal. **Este foi encontrado pelo teste**: a primeira versao devolvia "lance 0" |
+| `[Date "2011.??.??"]` | Linha de tag. A data COMPLETA (`2011.05.12`) ja cai na regra do decimal; a forma com `??` — comum em PGN de banco de dados — nao, e viraria o lance 2011 |
+| `; ver a partida 99. Kh1` | Resto de linha de comentario `;`, que este programa nem traduz |
+
+E um aceito, que existe para impedir a correcao larga: **`1. 0-0` continua
+sendo o lance 1.** Recusar todo digito depois do ponto apagaria o roque escrito
+com zeros, que aparece em PGN antigo. O que caracteriza decimal e o digito
+COLADO no ponto — o mesmo criterio que a secao 13.2 usou no achatamento.
+
+O indice conta os comentarios **aproveitados**: um `{}` vazio nao vira linha no
+banco, entao nao ocupa posicao. Ocupando, o indice do vizinho pularia um numero
+e a ordem de leitura teria um buraco que nada explica.
+
+### 18.3 Gravar: o arquivo em disco e a verdade sobre a obra
+
+O worker chama `resolve_comment_ids` (texto -> id, no par, em lotes como a carga
+de cache) e `record_occurrences`, depois dos lotes de cada arquivo e **antes**
+do `break` do disjuntor: as traducoes que aquele arquivo conseguiu ja estao no
+banco, e aquele e o unico momento em que o programa tem a procedencia na mao.
+
+**O conjunto do arquivo e SUBSTITUIDO, e nao mesclado.** Se o PGN encurtou, as
+posicoes que sobravam nao existem mais, e mante-las deixaria o banco afirmando
+que o comentario 2 daquele arquivo e um texto que ninguem le mais ali. O preco
+esta dito porque e real: uma execucao interrompida no meio de um arquivo grava
+so as posicoes que conseguiu traduzir, e a obra aparece menor do que e ate a
+execucao seguinte — que encontra o resto no cache e completa o registro.
+
+Duas consequencias que o log precisa dizer, e diz:
+
+- um comentario **sem linha no banco** (falhou na traducao, ou foi esvaziado
+  pela limpeza) nao vira ocorrencia: nao ha para onde apontar. O numero e
+  contado e anunciado — "a obra tem 1.200 posicoes" e diferente de "tem 1.200,
+  40 ainda sem traducao";
+- o caminho e normalizado (`abspath`) **dentro** de `record_occurrences`, que e
+  a unica porta pela qual caminho entra na tabela. `cap01.pgn` e `.\cap01.pgn`
+  sao o mesmo arquivo, e duas grafias dariam duas obras no filtro, cada uma com
+  metade do livro.
+
+### 18.4 O editor: um controle novo, e a ordem que segue dele
+
+Um menu **"Arquivo"** na barra dos filtros, com "Todos os arquivos" e uma
+entrada por obra do par. Escolher um arquivo filtra a lista **e** a poe em
+ordem de leitura; "Todos os arquivos" volta ao `id`, que e o que a lista sempre
+foi.
+
+**Nao ha um seletor de ordem, e a ausencia e a decisao.** Escolher um arquivo E
+pedir a obra em ordem de leitura — ninguem quer o capitulo 7 na ordem em que as
+traducoes dele entraram no cache. E sem arquivo a ordem de leitura nao existe:
+o mesmo comentario esta em varios arquivos, e ordenar pela primeira ocorrencia
+de cada um custaria uma agregacao da tabela inteira por pagina, que e
+exatamente o que a garantia R5 proibe. O rotulo da pagina passa a dizer
+"· ordem de leitura", porque uma lista que reordena sem avisar parece
+embaralhada.
+
+Duas coisas que este item obrigou a arrumar antes:
+
+- **Todos os filtros da lista passaram a sair de um lugar so**
+  (`list_filters`/`list_query_args`). A garantia R10 nasceu de duas consultas
+  que recebiam um filtro a menos; o filtro por arquivo teria sido a terceira, e
+  a ORDEM seria a quarta — porque "quantas linhas vem antes deste id" deixa de
+  ser "quantas tem id menor" no momento em que a lista se ordena por ocorrencia.
+- **O rodape do original diz onde ele foi lido**, com preferencia pelo arquivo
+  que esta aberto: quem le o capitulo 7 nao pode ver a posicao do mesmo
+  comentario no capitulo 1 — e verdade, responde outra pergunta, e na tela passa
+  por erro. Quando a traducao serve a varias posicoes, o rodape diz quantas: e a
+  informacao que muda o que o revisor faz.
+
+**O rodape passou por tres versoes, e quem as corrigiu foi a TELA.** A primeira
+punha o texto na mesma linha do rotulo "Original:", encostado a direita, com duas
+posicoes por extenso. Numa captura do app de verdade o resultado era ilegivel: o
+Tk corta o que nao cabe, e encostado a direita ele corta o **comeco** — o rotulo
+aparecia como `Original: · comentário 2 | cap02.pgn ...`, sem o nome do arquivo,
+que e justamente a parte que responde a pergunta. As tres correcoes, cada uma
+medida em `winfo_reqwidth` (faixa de 596 px, janela de 1280):
+
+| mudanca | por que |
+|---|---|
+| linha propria, ancorada a oeste | Na linha do rotulo sobravam 596 px menos os 70 do "Original:", e o corte caia no comeco. Em linha propria a faixa e toda dele, e o que falta sai do FIM |
+| uma posicao por extenso, nao duas | Duas posicoes de nome longo pediam 728 px |
+| um localizador, nao dois | O lance e o que um leitor de xadrez usa; o indice do comentario e a ordem da extracao, que ninguem ve. Ele entra so quando nao ha lance. Os dois somavam ~90 px |
+
+Depois das tres: **258 px** no caso comum (`cap01.pgn`, uma posicao), com 338 de
+sobra. No pior caso medido — nome de capitulo de 41 caracteres com 12 posicoes —
+sao 631 px, e **35 px estouram**: perdem-se ~6 caracteres do fim de "(a mesma
+tradução)", com arquivo, partida, lance e a contagem inteiros na tela. A ordem dos
+pedacos foi escolhida para que o corte caia sempre no menos importante.
+
+O rodape **sai do grid** quando nao ha procedencia, em vez de ficar como rotulo
+vazio: as linhas sem ocorrencia sao a maioria de um banco antigo, e uma faixa em
+branco acima do texto em 201.607 delas seria altura roubada do comentario para nao
+dizer nada. E o mesmo padrao do aviso de conflito do editor de glossario.
+
+A escolha e lembrada **pelo caminho**, e nao pelo rotulo do menu (o rotulo
+ganha a pasta quando dois nomes coincidem, entao amanha pode significar outro
+arquivo). Um arquivo lembrado que nao esta mais na lista cai em "Todos os
+arquivos": uma lista vazia sem explicacao e o pior desfecho de um filtro
+lembrado.
+
+### 18.5 As estatisticas: progresso por obra
+
+"Estatisticas do BD" ganhou um bloco por arquivo — posicoes, comentarios
+distintos, verificadas com porcentagem, pendentes e avisos QA — cortado em 20
+obras, com o corte dito na ultima linha (o resumo e um `messagebox`, que nao
+rola nem se copia; ver a secao 19, item 7).
+
+O numero mais facil de errar aqui e o de trabalho: **o progresso conta
+comentarios distintos**, e nao posicoes. Somando `verified` sobre o `JOIN`, um
+comentario verificado que aparece tres vezes viraria tres verificacoes e o
+progresso passaria de 100%. As posicoes, essas sim, contam a repeticao — e o
+tamanho do livro.
+
+Num banco sem ocorrencia nenhuma o bloco **nao fica vazio**: ele diz que as
+traducoes ja gravadas nao tem procedencia e que ela e registrada ao processar o
+PGN de novo. A leitura obvia de um bloco em branco seria "o programa nao
+registrou", que e a conclusao errada.
+
+### 18.6 O que a medicao mostrou, e a decisao que ela derrubou
+
+Medido num banco **sintetizado** na escala do banco do usuario — 201.500 linhas
+e 200 mil ocorrencias em 100 arquivos, ~1.900 comentarios distintos por arquivo
+com ~13% de repeticao interna. Nao e o banco real (esta na maquina do usuario);
+a distribuicao esta dita para o numero poder ser refeito.
+
+**A primeira escrita do filtro por arquivo era um `EXISTS`, e ela estava
+errada.** `EXISTS` e correlacionado: o SQLite varre `comments` e pergunta linha
+por linha. O `IN` com subconsulta independente vira uma lista que ele percorre
+pelo indice do arquivo, buscando cada comentario por `rowid`. As duas dizem a
+mesma coisa — pertence ao conjunto, uma vez — e custam isto:
+
+| consulta | `EXISTS` | `IN` |
+|---|---|---|
+| pagina em ordem de leitura, um arquivo | 831 ms | **1,6 ms** |
+| total do filtro | 70 ms | **0,6 ms** |
+| pagina em ordem de id, com filtro de arquivo | 51,7 ms | **0,5 ms** |
+
+O plano de execucao e que explica: com `EXISTS`, `SCAN comments`; com `IN`,
+`SEARCH comments USING INTEGER PRIMARY KEY` alimentado por `SEARCH occurrences
+USING INDEX (source_file=?)`. **A forma que parecia mais natural era 500 vezes
+mais lenta**, e nada na tela teria denunciado — 831 ms por pagina passam por
+"o banco esta grande".
+
+Com o `IN`, tudo o que tem arquivo escolhido ficou **mais barato que o caminho
+sem filtro**, porque a obra e um recorte pequeno:
+
+| operacao | com arquivo | sem arquivo (como antes) |
+|---|---|---|
+| pagina (offset 0) | 2,0 ms | 0,5 ms |
+| pagina (offset 1.700) | 3,7 ms | — |
+| resumo por status | 0,8 ms | 34,8 ms |
+| offset do "Ir para ID" | 2,2 ms | 24,5 ms |
+
+Os dois custos que sobraram estao dentro de acoes que nao acontecem por tecla
+digitada, e ficam declarados:
+
+- **menu de arquivos: 137 ms**, so na abertura da janela e na troca de par. E
+  um `GROUP BY` sobre as ocorrencias do par, por definicao.
+- **progresso por obra: 207-309 ms**, dentro de "Estatisticas do BD". A
+  agregacao le todas as ocorrencias, tambem por definicao. Isso reforca o item
+  7 da secao 19 (estatisticas fora do clique) em vez de contradize-lo.
+
+E a migracao: **0,05 s** para o banco de dev de 6.500 linhas, porque ela cria
+uma tabela e mais nada. Ver O2 para por que nao ha backfill.
+
+### 18.7 O que ficou de fora, dito por extenso
+
+- **Reverter "tudo que a execucao de ontem gravou" NAO foi entregue.** A
+  ocorrencia registra `recorded_at`, entao da para ver QUANDO uma posicao foi
+  lida, mas reverter uma execucao e apagar traducoes — decidir entre o que a
+  execucao inseriu e o que ela reaproveitou do cache, e o que foi revisado a
+  mao depois. Isso pede uma tabela de execucoes e uma decisao de produto que
+  este item nao tem; o backup continua sendo o caminho de volta.
+- **As linhas ja gravadas continuam sem procedencia**, e nenhuma heuristica vai
+  dar uma a elas (O2). Elas so aparecem em "Todos os arquivos", e nao existe
+  filtro "sem arquivo": ele seria um anti-join da tabela inteira por interacao,
+  e a garantia R5 vale para os filtros novos como vale para os velhos.
+- **A FEN por ocorrencia**, que era o proposito declarado de "esquema pronto".
+  Continua fora, e agora ha onde pendura-la.
+- **O CSV nao leva ocorrencia.** Importar traducoes cria linhas sem
+  procedencia, como as legadas. Levar o contexto no CSV muda o formato do
+  arquivo, e isso conversa com a exportacao TMX (secao 19, item 8).
+
+### 18.8 O que a verificacao fixou
+
+**59 testes novos em `test_core.py`** (706 -> 765) e **32 na janela de edicao**
+(98 -> 130), e **40 mutacoes**.
+
+**Uma sobreviveu, e ela e inalcancavel de proposito.** O `ORDER BY` da ordem de
+leitura termina em `, id` como desempate, e a `UNIQUE(source_file,
+comment_index)` faz os indices de um arquivo serem distintos — entao os minimos
+de dois comentarios diferentes tambem sao, e o desempate nunca decide nada. Ele
+fica porque o filtro e de UM arquivo, e no dia em que for de uma obra inteira
+(varios arquivos) os minimos passam a poder empatar; o preco de deixar e uma
+clausula, e o de tirar e uma pagina que repete linha sem erro nenhum. Esta
+escrito no codigo para nao ser lido como protecao ativa.
+
+**Tres sobreviveram na primeira rodada e viraram teste**, e as tres sao padroes
+que esta suite ja conhecia:
+
+| mutacao | o que ela mostrou |
+|---|---|
+| linha de tag deixa de ser recortada | **O exemplo nao exercitava a regra.** `[Date "2011.05.12"]` ja e recusado pela regra do decimal, entao o teste passava com a checagem e sem ela. A forma que precisa dela e `[Date "2011.??.??"]` |
+| comentario `;` deixa de ser recortado | O mesmo: com um `2. Nf3` depois do `;`, o lance certo vinha dali e a checagem nao era exercitada. O `;` tem de ser a ultima coisa antes do comentario |
+| o rodape ignora o arquivo aberto | **A afirmacao era sobre a presenca, e o efeito e a ORDEM.** O rodape mostra duas posicoes, entao "cap02 aparece no texto" valia com e sem a preferencia |
+
+Depois disso, as duas metades da guarda de movetext ganharam **uma mutacao
+cada** (linha de tag e `;` separadas): juntas, um teste que exercitasse so uma
+delas passaria por metade certa.
+
+**Duas correcoes ao proprio codigo NAO sairam de mutacao nenhuma**, e vale
+registrar de onde sairam:
+
+- **de um teste:** o `+0.35` no movetext virava "lance 0". A regra que faltava —
+  decimal e o digito colado no ponto — e a mesma da secao 13.2, e o teste do roque
+  `0-0` esta ao lado dela para que a proxima correcao nao seja larga;
+- **da MEDICAO:** o filtro por arquivo em `EXISTS` custava 831 ms por pagina. Vinte
+  e nove mutacoes mortas nao diriam nada sobre isso — o `EXISTS` estava correto, e
+  so era 500 vezes mais lento (18.6);
+- e **da TELA:** o rodape da procedencia aparecia cortado pelo comeco, sem o nome
+  do arquivo. Os testes leem `cget("text")`, e o texto estava certo — o que estava
+  errado era onde ele caberia (18.4).
+
+Tres formas de erro que teste verde nao pega: uma regra que ninguem escreveu, uma
+consulta certa e lenta, e um texto certo que nao cabe.
+
+**O que a verificacao NAO alcanca:**
+
+- o numero da partida e do lance vem de `[Event` e do ultimo numero de lance, e
+  nao de um leitor de PGN. Um arquivo com tags fora de ordem, ou sem `[Event`,
+  conta como uma partida so — os testes afirmam isso como comportamento, e nao
+  como acerto. Ler PGN de verdade para melhorar esses dois numeros e trabalho de
+  outro tamanho, e nao e o que este item precisava para dar ordem de leitura a obra;
+- a largura do rodape foi medida por `winfo_reqwidth` num script, e **nao virou
+  teste**: geometria de janela depende do gerenciador de janelas e do tema, e o
+  teste falharia por motivo alheio (a mesma decisao registrada em 17.11). O que os
+  testes protegem e o FORMATO do texto — uma posicao, um localizador — que e o que
+  a medicao mostrou ser a variavel que importa.
+
 ---
 
-## 19. O fluxo do tradutor profissional — PENDENTE
+## 19. O fluxo do tradutor profissional — CONCLUIDO (2026-07-30), menos o item 11
 
 O editor foi construido para revisar uma linha; um livro sao vinte mil. Os
 itens abaixo sao o que separa "da para revisar" de "da para trabalhar o dia
 inteiro nisso", em ordem de retorno por esforco. Nenhum exige o esquema novo
-(18); os que se beneficiam dele estao marcados.
+(18); os que se beneficiam dele estao marcados — e a **tabela `occurrences` ja
+existe**, entao os marcados deixaram de esperar por ela.
+
+**Entregue: 12 dos 13 itens, e as garantias F1-F11 (secao 9 da SPEC).** O item 11
+(corretor ortografico de prosa) **nao foi feito**, e o motivo esta em 19.14: ele
+depende de um dicionario e de uma dependencia que nao cabe decidir aqui. O que a
+verificacao mostrou esta em 19.16, e inclui uma correcao ao proprio codigo que
+somente um teste de janela encontrou.
+
+A ordem abaixo e a do plano original (retorno por esforco); a implementacao de
+cada um esta no subitem 19.x correspondente.
 
 1. **Lado a lado opcional.** Original acima da traducao, em 6 linhas contra
    12, obriga a rolar a fonte num comentario longo de livro. Um `PanedWindow`
@@ -4089,13 +4752,379 @@ inteiro nisso", em ordem de retorno por esforco. Nenhum exige o esquema novo
     dentro do comentario traduzido sem tocar na chave de cache — que e o
     achatado, e esta certo que seja.
 
+### 19.1 Lado a lado: um divisor, e nao dois layouts — CONCLUIDO
+
+Os dois textos passaram a viver num `PanedWindow` proprio, e o botao ao lado dos
+controles de fonte troca a orientacao dele. **Um divisor, e nao dois layouts
+alternativos**, por duas razoes: a proporcao entre original e traducao continua
+sendo do usuario nas duas orientacoes, e trocar passa a ser uma linha
+(`configure(orient=...)`) em vez de reconstruir os paineis.
+
+A diferenca nao e de elegancia. Reconstruir destruiria os widgets de texto, e
+dentro deles vivem **o texto digitado, a pilha de desfazer do Tk, a selecao e as
+marcas de busca** — os quatro perdidos no meio de uma edicao nao salva. A garantia
+F1 e exatamente isso.
+
+**A posicao do divisor e gravada por ORIENTACAO** (`texts_sash_y` e
+`texts_sash_x`), e no eixo certo: `sash_coord` devolve o par e o valor do outro
+eixo e sempre 1, entao gravar sempre o `x` deixaria o divisor vertical com um
+numero inutil. `collect_sash_positions` e `restore_sash` — compartilhados com o
+editor de glossario — ganharam o eixo como quarto campo opcional, com 0 (o
+horizontal) como padrao, que e o que os divisores antigos sao.
+
+### 19.2 `Ctrl+F` no texto, `Ctrl+L` na lista — CONCLUIDO
+
+Uma linha em cada bind, e a troca nao e questao de gosto: `Ctrl+F` e o gesto
+universal de "procurar no que estou lendo", e quem revisa um comentario longo o
+aperta para achar uma palavra NO TEXTO. Caindo no campo da lista, ele fazia a
+coisa mais destrutiva possivel — **a busca da lista troca a pagina**, e o revisor
+perdia o lugar em que estava.
+
+O teste destes dois **nao le `focus_get()`**: a suite roda com a janela nao
+mapeada (o `root` fica `withdraw`n para nada piscar na tela) e o Tk nao entrega
+foco a janela invisivel — ele devolve `None` para o caso certo e para o errado. O
+que se confere e a chamada de `focus_set`, interceptada, mais a ligacao da tecla.
+E a mesma decisao registrada em 17.11 para a geometria: confere-se a decisao no
+codigo, e nao o efeito do gerenciador de janelas.
+
+### 19.3 Voltar depois de buscar — CONCLUIDO
+
+`Alt+Backspace` (e um botao "< Voltar", porque atalho que ninguem descobre nao
+devolve pagina a ninguem) desfaz o ultimo SALTO.
+
+**A pilha guarda um retrato, e nao um id** — e essa e a decisao do item. Usar a
+busca como concordancia ("como traduzi *outpost* ate aqui?") troca a lista; voltar
+para um id que a busca nova nao contem nao e voltar. O retrato leva a linha
+aberta, o texto da busca, o status, a origem, o arquivo e a pagina, e `restore_view`
+repoe os seis antes de reencontrar a linha.
+
+**So os saltos empilham**: buscar, limpar a busca, ir para um id ou uma pagina,
+trocar de filtro/arquivo/par e o F7. Navegar para a linha vizinha nao empilha — um
+"voltar" que andasse linha por linha nao devolveria nada a quem revisa um livro.
+
+Duas decisoes menores, e as duas apareceram como mutacao sobrevivente ou como
+teste: a pilha e limitada a 50 retratos (uma sessao de revisao dura horas), e um
+retrato que nao da para repor **nao trava** a pilha — o proximo assume, porque a
+linha pode ter sido apagada por outra janela.
+
+`jump_to_id` foi extraida de `go_to_id` para que o "voltar" use a MESMA maquina de
+posicionar: offset calculado na lista filtrada e na ordem ativa. Duas
+implementacoes de "posicionar num id" divergiriam no dia em que uma das duas
+ganhasse um filtro novo — que e literalmente a historia da garantia R10.
+
+### 19.4 A linha da lista diz o que importa — CONCLUIDO
+
+O rotulo ganhou o **marcador de aviso QA** e o **idioma de origem**, e a pagina
+passou a trazer a coluna `quality_warning` (decima posicao da tupla, depois de
+tudo o que ja vinha no fim).
+
+**O marcador sai da COLUNA, e nao de reavaliar o texto em Python.** As duas
+respostas sao a mesma enquanto R6 valer, e usar a coluna e o que garante que o
+marcador concorde com o filtro "Avisos QA" — que tambem le a coluna. Reavaliar
+daria uma tela em que a linha nao tem marcador e o filtro a mostra.
+
+A linha reconstruida em memoria depois de uma edicao (`update_current_row_cache`)
+recalcula o bit pela MESMA funcao da gravacao. Copiar o bit antigo deixaria o
+marcador mostrando o veredito de antes: a linha corrigida continuaria marcada, e a
+que passou a ter aviso nao apareceria.
+
+### 19.5 Diff pintado na previa de "Aplicar todas" — CONCLUIDO
+
+As faixas trocadas sao pintadas nos dois lados, e a previa diz quantos trechos
+mudaram.
+
+**O ROADMAP dizia que "as faixas trocadas ja sao calculadas", e isso era meia
+verdade.** `apply_glossary_pair_with_cursor` calcula as posicoes de cada regra no
+texto daquela passagem e as descarta guardando so o cursor — mas o problema maior
+e que elas nao serviriam: a segunda regra aplicada **desloca** as faixas da
+primeira, e a previa mostra o texto depois de todas. Comparar os dois textos
+prontos (`diff_spans`, `SequenceMatcher` por token) responde a pergunta certa e nao
+depende de quantas passagens houve.
+
+O diff e por PALAVRA. Por caractere, `torre` -> `Torre` viraria um `T` trocado no
+meio de uma palavra inteira pintada de igual, e o que o revisor precisa ver e a
+palavra que mudou.
+
+### 19.6 Contagem de palavras — CONCLUIDO
+
+Modulo proprio (`word_count.py`), minusculo, porque a definicao de "palavra" e uma
+decisao que precisa estar num lugar so: duas contagens diferentes no mesmo programa
+fariam o orcamento discordar do relatorio (garantia F4).
+
+**Palavra e sequencia separada por espaco em branco** — a mesma definicao do `wc
+-w`, do Word e do OmegaT, que e a que o cliente usa para pagar. `14.Bxf7` conta
+como uma. A alternativa, contar so o que tem letra, foi recusada porque daria um
+numero MENOR do que aquele pelo qual o tradutor cobra.
+
+**A contagem e em Python, e nao em SQL**, e a decisao custa uma passagem pelo
+banco: o SQL contaria espacos (`LENGTH(x) - LENGTH(REPLACE(x, ' ', ''))`), o que
+acerta o ORIGINAL — ele e achatado, um espaco entre palavras — e erra a TRADUCAO,
+que passou pela mao do revisor e pode ter quebra de linha e espaco duplo. Um
+relatorio de orcamento que conta certo de um lado e por aproximacao do outro nao
+serve para cobrar.
+
+**Produtividade por dia sai do `comment_history`**, sem esquema novo, e com duas
+decisoes ditas: as palavras sao as da traducao NOVA de cada edicao (a diferenca
+seria negativa quando o revisor encurta, e "produzi -40 palavras hoje" nao e
+metrica de trabalho), e a mesma linha editada tres vezes conta tres — sao tres
+passagens de revisao, e o numero e de atividade, nao de acervo.
+
+### 19.7 Estatisticas fora do clique — CONCLUIDO
+
+Janela propria (`stats_window.py`), copiavel e salvavel em `.txt`, com o conteudo
+computado por `collect_database_stats` numa thread de trabalho (garantia F5). Era
+a ultima operacao pesada fora do `run_with_progress` (item 2.11), e desde a secao
+18 ela ficou mais pesada ainda — 1,12 s no banco de 201.500 linhas, com a contagem
+de palavras dentro.
+
+O relatorio ficou dividido em duas funcoes: uma que le o banco e uma **pura** que
+formata o texto. Os testes atacam as duas juntas, sem janela e sem `messagebox` — o
+que antes exigia interceptar um dialogo para conferir um numero.
+
+A janela e **modeless**: o proposito dela e ser consultada ENQUANTO se trabalha —
+copiar um numero para o orcamento, ver quanto falta do capitulo. Um modal aqui
+seria o `messagebox` de volta, so maior.
+
+O texto e selecionavel mas nao editavel, e a distincao importou na implementacao:
+`state="disabled"` no Tk impede tambem a SELECAO, e um relatorio que nao se copia
+e exatamente o defeito que o item veio corrigir. A escrita e barrada no `<Key>`,
+deixando passar `Ctrl+C`, `Ctrl+A` e as setas.
+
+### 19.8 Exportacao TMX, e o id no CSV — CONCLUIDO
+
+TMX 1.4 escrito **a mao e em blocos**, nao com `ElementTree`: montar a arvore de
+200 mil unidades antes de gravar a primeira e o que o item 2.9 tirou da exportacao
+de CSV, e aqui custaria mais (cada `<tu>` e um objeto com quatro filhos). Medido:
+**1,13 s e 55 MB** para 201.500 unidades.
+
+Tres decisoes do formato, cada uma com o que ela evita:
+
+| decisao | por que |
+|---|---|
+| `srclang="*all*"` | O acervo tem varios idiomas de origem ao mesmo tempo, e `*all*` e o valor que o proprio padrao define para isso. Declarar um so faria toda ferramenta importar o acervo inteiro como se fosse dele |
+| origem vazia vira `und` | `xml:lang=""` nao e valido, inventar `en` seria mentir, e pular as linhas deixaria de fora a MAIORIA de um banco anterior a secao 9.2. `und` e o codigo ISO de "indeterminado" |
+| linha sem traducao fica fora | Uma memoria com o lado de destino vazio nao ajuda ferramenta nenhuma e polui a busca por concordancia de quem a importar |
+
+O texto e escapado e os **controles C0 sao removidos**: o XML 1.0 nao os aceita nem
+escapados, e um deles no meio de um comentario produz um arquivo que nao abre — o
+erro apareceria na ferramenta do usuario, nao aqui. Um TMX cortado no meio e
+apagado, como o CSV: ele nao fecha `</body>`, entao nao abre em lugar nenhum, e o
+usuario so descobriria isso depois de contar com o arquivo.
+
+**O `id` entrou no CSV, como primeira coluna.** Ele e a unica coluna que identifica
+a linha sem depender do texto, e e o que torna o round-trip pela planilha
+conferivel. A importacao continua casando por TEXTO — dito como limite na SPEC,
+porque exportar um id que a volta ignora e uma promessa pela metade se ninguem
+avisar.
+
+### 19.9 Selecao em lote na lista — CONCLUIDO
+
+Uma marca por linha, e uma barra com "Página", "Limpar", "Verificar" e "Exportar".
+
+**A selecao e por ID, e sobrevive a trocar de pagina** — e o que torna "exportar so
+a selecao" util em vez de curiosidade: juntar 30 linhas de tres paginas e o caso
+real de quem prepara uma entrega. Ela morre na troca de PAR, porque um id do par
+anterior nao esta na lista nova e "Verificar" marcaria linhas que o revisor nao ve.
+
+A marca fica FORA do botao da linha (o `CTkButton` nao aceita filho), e isso e o
+desenho certo por outra razao: clicar na marca nao pode carregar a linha, e clicar
+na linha nao pode marcar. Confundi-las faria o revisor marcar como verificada uma
+linha que ele so queria ler.
+
+Duas decisoes da acao em lote:
+
+- **passa pelo mesmo caminho de uma linha so** (`set_translation_verified_by_id`),
+  entao cada uma ganha carimbo e historico. Um `UPDATE` em massa seria mais rapido
+  e deixaria N linhas verificadas sem historico — e "quem marcou isto, e quando" e
+  a primeira pergunta de uma revisao que deu errado (R2);
+- **nao propaga para traducoes iguais.** A propagacao tem confirmacao propria
+  (V1) porque marca originais que ninguem leu; encadea-la aqui abriria 100 dialogos
+  para 100 linhas marcadas, ou — pior — nenhum. A confirmacao diz isso em palavras.
+
+### 19.10 Rascunho fora da thread da interface — CONCLUIDO
+
+Debounce de 700 ms para **2.500 ms**, e a gravacao numa thread (garantia F8).
+
+Quem digita uma frase de comentario para varias vezes por mais de 700 ms — para
+pensar, para ler o original —, e cada parada custava reler o JSON inteiro,
+serializar tudo e trocar o arquivo de nome. Em disco lento ou com antivirus no
+caminho, isso e o programa parando entre duas teclas.
+
+O que roda na thread e SO o disco: os valores sao capturados na thread principal e
+o rotulo e escrito de volta por `after` (garantia C1). O snapshot em memoria e
+atualizado na thread principal, e nao la, porque a propria janela o le — se a linha
+for reaberta antes de a gravacao terminar, o rascunho tem de estar visivel.
+
+**E `update_settings` ganhou um lock.** Duas threads no ciclo ler-alterar-gravar
+fazem a segunda ler o disco ANTES de a primeira gravar, e o que a primeira escreveu
+desaparece: e a perda que a garantia R4 existe para impedir, agora por corrida em
+vez de por snapshot velho. O teste roda 24 threads e exige as 24 chaves.
+
+### 19.11 Corretor ortografico de prosa — NAO FEITO
+
+Ver 19.14. E o unico item da secao que nao foi entregue.
+
+### 19.12 Status alem do binario — CONCLUIDO
+
+Schema 8: `review_status` e `reviewer_note`, dois `ALTER TABLE` (nenhuma restricao
+muda, entao a tabela nao e reconstruida). Medido: **1,86 s** em 201.500 linhas.
+
+**`verified` continua sendo a autoridade sobre verificada/pendente**, e o campo
+novo so refina o lado pendente: `''`, `rejected` ou `doubt`. Guardar "verified"
+tambem ali daria dois lugares dizendo a mesma coisa, e um dia eles discordariam sem
+nada quebrar — a familia de defeito que a garantia R6 nomeia.
+
+A regra, uma frase, e a garantia F10: **verificar limpa o status, e um status alem
+de pendente derruba o verificado.** Rejeitar uma linha verificada e dizer que a
+verificacao estava errada; deixar o bit de pe a manteria fora do filtro de
+pendentes, e ela nunca voltaria para a fila de ninguem.
+
+**A frase e curta e os caminhos que a implementam eram QUATRO**, e foi por ai que
+o item quase escapou: `set_translation_verified_by_id`, `update_translation_by_id`
+(o "Salvar e verificar"), `set_exact_translation_matches_verified` (a propagacao) e
+`overwrite_translation_by_id` (a importacao). A primeira versao tratou so a
+primeira, e um teste de JANELA — "verificar uma linha em duvida limpa o status" —
+foi o que encontrou: a linha ficava verificada E em duvida ao mesmo tempo, estado
+que nenhum filtro mostra direito. Ver 19.16.
+
+Os dois status novos entraram no botao segmentado da lista, e o `if/elif` que
+traduzia rotulo para filtro virou um dicionario: eram dois lugares, e acrescentar um
+filtro exigia mexer nos dois — esquecer um dava um botao que nao filtra nada. As
+contagens deles aparecem no rodape **so quando existem**; um "Rejeitadas: 0" fixo na
+janela de quem nunca usou o recurso e ruido.
+
+O filtro exige `verified <> 1` junto com o status, embora o lockstep torne o outro
+caso impossivel pelo caminho do programa. A guarda existe para o `UPDATE` de fora
+(uma restauracao pela metade, outra ferramenta), e o teste dela escreve o estado
+inconsistente com SQL cru — sem isso a mutacao que removia a guarda sobrevivia, o
+que e a mesma discussao da mutacao inalcancavel de 18.8.
+
+### 19.13 Requebra em 80 colunas — CONCLUIDO
+
+`output.wrap_columns` no arquivo de configuracoes, zero (desligado) por padrao. 80
+e o export format do padrao PGN.
+
+**So o espaco em branco muda** (garantia F9): as palavras saem na mesma ordem e com
+os mesmos caracteres, e um espaco entre duas delas vira uma quebra de linha. E o que
+permite requebrar sem tocar na chave de cache — que e o texto achatado, e continua
+sendo (13.2).
+
+Quatro decisoes que a implementacao obrigou a tomar:
+
+- **a primeira linha sabe que comeca no meio.** Depois de `12. Nf3 {` sobra menos
+  espaco, e a conta e exata (nao uma estimativa) porque os spans sao substituidos da
+  direita para a esquerda: nada antes do comentario ainda vai mudar;
+- **um `[%...]` conta como UMA palavra.** A garantia X1 gastou uma secao protegendo
+  esses spans; quebra-los na gravacao seria desfazer o trabalho no ultimo passo;
+- **a quebra e a do ARQUIVO.** O conteudo e lido com `newline=''` para o `\r\n`
+  sobreviver (13.6), e inserir `\n` puro daria um PGN de fim de linha misturado — a
+  requebra existe para agradar editora, e entregaria um arquivo pior que o sem
+  requebra;
+- **palavra maior que a linha fica inteira** e estoura a coluna. Cortar no meio dela
+  produziria um token que nao existe: requebrar e formatacao, inventar palavra nao.
+
+Custo medido: **277 ms** para requebrar 15.000 comentarios de 60 palavras — o
+tamanho do PGN de 40 MB que a secao 20 usa como pior caso.
+
+### 19.14 O item que nao foi feito, e por que
+
+**Item 11, corretor ortografico do idioma de destino.** O `spelling.ssp` que o
+programa ja traz e dicionario de nomes proprios e nao serve para prosa; um corretor
+de verdade precisa de **um dicionario hunspell pt-BR (~1 MB) e de uma dependencia
+nova** (`spylls`, `cyhunspell` ou equivalente).
+
+As duas coisas sao decisao de quem mantem o programa, e nao deste item:
+
+- a dependencia entra no `requirements.txt` e no `.spec` do PyInstaller, e muda o
+  tamanho e o processo de build do executavel;
+- o dicionario precisa ser escolhido (licenca, variante ortografica) e versionado
+  junto, ou baixado — e baixar dicionario na primeira execucao e um comportamento
+  novo que ninguem pediu;
+- e o corretor teria de valer para os SETE idiomas de destino, ou declarar-se
+  parcial — a mesma discussao que a lista de termos suspeitos ja teve (16.1).
+
+**O que ficou de fora, ficou inteiro**: nao ha esqueleto, nao ha coluna nula, nao
+ha botao desabilitado. Um recurso que nao funciona mas parece existir e pior do que
+a ausencia — a mesma decisao que 18.1 registrou sobre a coluna de FEN.
+
+### 19.15 O que a medicao mostrou
+
+Mesmo banco sintetizado da secao 18 (201.500 linhas, 200 mil ocorrencias — ver o
+apendice).
+
+| operacao | custo |
+|---|---|
+| migracao 7 -> 8 (dois `ALTER TABLE`) | 1,86 s, uma vez |
+| pagina da lista, agora com `quality_warning` | 0,5 ms (igual a de antes) |
+| contagem de palavras do acervo inteiro | 675 ms |
+| atividade de revisao por dia | 1,1 ms |
+| coleta inteira das estatisticas | 1,12 s |
+| exportar TMX (201.500 unidades) | 1,13 s, 55 MB |
+| exportar CSV (com o `id`) | 1,30 s |
+| requebrar 15.000 comentarios de 60 palavras | 277 ms |
+
+**A coluna nova na pagina da lista nao custou nada** (0,5 ms, o mesmo numero da
+secao 18), e valia medir: ela entrou numa consulta que roda a cada interacao, e a
+garantia R5 e sobre exatamente isso.
+
+**A contagem de palavras e o unico numero grande, e e por definicao**: ela le os
+dois textos de todas as linhas. Os 675 ms sao dentro de uma operacao que o item 7
+acabou de tirar da thread da interface — os dois itens se pagam um ao outro, e essa
+foi a razao de fazer os dois juntos.
+
+### 19.16 O que a verificacao fixou
+
+**52 testes novos em `test_core.py`** (765 -> 817) e **39 na janela de edicao**
+(130 -> 169), e **51 mutacoes**.
+
+**Uma correcao ao proprio codigo saiu de um teste de janela**, e e a mais grave da
+secao: `save_changes(mark_verified=True)` nao passa por
+`set_translation_verified_by_id` — ele grava pelo `update_translation_by_id` —, e a
+regra de lockstep do item 12 estava so no primeiro. O efeito era uma linha
+**verificada E em duvida ao mesmo tempo**, que nenhum filtro mostra direito. Procurar
+os outros caminhos depois disso revelou mais dois (a propagacao e a sobrescrita pelo
+CSV): **quatro lugares escrevem `verified`**, e a frase "verificar limpa o status"
+precisava valer nos quatro.
+
+**Tres mutacoes sobreviveram na primeira rodada**, e as tres sao padroes que esta
+suite ja conhece:
+
+| mutacao | o que ela mostrou |
+|---|---|
+| `while` -> `if` na pilha do "voltar" | **O cenario dava o mesmo observavel.** Com UM retrato na pilha, desistir no primeiro e continuar terminam os dois em "Nada para voltar". O teste passou a empilhar dois, o de cima morto |
+| zerar a contagem de palavras na coleta | **O teste afirmava o rotulo, e nao o numero.** Ele procurava "Palavras no original:" no texto; a linha aparecia com zero e ele passava. Agora ele confere 14, 11, 2 e 9 |
+| tirar `verified <> 1` do filtro de rejeitadas | **O cenario nao existe pelo caminho do programa** — o lockstep o impede. O teste dele escreve o estado inconsistente com SQL cru, que e o que um `UPDATE` de fora produziria |
+
+E uma quarta "sobrevivente" era **a mutacao errada, e nao o teste**: o trecho do
+regex da requebra estava escrito com escape trocado no script e nao casava com o
+arquivo. O script acusa isso (`trecho aparece 0x`), que e a razao de ele conferir a
+contagem antes de substituir — a licao do padrao 5 de 2026-07-29.
+
+**O que a verificacao NAO alcanca:**
+
+- a **orientacao** dos textos e conferida por `cget("orient")` e pela chave gravada,
+  e nao pelo tamanho dos paineis na tela: medir geometria depende do gerenciador de
+  janelas (a mesma decisao de 17.11). O que se protege e que o texto sobrevive a
+  troca, que e o que a implementacao escolhida compra;
+- o **foco** dos atalhos e conferido interceptando `focus_set`, pelo motivo dito em
+  19.2 — a janela da suite nao e mapeada;
+- a **thread** do rascunho e conferida por qual thread chamou `update_settings`. Que
+  a gravacao nao engasgue a digitacao em disco lento com antivirus e a razao do item,
+  e nao da para afirmar num teste;
+- o **TMX** e validado como XML e nos campos que o padrao exige, e nao abrindo-o no
+  OmegaT. Um arquivo que o `ElementTree` le e que tem `tuid`, `srclang` e os dois
+  `tuv` e o que o formato pede; se alguma ferramenta recusar por outra razao, isso
+  aparece no uso.
+
 ---
 
-## 20. Desempenho e memoria do pipeline — PENDENTE
+## 20. Desempenho e memoria do pipeline — CONCLUIDO (2026-07-30)
 
 Itens medidos ou derivados na revisao de 2026-07-29, todos sem mudanca de
-comportamento — so de custo. Nenhum e urgente com os acervos atuais; todos
-viram parede com um livro grande.
+comportamento — so de custo. Nenhum era urgente com os acervos atuais; todos
+viravam parede com um livro grande.
+
+O diagnostico original, mantido como foi escrito:
 
 - **`generate_translated_pgn` e O(n·m)**: cada substituicao copia o arquivo
   inteiro (`content[:start] + rep + content[end:]`). Um PGN de 40 MB com 15 mil
@@ -4121,6 +5150,328 @@ viram parede com um livro grande.
   elementos e montada e hasheada a cada tecla no editor. Um contador de versao
   do glossario (incrementado a cada recarga) substitui a tupla por um inteiro.
 
+**Entregue: os seis itens, e as garantias D1-D7 (secao 9 da SPEC).** 46 testes
+novos (suite de nucleo 817 -> 863, suite completa 1.080 -> 1.126) e 22 mutacoes,
+21 mortas e uma investigada em 20.8.
+
+**"Sem mudanca de comportamento" acabou nao valendo ao pe da letra**, e o que
+mudou esta dito: o resumo da traducao ganhou a linha dos comentarios repetidos (a
+conta nao fechava sem ela — 20.3), o log do "Normalizar PGN" passou a anunciar o
+dicionario em vez do arquivo e a construcao do indice quando ela acontece (20.5), e
+cancelar durante a gravacao agora **tem** efeito (20.1). O PGN gerado e as
+traducoes gravadas continuam byte a byte os mesmos. Tres afirmacoes do proprio diagnostico nao sobreviveram a medicao — o pico
+do `spelling.ssp` (20.5), o texto que "vive duas vezes" (20.4) e o tamanho da
+tupla (20.6) —, e cada uma esta corrigida no item que a fez.
+
+O que foi medido, antes e depois:
+
+| medida | antes | depois |
+|---|---|---|
+| gravar 15.000 comentarios num PGN de 3,2 MB | **26.891 ms** | **22,9 ms** |
+| pico dessa gravacao | 15,1 MB | 7,8 MB |
+| leituras de cada PGN por execucao | 4 | **2** |
+| pico com 8 arquivos (2.000 comentarios, 50 distintos) | 16,1 MB | **5,3 MB** |
+| memoria viva durante a fase da API (1 livro, 15 mil comentarios) | 10,5 MB | **4,1 MB** |
+| pico da execucao desse mesmo livro | 67,4 MB | 75,5 MB (ver 20.4) |
+| abrir o dicionario de grafias | 1.038 ms / 72 MB | **29 ms / 2,1 MB** |
+| uma tecla no editor, com o glossario real | 9,15 ms | **7,21 ms** |
+| montar a chave do cache de ordenacao | 1,75 ms | 0,0002 ms |
+
+O metodo das medidas esta em 20.9.
+
+### 20.1 A gravacao do PGN era O(n·m) — CONCLUIDO
+
+O laco antigo refazia o arquivo inteiro a cada comentario, da direita para a
+esquerda. O custo cresce com o **produto** do numero de comentarios pelo tamanho
+do arquivo, e a curva medida nesta maquina nao deixa duvida:
+
+| comentarios | arquivo | antes | depois |
+|---|---|---|---|
+| 4.000 | 0,8 MB | 752 ms | 5,2 ms |
+| 8.000 | 1,7 MB | 6.552 ms | 9,6 ms |
+| 15.000 | 3,2 MB | 26.891 ms | 22,9 ms |
+
+**A gravacao e por PEDACOS, e nao por `"".join`.** O diagnostico pedia o `join`,
+e o `join` corrigia o tempo (18,9 ms) pagando com pico: ele monta o PGN de saida
+inteiro na memoria ao lado do de entrada e dos pedacos. Medido no PGN de 3,2 MB,
+o pico da fase era 15,1 MB com `join` contra 7,8 MB escrevendo pedaco por pedaco
+— e os 4 ms de diferenca no tempo sao 0,015% do que o item economizou. Trocar
+tempo por pico seria consertar metade do problema, entao `write_pgn_pieces`
+recebe uma **funcao** que devolve os pedacos: o fallback de codificacao precisa
+percorre-los de novo, e guardar a lista seria a copia que isto evita.
+
+**O `cancel_flag` entrou na fase**, conferido a cada 512 comentarios. A fase toda
+custa 23 ms num PGN de 15 mil comentarios, entao o intervalo nao precisa ser
+curto; ele existe para o caso extremo — arquivo enorme com requebra ligada. Um
+cancelamento devolve `False` **sem gravar nada**: um arquivo de saida pela metade
+seria pior do que nenhum.
+
+**Um bug real apareceu no caminho.** `{a} {b}` com os dois comentarios esvaziados
+pela limpeza: o span de `{b}` reclamava para tras o espaco que o de `{a}` ja
+havia levado, e dois spans sobrepostos, aplicados da direita para a esquerda,
+**apagavam todo o resto do arquivo**. Reproduzido, virou teste, e agora ha duas
+trancas — o limite do span anterior e a passada unica, em que uma sobreposicao de
+um caractere so produz uma fatia vazia. Ver 20.8: a mutacao que tira **so** o
+limite sobrevive por causa disso.
+
+**A gravacao por pedacos criou um risco novo, e ele tem teste.** `utf-8-sig` e
+`utf-16` escrevem a marca de ordem de bytes na PRIMEIRA codificacao; se um pedaco
+passasse a ser um `open` proprio, cada um levaria a sua BOM e o arquivo sairia
+ilegivel para qualquer ferramenta. O teste conta as marcas nos bytes, porque no
+texto elas sao caracteres invisiveis no meio da prosa e um `assertIn` passaria.
+
+**O comentario de `_comment_line_room` estava errado**, e ficou registrado nele:
+ele afirmava que o texto antes do comentario "ja e final" porque a substituicao ia
+da direita para a esquerda. Nunca foi — a requebra sempre foi calculada na fase de
+montagem, antes de qualquer substituicao. A conta e a mesma; o motivo dito era
+outro.
+
+### 20.2 Cada arquivo era lido quatro vezes — CONCLUIDO
+
+Contado com o `open` interceptado, e nao por leitura do codigo: a extracao abria
+duas vezes (uma em bytes, para detectar, outra em texto) e a geracao repetia as
+duas. `read_pgn_text` le os bytes uma vez, detecta a codificacao **neles** e
+decodifica; `detect_encoding_from_bytes` e a metade do criterio que nao precisa de
+disco. A execucao passou de **4 leituras por arquivo para 2** — uma na passada
+que conta e outra na vez do arquivo, que ja entrega o conteudo para a gravacao.
+
+Medido num PGN de 3,2 MB: `detect_encoding` + `open` custavam 4,2 ms, contra
+2,8 ms de `read_pgn_text`. E pouco em disco quente; o que o item de fato entrega e
+uma decodificacao completa a menos por arquivo (a deteccao valida a codificacao
+decodificando o arquivo inteiro — garantia E4).
+
+Nenhum comportamento muda, e ha teste para isso: `read_pgn_text` devolve o mesmo
+texto e a mesma codificacao que `detect_encoding` + `open(newline='')` davam, em
+UTF-8 com CRLF, UTF-8 com BOM, cp1252 e UTF-16. O `newline=''` era o que
+preservava o `\r\n` do arquivo (ROADMAP 13.6), e `bytes.decode` nao traduz fim de
+linha nenhum.
+
+O normalizador de metadados ganhou a mesma leitura unica, pelo mesmo motivo.
+
+### 20.3 Duplicatas dentro do arquivo pagavam API — CONCLUIDO
+
+O cache so aprende a traducao depois da resposta, e o lote inteiro sai antes dela:
+um capitulo com "Diagram" trinta vezes enviava as trinta. A lista de cada arquivo
+passa por `dict.fromkeys` na primeira passada, e o que vai para os lotes sao os
+**textos distintos**. A geracao continua trocando todas as ocorrencias — ela
+procura o texto no `translated_map`, nao a posicao — e a tabela `occurrences`
+continua recebendo uma linha por ocorrencia (ROADMAP 18 intacto).
+
+**A deduplicacao e POR ARQUIVO.** Entre arquivos quem serve e o cache em memoria,
+que ja funcionava; deduplicar globalmente nao economizaria requisicao e faria a
+barra de progresso mentir sobre o arquivo em curso.
+
+**Duas contas do resumo estavam erradas, e nao uma.** A primeira e a que o
+diagnostico apontou: a segunda gravacao da mesma chave volta `unchanged`, que nao
+e contado em contador nenhum, entao 5 comentarios processados apareciam como "2
+novas" e mais nada — tres comentarios sumiam da aritmetica. A segunda so apareceu
+ao implementar: **o denominador da barra de progresso** era o total com
+duplicatas, e com a deduplicacao a barra pararia antes do fim (2 passos de 5).
+Hoje o denominador e o numero de distintos, e o total ganhou uma linha que fecha a
+conta:
+
+    Total de comentarios detectados: 5
+    Comentarios repetidos dentro do proprio arquivo: 3 (traduzidos uma vez so)
+
+A linha **so aparece quando existe**, como a dos lances corrigidos e a dos
+comentarios `;`: um "repetidos: 0" fixo faria o usuario procurar um problema que
+nao ha.
+
+**Nao ha medida de quanto isso economiza num livro real**, e e melhor dizer do que
+inventar: o repositorio nao tem PGN de livro, e a taxa de repeticao interna
+depende da obra. O que se mediu foi o comportamento — o comentario repetido sai
+uma vez para a API, as quatro ocorrencias voltam traduzidas no arquivo.
+
+### 20.4 O acervo inteiro vivia na memoria — CONCLUIDO
+
+`info_by_file` guardava o resultado COMPLETO da extracao de todos os PGN —
+comentarios, posicoes e contexto de leitura de cada um — pela execucao inteira.
+Agora a execucao tem duas passadas com papeis diferentes:
+
+- a **primeira** le so o que a adocao (P2) e a carga de cache precisam: os textos
+  distintos de cada arquivo, mais as contagens e os comentarios `;`. Nem posicao,
+  nem contexto de leitura;
+- na **vez de cada arquivo**, e **depois da fase da API**, ele e lido uma vez e
+  extraido por inteiro; as posicoes vao para a gravacao e morrem com ela.
+
+**Depois da API, e nao antes** — foi a medicao que decidiu isso. A fase da API
+dura minutos (543 lotes no livro medido, ~1 s por lote em rede real), e o conteudo
+do PGN nao tem nada a fazer nela. A memoria viva durante essa fase caiu de
+**10,5 MB para 4,1 MB**, e o que sai dela e justamente o que cresce com o livro:
+num livro de 40 MB, sao 40 MB que deixam de ser segurados por minutos enquanto o
+usuario trabalha em outro programa.
+
+| cenario | antes | depois |
+|---|---|---|
+| 8 arquivos, 2.000 comentarios cada (50 distintos) | 16,1 MB | 5,3 MB |
+| 1 livro, 15.000 comentarios distintos em 9 MB | 67,4 MB | 75,5 MB |
+
+**O pico de um livro unico subiu 12%, e a decisao foi consciente.** A parte cara
+da extracao e o contexto de leitura (`comment_reading_context` copia o conteudo
+inteiro para apagar os spans dos comentarios — 174 ms dos 263 ms de uma extracao
+de 3,2 MB), e ela agora acontece quando a execucao ja tem os textos e as
+traducoes na mao, e nao no comeco, quando quase nada estava alocado. Foram
+medidas as duas ordens: extrair antes do laco dos lotes da 71,1 MB de pico e
+devolve o conteudo para dentro da fase da API. Preferiu-se o pico de 75,5 MB
+**uma vez** a 9 MB segurados **por minutos** — parede se bate no pico, mas o que
+o usuario sente numa maquina com outros programas abertos e o sustentado. Baixar
+esse pico exige tirar a copia de `comment_reading_context`, que e desenho da
+secao 18 e nao deste item.
+
+**A afirmacao do diagnostico estava errada, e virou verdade no meio do caminho.**
+"O conteudo normalizado vive duas vezes: na lista de comentarios e nas tuplas de
+posicao" — nao vivia: `comments`, `positions` e `occurrences` guardam **o mesmo
+objeto** `str`, e o custo era de ponteiros. Mas ler o arquivo em duas passadas
+FARIA o texto viver duas vezes (a segunda extracao criaria objetos novos de igual
+conteudo, 3,9 MB no livro medido, exatamente no momento da gravacao). Dai
+`known_texts`: a segunda extracao recebe os textos que a primeira ja tem e
+devolve **os mesmos objetos**. O teste afirma identidade (`assertIs`), e nao
+igualdade — `assertEqual` passaria de qualquer jeito, e nao e disso que a memoria
+depende.
+
+**Um vazamento apareceu na medicao, e nao na leitura do codigo.** A primeira
+versao soltava a lista de textos com um `comentarios_do_lote = None` "de
+proposito" — e o pico nao caiu. O motivo: **as variaveis de um laco Python
+sobrevivem ao laco**, entao o `info` do ULTIMO arquivo continuava vivo ate o fim
+da execucao. A passada virou uma funcao (`_first_pass`), que e o unico jeito
+confiavel de nao ter esse tipo de sobra.
+
+### 20.5 O `spelling.ssp` era reparseado a cada uso — CONCLUIDO
+
+Mesmo desenho do `glossario.db`: um indice SQLite derivado, ao lado do fonte,
+reconstruido quando o hash do conteudo do fonte muda.
+
+| operacao | antes | depois |
+|---|---|---|
+| carregar o dicionario | 1.038 ms / 72 MB de pico | 29 ms / 2,1 MB de pico |
+| construir o indice (uma vez por versao do fonte) | — | 2,0 s / 5,4 MB de pico |
+| corrigir uma tag | 0,0005 ms (dicionario em memoria) | 0,048 ms (consulta indexada) |
+
+Dos 29 ms de abertura, **27 sao o hash do fonte** (30,5 MB de SHA-256). Vale
+pagar: e o que garante que trocar o `spelling.ssp` por uma versao nova das
+classificacoes seja notado, e o `mtime` nao serve (muda quando o arquivo e
+reescrito igual e nao muda quando outro toma o lugar dele com a mesma data).
+
+Decisoes, cada uma com o que ela evita:
+
+| decisao | por que |
+|---|---|
+| leitura em fluxo (`iter_spelling_records`) | O dicionario inteiro em memoria e o custo que o item vem eliminar; um gerador de eventos serve aos dois consumidores — o `dict` e o banco — com **uma** implementacao do formato |
+| `INSERT OR IGNORE` na chave `(section, key)` | Reproduz o `setdefault` do dicionario: o primeiro a definir uma chave vence, dentro do bloco e entre blocos repetidos. Sem isso, um `@PLAYER` no fim do arquivo passaria a sobrescrever os nomes do bloco de cima — o defeito de 17.10, de volta pela porta do indice |
+| `source_hash` gravado por ULTIMO | Uma construcao interrompida deixa um banco sem a marca, e a carga seguinte o trata como invalido. E a mesma escolha de Q2: a marca significa "isto terminou" |
+| zerar por `DROP TABLE`, e nao apagando o arquivo | **Foi um teste que mostrou:** no Windows, remover um `.db` que outra conexao mantem aberto falha, o `except OSError` engolia a falha, e o indice novo era gravado POR CIMA do antigo — com os nomes que ja tinham saido do fonte continuando a responder. Um arquivo que nao e banco nenhum e apagado e a abertura recomeca, uma vez so |
+| degradar para o dicionario, com aviso | O `_internal` do executavel pode estar em pasta sem escrita. O botao continua funcionando, custando o que sempre custou, e o log diz por que |
+| o indice **nao** e versionado | Diferente do `glossario.db`, e a diferenca e tamanho: 1,1 MB que viajam junto para poupar uma reconstrucao, contra 25,5 MB para poupar 2 s. O `*.db` do `.gitignore` ja o mantem fora. (O fonte, `spelling.ssp`, **e** versionado — o comentario do `.spec` dizia o contrario, e estava errado desde o commit que o adicionou) |
+
+`correct_spelling_value` aceita o indice **ou** o dicionario, por `getattr(...,
+"entry", None)` e nao por `isinstance`: os testes do formato passam dicionarios
+literais e continuam valendo sem conhecer a classe nova.
+
+**A afirmacao de "centenas de MB transitorios" nao se sustentou.** O pico medido
+com `tracemalloc` e de **72 MB** para o arquivo de 30,5 MB — muito, e o suficiente
+para justificar o item, mas nao centenas. O numero certo esta na tabela.
+
+O indice guarda **513.797 entradas**, e a construcao ignora **4.495 chaves
+repetidas** — o mesmo numero que o dicionario em memoria descartava em silencio.
+O log diz as duas coisas.
+
+### 20.6 A chave do cache de ordenacao era O(n) — CONCLUIDO
+
+`order_rules_by_specificity` memoriza por conteudo, e a chave era uma tupla com
+uma entrada por regra, montada e hasheada a cada consulta. O editor consulta a
+cada tecla digitada.
+
+| medida (glossario real) | antes | depois |
+|---|---|---|
+| montar a chave | 1,75 ms | 0,0002 ms |
+| ordenar com o cache quente | 1,96 ms | 0,017 ms |
+| uma tecla (`find_glossary_suggestions`) | 9,15 ms | 7,21 ms |
+
+A lista carregada e uma `VersionedRules`, que traz o proprio numero de versao. O
+`id()` nao serviria — uma lista nova reaproveita o endereco de uma coletada —, e
+uma versao resolve isso **e** um caso que a chave por conteudo tambem cobria de
+graca: a lista alterada no lugar. Por isso **cada mutacao renova a versao**
+(doze metodos de `list`, envolvidos num laco para que nenhum fique de fora); sem
+isso, uma lista mutada receberia a ordem antiga, com regras que nao estao mais
+nela. Uma lista comum — de teste, escrita a mao — continua caindo na chave por
+conteudo.
+
+O que sobrou dos 7,21 ms por tecla sao as 7.334 buscas de padrao no texto
+(`find_glossary_matches` por regra). E outro item, e nao este.
+
+**O numero do diagnostico envelheceu:** eram 6.958 regras interativas quando ele
+foi escrito, e sao **7.334** depois da curadoria da secao 14 (o `@casa@` expande
+para 64 regras cada). A medida acima e com o glossario de hoje.
+
+### 20.7 O que os testes protegem
+
+46 testes novos, e cada um deles falha sem a correcao correspondente:
+
+| garantia | o que fixa |
+|---|---|
+| D1 | A gravacao e uma passada, sem uma segunda copia do arquivo na memoria |
+| D2 | Cancelar interrompe a gravacao e nao deixa arquivo pela metade |
+| D3 | Cada PGN e lido uma vez por passada, e o texto e a codificacao sao os mesmos de antes |
+| D4 | Comentario repetido no arquivo vai uma vez para a API, e a conta do resumo fecha |
+| D5 | Conteudo, posicoes e contexto de um PGN nao atravessam a fase da API |
+| D6 | O indice de grafias responde como o arquivo, e um fonte trocado o reconstroi |
+| D7 | A ordem das regras e identificada por versao, e mutar a lista renova a versao |
+
+Dois deles medem custo em vez de comportamento, porque as duas familias de
+defeito deste secao nao aparecem em teste de igualdade (ver a licao da secao 18):
+o cronometro da gravacao (8.000 comentarios em menos de 0,5 s; a versao antiga
+levava 6,5 s) e o `tracemalloc` do pico (menos de 3x o tamanho do arquivo). Os
+limites sao generosos de proposito — o que eles precisam distinguir e uma ordem de
+grandeza, nao a velocidade desta maquina.
+
+### 20.8 A rodada de mutacao
+
+22 mutacoes, 21 mortas. As duas primeiras versoes do script tinham uma mutacao
+**invalida** cada — um `NameError` de nome que deixou de existir e um `del` de
+variavel de laco vazio —, e as duas deixavam o pytest vermelho sem que teste
+nenhum tivesse olhado comportamento. O script passou a distinguir "vermelho com
+teste citado" de "vermelho sem teste", que e a checagem que faltava depois do
+padrao 5 da secao 16.
+
+**A sobrevivente:** tirar o limite do span anterior no ajuste do espaco vizinho
+(`start > fim_anterior` -> `start > 0`) nao deixa nenhum teste vermelho. Nao e
+teste inutil: **e guarda redundante**, e a redundancia foi criada por esta secao.
+O desastre de `{a} {b}` precisava de DOIS erros — a sobreposicao e a substituicao
+da direita para a esquerda —, e a passada unica ja torna a sobreposicao
+inofensiva (uma fatia vazia). O limite ficou porque e o que mantem `replacements`
+sem sobreposicao, que e o invariante de que a gravacao depende; confiar numa
+fatia vazia seria correcao por acidente. O teste diz isso, e o docstring dele
+tambem.
+
+Uma segunda guarda redundante foi **apagada** em vez de documentada: a checagem
+`if not gravado: return True` em `spelling_index_is_stale` — a comparacao com o
+hash ja responde "precisa reconstruir" quando a marca nao existe (`None` nunca e
+igual a um hash).
+
+### 20.9 O metodo das medidas, para poder ser refeito
+
+- **Maquina**: a mesma da secao 18 (Windows 10, Python 3.13). Todo numero e o
+  melhor de 3 a 5 execucoes, com o cache de paginas quente.
+- **Arquivos de medida**: PGN sinteticos, gerados no diretorio temporario. Dois
+  formatos, e a diferenca importa: um "so comentarios" (comentario de 180 a 400
+  caracteres a cada dois lances) exagera o peso do texto, e um "de livro"
+  (movetext na proporcao de uma obra real, comentario ~20% dos bytes) e o que
+  vale para os numeros de memoria da execucao. Os dois estao ditos onde
+  aparecem.
+- **Memoria**: `tracemalloc` (pico e vivo), amostrado tambem **por linha de log**
+  do worker — foi assim que o vazamento das variaveis de laco apareceu, e o
+  proprio pico contou onde ele acontece.
+- **Antes/depois do worker**: o `translation_worker.py` do commit anterior foi
+  trocado no lugar do novo (`git show HEAD:...`) e medido no mesmo cenario, com o
+  resto do programa igual. Nao e estimativa: sao as duas versoes rodando.
+- **Leituras por arquivo**: contadas interceptando o `open` embutido e filtrando
+  pelo caminho do PGN.
+- **`spelling.ssp`**: o arquivo real de 30,5 MB e 985.829 linhas. A conferencia de
+  equivalencia comparou o indice com o dicionario em 21.129 chaves sorteadas
+  (semente fixa) e em todos os parametros de secao: zero divergencias.
+- **Glossario**: `load_interactive_substitutions()` com o `Substituicoes.txt` do
+  repositorio (7.334 regras depois da expansao de `@casa@`).
+
 ---
 
 ## Apendice da revisao de 2026-07-29 — o metodo, para poder ser refeito
@@ -4142,3 +5493,15 @@ viram parede com um livro grande.
   de origem, backup que migra, CSV somente-exportacao): conferidos por leitura
   das linhas citadas; cada um precisa de teste que falhe antes da correcao,
   como manda a regra da secao 11 da SPEC.
+- **Banco sintetizado da secao 18**: as ocorrencias so nascem ao processar um PGN,
+  entao o banco de dev tem zero delas e nao servia para medir o filtro por arquivo.
+  O banco de medida sai de uma copia do `traducoes.db` local inflada a 201.500
+  linhas (o mesmo texto com sufixo, para caber na UNIQUE) e 200 mil ocorrencias em
+  100 arquivos — ~1.900 comentarios distintos por arquivo, com ~13% de repeticao
+  interna, `ANALYZE` rodado no fim. Nao e o banco do usuario; e a escala dele.
+  Numeros de pagina, contagem e offset sao o melhor de 5 execucoes, ja com o cache
+  de paginas quente.
+- **Largura do rodape da procedencia (18.4)**: medida por `winfo_reqwidth` com a
+  janela `withdraw`n, na geometria padrao (1280 px de janela, 596 px de faixa) e na
+  minima declarada. Sem screenshot de proposito: a captura anterior pegou a janela
+  atras de outro programa e mostrou a tela errada.

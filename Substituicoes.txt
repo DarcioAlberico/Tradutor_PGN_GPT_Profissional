@@ -4994,7 +4994,6 @@ substituicoes = [
     ('Terminator', 'Exterminador'),
     ('Companheiros pretas', 'Mate das pretas'),
     ('as pretas queimou', 'as pretas queimaram'),
-    ('pretas parecem estar', 'pretas parecem estarem'),
     ('{ as pretas iria', '{ as pretas iriam'),
     ('Companheiros brancas', 'Mate das brancas'),
     ('as brancas queimou', 'as brancas queimaram'),

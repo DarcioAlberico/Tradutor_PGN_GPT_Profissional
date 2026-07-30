@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import threading
 from datetime import datetime
 
 
@@ -67,6 +68,19 @@ def save_settings(settings, path=None):
     os.replace(tmp_path, path)
 
 
+# Serializa o ciclo ler-alterar-gravar. Ele passou a acontecer de mais de uma
+# thread (ROADMAP 19, item 10): o rascunho do editor grava em segundo plano, e o
+# resto do programa continua gravando na thread do Tk. Sem o lock, duas gravacoes
+# simultaneas fazem a segunda ler o disco ANTES de a primeira ter gravado, e o que
+# a primeira escreveu desaparece — exatamente a perda que a garantia R4 existe para
+# impedir, agora por corrida em vez de por snapshot velho.
+#
+# O lock protege este processo, que e onde a corrida existe: `save_settings` grava
+# num temporario e troca de nome, entao um segundo processo veria um arquivo
+# completo, nunca um pela metade.
+_UPDATE_LOCK = threading.Lock()
+
+
 def update_settings(mutator, path=None):
     """Aplica `mutator` sobre o estado atual do disco e grava o resultado.
 
@@ -78,10 +92,15 @@ def update_settings(mutator, path=None):
 
     `mutator` recebe o dicionario lido do disco e o altera no lugar; o valor que
     devolver e repassado ao chamador.
+
+    O ciclo inteiro roda sob um lock (ver `_UPDATE_LOCK`): a leitura, a alteracao e
+    a gravacao sao uma coisa so, e desde que o rascunho passou a ser gravado em
+    segundo plano ha duas threads chamando isto.
     """
-    settings = load_settings(path)
-    result = mutator(settings)
-    save_settings(settings, path)
+    with _UPDATE_LOCK:
+        settings = load_settings(path)
+        result = mutator(settings)
+        save_settings(settings, path)
     return result
 
 
@@ -182,6 +201,11 @@ def clear_editor_draft(settings, db_path, target_language, comment_id):
 
 OUTPUT_KEY = "output"
 
+# Menor requebra aceita. Abaixo disto o arquivo deixa de ser um PGN requebrado e
+# passa a ser uma palavra por linha; 20 colunas nao servem para nada de util e ja
+# sao larguras que ninguem digita por engano.
+MIN_WRAP_COLUMNS = 20
+
 OUTPUT_DEFAULTS = {
     # UTF-8 com BOM na saida. Desligado por padrao: e o comportamento de
     # sempre, e um BOM que ninguem pediu tambem incomoda (git, diff, parsers
@@ -189,6 +213,15 @@ OUTPUT_DEFAULTS = {
     # UTF-8 sem BOM como ANSI e exibe mojibake — liga isto no
     # `pgn_tradutor_pro_settings.json` (ROADMAP 13.6).
     "utf8_bom": False,
+    # Requebra dos comentarios na gravacao, em colunas (ROADMAP 19, item 13). Zero
+    # desliga, que e o comportamento de sempre — comentario em linha unica. 80 e o
+    # export format do padrao PGN, o que editora espera receber.
+    #
+    # Desligado por padrao pelo mesmo motivo do BOM: quem le o PGN gerado neste
+    # programa nao ganha nada com a requebra, e ela muda TODA linha de comentario do
+    # arquivo — um diff entre a saida de antes e a de depois fica ilegivel. Quem
+    # entrega para editora liga.
+    "wrap_columns": 0,
 }
 
 
@@ -207,6 +240,15 @@ def read_output_settings(settings):
     bom = guardado.get("utf8_bom")
     if isinstance(bom, bool):
         valores["utf8_bom"] = bom
+
+    colunas = guardado.get("wrap_columns")
+    # `bool` e subclasse de `int` em Python: sem a checagem, um `true` no arquivo
+    # viraria requebra em 1 coluna — uma palavra por linha, que e o pior arquivo
+    # possivel e nao se parece com nada que o usuario pediu. O piso de 20 recusa o
+    # mesmo acidente escrito com numero.
+    if isinstance(colunas, int) and not isinstance(colunas, bool):
+        if colunas == 0 or colunas >= MIN_WRAP_COLUMNS:
+            valores["wrap_columns"] = colunas
     return valores
 
 

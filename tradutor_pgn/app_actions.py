@@ -14,8 +14,10 @@ from .backup_retention import (
 from .db_tools import backup_database as backup_database_file
 from .db_tools import apply_automatic_rules_to_database as apply_auto_rules_to_database
 from .db_tools import export_csv as export_translations_csv
+from .db_tools import export_tmx as export_translations_tmx
 from .db_tools import import_csv as import_translations_csv
 from .db_tools import fix_move_notation_in_database
+from .db_tools import reevaluate_quality_in_database
 from .db_tools import reset_glossary as reset_glossary_file
 from .db_tools import reset_translations as reset_translations_database
 from .db_tools import restore_database as restore_database_file
@@ -31,6 +33,33 @@ from .glossario import load_interactive_substitutions, report_glossary_error
 from .glossary_editor import open_glossary_editor
 from .pgn_spellcheck import normalize_pgn_metadata_path
 from .translation_worker import run_translation
+
+
+def _busy_with_translation(app, titulo, o_que, nota=""):
+    """Recusa uma escrita em massa enquanto uma traducao roda (garantia T5).
+
+    Um lugar so, porque a guarda estava em tres das seis ferramentas e faltava
+    nas outras tres — e as que faltavam incluiam "Restaurar BD", que e a pior:
+    restaurar um backup enquanto o worker grava produz um banco que nao e nem o
+    backup nem a execucao, com o cache em memoria apontando para linhas que ja
+    nao existem.
+
+    E uma MENSAGEM, e nao um `return` mudo, e nao e detalhe: os botoes de
+    "Ferramentas" sao criados anonimos e nao ha como desabilita-los, entao o
+    clique acontece. Sem dialogo, ele simplesmente nao faz nada e o usuario
+    conclui que o programa travou.
+
+    `nota` acrescenta o motivo quando ele nao e obvio pelo nome da acao.
+
+    Devolve `True` quando recusou, para quem chama sair na linha seguinte.
+    """
+    if not app.is_processing:
+        return False
+    messagebox.showinfo(
+        titulo,
+        f"Há uma tradução em andamento{nota}. Aguarde ou cancele antes de {o_que}.",
+    )
+    return True
 
 
 def report_glossary_failure(app, message):
@@ -122,6 +151,37 @@ def run_startup_cleanup(app):
         )
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+def reevaluate_quality_warnings(app):
+    """Botao "Reavaliar QA": recalcula os avisos do banco (garantia Q2)."""
+    if _busy_with_translation(app, "Avisos QA", "reavaliar os avisos de qualidade"):
+        return
+    reevaluate_quality_in_database(app)
+
+
+def run_startup_quality_check(app):
+    """Reavalia os avisos na abertura, se as heuristicas mudaram (garantia Q2).
+
+    Roda aqui, e nao dentro do `initialize_database`, e a diferenca importa: essa
+    funcao e chamada a cada clique de linha do editor, e reavaliar 200 mil linhas
+    ali seria travar a interface em qualquer navegacao. Aqui acontece uma vez, com
+    barra de progresso e cancelamento, como toda escrita em massa.
+
+    E automatico, e nao uma pergunta, porque `quality_warning` e cache derivado:
+    enquanto ele nao for recalculado, a contagem de avisos e o filtro "Avisos QA"
+    mostram o veredito das heuristicas antigas — a garantia R6 esta violada, e nao
+    ha decisao do usuario a tomar sobre isso. O que ele pode fazer e cancelar, e
+    ai a versao NAO e gravada e a reavaliacao volta a ser oferecida na proxima
+    abertura.
+
+    Agendado com `after`, para a janela principal aparecer primeiro: um dialogo de
+    progresso sobre uma tela ainda em branco parece que o programa travou ao
+    abrir.
+    """
+    app.root.after(200, lambda: reevaluate_quality_in_database(
+        app, announce_when_current=False
+    ))
 
 
 def select_file(app):
@@ -225,6 +285,11 @@ def _begin_translation_run(app):
 
     app.is_processing = True
     app.start_button.configure(state="disabled")
+    # Junto com o "Iniciar": as duas comecam uma traducao, e deixar so uma delas
+    # apagada dizia que a outra estava disponivel. A guarda em
+    # `retry_failed_translation` continua sendo a defesa de verdade; isto e o que
+    # a torna visivel antes do clique.
+    app.retry_button.configure(state="disabled")
     app.pause_button.configure(state="normal")
     app.resume_button.configure(state="disabled")
     app.cancel_button.configure(state="normal")
@@ -240,7 +305,9 @@ def retry_failed_translation(app):
     montada traduzindo para aquele idioma, e reaproveita-la com outro produziria
     um arquivo misturado sem que ninguem tivesse pedido.
     """
-    if app.is_processing:
+    if _busy_with_translation(
+        app, "Reprocessar falhas", "reprocessar os arquivos que ficaram devendo"
+    ):
         return
 
     record = load_failed_run()
@@ -319,6 +386,7 @@ def cancel_translation(app):
 
 def reset_buttons(app):
     app.start_button.configure(state="normal")
+    app.retry_button.configure(state="normal")
     app.pause_button.configure(state="disabled")
     app.resume_button.configure(state="disabled")
     app.cancel_button.configure(state="disabled")
@@ -342,19 +410,38 @@ def export_csv(app):
     export_translations_csv(app)
 
 
+def export_tmx(app):
+    # Sem guarda de traducao em andamento, pelo mesmo motivo do "Backup BD": so LE
+    # o banco. O que sair sera o acervo no instante da leitura, e uma execucao
+    # gravando durante a exportacao apenas nao aparece nela.
+    export_translations_tmx(app)
+
+
 def import_csv(app):
+    if _busy_with_translation(app, "Importar CSV", "importar traduções"):
+        return
     import_translations_csv(app)
 
 
 def backup_database(app):
+    # Sem guarda de proposito: um backup so LE o banco de trabalho, e a copia sai
+    # consistente mesmo com o worker escrevendo (a API de backup do SQLite ve o
+    # banco logico). Recusar aqui seria negar a copia justamente a quem quer
+    # guardar o estado de uma execucao longa.
     backup_database_file(app)
 
 
 def restore_database(app):
+    if _busy_with_translation(app, "Restaurar Banco de Dados", "restaurar o banco"):
+        return
     restore_database_file(app)
 
 
 def apply_automatic_rules(app):
+    if _busy_with_translation(
+        app, "Substituicoes automaticas", "reescrever as traduções gravadas"
+    ):
+        return
     apply_auto_rules_to_database(app, target_language=app.target_language.get())
 
 
@@ -366,12 +453,9 @@ def fix_move_notation(app):
     fazer: "de que idioma vieram estas traducoes" e exatamente o que aqueles
     controles significam em todo o resto do programa.
     """
-    if app.is_processing:
-        messagebox.showinfo(
-            "Corrigir Lances",
-            "Há uma tradução em andamento. Aguarde ou cancele antes de corrigir "
-            "as traduções já gravadas.",
-        )
+    if _busy_with_translation(
+        app, "Corrigir Lances", "corrigir as traduções já gravadas"
+    ):
         return
     fix_move_notation_in_database(
         app,
@@ -381,22 +465,15 @@ def fix_move_notation(app):
 
 
 def reset_translations(app):
-    if app.is_processing:
-        messagebox.showinfo(
-            "Zerar Traduções",
-            "Há uma tradução em andamento. Aguarde ou cancele antes de zerar o banco.",
-        )
+    if _busy_with_translation(app, "Zerar Traduções", "zerar o banco"):
         return
     reset_translations_database(app)
 
 
 def reset_glossary(app):
-    if app.is_processing:
-        messagebox.showinfo(
-            "Zerar Glossário",
-            "Há uma tradução em andamento, e ela usa o glossário. Aguarde ou "
-            "cancele antes de zerá-lo.",
-        )
+    if _busy_with_translation(
+        app, "Zerar Glossário", "zerá-lo", nota=", e ela usa o glossário"
+    ):
         return
     reset_glossary_file(app)
 
@@ -420,20 +497,36 @@ def _finish_metadata_normalization(app, summary=None, error=None):
         app.log_message(
             f"Arquivos -NORM.pgn ignorados: {summary['skipped_normalized']}"
         )
-    messagebox.showinfo(
-        "Normalizar PGN",
-        (
-            "Normalizacao concluida.\n\n"
-            f"Arquivos analisados: {summary['files']}\n"
-            f"Arquivos alterados: {summary['changed_files']}\n"
-            f"Sem alteracao: {summary['unchanged_files']}\n"
-            f"Correcoes aplicadas: {summary['changes']}"
-        ),
+
+    # Um arquivo ilegivel no meio do lote nao interrompe mais os outros, entao o
+    # resultado precisa dizer que ele existiu. Um "concluida" liso sobre um lote
+    # com falhas seria pior do que o erro que este item tirou do caminho.
+    falhas = summary.get("failed") or []
+    linha_falhas = f"Falharam: {len(falhas)}\n" if falhas else ""
+    for falha in falhas:
+        app.log_message(
+            f"[FALHA] {os.path.basename(falha['file'])}: {falha['error']}"
+        )
+
+    texto = (
+        f"Arquivos analisados: {summary['files']}\n"
+        f"Arquivos alterados: {summary['changed_files']}\n"
+        f"Sem alteracao: {summary['unchanged_files']}\n"
+        f"{linha_falhas}"
+        f"Correcoes aplicadas: {summary['changes']}"
     )
+    if falhas:
+        messagebox.showwarning(
+            "Normalizar PGN",
+            f"Normalizacao concluida, com {len(falhas)} arquivo(s) que "
+            f"falharam.\n\n{texto}\n\nOs motivos estao no log.",
+        )
+        return
+    messagebox.showinfo("Normalizar PGN", f"Normalizacao concluida.\n\n{texto}")
 
 
 def normalize_pgn_metadata(app):
-    if app.is_processing:
+    if _busy_with_translation(app, "Normalizar PGN", "normalizar os metadados"):
         return
 
     source_path = app.source_path.get().strip()
@@ -463,6 +556,7 @@ def normalize_pgn_metadata(app):
 
     app.is_processing = True
     app.start_button.configure(state="disabled")
+    app.retry_button.configure(state="disabled")
     app.pause_button.configure(state="disabled")
     app.resume_button.configure(state="disabled")
     app.cancel_button.configure(state="disabled")

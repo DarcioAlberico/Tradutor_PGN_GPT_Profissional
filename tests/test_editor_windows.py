@@ -20,6 +20,8 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
+import time
 import tkinter as tk
 import types
 import unittest
@@ -39,7 +41,12 @@ from tradutor_pgn import (
     translation_worker,
     window_utils,
 )
-from tradutor_pgn.database import initialize_database, save_translation
+from tradutor_pgn.database import (
+    initialize_database,
+    record_occurrences,
+    resolve_comment_ids,
+    save_translation,
+)
 from tradutor_pgn.glossario import (
     glossary_entry_priority,
     load_glossary_entry_details,
@@ -1677,6 +1684,1504 @@ class EditorLanguagePairTests(EditorWindowTestCase):
         self.assertEqual(
             edit_window.source_filter_code(edit_window.UNKNOWN_SOURCE_LABEL), ""
         )
+
+
+# ===========================================================================
+# Secao 17 — navegacao dentro do filtro, e a propagacao que se anuncia
+# ===========================================================================
+
+
+class SourceFilterNavigationTests(EditorWindowTestCase):
+    """Garantia R10: "Ir para ID" e "Proximo aviso" respeitam o filtro de origem.
+
+    Os dois caminhos consultavam o banco SEM `source_language`, embora as funcoes
+    aceitem o parametro e o `reload_rows` o passe. Com "Origem: Espanhol" ativo,
+    digitar um ID ingles calculava o offset na lista NAO filtrada e selecionava
+    uma linha espanhola arbitraria — sem mensagem. E a mesma classe do bug que a
+    garantia R7 fechou: navegar pela posicao errada.
+    """
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        # Muitas linhas inglesas primeiro (ids baixos) e algumas espanholas
+        # depois: assim o offset calculado na tabela inteira cai fora da lista
+        # espanhola, que e o que o bug produzia.
+        for i in range(6):
+            save_translation(cur, f"EN {i} rook rook rook", f"EN {i} torre", "pt", "en")
+        for i in range(3):
+            # Traducao igual ao original => aviso de qualidade garantido.
+            texto = f"ES {i} la torre la torre"
+            save_translation(cur, texto, texto, "pt", "es")
+        conn.commit()
+        conn.close()
+
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        tops = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
+        self.win = tops[-1]
+
+    def usar_origem(self, rotulo):
+        self.editor.source_menu.set(rotulo)
+        self.editor.change_language_filter()
+        self.pump()
+
+    def id_de(self, original):
+        conn = initialize_database(self.db_path)
+        try:
+            return conn.execute(
+                "SELECT id FROM comments WHERE original_comment = ?", (original,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def original_carregado(self):
+        return self.editor.current["orig"]
+
+    # ------------------------------------------------------------ Ir para ID
+
+    def test_an_id_outside_the_filter_is_refused_instead_of_landing_anywhere(self):
+        """O bug: com o filtro espanhol, um ID ingles selecionava uma linha
+        espanhola arbitraria e nada dizia."""
+        self.usar_origem("Espanhol")
+        alvo = self.id_de("EN 0 rook rook rook")
+
+        self.editor.go_id_text.set(str(alvo))
+        self.editor.go_to_id()
+        self.pump()
+
+        self.assertTrue(
+            self.original_carregado().startswith("ES 0"),
+            f"a selecao saiu do filtro: {self.original_carregado()!r}",
+        )
+        self.assertIn("não encontrado", self.editor.msg_label.cget("text"))
+
+    def test_an_id_inside_the_filter_is_found(self):
+        """Contraprova: dentro do filtro, a navegacao continua funcionando."""
+        self.usar_origem("Espanhol")
+        alvo = self.id_de("ES 2 la torre la torre")
+
+        self.editor.go_id_text.set(str(alvo))
+        self.editor.go_to_id()
+        self.pump()
+
+        self.assertTrue(self.original_carregado().startswith("ES 2"))
+
+    def test_the_offset_is_computed_inside_the_filter(self):
+        """A prova de que nao e sorte de pagina unica: sem o filtro na consulta,
+        o offset de `ES 0` seria 6 (a posicao dele na tabela inteira), e nao 0."""
+        self.usar_origem("Espanhol")
+        alvo = self.id_de("ES 0 la torre la torre")
+
+        self.editor.go_id_text.set(str(alvo))
+        self.editor.go_to_id()
+        self.pump()
+
+        self.assertEqual(self.editor.state.selected_index, 0)
+
+    # -------------------------------------------------------- Proximo aviso
+
+    def test_the_next_warning_stays_inside_the_filter(self):
+        """F7 varria as primeiras N linhas da tabela inteira usando o total
+        FILTRADO como limite, e anunciava o aviso de uma linha que nao esta na
+        tela."""
+        self.usar_origem("Espanhol")
+        self.editor.select_index(0)
+        self.pump()
+
+        self.editor.go_to_next_quality_warning()
+        self.pump()
+
+        self.assertTrue(
+            self.original_carregado().startswith("ES"),
+            f"F7 saiu do filtro: {self.original_carregado()!r}",
+        )
+
+    def test_with_no_warning_in_the_filter_it_says_so(self):
+        """As linhas inglesas nao tem aviso; as espanholas, sim. Filtrando pelo
+        ingles, a resposta certa e "nenhum" — e nao a linha espanhola."""
+        self.usar_origem("Inglês")
+
+        self.editor.go_to_next_quality_warning()
+        self.pump()
+
+        self.assertIn("Nenhum aviso QA", self.editor.msg_label.cget("text"))
+        self.assertFalse(self.original_carregado().startswith("ES"))
+
+    def test_the_scan_finds_the_warning_when_the_filter_has_one(self):
+        self.usar_origem("Espanhol")
+
+        self.editor.go_to_next_quality_warning()
+        self.pump()
+
+        self.assertIn("Aviso QA", self.editor.msg_label.cget("text"))
+
+
+class BulkVerificationConfirmationTests(EditorWindowTestCase):
+    """Garantia V1, na janela: a propagacao pergunta antes de marcar.
+
+    Ela acontecia sem nenhuma pergunta e era anunciada depois — "N iguais
+    também verificadas". O que ela marca sao N originais DIFERENTES que ninguem
+    leu; nas traducoes curtas isso da por revisado o texto errado.
+    """
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        save_translation(cur, "Draw.", "Empate.", "pt", "en")
+        save_translation(cur, "Checkmate.", "Empate.", "pt", "en")
+        conn.commit()
+        conn.close()
+
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        tops = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
+        self.win = tops[-1]
+
+    def estados(self):
+        conn = initialize_database(self.db_path)
+        try:
+            return dict(
+                conn.execute(
+                    "SELECT original_comment, verified FROM comments"
+                ).fetchall()
+            )
+        finally:
+            conn.close()
+
+    def abrir_o_draw(self):
+        for indice, linha in enumerate(self.editor.state.rows):
+            if linha[1] == "Draw.":
+                self.editor.select_index(indice)
+                self.pump()
+                return
+        self.fail("a linha 'Draw.' nao esta na lista")
+
+    def test_the_question_names_the_other_original(self):
+        self.abrir_o_draw()
+
+        self.click(self.button("Marcar como verificada"))
+
+        perguntas = [m for k, _t, m in self.dialogs.calls if k == "askyesno"]
+        self.assertEqual(len(perguntas), 1, "a propagacao devia ter perguntado")
+        self.assertIn("Checkmate.", perguntas[0])
+        self.assertIn("1 original(is) diferente(s)", perguntas[0])
+
+    def test_saying_yes_propagates(self):
+        self.dialogs.askyesno_result = True
+        self.abrir_o_draw()
+
+        self.click(self.button("Marcar como verificada"))
+
+        self.assertEqual(self.estados(), {"Draw.": 1, "Checkmate.": 1})
+
+    def test_saying_no_verifies_only_the_open_row(self):
+        """O que o item existe para permitir: recusar a propagacao sem perder a
+        verificacao que o usuario pediu."""
+        self.dialogs.askyesno_result = False
+        self.abrir_o_draw()
+
+        self.click(self.button("Marcar como verificada"))
+
+        self.assertEqual(self.estados(), {"Draw.": 1, "Checkmate.": 0})
+
+    def test_a_translation_without_twins_asks_nothing(self):
+        """A pergunta so aparece quando ha consequencia: um dialogo por
+        verificacao viraria ruido e seria clicado no automatico."""
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        save_translation(cur, "Good move.", "Bom lance.", "pt", "en")
+        conn.commit()
+        conn.close()
+        self.editor.reload_rows()
+        self.pump()
+
+        for indice, linha in enumerate(self.editor.state.rows):
+            if linha[1] == "Good move.":
+                self.editor.select_index(indice)
+                self.pump()
+                break
+        self.dialogs.calls.clear()
+
+        self.click(self.button("Marcar como verificada"))
+
+        self.assertEqual([k for k, _t, _m in self.dialogs.calls if k == "askyesno"], [])
+        self.assertEqual(self.estados()["Good move."], 1)
+
+
+class AddToGlossaryPopupTests(EditorWindowTestCase):
+    """O popup "Adicionar ao glossario" (ROADMAP 17.10).
+
+    Abria em tela cheia para tres campos e fechava sem validar nem avisar: os
+    tres desfechos — gravou, campo vazio, gravacao falhou — terminavam na MESMA
+    coisa, a janela fechada. Sem regra nenhuma no glossario e sem uma palavra na
+    tela, o usuario tinha todo motivo para achar que gravou.
+    """
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        save_translation(cur, "The rook", "a torre", "pt", "en")
+        conn.commit()
+        conn.close()
+
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [
+            w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)
+        ][-1]
+        self.editor.select_index(0)
+        self.pump()
+
+    def abrir_popup(self):
+        antes = set(self.editor.win.winfo_children())
+        self.editor.add_gloss_popup()
+        self.pump()
+        novos = [
+            w
+            for w in self.editor.win.winfo_children()
+            if isinstance(w, tk.Toplevel) and w not in antes
+        ]
+        self.assertTrue(novos, "o popup nao abriu")
+        self.pop = novos[-1]
+        self.addCleanup(self._fechar_popup)
+        return self.pop
+
+    def _fechar_popup(self):
+        try:
+            if self.pop.winfo_exists():
+                self.pop.destroy()
+        except tk.TclError:
+            pass
+
+    def widgets_do_popup(self, kind):
+        def desce(widget):
+            yield widget
+            for filho in widget.winfo_children():
+                yield from desce(filho)
+
+        return [w for w in desce(self.pop) if isinstance(w, kind)]
+
+    def botao_adicionar(self):
+        for widget in self.widgets_do_popup(edit_window.ctk.CTkButton):
+            if (widget.cget("text") or "").strip() == "Adicionar":
+                return widget
+        self.fail("o botao Adicionar nao esta no popup")
+
+    def entradas(self):
+        return self.widgets_do_popup(edit_window.ctk.CTkEntry)
+
+    def regras(self):
+        return load_glossary_entry_details(
+            glossario._default_substitutions_path(), prefer_db=False
+        )
+
+    def test_an_empty_original_warns_and_keeps_the_window_open(self):
+        self.abrir_popup()
+        self.dialogs.calls.clear()
+
+        self.botao_adicionar().invoke()
+        self.pump()
+
+        self.assertEqual(len(self.dialogs.messages("warning")), 1)
+        # A mensagem tem de ser a do campo QUE FALTA. Sem exigir isso, o teste
+        # passava tambem com a validacao do original removida: com os dois campos
+        # vazios, a validacao da substituicao dispara e produz um aviso, uma
+        # janela aberta e nenhuma regra gravada — indistinguivel do certo.
+        self.assertIn("original", self.dialogs.messages("warning")[0])
+        self.assertTrue(self.pop.winfo_exists(), "a janela nao pode fechar sem gravar")
+        self.assertEqual(self.regras(), [])
+
+    def test_an_empty_original_is_refused_even_with_a_replacement(self):
+        """Um original vazio com substituicao preenchida so pode cair na
+        validacao do original — nao ha outra que o pegue."""
+        self.abrir_popup()
+        self.entradas()[1].insert(0, "torre")
+        self.dialogs.calls.clear()
+
+        self.botao_adicionar().invoke()
+        self.pump()
+
+        self.assertEqual(len(self.dialogs.messages("warning")), 1)
+        self.assertIn("original", self.dialogs.messages("warning")[0])
+        self.assertEqual(self.regras(), [])
+
+    def test_an_empty_original_is_refused_in_a_cleanup_rule_too(self):
+        """A regra de limpeza dispensa a substituicao, e nao o original: sem
+        padrao nao ha o que casar, e a entrada seria lixo no arquivo."""
+        self.abrir_popup()
+        for widget in self.widgets_do_popup(edit_window.ctk.CTkSegmentedButton):
+            widget.set("Limpeza")
+        self.dialogs.calls.clear()
+
+        self.botao_adicionar().invoke()
+        self.pump()
+
+        self.assertEqual(len(self.dialogs.messages("warning")), 1)
+        self.assertIn("original", self.dialogs.messages("warning")[0])
+        self.assertEqual(self.regras(), [])
+
+    def test_a_suggestion_without_a_replacement_warns(self):
+        self.abrir_popup()
+        self.entradas()[0].insert(0, "rook")
+        self.dialogs.calls.clear()
+
+        self.botao_adicionar().invoke()
+        self.pump()
+
+        self.assertEqual(len(self.dialogs.messages("warning")), 1)
+        self.assertIn("substituição", self.dialogs.messages("warning")[0])
+        self.assertEqual(self.regras(), [])
+
+    def test_a_complete_rule_is_written_and_the_window_closes(self):
+        self.abrir_popup()
+        self.entradas()[0].insert(0, "rook")
+        self.entradas()[1].insert(0, "torre")
+        self.dialogs.calls.clear()
+
+        self.botao_adicionar().invoke()
+        self.pump()
+
+        self.assertEqual(self.dialogs.messages("warning"), [])
+        self.assertFalse(self.pop.winfo_exists(), "gravou: a janela devia fechar")
+        self.assertEqual([orig for orig, *_r in self.regras()], ["rook"])
+
+    def test_a_cleanup_rule_may_have_an_empty_replacement(self):
+        """Elas existem justamente para remover o trecho (garantia S14)."""
+        self.abrir_popup()
+        self.entradas()[0].insert(0, "lixo de conversao")
+        for widget in self.widgets_do_popup(edit_window.ctk.CTkSegmentedButton):
+            widget.set("Limpeza")
+        self.dialogs.calls.clear()
+
+        self.botao_adicionar().invoke()
+        self.pump()
+
+        self.assertEqual(self.dialogs.messages("warning"), [])
+        self.assertEqual(
+            [(orig, new) for orig, new, *_r in self.regras()],
+            [("lixo de conversao", "")],
+        )
+
+    def test_a_write_failure_says_so_instead_of_closing(self):
+        """Falha = janela fechada = usuario acha que gravou."""
+        self.abrir_popup()
+        self.entradas()[0].insert(0, "rook")
+        self.entradas()[1].insert(0, "torre")
+        original = edit_window.add_to_glossary
+        edit_window.add_to_glossary = lambda *a, **k: False
+        self.addCleanup(setattr, edit_window, "add_to_glossary", original)
+        self.dialogs.calls.clear()
+
+        self.botao_adicionar().invoke()
+        self.pump()
+
+        self.assertEqual(len(self.dialogs.messages("error")), 1)
+        self.assertTrue(self.pop.winfo_exists())
+
+    def test_it_does_not_open_maximized(self):
+        """Tres campos e um botao. Maximizado, o formulario ficava num canto de
+        uma janela do tamanho da tela, cobrindo o editor — e o texto que o
+        usuario acabou de selecionar para copiar dali."""
+        chamadas = []
+        original = edit_window.bring_window_to_front
+        edit_window.bring_window_to_front = (
+            lambda win, parent=None, maximize=False: chamadas.append(maximize)
+        )
+        self.addCleanup(setattr, edit_window, "bring_window_to_front", original)
+
+        self.editor.add_gloss_popup()
+        self.pump()
+        self.pop = [
+            w for w in self.editor.win.winfo_children() if isinstance(w, tk.Toplevel)
+        ][-1]
+        self.addCleanup(self._fechar_popup)
+
+        self.assertEqual(chamadas, [False])
+
+
+class HistoryWindowStaysOutOfTheWayTests(EditorWindowTestCase):
+    """A janela de historico e modeless PARA QUE a lista continue clicavel.
+
+    Ela abria maximizada, cobrindo exatamente a lista que a garantia R3 existe
+    para manter acessivel: maximizar anulava na tela o que o `transient` sem
+    `grab_set` garante no codigo (ROADMAP 17.10).
+    """
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        save_translation(cur, "The rook", "a torre", "pt", "en")
+        conn.commit()
+        conn.close()
+
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [
+            w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)
+        ][-1]
+        self.editor.select_index(0)
+        self.pump()
+
+    def test_it_does_not_open_maximized(self):
+        chamadas = []
+        original = history_window.bring_window_to_front
+        history_window.bring_window_to_front = (
+            lambda win, parent=None, maximize=False: chamadas.append(maximize)
+        )
+        self.addCleanup(
+            setattr, history_window, "bring_window_to_front", original
+        )
+
+        janela = history_window.HistoryWindow(
+            self.editor, self.editor.current["id"], "The rook"
+        )
+        self.pump()
+        self.addCleanup(janela.win.destroy)
+
+        self.assertEqual(chamadas, [False])
+
+
+# ===========================================================================
+# Secao 18 — o filtro por arquivo e a ordem de leitura, na janela
+# ===========================================================================
+
+
+class FileFilterLabelTests(unittest.TestCase):
+    """Os rotulos do menu de arquivos. Funcao pura, sem display."""
+
+    def test_the_label_is_the_file_name(self):
+        rotulos = edit_window.occurrence_file_labels(
+            [os.path.join("C:", "livro", "cap01.pgn")]
+        )
+        self.assertEqual(list(rotulos), ["cap01.pgn"])
+
+    def test_two_files_with_the_same_name_gain_the_folder(self):
+        """Sem isto, duas obras apareceriam no menu com o mesmo texto e escolher
+        uma seria sorteio."""
+        a = os.path.join("C:", "Livro A", "cap01.pgn")
+        b = os.path.join("C:", "Livro B", "cap01.pgn")
+
+        rotulos = edit_window.occurrence_file_labels([a, b])
+
+        self.assertEqual(len(rotulos), 2)
+        self.assertEqual(sorted(rotulos.values()), sorted([a, b]))
+        self.assertIn("Livro A/cap01.pgn", rotulos)
+
+    def test_the_same_folder_name_in_two_trees_falls_back_to_the_path(self):
+        """A pasta imediata tambem pode repetir. O caminho inteiro e feio e e a
+        unica coisa que sempre distingue."""
+        a = os.path.join("C:", "x", "livro", "cap01.pgn")
+        b = os.path.join("C:", "y", "livro", "cap01.pgn")
+
+        rotulos = edit_window.occurrence_file_labels([a, b])
+
+        self.assertEqual(len(rotulos), 2)
+        self.assertEqual(sorted(rotulos.values()), sorted([a, b]))
+
+    def test_the_order_of_the_menu_follows_the_bank(self):
+        """O banco devolve por nome de arquivo, que e como capitulo se ordena."""
+        caminhos = [f"/livro/cap0{i}.pgn" for i in (1, 2, 3)]
+        self.assertEqual(
+            list(edit_window.occurrence_file_labels(caminhos)),
+            ["cap01.pgn", "cap02.pgn", "cap03.pgn"],
+        )
+
+
+class OccurrenceContextLabelTests(unittest.TestCase):
+    """O rodape que diz de onde o original aberto veio."""
+
+    def test_no_occurrence_says_nothing(self):
+        """As linhas gravadas antes desta versao nao tem procedencia, e um rotulo
+        fixo apareceria em 201.607 delas sem informar nada."""
+        self.assertEqual(edit_window.format_occurrence_context([], 0), "")
+
+    def test_the_file_the_game_and_the_move_are_named(self):
+        texto = edit_window.format_occurrence_context(
+            [(os.path.join("C:", "livro", "cap07.pgn"), 3, 41, 24)], 1
+        )
+
+        self.assertIn("cap07.pgn", texto)
+        self.assertIn("partida 3", texto)
+        self.assertIn("lance 24", texto)
+
+    def test_the_comment_index_gives_way_to_the_move(self):
+        """Um localizador por posicao. O lance e o que um leitor de xadrez usa; o
+        indice do comentario e a ordem da extracao, que ninguem ve. Levar os dois
+        somava ~90 px a uma linha que ja estourava a faixa."""
+        texto = edit_window.format_occurrence_context(
+            [(os.path.join("C:", "livro", "cap07.pgn"), 3, 41, 24)], 1
+        )
+
+        self.assertNotIn("comentário", texto)
+
+    def test_without_a_move_the_comment_index_is_the_locator(self):
+        """Um comentario antes do primeiro lance nao tem lance — e "lance 0" seria
+        uma medicao que ninguem fez. Sem o lance, o indice e o que resta para achar
+        a linha na obra."""
+        texto = edit_window.format_occurrence_context(
+            [(os.path.join("C:", "livro", "cap07.pgn"), 1, 2, None)], 1
+        )
+
+        self.assertNotIn("lance", texto)
+        self.assertIn("comentário 2", texto)
+
+    def test_the_reused_translation_says_in_how_many_positions(self):
+        """A informacao que muda o que o revisor faz: editar aqui muda as doze."""
+        texto = edit_window.format_occurrence_context([("/livro/cap01.pgn", 1, 1, 1)], 12)
+
+        self.assertIn("e mais 11 posições (a mesma tradução)", texto)
+
+    def test_a_single_extra_position_is_singular(self):
+        texto = edit_window.format_occurrence_context([("/livro/cap01.pgn", 1, 1, 1)], 2)
+        self.assertIn("e mais 1 posição (a mesma tradução)", texto)
+
+    def test_a_single_position_does_not_claim_reuse(self):
+        texto = edit_window.format_occurrence_context([("/l/cap01.pgn", 1, 1, 1)], 1)
+        self.assertNotIn("a mesma tradução", texto)
+        self.assertNotIn("e mais", texto)
+
+    def test_only_one_position_is_spelled_out(self):
+        """O rodape divide a linha com o rotulo "Original:". Com duas posicoes por
+        extenso, o texto passava da linha e o Tk cortava o COMECO dele — o nome do
+        arquivo, que e a parte que responde a pergunta. Encontrado numa captura de
+        tela do app, e nao por teste nenhum."""
+        self.assertEqual(edit_window.OCCURRENCE_PREVIEW_LIMIT, 1)
+
+
+class EditorFileFilterTests(EditorWindowTestCase):
+    """O filtro por arquivo e a ordem de leitura da obra, na janela de verdade."""
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        self.arquivo = str(Path(self.base) / "cap01.pgn")
+        self.outro = str(Path(self.base) / "cap02.pgn")
+
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        # Inseridos fora da ordem de leitura, que e o que acontece de verdade: a
+        # ordem de insercao e a ordem em que a API respondeu.
+        for texto in ("C terceiro", "A primeiro", "B segundo", "sem arquivo"):
+            save_translation(cur, texto, f"T {texto}", "pt", "en")
+        conn.commit()
+        ids = resolve_comment_ids(
+            cur, "pt", ["A primeiro", "B segundo", "C terceiro"], "en"
+        )
+        record_occurrences(
+            cur,
+            self.arquivo,
+            [
+                (1, 1, 1, "A primeiro"),
+                (2, 1, 3, "B segundo"),
+                (3, 2, 12, "C terceiro"),
+            ],
+            ids,
+        )
+        record_occurrences(
+            cur, self.outro, [(1, 1, 1, "C terceiro")], ids
+        )
+        conn.commit()
+        conn.close()
+
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [
+            w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)
+        ][-1]
+
+    def rotulo_de(self, caminho):
+        for rotulo, valor in self.editor.file_options.items():
+            if valor == caminho:
+                return rotulo
+        self.fail(f"{caminho} nao esta no menu: {list(self.editor.file_options)}")
+
+    def usar_arquivo(self, caminho):
+        self.editor.file_menu.set(self.rotulo_de(caminho))
+        self.editor.change_file_filter()
+        self.pump()
+
+    def originais(self):
+        return [linha[1] for linha in self.editor.state.rows]
+
+    # ------------------------------------------------------------- o menu
+
+    def test_the_menu_lists_the_files_of_the_pair(self):
+        self.assertEqual(
+            self.editor.file_menu.cget("values"),
+            [edit_window.FILE_FILTER_ALL, "cap01.pgn", "cap02.pgn"],
+        )
+
+    def test_it_opens_showing_every_file(self):
+        """O filtro nao pode comecar escondendo o acervo: as linhas sem
+        procedencia — as 201.607 do banco real — so aparecem em "Todos"."""
+        self.assertEqual(self.editor.file_menu.get(), edit_window.FILE_FILTER_ALL)
+        self.assertIsNone(self.editor.selected_source_file())
+        self.assertIn("sem arquivo", self.originais())
+
+    # ------------------------------------------- filtro e ordem de leitura
+
+    def test_choosing_a_file_shows_the_work_in_reading_order(self):
+        """O item inteiro da secao 18: `ORDER BY id` nao e ordem de leitura."""
+        self.assertEqual(
+            self.originais(),
+            ["C terceiro", "A primeiro", "B segundo", "sem arquivo"],
+        )
+
+        self.usar_arquivo(self.arquivo)
+
+        self.assertEqual(
+            self.originais(), ["A primeiro", "B segundo", "C terceiro"]
+        )
+
+    def test_the_other_book_is_left_out(self):
+        self.usar_arquivo(self.outro)
+        self.assertEqual(self.originais(), ["C terceiro"])
+
+    def test_the_counts_follow_the_file(self):
+        self.usar_arquivo(self.outro)
+        self.assertEqual(self.editor.state.total_rows, 1)
+        self.assertIn("Todas: 1", self.editor.counts_label.cget("text"))
+
+    def test_the_label_announces_the_reading_order(self):
+        """Uma lista que reordena sem dizer nada parece embaralhada."""
+        self.assertNotIn("ordem de leitura", self.editor.page_label.cget("text"))
+
+        self.usar_arquivo(self.arquivo)
+
+        self.assertIn("ordem de leitura", self.editor.page_label.cget("text"))
+
+    def test_going_back_to_every_file_restores_the_id_order(self):
+        self.usar_arquivo(self.arquivo)
+        self.editor.file_menu.set(edit_window.FILE_FILTER_ALL)
+        self.editor.change_file_filter()
+        self.pump()
+
+        self.assertEqual(self.editor.selected_order(), edit_window.ORDER_BY_ID)
+        self.assertEqual(
+            self.originais(),
+            ["C terceiro", "A primeiro", "B segundo", "sem arquivo"],
+        )
+
+    # ------------------------------------------------- navegar dentro dela
+
+    def test_go_to_id_lands_on_the_right_row_in_reading_order(self):
+        """A classe de defeito da garantia R10, pelo lado da ordem.
+
+        "C terceiro" e o primeiro id do banco e o ULTIMO da obra: com o offset
+        contado por id, a janela iria para a posicao 0 e selecionaria "A
+        primeiro" — sem erro nenhum na tela.
+        """
+        self.usar_arquivo(self.arquivo)
+        conn = initialize_database(self.db_path)
+        alvo = conn.execute(
+            "SELECT id FROM comments WHERE original_comment = 'C terceiro'"
+        ).fetchone()[0]
+        conn.close()
+
+        self.editor.go_id_text.set(str(alvo))
+        self.editor.go_to_id()
+        self.pump()
+
+        self.assertEqual(self.editor.current["orig"], "C terceiro")
+        self.assertEqual(self.editor.state.selected_index, 2)
+
+    def test_an_id_outside_the_file_is_refused(self):
+        """O mesmo criterio do filtro de origem (R10): fora do filtro, a resposta
+        e "nao encontrado", e nao uma linha qualquer."""
+        self.usar_arquivo(self.outro)
+
+        conn = initialize_database(self.db_path)
+        alvo = conn.execute(
+            "SELECT id FROM comments WHERE original_comment = 'sem arquivo'"
+        ).fetchone()[0]
+        conn.close()
+
+        self.editor.go_id_text.set(str(alvo))
+        self.editor.go_to_id()
+        self.pump()
+
+        self.assertIn("não encontrado", self.editor.msg_label.cget("text"))
+        self.assertEqual(self.editor.current["orig"], "C terceiro")
+
+    def test_the_next_warning_stays_inside_the_file(self):
+        """F7 varre a lista FILTRADA. Sem o arquivo na consulta, ele varreria as
+        primeiras N linhas da tabela inteira usando o total da obra como limite."""
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        # Traducao igual ao original => aviso garantido, e so no arquivo de fora.
+        save_translation(cur, "la torre la torre", "la torre la torre", "pt", "en")
+        conn.commit()
+        conn.close()
+
+        self.usar_arquivo(self.arquivo)
+        self.editor.go_to_next_quality_warning()
+        self.pump()
+
+        self.assertIn("Nenhum aviso QA", self.editor.msg_label.cget("text"))
+        self.assertIn(self.editor.current["orig"], self.originais())
+
+    # ------------------------------------------------------ o que a tela diz
+
+    def test_the_footer_says_where_the_open_original_was_read(self):
+        self.usar_arquivo(self.arquivo)
+        self.editor.select_index(2)
+        self.pump()
+
+        texto = self.editor.origin_label.cget("text")
+        self.assertIn("cap01.pgn", texto)
+        self.assertIn("partida 2", texto)
+        self.assertIn("lance 12", texto)
+
+    def test_the_footer_prefers_the_file_being_read(self):
+        """"C terceiro" esta nos dois capitulos. Lendo o cap02, o rodape mostra a
+        posicao NELE — a do cap01 e verdade e responde outra pergunta.
+
+        Uma posicao cabe no rodape (a outra vira contagem), entao aqui a afirmacao
+        e exclusiva: o cap01 nao pode aparecer. Enquanto o rodape mostrava duas,
+        "cap02 aparece no texto" valia com e sem a preferencia — foi o que a
+        mutacao mostrou.
+        """
+        self.usar_arquivo(self.outro)
+        self.editor.select_index(0)
+        self.pump()
+
+        texto = self.editor.origin_label.cget("text")
+        self.assertIn("cap02.pgn", texto)
+        self.assertNotIn("cap01.pgn", texto)
+        self.assertIn("e mais 1 posição", texto)
+
+    def test_a_row_without_provenance_leaves_the_footer_empty(self):
+        indice = self.originais().index("sem arquivo")
+        self.editor.select_index(indice)
+        self.pump()
+
+        self.assertEqual(self.editor.origin_label.cget("text"), "")
+
+    def test_without_provenance_the_line_leaves_the_grid(self):
+        """Um rotulo vazio ainda ocupa uma linha, e as linhas sem procedencia sao a
+        maioria de um banco antigo: seria altura roubada do comentario em 201.607
+        delas para nao dizer nada."""
+        self.usar_arquivo(self.arquivo)
+        self.editor.select_index(0)
+        self.pump()
+        self.assertEqual(self.editor.origin_label.winfo_manager(), "grid")
+
+        self.editor.file_menu.set(edit_window.FILE_FILTER_ALL)
+        self.editor.change_file_filter()
+        indice = self.originais().index("sem arquivo")
+        self.editor.select_index(indice)
+        self.pump()
+
+        self.assertEqual(self.editor.origin_label.winfo_manager(), "")
+
+    def test_the_footer_is_cleared_when_no_row_is_open(self):
+        """A procedencia da linha anterior, sem linha aberta, e uma afirmacao
+        sobre o vazio — o mesmo criterio do par de idiomas."""
+        self.usar_arquivo(self.arquivo)
+        self.editor.select_index(0)
+        self.pump()
+        self.assertNotEqual(self.editor.origin_label.cget("text"), "")
+
+        self.editor.clear_current()
+        self.pump()
+
+        self.assertEqual(self.editor.origin_label.cget("text"), "")
+
+    # --------------------------------------------------- a escolha lembrada
+
+    def test_the_chosen_file_is_remembered_by_path(self):
+        """Revisar um livro leva dias; reabrir no capitulo em que se estava e o
+        ponto. Guardado pelo CAMINHO porque o rotulo depende de quais outros
+        arquivos existem hoje."""
+        self.usar_arquivo(self.arquivo)
+
+        gravado = settings.load_settings()["editor"]["file_filter"]
+
+        self.assertEqual(gravado, self.arquivo)
+
+    def test_a_remembered_file_that_no_longer_exists_falls_back_to_all(self):
+        """Uma lista vazia sem explicacao e o pior desfecho de um filtro
+        lembrado."""
+        self.editor.refresh_file_filter(restore=str(Path(self.base) / "sumiu.pgn"))
+        self.pump()
+
+        self.assertEqual(self.editor.file_menu.get(), edit_window.FILE_FILTER_ALL)
+        self.assertIsNone(self.editor.selected_source_file())
+
+    def test_changing_the_pair_rebuilds_the_file_list(self):
+        """Um par sem execucao nenhuma nao tem obra, e manter os arquivos do par
+        anterior daria um filtro que devolve zero linhas sempre."""
+        self.usar_arquivo(self.arquivo)
+
+        self.editor.target_menu.set("Inglês")
+        self.editor.change_language_filter()
+        self.pump()
+
+        self.assertEqual(
+            self.editor.file_menu.cget("values"), [edit_window.FILE_FILTER_ALL]
+        )
+        self.assertIsNone(self.editor.selected_source_file())
+
+    def test_the_source_filter_narrows_the_file_list(self):
+        """O menu de arquivos e do PAR: um arquivo do espanhol no menu do ingles
+        seria um filtro que nao devolve linha nenhuma."""
+        self.editor.source_menu.set("Espanhol")
+        self.editor.change_language_filter()
+        self.pump()
+
+        self.assertEqual(
+            self.editor.file_menu.cget("values"), [edit_window.FILE_FILTER_ALL]
+        )
+
+    # ------------------------------------------------- todos os filtros juntos
+
+    def test_every_list_query_gets_the_same_filters(self):
+        """A garantia R10 nasceu de duas consultas que recebiam um filtro a menos.
+
+        Este teste olha o CONTRATO em vez de um sintoma: o que a janela manda para
+        o banco sai de um lugar so, e o filtro por arquivo entra nele — senao a
+        proxima consulta acrescentada volta a esquecer.
+        """
+        self.usar_arquivo(self.arquivo)
+
+        filtros = self.editor.list_filters()
+        consulta = self.editor.list_query_args()
+
+        self.assertEqual(filtros["source_file"], self.arquivo)
+        self.assertEqual(consulta["order"], edit_window.ORDER_BY_OCCURRENCE)
+        self.assertEqual(
+            set(consulta) - set(filtros), {"order"}
+        )
+
+
+# ===========================================================================
+# Secao 19 — o fluxo do tradutor profissional, na janela
+# ===========================================================================
+
+
+class RowLabelTests(unittest.TestCase):
+    """O rotulo da linha da lista (ROADMAP 19, item 4). Funcao pura."""
+
+    def linha(self, verified=0, origem="en", aviso=0):
+        return (7, "the rook", "a torre", verified, "", "", "", origem, "pt", aviso)
+
+    def test_the_qa_marker_appears_only_with_a_warning(self):
+        """Sem o marcador, achar as linhas com aviso exigia trocar o filtro para
+        "Avisos QA" — e ai a lista deixava de mostrar o resto da obra."""
+        self.assertIn("QA", edit_window.row_label(self.linha(aviso=1)))
+        self.assertNotIn("QA", edit_window.row_label(self.linha(aviso=0)))
+
+    def test_the_marker_comes_from_the_column_and_not_from_the_text(self):
+        """A mesma resposta que o filtro usa (garantia R6). Aqui a traducao e
+        identica ao original — que geraria aviso se o rotulo reavaliasse o texto — e
+        a coluna diz zero: quem manda e a coluna."""
+        linha = (7, "igual", "igual", 0, "", "", "", "en", "pt", 0)
+
+        self.assertNotIn("QA", edit_window.row_label(linha))
+
+    def test_the_source_language_is_named(self):
+        """Em "Origem: Todos" nao havia como saber de que lingua a linha veio sem
+        carrega-la."""
+        self.assertIn("Inglês", edit_window.row_label(self.linha(origem="en")))
+        self.assertIn("Espanhol", edit_window.row_label(self.linha(origem="es")))
+
+    def test_a_row_without_the_new_fields_still_renders(self):
+        """As tuplas de sete campos existem nos testes e no historico da janela: elas
+        nao ganham marcador nem idioma, em vez de ganharem "sem aviso"."""
+        curta = (7, "the rook", "a torre", 1, "", "", "")
+
+        rotulo = edit_window.row_label(curta)
+
+        self.assertIn("#7", rotulo)
+        self.assertNotIn("QA", rotulo)
+
+    def test_the_status_and_the_id_survive_the_new_fields(self):
+        rotulo = edit_window.row_label(self.linha(verified=1, aviso=1))
+
+        self.assertTrue(rotulo.startswith("OK  #7"))
+
+
+class EditorShortcutTests(EditorWindowTestCase):
+    """`Ctrl+F` no texto e `Ctrl+L` na lista (ROADMAP 19, item 2)."""
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        save_translation(cur, "The rook is strong", "A torre e forte", "pt", "en")
+        conn.commit()
+        conn.close()
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [
+            w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)
+        ][-1]
+
+    def focados(self):
+        """Quais campos receberam `focus_set`, interceptando a chamada.
+
+        `focus_get()` nao serve aqui: a janela da suite nao e mapeada (o `root` fica
+        `withdraw`n para nada piscar na tela), e o Tk nao entrega foco a janela nao
+        visivel — ele devolve `None` para os dois casos, certo e errado. Interceptar
+        a chamada e a mesma decisao que a suite ja tomou para a geometria (SPEC,
+        secao 9, nota de 17.11): confere-se a decisao no codigo, nao o efeito do
+        gerenciador de janelas.
+        """
+        chamados = []
+        for nome, campo in (
+            ("texto", self.editor.editor_find_entry),
+            ("lista", self.editor.search_entry),
+        ):
+            original = campo.focus_set
+            campo.focus_set = (
+                lambda n=nome, o=original: (chamados.append(n), o())[0]
+            )
+            self.addCleanup(setattr, campo, "focus_set", original)
+        return chamados
+
+    def test_control_f_focuses_the_search_inside_the_text(self):
+        """Caindo no campo da lista, `Ctrl+F` fazia a coisa mais destrutiva
+        possivel: a busca da lista TROCA a pagina, e o revisor perdia o lugar."""
+        chamados = self.focados()
+
+        self.editor.focus_editor_find()
+
+        self.assertEqual(chamados, ["texto"])
+
+    def test_control_l_focuses_the_search_of_the_list(self):
+        chamados = self.focados()
+
+        self.editor.focus_search()
+
+        self.assertEqual(chamados, ["lista"])
+
+    def test_both_shortcuts_are_bound_to_the_right_method(self):
+        """O que o teste acima nao pega: os dois metodos existem e funcionam, e a
+        LIGACAO pode ter ficado trocada."""
+        self.assertIn("focus_editor_find", self.editor.win.bind("<Control-f>"))
+        self.assertIn("focus_search", self.editor.win.bind("<Control-l>"))
+
+
+class EditorBackStackTests(EditorWindowTestCase):
+    """Voltar de onde a busca tirou o revisor (ROADMAP 19, item 3)."""
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        for i in range(6):
+            save_translation(cur, f"comentario {i} rook", f"traducao {i} torre", "pt", "en")
+        save_translation(cur, "outpost eterno", "casa avancada", "pt", "en")
+        conn.commit()
+        conn.close()
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [
+            w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)
+        ][-1]
+
+    def buscar(self, texto):
+        self.editor.search_text.set(texto)
+        self.editor.apply_search()
+        self.pump()
+
+    def test_searching_and_going_back_restores_the_line_and_the_search(self):
+        """O caso do item: usar a busca como concordancia descartava a pagina em que
+        se estava. Guardar so o id nao bastaria — o id de antes nao esta no resultado
+        da busca nova, entao os FILTROS voltam junto."""
+        self.editor.select_index(2)
+        self.pump()
+        original = self.editor.current["orig"]
+
+        self.buscar("outpost")
+        self.assertEqual(self.editor.current["orig"], "outpost eterno")
+
+        self.editor.go_back()
+        self.pump()
+
+        self.assertEqual(self.editor.current["orig"], original)
+        self.assertEqual(self.editor.state.active_search, "")
+
+    def test_walking_to_the_next_line_does_not_stack(self):
+        """Um "voltar" que andasse linha por linha nao devolveria nada a quem revisa
+        um livro: a pilha e dos SALTOS."""
+        self.editor.select_index(0)
+        self.pump()
+        self.editor.navigate(1)
+        self.editor.navigate(1)
+        self.pump()
+
+        self.assertEqual(self.editor.state.history_stack, [])
+
+    def test_going_back_with_nothing_stacked_says_so(self):
+        self.editor.select_index(0)
+        self.pump()
+
+        self.assertFalse(self.editor.go_back())
+        self.assertIn("Nada para voltar", self.editor.msg_label.cget("text"))
+
+    def test_the_stack_survives_two_jumps_and_unwinds_in_order(self):
+        self.editor.select_index(0)
+        self.pump()
+        primeiro = self.editor.current["orig"]
+        self.buscar("comentario 3")
+        segundo = self.editor.current["orig"]
+        self.buscar("outpost")
+
+        self.editor.go_back()
+        self.pump()
+        self.assertEqual(self.editor.current["orig"], segundo)
+
+        self.editor.go_back()
+        self.pump()
+        self.assertEqual(self.editor.current["orig"], primeiro)
+
+    def test_a_line_that_vanished_does_not_block_the_stack(self):
+        """Um retrato que nao da para repor — a linha foi apagada por outra janela —
+        nao pode travar o "voltar": o PROXIMO da pilha assume.
+
+        Sao dois retratos de proposito, e o de cima e o morto: com um so, desistir no
+        primeiro e continuar dao o mesmo observavel ("Nada para voltar"), e o teste
+        passava com as duas producoes — foi o que a mutacao mostrou.
+        """
+        self.editor.select_index(0)
+        self.pump()
+        vivo = self.editor.current["orig"]
+
+        self.buscar("comentario 3")
+        morto = self.editor.current["id"]
+        self.buscar("outpost")
+
+        conn = initialize_database(self.db_path)
+        conn.execute("DELETE FROM comments WHERE id = ?", (morto,))
+        conn.commit()
+        conn.close()
+
+        self.assertTrue(self.editor.go_back())
+        self.pump()
+        self.assertEqual(self.editor.current["orig"], vivo)
+
+    def test_the_stack_is_capped(self):
+        """Uma sessao de revisao dura horas, e cada salto empilha um retrato."""
+        self.editor.select_index(0)
+        self.pump()
+        self.addCleanup(
+            setattr, edit_window, "HISTORY_STACK_LIMIT",
+            edit_window.HISTORY_STACK_LIMIT,
+        )
+        edit_window.HISTORY_STACK_LIMIT = 3
+
+        for i in range(6):
+            self.buscar(f"comentario {i % 5}")
+
+        self.assertLessEqual(len(self.editor.state.history_stack), 3)
+
+
+class SideBySideLayoutTests(EditorWindowTestCase):
+    """Lado a lado opcional (ROADMAP 19, item 1)."""
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        save_translation(cur, "The rook", "a torre", "pt", "en")
+        conn.commit()
+        conn.close()
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [
+            w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)
+        ][-1]
+
+    def test_it_starts_stacked(self):
+        """O comportamento de sempre: original acima da traducao."""
+        self.assertFalse(self.editor.side_by_side)
+        self.assertEqual(str(self.editor.texts_pane.cget("orient")), "vertical")
+
+    def test_the_toggle_changes_the_orientation(self):
+        self.editor.toggle_side_by_side()
+        self.pump()
+
+        self.assertTrue(self.editor.side_by_side)
+        self.assertEqual(str(self.editor.texts_pane.cget("orient")), "horizontal")
+
+    def test_the_text_survives_the_toggle(self):
+        """`configure(orient=...)` em vez de reconstruir os paineis: o texto
+        digitado, o desfazer e a selecao vivem DENTRO dos widgets."""
+        self.editor.select_index(0)
+        self.pump()
+        self.set_text(self.editor.trans_text, "traducao em andamento")
+
+        self.editor.toggle_side_by_side()
+        self.pump()
+
+        self.assertEqual(
+            self.text_value(self.editor.trans_text), "traducao em andamento"
+        )
+
+    def test_the_choice_is_remembered(self):
+        self.editor.toggle_side_by_side()
+        self.pump()
+
+        self.assertTrue(settings.load_settings()["editor"]["side_by_side"])
+
+    def test_each_orientation_has_its_own_sash_key(self):
+        """O divisor horizontal mede largura e o vertical mede altura: reaproveitar o
+        numero de um no outro poria o divisor num lugar sem relacao com o escolhido."""
+        vertical = self.editor.texts_sash_key()
+        self.editor.toggle_side_by_side()
+        horizontal = self.editor.texts_sash_key()
+
+        self.assertNotEqual(vertical, horizontal)
+        self.assertEqual((vertical, horizontal), ("texts_sash_y", "texts_sash_x"))
+
+    def test_the_saved_sash_uses_the_axis_of_the_active_orientation(self):
+        """`sash_coord` devolve o par, e o outro valor e sempre 1: gravar sempre o x
+        deixaria o divisor vertical com a posicao inutil."""
+        chaves = [
+            item for item in self._sashes_gravados() if item[0].startswith("texts_")
+        ]
+        self.assertEqual(len(chaves), 1)
+        self.assertEqual(chaves[0][3], 1, "vertical grava no eixo y")
+
+        self.editor.toggle_side_by_side()
+        chaves = [
+            item for item in self._sashes_gravados() if item[0].startswith("texts_")
+        ]
+        self.assertEqual(chaves[0][3], 0, "horizontal grava no eixo x")
+
+    def _sashes_gravados(self):
+        """Os `sashes` que a janela passa para `save_window_section`."""
+        capturado = {}
+        original = edit_window.save_window_section
+
+        def espiao(local_settings, section, values, window=None, sashes=()):
+            capturado["sashes"] = sashes
+            return original(local_settings, section, values, window=window, sashes=sashes)
+
+        edit_window.save_window_section = espiao
+        try:
+            self.editor.save_editor_settings()
+        finally:
+            edit_window.save_window_section = original
+        return capturado["sashes"]
+
+
+class BatchSelectionTests(EditorWindowTestCase):
+    """Selecao em lote na lista (ROADMAP 19, item 9)."""
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        for i in range(4):
+            save_translation(cur, f"orig {i}", f"trad {i}", "pt", "en")
+        conn.commit()
+        self.ids = [r[0] for r in cur.execute("SELECT id FROM comments ORDER BY id")]
+        conn.close()
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [
+            w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)
+        ][-1]
+
+    def verificadas(self):
+        conn = initialize_database(self.db_path)
+        try:
+            return [
+                r[0] for r in conn.execute(
+                    "SELECT id FROM comments WHERE verified = 1 ORDER BY id"
+                )
+            ]
+        finally:
+            conn.close()
+
+    def test_nothing_is_selected_at_first_and_the_actions_are_off(self):
+        """Um botao "Verificar" clicavel com nada marcado nao tem resposta boa."""
+        self.assertEqual(self.editor.state.selected_ids, set())
+        self.assertEqual(self.editor.btn_batch_verify.cget("state"), "disabled")
+        self.assertIn("nenhuma", self.editor.batch_label.cget("text"))
+
+    def test_toggling_a_row_selects_it_by_id(self):
+        self.editor.toggle_row_selection(1)
+
+        self.assertEqual(self.editor.state.selected_ids, {self.ids[1]})
+        self.assertEqual(self.editor.btn_batch_verify.cget("state"), "normal")
+        self.assertIn("1 selecionada", self.editor.batch_label.cget("text"))
+
+    def test_selecting_the_page_takes_every_row(self):
+        self.editor.select_page_rows()
+
+        self.assertEqual(self.editor.state.selected_ids, set(self.ids))
+
+    def test_verifying_the_selection_marks_only_those(self):
+        self.editor.toggle_row_selection(0)
+        self.editor.toggle_row_selection(2)
+        self.dialogs.askyesno_result = True
+
+        self.editor.verify_selected_rows()
+        self.pump()
+
+        self.assertEqual(self.verificadas(), [self.ids[0], self.ids[2]])
+
+    def test_verifying_asks_first(self):
+        """Marcar 100 linhas de uma vez e irreversivel por clique: a pergunta e a
+        unica defesa, e ela diz quantas."""
+        self.editor.select_page_rows()
+        self.dialogs.askyesno_result = False
+
+        self.editor.verify_selected_rows()
+        self.pump()
+
+        self.assertEqual(self.verificadas(), [])
+        self.assertTrue(
+            any("4 tradução" in m for m in self.dialogs.messages("askyesno")),
+            self.dialogs.messages("askyesno"),
+        )
+
+    def test_the_confirmation_says_that_equal_translations_are_untouched(self):
+        """A propagacao tem confirmacao propria (garantia V1). Encadea-la aqui daria
+        100 dialogos, ou — pior — nenhum."""
+        self.editor.toggle_row_selection(0)
+        self.dialogs.askyesno_result = False
+        self.editor.verify_selected_rows()
+
+        self.assertTrue(
+            any("NÃO" in m for m in self.dialogs.messages("askyesno")),
+            self.dialogs.messages("askyesno"),
+        )
+
+    def test_the_selection_is_cleared_after_verifying(self):
+        self.editor.toggle_row_selection(0)
+        self.dialogs.askyesno_result = True
+
+        self.editor.verify_selected_rows()
+        self.pump()
+
+        self.assertEqual(self.editor.state.selected_ids, set())
+
+    def test_changing_the_pair_drops_the_selection(self):
+        """Ela e por id, e um id do par anterior nao esta na lista nova: "Verificar"
+        marcaria linhas que o revisor nao ve."""
+        self.editor.select_page_rows()
+
+        self.editor.target_menu.set("Inglês")
+        self.editor.change_language_filter()
+        self.pump()
+
+        self.assertEqual(self.editor.state.selected_ids, set())
+
+    def test_exporting_the_selection_writes_only_those_rows(self):
+        self.editor.toggle_row_selection(1)
+        destino = Path(self.base) / "selecao.csv"
+        self.file_dialogs.answer = str(destino)
+
+        self.editor.export_selected_rows()
+        self.pump()
+
+        linhas = destino.read_text(encoding="utf-8-sig").splitlines()
+        self.assertEqual(len(linhas), 2, linhas)
+        self.assertTrue(linhas[1].startswith(f"{self.ids[1]},"))
+
+
+class ReviewStatusEditorTests(EditorWindowTestCase):
+    """Rejeitada, em duvida e a nota do revisor, na janela (item 12)."""
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        save_translation(cur, "the rook", "a torre", "pt", "en")
+        save_translation(cur, "the bishop", "o bispo", "pt", "en")
+        conn.commit()
+        conn.close()
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [
+            w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)
+        ][-1]
+        self.editor.select_index(0)
+        self.pump()
+
+    def status_no_banco(self, original):
+        conn = initialize_database(self.db_path)
+        try:
+            return conn.execute(
+                "SELECT review_status, reviewer_note, verified FROM comments"
+                " WHERE original_comment = ?",
+                (original,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+    def test_rejecting_saves_the_status_and_the_note_together(self):
+        """Na tela e um gesto so: quem rejeita escreve por que."""
+        self.editor.reviewer_note_text.set("termo inventado")
+
+        self.editor.set_review_status(edit_window.REVIEW_STATUS_REJECTED)
+        self.pump()
+
+        self.assertEqual(
+            self.status_no_banco("the rook"), ("rejected", "termo inventado", 0)
+        )
+
+    def test_the_note_of_the_open_line_is_loaded(self):
+        self.editor.reviewer_note_text.set("ver com o autor")
+        self.editor.set_review_status(edit_window.REVIEW_STATUS_DOUBT)
+        self.pump()
+
+        self.editor.select_index(1)
+        self.pump()
+        self.assertEqual(self.editor.reviewer_note_text.get(), "")
+
+        self.editor.select_index(0)
+        self.pump()
+        self.assertEqual(self.editor.reviewer_note_text.get(), "ver com o autor")
+
+    def test_clearing_the_current_line_clears_the_note(self):
+        """Deixada na tela, o proximo "Rejeitar" gravaria a nota na linha errada."""
+        self.editor.reviewer_note_text.set("nota da linha 1")
+        self.editor.set_review_status(edit_window.REVIEW_STATUS_DOUBT)
+        self.pump()
+
+        self.editor.clear_current()
+        self.pump()
+
+        self.assertEqual(self.editor.reviewer_note_text.get(), "")
+
+    def test_the_filter_shows_only_the_rejected_ones(self):
+        self.editor.set_review_status(edit_window.REVIEW_STATUS_REJECTED)
+        self.pump()
+
+        self.editor.status_segment.set("Rejeitadas")
+        self.editor.toggle_filter()
+        self.pump()
+
+        self.assertEqual([l[1] for l in self.editor.state.rows], ["the rook"])
+
+    def test_the_counts_label_names_the_new_states_only_when_they_exist(self):
+        """Um "Rejeitadas: 0" fixo no rodape de quem nunca usou o recurso e ruido."""
+        self.assertNotIn("Rejeitadas", self.editor.counts_label.cget("text"))
+
+        self.editor.set_review_status(edit_window.REVIEW_STATUS_REJECTED)
+        self.pump()
+
+        self.assertIn("Rejeitadas: 1", self.editor.counts_label.cget("text"))
+
+    def test_verifying_a_doubtful_line_clears_the_status(self):
+        """O lockstep visto da janela: uma traducao aceita nao esta "em duvida"."""
+        self.editor.set_review_status(edit_window.REVIEW_STATUS_DOUBT)
+        self.pump()
+
+        self.editor.save_changes(silent=True, mark_verified=True)
+        self.pump()
+
+        status, _nota, verified = self.status_no_banco("the rook")
+        self.assertEqual((status, verified), ("", 1))
+
+    def test_the_status_filter_labels_and_the_codes_agree(self):
+        """A lista de rotulos do botao segmentado e a traducao para o banco vivem no
+        MESMO dicionario: eram dois lugares, e acrescentar um filtro exigia mexer nos
+        dois — esquecer um dava um botao que nao filtra nada."""
+        self.assertEqual(
+            list(self.editor.status_segment.cget("values")),
+            list(edit_window.STATUS_FILTER_LABELS),
+        )
+        for rotulo, codigo in edit_window.STATUS_FILTER_LABELS.items():
+            self.editor.status_segment.set(rotulo)
+            self.assertEqual(self.editor.selected_status_filter(), codigo, rotulo)
+
+
+class DraftOffThreadTests(EditorWindowTestCase):
+    """O rascunho grava fora da thread da interface (ROADMAP 19, item 10)."""
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        save_translation(cur, "the rook", "a torre", "pt", "en")
+        conn.commit()
+        conn.close()
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [
+            w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)
+        ][-1]
+        self.editor.select_index(0)
+        self.pump()
+
+    def test_the_disk_write_happens_off_the_tk_thread(self):
+        """Cada gravacao rele o JSON inteiro, serializa e troca o arquivo de nome. Na
+        thread do Tk, isso e um engasgo na digitacao em disco lento."""
+        threads = []
+        original = edit_window.update_settings
+
+        def espiao(mutator, path=None):
+            threads.append(threading.current_thread())
+            return original(mutator, path)
+
+        edit_window.update_settings = espiao
+        self.addCleanup(setattr, edit_window, "update_settings", original)
+
+        self.set_text(self.editor.trans_text, "rascunho novo")
+        self.editor.persist_current_draft()
+        for _ in range(50):
+            if threads:
+                break
+            time.sleep(0.02)
+
+        self.assertTrue(threads, "a gravacao nao aconteceu")
+        self.assertNotIn(
+            threading.main_thread(), threads, "gravou na thread do Tk"
+        )
+
+    def test_the_draft_reaches_the_disk(self):
+        self.set_text(self.editor.trans_text, "rascunho que precisa sobreviver")
+        self.editor.persist_current_draft()
+
+        for _ in range(100):
+            rascunhos = settings.load_settings().get("editor_drafts") or {}
+            if rascunhos:
+                break
+            time.sleep(0.02)
+
+        self.assertTrue(rascunhos, "o rascunho nao chegou ao disco")
+        self.assertIn(
+            "rascunho que precisa sobreviver",
+            [d["text"] for d in rascunhos.values()],
+        )
+
+    def test_the_debounce_is_long_enough_to_be_worth_it(self):
+        """Eram 700 ms: quem digita uma frase para varias vezes por mais que isso — e
+        cada parada custava uma releitura e uma regravacao do JSON inteiro."""
+        self.assertGreaterEqual(edit_window.DRAFT_SAVE_DELAY_MS, 2000)
+
 
 if __name__ == "__main__":
     unittest.main()

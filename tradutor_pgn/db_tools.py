@@ -1,24 +1,37 @@
 import csv
+import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
+from xml.sax.saxutils import escape as xml_escape
 
 from .app_config import language_label
 from .chess_notation import fix_move_notation, supports_notation
 from .database import (
     MoveNotationCanceled,
+    QUALITY_VERSION_KEY,
+    QualityReevaluationCanceled,
+    WordCountCanceled,
     adopt_unknown_source_language,
     analyze_automatic_translation_updates,
     analyze_move_notation_updates,
     apply_automatic_translation_updates,
     apply_move_notation_updates,
     clear_all_translations,
+    count_words_by_pair,
     fetch_export_rows,
     fetch_review_rows,
+    get_daily_review_activity,
     get_database_stats,
+    get_quality_heuristics_version,
     initialize_database,
+    overwrite_translation_by_id,
+    quality_heuristics_are_current,
+    reevaluate_quality_warnings,
     save_translation,
+    set_db_metadata,
     set_translation_verified_by_id,
 )
 from .backup_retention import prune_database_backups
@@ -31,7 +44,8 @@ from .glossario import (
     load_automatic_substitutions,
     save_glossary_entries,
 )
-from .review_quality import summarize_quality_warnings
+from .review_quality import QUALITY_HEURISTICS_VERSION, summarize_quality_warnings
+from .stats_window import StatsWindow
 
 
 # Paginas por passo da copia do SQLite. E o intervalo entre duas chances de
@@ -47,6 +61,12 @@ EXPORT_CHUNK = 5000
 
 # Linhas entre duas verificacoes de cancelamento na importacao.
 IMPORT_PROGRESS_EVERY = 200
+
+# Quantas obras o resumo lista por extenso. O resumo e um `messagebox`, que nao
+# rola nem se copia (ROADMAP 19, item 7): uma pasta com 200 capitulos daria um
+# dialogo mais alto que a tela e o usuario perderia as linhas de cima, que sao as
+# que ele leu primeiro. O corte fica dito na ultima linha.
+FILE_PROGRESS_LIMIT = 20
 
 
 def _cancelable(work):
@@ -108,6 +128,21 @@ def create_database_backup(
     progress_callback=None,
     should_cancel=None,
 ):
+    """Copia o banco para `backups/` e devolve o caminho da copia.
+
+    **A origem e aberta com `sqlite3.connect` puro, e nao com
+    `initialize_database`.** A diferenca e o proposito de um backup: aquela
+    funcao roda a migracao de schema e o backfill do `quality_warning`, entao a
+    copia "de seguranca" feita antes de uma restauracao ALTERAVA o banco de
+    trabalho antes de copia-lo — e capturava o estado pos-migracao. Se a migracao
+    fosse a causa do problema que o usuario quer desfazer, o backup dela nao
+    tinha mais volta. Um backup copia o que esta la, como esta.
+
+    O `open_database` tambem esta fora por outro motivo: ele grava `journal_mode
+    = WAL` no arquivo. Num banco antigo em modo `delete`, o "backup" mudaria o
+    modo do original. Ler nao precisa de nenhum dos dois — a API de backup do
+    SQLite ve o banco logico, `-wal` incluido (ver `_copy_database`).
+    """
     source_path = Path(db_path)
     if backup_dir is None:
         backup_dir = source_path.parent / "backups"
@@ -118,7 +153,7 @@ def create_database_backup(
     timestamp = timestamp or datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_path = _unique_backup_path(backup_dir, source_path.stem, timestamp)
 
-    source_conn = initialize_database(str(source_path))
+    source_conn = sqlite3.connect(str(source_path))
     target_conn = sqlite3.connect(str(backup_path))
     try:
         _copy_database(source_conn, target_conn, progress_callback, should_cancel)
@@ -244,22 +279,6 @@ def _parse_verified(value):
     }
 
 
-def _fetch_comment_id(cursor, original_comment, target_language, source_language=""):
-    row = cursor.execute(
-        """
-        SELECT id
-        FROM comments
-        WHERE original_comment = ?
-          AND source_language = ?
-          AND target_language = ?
-        ORDER BY id
-        LIMIT 1
-        """,
-        (original_comment, source_language, target_language),
-    ).fetchone()
-    return row[0] if row else None
-
-
 def _read_translation_csv_rows(csv_path):
     with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -291,16 +310,38 @@ def _empty_import_stats(backup_path=None):
         "inserted": 0,
         "filled_empty": 0,
         "unchanged": 0,
+        # Subconjunto de `unchanged`: as linhas que o CSV ALTERARIA e que o modo
+        # padrao deixa como estao (garantia T1). Contadas em separado porque a
+        # previa precisa dizer o que a importacao vai deixar de fazer — era esse
+        # o buraco: 300 traducoes corrigidas na planilha voltavam como "sem
+        # alteracao" e o usuario descobria depois do trabalho feito.
+        "overwritable": 0,
+        # Das acima, quantas estao marcadas como verificadas. Sobrescrever uma
+        # dessas apaga revisao humana, e e a unica parte desta operacao que o
+        # backup nao devolve de graca.
+        "overwritable_verified": 0,
+        "overwritten": 0,
+        # Linhas ja preenchidas que o CSV marca como verificadas e que ainda nao
+        # estao. Sao aplicadas apenas no modo de sobrescrever, entao a previa as
+        # conta em separado para nao prometer no padrao o que so o outro modo faz.
+        "verified_on_existing": 0,
         "skipped": 0,
         "verified_applied": 0,
         "backup_path": backup_path,
     }
 
 
-def _existing_translation(cursor, original_comment, target_language, source_language=""):
+def _existing_row(cursor, original_comment, target_language, source_language=""):
+    """`(id, traducao, verified)` da linha do CSV, ou `None`.
+
+    Devolve as tres coisas de uma consulta so porque o modo de sobrescrever
+    precisa das tres: o id para gravar, o texto para saber se ha o que gravar, e o
+    `verified` anterior para nao contar como "verificada aplicada" uma linha que
+    ja estava verificada.
+    """
     return cursor.execute(
         """
-        SELECT translated_comment
+        SELECT id, translated_comment, verified
         FROM comments
         WHERE original_comment = ?
           AND source_language = ?
@@ -330,7 +371,13 @@ def analyze_translations_csv_import(
     progress_callback=None,
     should_cancel=None,
 ):
-    """Previa da importacao. `csv_rows` evita reler o arquivo (ROADMAP 2.10)."""
+    """Previa da importacao. `csv_rows` evita reler o arquivo (ROADMAP 2.10).
+
+    Nao depende do modo de gravacao: ela conta as duas coisas de uma passagem so
+    — o que a importacao padrao faria e o que ela deixaria de fazer
+    (`overwritable`). E o que permite oferecer a sobrescrita no mesmo dialogo em
+    que os numeros aparecem, em vez de fazer o usuario escolher antes de ver.
+    """
     if csv_rows is None:
         csv_rows = _read_translation_csv_rows(csv_path)
     stats = _empty_import_stats()
@@ -351,7 +398,7 @@ def analyze_translations_csv_import(
                 stats["skipped"] += 1
                 continue
 
-            existing = _existing_translation(
+            existing = _existing_row(
                 cursor, original, target_language, row["source_language"]
             )
             if existing is None:
@@ -360,13 +407,23 @@ def analyze_translations_csv_import(
                     stats["verified_applied"] += 1
                 continue
 
-            existing_translation = existing[0]
+            _row_id, existing_translation, existing_verified = existing
             if existing_translation is None or existing_translation == "":
                 stats["filled_empty"] += 1
                 if row["verified"]:
                     stats["verified_applied"] += 1
             else:
                 stats["unchanged"] += 1
+                # Texto identico nao e uma sobrescrita: nao ha o que gravar, nem
+                # em modo de sobrescrever. Contar essas linhas inflaria o numero
+                # do dialogo com o que a exportacao devolveu igual — que num CSV
+                # exportado e corrigido em parte e a grande maioria.
+                if existing_translation != translated:
+                    stats["overwritable"] += 1
+                    if existing_verified == 1:
+                        stats["overwritable_verified"] += 1
+                if row["verified"] and existing_verified != 1:
+                    stats["verified_on_existing"] += 1
     finally:
         conn.close()
 
@@ -381,12 +438,20 @@ def import_translations_from_csv(
     csv_rows=None,
     progress_callback=None,
     should_cancel=None,
+    overwrite_existing=False,
 ):
     """Aplica a importacao. `csv_rows` evita reler o arquivo (ROADMAP 2.10).
 
     Reaproveitar as linhas da previa nao e so economia: e o que garante que o
     usuario confirmou exatamente o que sera gravado. Lendo duas vezes, um arquivo
     alterado entre a previa e o "Sim" aplicaria numeros diferentes dos exibidos.
+
+    `overwrite_existing` e a decisao do usuario sobre as linhas que ja tem
+    traducao. O padrao continua sendo T1 — nunca sobrescrever —, e ligado ele
+    passa por `overwrite_translation_by_id`, que reavalia o aviso de qualidade
+    (R6) e registra no historico (R2). O flag e explicito, e nao inferido do
+    conteudo do CSV: um arquivo que difere em 300 linhas nao diz se aquilo e
+    correcao ou uma exportacao velha.
 
     Cancelar faz `rollback`: o banco fica como estava, e nao com metade das
     linhas do CSV aplicadas. O backup criado antes da importacao permanece —
@@ -429,17 +494,57 @@ def import_translations_from_csv(
                 stats["inserted"] += 1
             elif save_status == "filled_empty":
                 stats["filled_empty"] += 1
-            else:
+            elif not overwrite_existing:
                 stats["unchanged"] += 1
-
-            if save_status in {"inserted", "filled_empty"} and row["verified"]:
-                comment_id = _fetch_comment_id(
+            else:
+                # `save_translation` respeitou T1 e nao gravou nada; a
+                # sobrescrita e um segundo passo, sobre a linha que ele
+                # encontrou. Deixar as duas coisas em funcoes separadas e o que
+                # mantem T1 valendo para o worker, que nunca chama esta.
+                existente = _existing_row(
                     cursor, original, target_language, row["source_language"]
                 )
-                if comment_id is not None:
+                if existente is None:  # pragma: no cover - defensivo
+                    stats["unchanged"] += 1
+                    continue
+
+                comment_id, existing_translation, existing_verified = existente
+                ja_verificada = existing_verified == 1
+
+                if overwrite_translation_by_id(
+                    cursor, comment_id, translated, verified=row["verified"]
+                ):
+                    stats["overwritten"] += 1
+                    # Contada aqui, e nao no bloco de baixo: a sobrescrita ja
+                    # gravou o `verified` na mesma operacao. E so quando a linha
+                    # NAO estava verificada — reafirmar o que ja valia nao e uma
+                    # marca aplicada, e contar isso faria o numero do resultado
+                    # nao bater com o da previa.
+                    if row["verified"] and not ja_verificada:
+                        stats["verified_applied"] += 1
+                else:
+                    # Texto igual ao que estava: nada a sobrescrever. Continua
+                    # sendo "sem alteracao" — mas a coluna `verified` do CSV
+                    # ainda pode ter algo a dizer, e era ela a outra metade do
+                    # beco: editada na planilha, era descartada em silencio
+                    # porque so linhas inseridas ou preenchidas a recebiam.
+                    # Somente PROMOVE; ver `overwrite_translation_by_id`.
+                    stats["unchanged"] += 1
+                    if row["verified"]:
+                        stats["verified_applied"] += set_translation_verified_by_id(
+                            cursor,
+                            comment_id,
+                            True,
+                        )
+
+            if save_status in {"inserted", "filled_empty"} and row["verified"]:
+                existente = _existing_row(
+                    cursor, original, target_language, row["source_language"]
+                )
+                if existente is not None:
                     stats["verified_applied"] += set_translation_verified_by_id(
                         cursor,
-                        comment_id,
+                        existente[0],
                         True,
                     )
 
@@ -454,6 +559,10 @@ def import_translations_from_csv(
 
 
 EXPORT_CSV_HEADERS = [
+    # O id abre a lista (ROADMAP 19, item 8): ele e a unica coluna que identifica a
+    # linha sem depender do texto, e e o que torna o round-trip pela planilha
+    # conferivel. A importacao NAO o usa para casar — ver a SPEC, secao 10.
+    "id",
     "original_comment",
     "translated_comment",
     # Entre a traducao e o destino, na mesma ordem em que `fetch_export_rows`
@@ -465,6 +574,11 @@ EXPORT_CSV_HEADERS = [
     "created_at",
     "updated_at",
     "verified_at",
+    # Status de revisao e nota (ROADMAP 19, item 12). Exportados para que nada do que
+    # o revisor escreveu fique preso no programa; a importacao NAO os le de volta —
+    # ver o limite na secao 10 da SPEC.
+    "review_status",
+    "reviewer_note",
 ]
 
 
@@ -473,8 +587,13 @@ def export_translations_to_csv(
     save_path,
     progress_callback=None,
     should_cancel=None,
+    only_ids=None,
 ):
     """Escreve o CSV de traducoes. Devolve quantas linhas sairam.
+
+    `only_ids` exporta so aquelas linhas — e a selecao em lote do editor (ROADMAP
+    19, item 9). O total do progresso passa a ser o tamanho da selecao, senao a
+    barra iria de 30 linhas contra 200 mil e ficaria parada no zero.
 
     Estava embutida no callback do botao, entao exportar as 195.607 linhas
     congelava a janela por ~1,1 s sem nenhum sinal de vida. Extraida, ela roda
@@ -488,7 +607,10 @@ def export_translations_to_csv(
     conn = initialize_database(db_path)
     try:
         cursor = conn.cursor()
-        total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+        if only_ids is None:
+            total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+        else:
+            total = len(only_ids)
         if progress_callback is not None:
             progress_callback(0, total)
 
@@ -498,7 +620,7 @@ def export_translations_to_csv(
                 writer = csv.writer(f)
                 writer.writerow(EXPORT_CSV_HEADERS)
 
-                rows = fetch_export_rows(cursor)
+                rows = fetch_export_rows(cursor, only_ids=only_ids)
                 while True:
                     if should_cancel is not None and should_cancel():
                         raise TaskCanceled()
@@ -519,6 +641,179 @@ def export_translations_to_csv(
         conn.close()
 
     return escritas
+
+
+# O idioma de uma linha sem origem declarada, no TMX. `und` e o codigo ISO 639-2
+# de "indeterminado", e e a resposta certa para o balde que a secao 9.2 criou:
+# `xml:lang=""` nao e valido, inventar `en` seria mentir, e pular as linhas
+# deixaria de fora a maioria de um banco anterior aquela versao.
+TMX_UNKNOWN_LANGUAGE = "und"
+
+# O `srclang` do cabecalho. O acervo tem varios idiomas de origem ao mesmo tempo,
+# e `*all*` e o valor que o proprio padrao TMX define para isso — cada `<tu>` diz o
+# seu par nos `<tuv>`. Declarar um idioma so faria toda ferramenta importar o acervo
+# inteiro como se fosse dele.
+TMX_SOURCE_LANGUAGE = "*all*"
+
+# Caracteres que o XML 1.0 nao aceita nem escapados: os controles C0, menos tab,
+# LF e CR. Um deles no meio de um comentario produz um arquivo que nenhum parser
+# abre — e o erro apareceria na ferramenta do usuario, nao aqui.
+_XML_FORBIDDEN_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def tmx_language(code):
+    return code or TMX_UNKNOWN_LANGUAGE
+
+
+def tmx_segment(text):
+    """Texto pronto para dentro de um `<seg>`: escapado e sem controle proibido."""
+    return xml_escape(_XML_FORBIDDEN_RE.sub("", text or ""))
+
+
+def tmx_translation_unit(row):
+    """Um `<tu>` a partir da linha do banco, ou `None` se ela nao serve.
+
+    A linha vem na ordem de `fetch_export_rows`. Sem traducao nao ha unidade de
+    traducao: uma memoria com o lado de destino vazio nao ajuda ferramenta nenhuma
+    e polui a busca por concordancia de quem a importar.
+
+    O `tuid` e o `id` do banco (ROADMAP 19, item 8), que e o que permite reconhecer
+    a mesma unidade depois de uma ida e volta pelo OmegaT.
+    """
+    (
+        row_id, original, translated, source_language, target_language,
+        _verified, created_at, updated_at, _verified_at,
+    ) = row[:9]
+    if not (translated or "").strip():
+        return None
+
+    # `changedate`/`creationdate` no formato do TMX (`YYYYMMDDThhmmssZ`) sairiam de
+    # uma conversao dos carimbos do SQLite, que sao hora LOCAL sem fuso. Convertidos
+    # como se fossem UTC, ficariam com o erro do fuso embutido; declarados como
+    # locais, o padrao nao tem onde dizer isso. Ficam de fora, e o `id` continua
+    # sendo o que identifica a unidade — ver o limite na SPEC.
+    return (
+        f'  <tu tuid="{xml_escape(str(row_id))}">\n'
+        f'   <tuv xml:lang="{xml_escape(tmx_language(source_language))}">'
+        f"<seg>{tmx_segment(original)}</seg></tuv>\n"
+        f'   <tuv xml:lang="{xml_escape(tmx_language(target_language))}">'
+        f"<seg>{tmx_segment(translated)}</seg></tuv>\n"
+        f"  </tu>\n"
+    )
+
+
+def export_translations_to_tmx(
+    db_path,
+    save_path,
+    progress_callback=None,
+    should_cancel=None,
+):
+    """Escreve o acervo como TMX 1.4. Devolve quantas unidades sairam.
+
+    O acervo revisado **e** uma memoria de traducao (ROADMAP 19, item 8), e ate aqui
+    ela vivia num formato que so este programa le. TMX 1.4 abre em OmegaT, Trados e
+    memoQ, e transforma o trabalho acumulado em ativo portavel.
+
+    Escrito a mao, em blocos, e nao com `ElementTree`: montar a arvore de 200 mil
+    unidades em memoria antes de gravar a primeira e exatamente o que o item 2.9 do
+    ROADMAP tirou da exportacao de CSV. Aqui o custo seria maior, porque cada `<tu>`
+    e um objeto com quatro filhos.
+
+    Um arquivo cortado pelo meio e apagado, como o CSV: um TMX truncado nao fecha a
+    tag `</body>`, entao ele nao abre em ferramenta nenhuma — mas o usuario so
+    descobre isso na ferramenta, depois de ter contado com o arquivo.
+    """
+    conn = initialize_database(db_path)
+    try:
+        cursor = conn.cursor()
+        total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+        if progress_callback is not None:
+            progress_callback(0, total)
+
+        lidas = 0
+        unidades = 0
+        try:
+            with open(save_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(
+                    '<?xml version="1.0" encoding="utf-8"?>\n'
+                    '<tmx version="1.4">\n'
+                    ' <header creationtool="PGN Tradutor Pro"\n'
+                    '         creationtoolversion="1.0"\n'
+                    '         segtype="paragraph"\n'
+                    '         o-tmf="PGN Tradutor Pro"\n'
+                    '         adminlang="en"\n'
+                    f'         srclang="{TMX_SOURCE_LANGUAGE}"\n'
+                    '         datatype="plaintext"/>\n'
+                    " <body>\n"
+                )
+                rows = fetch_export_rows(cursor)
+                while True:
+                    if should_cancel is not None and should_cancel():
+                        raise TaskCanceled()
+                    bloco = rows.fetchmany(EXPORT_CHUNK)
+                    if not bloco:
+                        break
+                    unidades_do_bloco = [
+                        tmx_translation_unit(linha) for linha in bloco
+                    ]
+                    f.write("".join(u for u in unidades_do_bloco if u))
+                    unidades += sum(1 for u in unidades_do_bloco if u)
+                    lidas += len(bloco)
+                    if progress_callback is not None:
+                        progress_callback(lidas, total)
+                f.write(" </body>\n</tmx>\n")
+        except BaseException:
+            Path(save_path).unlink(missing_ok=True)
+            raise
+    finally:
+        conn.close()
+
+    return unidades
+
+
+def export_tmx(app, on_finish=None):
+    """Botao "Exportar TMX": pergunta o caminho e exporta em segundo plano."""
+    save_path = filedialog.asksaveasfilename(
+        title="Exportar memoria de traducao (TMX)",
+        defaultextension=".tmx",
+        filetypes=[("Memoria de traducao TMX", "*.tmx"), ("Todos os arquivos", "*.*")],
+    )
+    if not save_path:
+        if on_finish is not None:
+            on_finish()
+        return None
+
+    falhou, cancelado = _database_task_callbacks(
+        app, "Exportar TMX", "Erro ao exportar TMX", on_finish
+    )
+
+    def trabalho(task):
+        return export_translations_to_tmx(
+            app.output_db,
+            save_path,
+            progress_callback=task.report,
+            should_cancel=task.cancelado,
+        )
+
+    def exportado(unidades):
+        messagebox.showinfo(
+            "Exportar TMX",
+            f"{unidades} unidade(s) de traducao exportada(s) para:\n{save_path}\n\n"
+            "Linhas sem traducao nao entram: uma memoria com o lado de destino "
+            "vazio nao serve para concordancia.",
+        )
+        if on_finish is not None:
+            on_finish()
+
+    return run_with_progress(
+        app.root,
+        "Exportar TMX",
+        _cancelable(trabalho),
+        on_success=exportado,
+        on_error=falhou,
+        on_cancel=cancelado,
+        message="Escrevendo a memoria de traducao...",
+    )
 
 
 def analyze_database_automatic_rules(
@@ -811,15 +1106,61 @@ def format_quality_stats(summary, indent=""):
     return "\n".join(lines)
 
 
-def show_db_stats(app):
-    conn = None
+def format_file_progress(per_file, indent="  ", limit=FILE_PROGRESS_LIMIT):
+    """O progresso por obra, como o resumo o mostra (ROADMAP 18).
+
+    Sem nenhuma ocorrencia gravada a resposta nao e um bloco vazio: e a frase que
+    explica POR QUE ele esta vazio. Um banco de 201.607 linhas migrado ontem nao
+    tem procedencia nenhuma — nao havia de onde tirar — e ele ganha a primeira
+    quando um arquivo for processado de novo. Sem essa linha, a leitura obvia da
+    ausencia e "o programa nao registrou", que e a conclusao errada.
+
+    A porcentagem e sobre COMENTARIOS distintos, e nao sobre posicoes: e a
+    pergunta "quanto desta obra ja foi revisado" respondida em unidades de
+    trabalho, que e o que o revisor gasta. As posicoes aparecem ao lado porque sao
+    o tamanho do livro.
+    """
+    if not per_file:
+        return (
+            f"{indent}Nenhum arquivo registrado ainda. As traducoes ja gravadas nao\n"
+            f"{indent}tem procedencia — ela e registrada ao processar o PGN de novo."
+        )
+
+    linhas = []
+    for arquivo, posicoes, comentarios, verificadas, pendentes, avisos in per_file[:limit]:
+        porcento = (verificadas / comentarios * 100) if comentarios else 0.0
+        linhas.append(
+            f"{indent}- {os.path.basename(arquivo)}: {posicoes} posicoes | "
+            f"{comentarios} comentarios | verificadas: {verificadas} "
+            f"({porcento:.0f}%) | pendentes: {pendentes} | QA: {avisos}"
+        )
+    if len(per_file) > limit:
+        linhas.append(f"{indent}... e mais {len(per_file) - limit} arquivo(s).")
+    return "\n".join(linhas)
+
+
+def collect_database_stats(db_path, progress_callback=None, should_cancel=None):
+    """Tudo o que a janela de estatisticas mostra, computado FORA da thread do Tk.
+
+    Era o unico trabalho pesado do programa que continuava dentro do callback do
+    botao (ROADMAP 19, item 7): ele materializa as linhas com aviso de todos os
+    pares e agora tambem conta as palavras do banco inteiro. Aqui dentro nao ha
+    widget nenhum — quem exibe e `show_db_stats`, na thread principal.
+
+    A contagem de palavras vem por ultimo de proposito: e a parte mais longa, e
+    cancelar no meio dela nao perde as anteriores (ninguem as ve, mas o
+    cancelamento chega mais rapido do que se ela fosse a primeira).
+    """
+    conn = initialize_database(db_path)
     try:
-        conn = initialize_database(app.output_db)
         cursor = conn.cursor()
         stats = get_database_stats(cursor)
+
         quality_rows_by_language = {}
         all_quality_rows = []
         for source, target, _count, _verified, _pending in stats["per_language"]:
+            if should_cancel is not None and should_cancel():
+                raise TaskCanceled()
             # Só as linhas marcadas com aviso: o resumo exibido conta apenas
             # essas, entao carregar a tabela inteira era desperdicio puro
             # (~2 s de interface congelada e ~100 MB em 195 mil linhas).
@@ -829,33 +1170,128 @@ def show_db_stats(app):
             quality_rows_by_language[(source, target)] = lang_rows
             all_quality_rows.extend(lang_rows)
 
-        quality_summary = summarize_quality_warnings(all_quality_rows)
+        stats["quality"] = summarize_quality_warnings(all_quality_rows)
+        stats["quality_by_language"] = {
+            par: summarize_quality_warnings(linhas)
+            for par, linhas in quality_rows_by_language.items()
+        }
+        stats["daily"] = get_daily_review_activity(cursor)
 
-        msg = (
-            f"Total de traducoes armazenadas: {stats['total']}\n"
-            f"Verificadas: {stats['verified_total']}\n"
-            f"Pendentes: {stats['pending_total']}\n\n"
-            "QA geral:\n"
-            f"{format_quality_stats(quality_summary, '  ')}\n\n"
-            "Por par de idiomas (origem -> destino):\n"
-        )
-        for source, target, count, verified, pending in stats["per_language"]:
-            language_summary = summarize_quality_warnings(
-                quality_rows_by_language[(source, target)]
+        try:
+            por_par, total = count_words_by_pair(
+                cursor,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel,
             )
-            par = f"{language_label(source)} -> {target}"
-            msg += (
-                f"  - {par}: {count} | verificadas: {verified} | "
-                f"pendentes: {pending} | QA: {language_summary['warning_rows']}\n"
-            )
-
-        messagebox.showinfo("Estatisticas do Banco de Dados", msg)
-
-    except Exception as e:
-        messagebox.showerror("Erro", f"Nao foi possivel acessar o banco de dados:\n{e}")
+        except WordCountCanceled as exc:
+            raise TaskCanceled() from exc
+        stats["words_by_pair"] = por_par
+        stats["words"] = total
+        return stats
     finally:
-        if conn is not None:
-            conn.close()
+        conn.close()
+
+
+def format_word_counts(counts, indent="  "):
+    """As contagens de palavras de um recorte, em quatro linhas.
+
+    O original e a traducao aparecem separados porque servem a coisas diferentes: o
+    tradutor orca pelo ORIGINAL (e o que o cliente manda) e mede o trabalho feito
+    pela TRADUCAO. Os dois numeros juntos tambem dizem, de graca, quanto o idioma
+    de destino incha o texto — em portugues sobre ingles, sempre incha.
+    """
+    return "\n".join([
+        f"{indent}Palavras no original: {counts['original']:,}".replace(",", "."),
+        f"{indent}Palavras na traducao: {counts['translated']:,}".replace(",", "."),
+        f"{indent}Palavras verificadas: {counts['verified']:,}".replace(",", "."),
+        f"{indent}Palavras pendentes: {counts['pending']:,}".replace(",", "."),
+    ])
+
+
+def format_daily_activity(daily, indent="  "):
+    """Produtividade por dia, do historico de edicoes (ROADMAP 19, item 6)."""
+    if not daily:
+        return (
+            f"{indent}Nenhuma edicao registrada. O historico guarda uma linha por\n"
+            f"{indent}edicao feita no editor — traducao gravada pelo worker nao conta."
+        )
+    return "\n".join(
+        f"{indent}- {dia}: {edicoes} edicao(oes) | {palavras} palavra(s)"
+        for dia, edicoes, palavras in daily
+    )
+
+
+def format_database_stats(stats):
+    """O relatorio inteiro, como texto. Puro: e o que a janela mostra e copia."""
+    linhas = [
+        f"Total de traducoes armazenadas: {stats['total']}",
+        f"Verificadas: {stats['verified_total']}",
+        f"Pendentes: {stats['pending_total']}",
+        "",
+        "Palavras (acervo inteiro):",
+        format_word_counts(stats["words"]),
+        "",
+        "QA geral:",
+        format_quality_stats(stats["quality"], "  "),
+        "",
+        "Por par de idiomas (origem -> destino):",
+    ]
+    for source, target, count, verified, pending in stats["per_language"]:
+        resumo_qa = stats["quality_by_language"].get(
+            (source, target), {"warning_rows": 0}
+        )
+        palavras = stats["words_by_pair"].get(
+            (source, target),
+            {"original": 0, "translated": 0, "verified": 0, "pending": 0},
+        )
+        linhas.append(
+            f"  - {language_label(source)} -> {target}: {count} | "
+            f"verificadas: {verified} | pendentes: {pending} | "
+            f"QA: {resumo_qa['warning_rows']}"
+        )
+        linhas.append(
+            f"      palavras: {palavras['original']} no original, "
+            f"{palavras['translated']} na traducao"
+        )
+
+    # Por obra, e depois do par de idiomas: e a contagem que responde "quanto
+    # falta do capitulo 7", que o total por idioma nunca respondeu (ROADMAP 18).
+    linhas.extend([
+        "",
+        "Por arquivo de origem (obra):",
+        format_file_progress(stats["per_file"]),
+        "",
+        "Atividade de revisao por dia:",
+        format_daily_activity(stats["daily"]),
+    ])
+    return "\n".join(linhas)
+
+
+def show_db_stats(app):
+    """Abre a janela de estatisticas, computando o conteudo em segundo plano."""
+    def pronto(stats):
+        StatsWindow(app, format_database_stats(stats))
+
+    def falhou(erro):
+        messagebox.showerror(
+            "Erro", f"Nao foi possivel acessar o banco de dados:\n{erro}"
+        )
+
+    run_with_progress(
+        app.root,
+        "Estatisticas do Banco de Dados",
+        _cancelable(
+            lambda task: collect_database_stats(
+                app.output_db,
+                progress_callback=task.report,
+                should_cancel=task.cancelado,
+            )
+        ),
+        on_success=pronto,
+        on_error=falhou,
+        on_cancel=lambda _valor=None: None,
+        message="Somando as traducoes e contando as palavras...",
+    )
 
 
 def _database_task_callbacks(app, titulo, erro_prefixo, on_finish=None):
@@ -919,6 +1355,57 @@ def export_csv(app, on_finish=None):
     )
 
 
+OVERWRITE_CHOICE_MESSAGE = (
+    "Sim: importar SOBRESCREVENDO as traducoes que diferem.\n"
+    "Nao: importar sem sobrescrever (so novas e vazias).\n"
+    "Cancelar: nao importar nada."
+)
+
+
+def format_import_preview(preview):
+    """A previa da importacao, com o que ela NAO faria por padrao.
+
+    A linha das sobrescritiveis e o item: sem ela, um CSV com 300 traducoes
+    corrigidas na planilha aparecia como "Sem alteracao: 300" — verdade literal, e
+    a informacao que importa (o arquivo tem 300 correcoes prontas, e elas serao
+    descartadas) nao estava escrita em lugar nenhum.
+    """
+    linhas = [
+        "Previa da importacao:",
+        "",
+        f"Linhas lidas: {preview['total_rows']}",
+        f"Novas: {preview['inserted']}",
+        f"Vazias a preencher: {preview['filled_empty']}",
+        f"Sem alteracao: {preview['unchanged']}",
+        f"Ignoradas: {preview['skipped']}",
+        f"Verificadas a aplicar: {preview['verified_applied']}",
+    ]
+    if preview["overwritable"]:
+        linhas.extend(
+            [
+                "",
+                f"{preview['overwritable']} traducao(oes) do arquivo DIFEREM do que "
+                f"esta gravado.",
+            ]
+        )
+        if preview["overwritable_verified"]:
+            linhas.append(
+                f"Dessas, {preview['overwritable_verified']} estao marcadas como "
+                f"VERIFICADAS — sobrescrever apaga a revisao."
+            )
+        if preview["verified_on_existing"]:
+            linhas.append(
+                f"Sobrescrevendo, {preview['verified_on_existing']} linha(s) ja "
+                f"gravada(s) tambem passam a verificadas pelo CSV."
+            )
+    else:
+        linhas.extend(
+            ["", "Traducoes existentes preenchidas nao serao sobrescritas."]
+        )
+    linhas.extend(["", "Um backup sera criado antes de alterar o banco."])
+    return "\n".join(linhas)
+
+
 def import_csv(app, on_finish=None):
     csv_path = filedialog.askopenfilename(
         title="Selecionar CSV de traducoes",
@@ -941,7 +1428,7 @@ def import_csv(app, on_finish=None):
         falhou(exc)
         return
 
-    def aplicar():
+    def aplicar(overwrite_existing=False):
         def trabalho(task):
             return import_translations_from_csv(
                 app.output_db,
@@ -949,11 +1436,17 @@ def import_csv(app, on_finish=None):
                 csv_rows=csv_rows,
                 progress_callback=task.report,
                 should_cancel=task.cancelado,
+                overwrite_existing=overwrite_existing,
             )
 
         def importado(stats):
             if hasattr(app, "translation_cache"):
                 app.translation_cache.clear()
+            linha_sobrescritas = (
+                f"Sobrescritas: {stats['overwritten']}\n"
+                if overwrite_existing
+                else ""
+            )
             messagebox.showinfo(
                 "Importar CSV",
                 (
@@ -961,6 +1454,7 @@ def import_csv(app, on_finish=None):
                     f"Linhas lidas: {stats['total_rows']}\n"
                     f"Novas: {stats['inserted']}\n"
                     f"Vazias preenchidas: {stats['filled_empty']}\n"
+                    f"{linha_sobrescritas}"
                     f"Sem alteracao: {stats['unchanged']}\n"
                     f"Ignoradas: {stats['skipped']}\n"
                     f"Verificadas aplicadas: {stats['verified_applied']}\n\n"
@@ -981,26 +1475,32 @@ def import_csv(app, on_finish=None):
         )
 
     def analisado(preview):
-        confirmed = messagebox.askyesno(
+        if not preview["overwritable"]:
+            confirmed = messagebox.askyesno(
+                "Importar CSV",
+                format_import_preview(preview) + "\n\nDeseja continuar?",
+            )
+            if not confirmed:
+                if on_finish is not None:
+                    on_finish(None)
+                return
+            aplicar()
+            return
+
+        # Tres desfechos, e por isso tres botoes: importar sobrescrevendo,
+        # importar respeitando T1, ou nao importar. Reduzir a um "sim/nao" era o
+        # que fazia o fluxo natural — exportar, corrigir na planilha, importar —
+        # terminar em "Sem alteracao" para tudo, com o trabalho da planilha
+        # jogado fora sem que nada tivesse falhado.
+        escolha = messagebox.askyesnocancel(
             "Importar CSV",
-            (
-                "Previa da importacao:\n\n"
-                f"Linhas lidas: {preview['total_rows']}\n"
-                f"Novas: {preview['inserted']}\n"
-                f"Vazias a preencher: {preview['filled_empty']}\n"
-                f"Sem alteracao: {preview['unchanged']}\n"
-                f"Ignoradas: {preview['skipped']}\n"
-                f"Verificadas a aplicar: {preview['verified_applied']}\n\n"
-                "Um backup sera criado antes de alterar o banco.\n"
-                "Traducoes existentes preenchidas nao serao sobrescritas.\n\n"
-                "Deseja continuar?"
-            ),
+            format_import_preview(preview) + "\n\n" + OVERWRITE_CHOICE_MESSAGE,
         )
-        if not confirmed:
+        if escolha is None:
             if on_finish is not None:
                 on_finish(None)
             return
-        aplicar()
+        aplicar(overwrite_existing=bool(escolha))
 
     def analisar(task):
         return analyze_translations_csv_import(
@@ -1293,6 +1793,151 @@ def reset_glossary(app, on_finish=None):
     if on_finish is not None:
         on_finish(total)
 
+def _cancelable_quality(work):
+    """O mesmo tradutor de `_cancelable`, para a reavaliacao de qualidade."""
+    def wrapper(task):
+        try:
+            return work(task)
+        except QualityReevaluationCanceled:
+            raise TaskCanceled() from None
+
+    return wrapper
+
+
+def reevaluate_database_quality(
+    db_path,
+    progress_callback=None,
+    should_cancel=None,
+):
+    """Reavalia os avisos e, SO se terminar, grava a versao das heuristicas.
+
+    A ordem e o item (garantia Q2). Gravar a versao antes de reavaliar — ou
+    depois de um cancelamento — diria que o banco esta em dia com um veredito que
+    metade das linhas nao recebeu, e ninguem descobriria depois: a coluna nao tem
+    como acusar que esta velha. Cancelar deixa a marca antiga, e a proxima
+    abertura oferece de novo.
+
+    Nao faz backup, e e a unica escrita em massa sem um. `quality_warning` e
+    coluna DERIVADA: ela nao guarda nada que o usuario tenha escrito, e o que ela
+    contem pode ser recalculado a partir do texto a qualquer momento — que e
+    exatamente o que esta funcao faz. Um backup de 115 MB para proteger um bit
+    por linha, recomputavel, seria custo sem risco correspondente.
+    """
+    conn = initialize_database(db_path)
+    try:
+        stats = reevaluate_quality_warnings(
+            conn,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
+        )
+        set_db_metadata(conn, QUALITY_VERSION_KEY, QUALITY_HEURISTICS_VERSION)
+        conn.commit()
+    finally:
+        conn.close()
+
+    stats["version"] = QUALITY_HEURISTICS_VERSION
+    return stats
+
+
+def reevaluate_quality_in_database(app, on_finish=None, announce_when_current=True):
+    """Reavalia os avisos de qualidade do banco, com progresso e cancelamento.
+
+    `announce_when_current=False` e para a chamada da abertura: se o banco ja esta
+    em dia, ela nao pode abrir dialogo nenhum — seria um aviso por sessao dizendo
+    que nada aconteceu.
+    """
+    conn = None
+    try:
+        conn = initialize_database(app.output_db)
+        em_dia = quality_heuristics_are_current(conn)
+        versao_gravada = get_quality_heuristics_version(conn)
+        total = conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+    except Exception as exc:
+        messagebox.showerror("Avisos QA", f"Nao foi possivel ler o banco:\n{exc}")
+        if on_finish is not None:
+            on_finish(None)
+        return
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if em_dia:
+        if announce_when_current:
+            messagebox.showinfo(
+                "Avisos QA",
+                (
+                    "Os avisos de qualidade ja estao na versao atual das "
+                    f"heuristicas (v{QUALITY_HEURISTICS_VERSION}).\n\n"
+                    f"Traducoes avaliadas: {total}"
+                ),
+            )
+        if on_finish is not None:
+            on_finish(None)
+        return
+
+    if total == 0:
+        # Banco vazio: nao ha o que reavaliar, e a marca pode ser gravada na
+        # hora. Sem este atalho, toda primeira abertura — e todo banco recem
+        # zerado — abriria uma janela de progresso modal para varrer zero linha.
+        # E o caminho de um banco NOVO, que e o mais comum de todos.
+        try:
+            conn = initialize_database(app.output_db)
+            try:
+                set_db_metadata(conn, QUALITY_VERSION_KEY, QUALITY_HEURISTICS_VERSION)
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:  # pragma: no cover - defensivo
+            app.log_message(f"[AVISO] Nao foi possivel marcar a versao do QA: {exc}")
+        if on_finish is not None:
+            on_finish(None)
+        return
+
+    falhou, cancelado = _database_task_callbacks(
+        app, "Avisos QA", "Erro ao reavaliar os avisos de qualidade:", on_finish
+    )
+
+    def trabalho(task):
+        return reevaluate_database_quality(
+            app.output_db,
+            progress_callback=task.report,
+            should_cancel=task.cancelado,
+        )
+
+    def pronto(stats):
+        app.log_message(
+            f"Avisos QA reavaliados (heuristicas v{stats['version']}): "
+            f"{stats['scanned']} traducao(oes) examinadas, "
+            f"{stats['changed']} com veredito alterado."
+        )
+        messagebox.showinfo(
+            "Avisos QA",
+            (
+                "Avisos de qualidade reavaliados.\n\n"
+                f"Heuristicas: v{versao_gravada or 'anterior'} -> "
+                f"v{stats['version']}\n"
+                f"Traducoes examinadas: {stats['scanned']}\n"
+                f"Avisos que mudaram: {stats['changed']}"
+            ),
+        )
+        if on_finish is not None:
+            on_finish(stats)
+
+    app.log_message(
+        f"As heuristicas de avisos QA mudaram (v{versao_gravada or 'anterior'} -> "
+        f"v{QUALITY_HEURISTICS_VERSION}); reavaliando {total} traducao(oes)."
+    )
+    run_with_progress(
+        app.root,
+        "Avisos QA",
+        _cancelable_quality(trabalho),
+        on_success=pronto,
+        on_error=falhou,
+        on_cancel=cancelado,
+        message=f"Reavaliando {total} traducao(oes)...",
+    )
+
+
 def _cancelable_notation(work):
     """O mesmo tradutor de `_cancelable`, para a correcao de lances.
 
@@ -1397,6 +2042,16 @@ def _format_move_notation_preview(stats):
         f"Traducoes que serao alteradas: {stats['changed']}",
         f"Lances corrigidos: {stats['moves']}",
     ]
+    if stats.get("labeled"):
+        # A parte irreversivel, e a que faltava aqui. Corrigir reescreve texto
+        # que o backup desfaz; rotular declara de que idioma veio o acervo
+        # inteiro, e num banco com 200 mil linhas legadas esse "Sim" era dado sem
+        # que o numero tivesse aparecido em lugar nenhum. Antes so era dito no
+        # dialogo de RESULTADO, depois de feito.
+        linhas.append(
+            f"Linhas sem origem que serao rotuladas como "
+            f"'{stats['source_language']}': {stats['labeled']}"
+        )
     if stats["examples"]:
         linhas.append("")
         linhas.append("Exemplos:")

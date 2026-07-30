@@ -16,6 +16,7 @@ Precisam de display. Onde nao houver, as classes sao puladas.
 
 import os
 import threading
+import time
 import tkinter as tk
 import types
 import unittest
@@ -26,6 +27,15 @@ import customtkinter as ctk
 
 from gui_harness import GuiTestCase
 from tradutor_pgn import app as app_module
+from tradutor_pgn import db_tools
+from tradutor_pgn.background_task import BackgroundTask, TaskCanceled
+from tradutor_pgn.database import (
+    QualityReevaluationCanceled,
+    get_quality_heuristics_version,
+    initialize_database,
+    save_translation,
+)
+from tradutor_pgn.review_quality import QUALITY_HEURISTICS_VERSION
 from tradutor_pgn import app_actions, app_config, confirm_dialog, edit_window, settings
 from tradutor_pgn import glossary_editor
 from tradutor_pgn import main_window
@@ -53,6 +63,13 @@ class MainWindowTestCase(GuiTestCase):
         # Aqui ela sai do caminho; tem teste proprio, que usa esta referencia.
         self.startup_cleanup = app_actions.run_startup_cleanup
         self.patch(app_actions, "run_startup_cleanup", lambda _app: None)
+
+        # A conferencia dos avisos QA da abertura sai do caminho pelo mesmo
+        # motivo, e por um a mais: ela agenda com `after`, entao dispararia no
+        # meio de qualquer `pump()` de qualquer teste. Tem classe propria, que usa
+        # esta referencia.
+        self.startup_quality_check = app_actions.run_startup_quality_check
+        self.patch(app_actions, "run_startup_quality_check", lambda _app: None)
 
         self.app = app_module.PGNTranslatorApp(self.root)
         self.root.withdraw()
@@ -1136,6 +1153,422 @@ class RememberedChoicesTests(MainWindowTestCase):
             settings.load_settings()["editor_drafts"],
             {"chave": {"text": "rascunho vivo"}},
         )
+
+
+# ===========================================================================
+# Secao 17 — nenhuma escrita em massa roda durante uma traducao
+# ===========================================================================
+
+
+class MassWriteGuardTests(MainWindowTestCase):
+    """Garantia T5 (ROADMAP 17.2 e 17.3).
+
+    Tres das seis ferramentas de escrita verificavam `is_processing` e recusavam
+    com dialogo; **Restaurar BD, Importar CSV e Aplicar Automaticas nao
+    verificavam nada**. Restaurar um backup enquanto o worker grava produz um
+    banco que nao e nem o backup nem a execucao, com o cache em memoria
+    apontando para linhas que ja nao existem.
+
+    Agravante que faz a mensagem ser parte da correcao: os botoes de
+    "Ferramentas" sao criados anonimos e nao ha como desabilita-los. O clique
+    acontece — e sem dialogo ele nao faz nada e nao diz nada.
+    """
+
+    # Rotulo -> alias em `app_actions` que a acao delega.
+    FERRAMENTAS = {
+        "Restaurar BD": "restore_database_file",
+        "Importar CSV": "import_translations_csv",
+        "Aplicar Automaticas": "apply_auto_rules_to_database",
+        "Corrigir Lances": "fix_move_notation_in_database",
+        "Zerar Traduções": "reset_translations_database",
+        "Zerar Glossário": "reset_glossary_file",
+    }
+
+    def espiar(self):
+        chamadas = []
+        for alias in self.FERRAMENTAS.values():
+            self.patch(
+                app_actions,
+                alias,
+                lambda *_a, _nome=alias, **_k: chamadas.append(_nome),
+            )
+        return chamadas
+
+    def test_none_of_them_runs_during_a_translation(self):
+        chamadas = self.espiar()
+        self.app.is_processing = True
+
+        for rotulo in self.FERRAMENTAS:
+            self.button(rotulo).invoke()
+            self.pump()
+
+        self.assertEqual(chamadas, [], "alguma ferramenta rodou durante a traducao")
+
+    def test_each_one_says_why_instead_of_swallowing_the_click(self):
+        self.espiar()
+        self.app.is_processing = True
+
+        for rotulo in self.FERRAMENTAS:
+            with self.subTest(rotulo=rotulo):
+                self.dialogs.calls.clear()
+                self.button(rotulo).invoke()
+                self.pump()
+                mensagens = self.dialogs.messages("info")
+                self.assertEqual(len(mensagens), 1, f"{rotulo} nao disse nada")
+                self.assertIn("tradução em andamento", mensagens[0])
+
+    def test_all_of_them_run_when_nothing_is_running(self):
+        """Contraprova: a guarda nao pode ter trancado a ferramenta de vez."""
+        chamadas = self.espiar()
+        self.app.is_processing = False
+
+        for rotulo in self.FERRAMENTAS:
+            self.button(rotulo).invoke()
+            self.pump()
+
+        self.assertEqual(sorted(chamadas), sorted(self.FERRAMENTAS.values()))
+
+    def test_a_backup_is_still_allowed(self):
+        """`Backup BD` fica de fora de proposito: ele so LE o banco, e a copia
+        sai consistente mesmo com o worker escrevendo (a API de backup do SQLite
+        ve o banco logico). Recusar aqui negaria a copia justamente a quem quer
+        guardar o estado de uma execucao longa."""
+        chamadas = []
+        self.patch(
+            app_actions, "backup_database_file", lambda app: chamadas.append("backup")
+        )
+        self.app.is_processing = True
+
+        self.button("Backup BD").invoke()
+        self.pump()
+
+        self.assertEqual(chamadas, ["backup"])
+
+
+class SilentButtonTests(MainWindowTestCase):
+    """Os dois botoes que engoliam o clique (ROADMAP 17.3).
+
+    "Reprocessar Falhas" e "Normalizar PGN" comecavam com `if
+    app.is_processing: return` — retorno mudo. Clicar durante uma traducao nao
+    fazia nada e nao dizia nada, enquanto "Corrigir Lances", no mesmo caso, abria
+    um dialogo explicando.
+    """
+
+    def test_reprocessing_says_why_it_refuses(self):
+        chamadas, _pronto = self.worker_falso()
+        self.app.is_processing = True
+
+        self.button("Reprocessar Falhas").invoke()
+        self.pump()
+
+        self.assertEqual(chamadas, [])
+        self.assertEqual(len(self.dialogs.messages("info")), 1)
+        self.assertIn("tradução em andamento", self.dialogs.messages("info")[0])
+
+    def test_normalizing_says_why_it_refuses(self):
+        chamadas = []
+        self.patch(
+            app_actions,
+            "normalize_pgn_metadata_path",
+            lambda *a, **k: chamadas.append(a),
+        )
+        self.app.source_path.set(self.escreve_pgn("entrada.pgn"))
+        self.app.is_processing = True
+
+        self.button("Normalizar PGN").invoke()
+        self.pump()
+
+        self.assertEqual(chamadas, [])
+        self.assertEqual(len(self.dialogs.messages("info")), 1)
+        self.assertIn("tradução em andamento", self.dialogs.messages("info")[0])
+
+    def test_the_retry_button_is_disabled_with_the_others(self):
+        """As duas comecam uma traducao; deixar so uma apagada dizia que a outra
+        estava disponivel."""
+        self.assertEqual(self.app.retry_button.cget("state"), "normal")
+
+        app_actions._begin_translation_run(self.app)
+        self.pump()
+
+        self.assertEqual(self.app.start_button.cget("state"), "disabled")
+        self.assertEqual(self.app.retry_button.cget("state"), "disabled")
+
+    def test_the_retry_button_comes_back_with_the_others(self):
+        app_actions._begin_translation_run(self.app)
+        self.pump()
+
+        app_actions.reset_buttons(self.app)
+        self.pump()
+
+        self.assertEqual(self.app.retry_button.cget("state"), "normal")
+
+    def test_the_normalizer_also_disables_it(self):
+        """O normalizador poe `is_processing` de pe sem passar por
+        `_begin_translation_run`, e por isso tem a sua propria lista de botoes."""
+        self.patch(
+            app_actions, "normalize_pgn_metadata_path", lambda *a, **k: {}
+        )
+        self.app.source_path.set(self.escreve_pgn("entrada.pgn"))
+
+        # A thread do normalizador nao e iniciada: o que interessa e o estado
+        # que o clique deixa antes dela.
+        self.patch(app_actions.threading, "Thread", lambda **_k: types.SimpleNamespace(
+            start=lambda: None
+        ))
+
+        self.button("Normalizar PGN").invoke()
+        self.pump()
+
+        self.assertEqual(self.app.retry_button.cget("state"), "disabled")
+
+
+class NormalizerPartialFailureDialogTests(MainWindowTestCase):
+    """Um arquivo ilegivel nao interrompe mais o lote — e o resultado diz isso.
+
+    Um "concluida" liso sobre um lote com falhas seria pior do que o erro que a
+    correcao tirou do caminho (ROADMAP 17.10).
+    """
+
+    def resumo(self, falhas):
+        return {
+            "files": 3,
+            "changed_files": 2,
+            "unchanged_files": 0,
+            "changes": 4,
+            "skipped_normalized": 0,
+            "outputs": [],
+            "failed": falhas,
+        }
+
+    def test_a_run_with_failures_warns_and_counts_them(self):
+        app_actions._finish_metadata_normalization(
+            self.app,
+            summary=self.resumo([{"file": "b.pgn", "error": "permissao negada"}]),
+        )
+        self.pump()
+
+        avisos = self.dialogs.messages("warning")
+        self.assertEqual(len(avisos), 1)
+        self.assertIn("Falharam: 1", avisos[0])
+        self.assertEqual(self.dialogs.messages("info"), [])
+
+    def test_the_reason_goes_to_the_log(self):
+        app_actions._finish_metadata_normalization(
+            self.app,
+            summary=self.resumo([{"file": "b.pgn", "error": "permissao negada"}]),
+        )
+        self.pump()
+
+        self.assertIn("permissao negada", self.log())
+
+    def test_a_clean_run_still_reports_success(self):
+        app_actions._finish_metadata_normalization(self.app, summary=self.resumo([]))
+        self.pump()
+
+        infos = self.dialogs.messages("info")
+        self.assertEqual(len(infos), 1)
+        self.assertIn("Normalizacao concluida", infos[0])
+        self.assertNotIn("Falharam", infos[0])
+        self.assertEqual(self.dialogs.messages("warning"), [])
+
+
+# ===========================================================================
+# Secao 16 — a versao das heuristicas e a reavaliacao (garantia Q2)
+# ===========================================================================
+
+
+class QualityReevaluationToolTests(MainWindowTestCase):
+    """O botao "Reavaliar QA" e a conferencia da abertura."""
+
+    def setUp(self):
+        super().setUp()
+        # As tarefas de fundo rodam na hora: o que esta sob teste e a
+        # orquestracao, e a thread tem teste proprio em test_background_task.
+        self.patch(db_tools, "run_with_progress", self._rodar_sincrono)
+
+    def _rodar_sincrono(self, _parent, _titulo, work, on_success=None, on_cancel=None, **_kw):
+        try:
+            resultado = work(BackgroundTask())
+        except TaskCanceled:
+            if on_cancel is not None:
+                on_cancel(None)
+            return
+        if on_success is not None:
+            on_success(resultado)
+
+    def com_linhas(self, *pares):
+        """Grava traducoes no banco do sandbox e devolve a conexao fechada."""
+        conn = initialize_database(self.app.output_db)
+        cur = conn.cursor()
+        for original, traduzida in pares:
+            save_translation(cur, original, traduzida, "pt", "en")
+        conn.commit()
+        conn.close()
+
+    def versao(self):
+        conn = initialize_database(self.app.output_db)
+        try:
+            return get_quality_heuristics_version(conn)
+        finally:
+            conn.close()
+
+    def esperar(self, condicao, limite=5.0):
+        """Bombeia o Tk ate a condicao valer, ou desiste.
+
+        `run_startup_quality_check` agenda com `after`, entao o efeito dela nao
+        acontece dentro do `pump()` que vem logo depois — o callback so dispara
+        quando o atraso passa. Chamar a funcao interna direto testaria outra
+        coisa: o agendamento e parte do que este item decidiu (a janela aparece
+        primeiro).
+        """
+        fim = time.monotonic() + limite
+        while time.monotonic() < fim:
+            self.root.update()
+            if condicao():
+                return True
+            time.sleep(0.02)
+        return condicao()
+
+    def avisos_marcados(self):
+        conn = initialize_database(self.app.output_db)
+        try:
+            return conn.execute(
+                "SELECT COUNT(*) FROM comments WHERE quality_warning = 1"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    # -------------------------------------------------------------- o botao
+
+    def test_the_button_reaches_the_operation(self):
+        chamadas = []
+        self.patch(
+            app_actions,
+            "reevaluate_quality_in_database",
+            lambda app: chamadas.append(app),
+        )
+
+        self.button("Reavaliar QA").invoke()
+        self.pump()
+
+        self.assertEqual(chamadas, [self.app])
+
+    def test_it_does_not_run_during_a_translation(self):
+        """Garantia T5: e uma escrita em massa como as outras."""
+        chamadas = []
+        self.patch(
+            app_actions,
+            "reevaluate_quality_in_database",
+            lambda app: chamadas.append(app),
+        )
+        self.app.is_processing = True
+
+        self.button("Reavaliar QA").invoke()
+        self.pump()
+
+        self.assertEqual(chamadas, [])
+        self.assertEqual(len(self.dialogs.messages("info")), 1)
+        self.assertIn("tradução em andamento", self.dialogs.messages("info")[0])
+
+    def test_a_stale_database_is_reevaluated_and_stamped(self):
+        self.com_linhas(("The open file.", "O arquivo aberto."))
+        conn = initialize_database(self.app.output_db)
+        conn.execute("UPDATE comments SET quality_warning = 0")
+        conn.commit()
+        conn.close()
+
+        self.button("Reavaliar QA").invoke()
+        self.pump()
+
+        self.assertEqual(self.avisos_marcados(), 1)
+        self.assertEqual(self.versao(), QUALITY_HEURISTICS_VERSION)
+        self.assertIn("Avisos QA reavaliados", self.log())
+
+    def test_asking_again_says_it_is_already_current(self):
+        self.com_linhas(("The open file.", "O arquivo aberto."))
+        self.button("Reavaliar QA").invoke()
+        self.pump()
+        self.dialogs.calls.clear()
+
+        self.button("Reavaliar QA").invoke()
+        self.pump()
+
+        mensagens = self.dialogs.messages("info")
+        self.assertEqual(len(mensagens), 1)
+        self.assertIn("ja estao na versao atual", mensagens[0])
+
+    def test_cancelling_leaves_the_old_mark(self):
+        """A ordem e o item: gravar a versao depois de um cancelamento diria que
+        o banco esta em dia com um veredito que metade das linhas nao recebeu — e
+        ninguem descobriria, porque a coluna nao acusa que esta velha."""
+        self.com_linhas(("The open file.", "O arquivo aberto."))
+
+        def cancelar(_parent, _titulo, work, on_cancel=None, **_kw):
+            task = BackgroundTask()
+            task.cancel()
+            try:
+                work(task)
+            except (TaskCanceled, QualityReevaluationCanceled):
+                if on_cancel is not None:
+                    on_cancel(None)
+
+        self.patch(db_tools, "run_with_progress", cancelar)
+
+        self.button("Reavaliar QA").invoke()
+        self.pump()
+
+        self.assertEqual(self.versao(), 0, "cancelar nao pode marcar como em dia")
+
+    # ----------------------------------------------------- a abertura
+
+    def test_the_startup_check_stamps_an_empty_database_without_a_dialog(self):
+        """O caminho mais comum de todos — banco novo. Sem este atalho, toda
+        primeira abertura abriria uma janela de progresso modal para varrer zero
+        linha."""
+        abertas = []
+        self.patch(
+            db_tools,
+            "run_with_progress",
+            lambda *a, **k: abertas.append(a[1]),
+        )
+
+        self.startup_quality_check(self.app)
+
+        self.assertTrue(
+            self.esperar(lambda: self.versao() == QUALITY_HEURISTICS_VERSION),
+            "a abertura devia ter gravado a versao",
+        )
+        self.assertEqual(abertas, [], "nao devia abrir progresso nenhum")
+        self.assertEqual(self.dialogs.calls, [])
+
+    def test_the_startup_check_reevaluates_a_stale_database(self):
+        self.com_linhas(("The open file.", "O arquivo aberto."))
+        conn = initialize_database(self.app.output_db)
+        conn.execute("UPDATE comments SET quality_warning = 0")
+        conn.commit()
+        conn.close()
+
+        self.startup_quality_check(self.app)
+
+        self.assertTrue(
+            self.esperar(lambda: self.versao() == QUALITY_HEURISTICS_VERSION),
+            "a abertura devia ter reavaliado",
+        )
+        self.assertEqual(self.avisos_marcados(), 1)
+
+    def test_the_startup_check_is_silent_when_already_current(self):
+        """Um aviso por sessao dizendo que nada aconteceu seria pior do que
+        nenhum aviso."""
+        self.com_linhas(("The open file.", "O arquivo aberto."))
+        self.startup_quality_check(self.app)
+        self.esperar(lambda: self.versao() == QUALITY_HEURISTICS_VERSION)
+        self.dialogs.calls.clear()
+
+        self.startup_quality_check(self.app)
+        self.esperar(lambda: False, limite=0.6)
+
+        self.assertEqual(self.dialogs.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

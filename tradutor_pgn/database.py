@@ -1,7 +1,9 @@
+import os
 import re
 import sqlite3
 
-from .review_quality import evaluate_translation_quality
+from .review_quality import QUALITY_HEURISTICS_VERSION, evaluate_translation_quality
+from .word_count import add_word_counts, count_words, total_word_counts
 
 
 # Incrementar sempre que o schema mudar. Enquanto o PRAGMA user_version do
@@ -13,7 +15,43 @@ from .review_quality import evaluate_translation_quality
 # uma vez, e nunca sobre um banco que ja passou por ela — um `0. 35` inserido
 # DEPOIS da correcao e um espaco que estava no PGN de origem, e colapsa-lo
 # seria reescrever texto do usuario.
-SCHEMA_VERSION = 5
+#
+# A versao 6 acrescenta a tabela `db_metadata`, que e onde a versao das
+# heuristicas de qualidade passa a ser gravada (ROADMAP 16.2). Ela e uma tabela, e
+# nao um PRAGMA, por dois motivos: `user_version` ja esta em uso pelo schema, e um
+# `application_id` com numero de versao seria usar um campo que significa outra
+# coisa. Uma tabela de chave/valor tambem aceita a proxima marca sem migracao
+# nenhuma — e o mesmo desenho que o `glossario.db` ja usa.
+#
+# A versao 7 acrescenta a tabela `occurrences` (ROADMAP 18): onde cada comentario
+# foi lido — arquivo, partida, indice e numero do lance. Ela e uma tabela AO LADO,
+# e nao colunas em `comments`, porque a relacao e N para 1: o mesmo comentario em
+# doze livros continua sendo uma linha, uma traducao e uma revisao, que e o que a
+# `UNIQUE(original, origem, destino)` diz e o que o reuso do acervo vale. A
+# migracao cria a tabela e mais nada — ver `_create_occurrences_table` para por
+# que nao existe backfill.
+# A versao 8 acrescenta `review_status` e `reviewer_note` (ROADMAP 19, item 12):
+# "rejeitada" e "em duvida" nao caberiam no bit `verified`, e "voltar aqui com o
+# autor" e a anotacao que hoje vive no caderno de quem revisa. Sao dois `ALTER
+# TABLE` — nenhuma restricao muda, entao a tabela nao e reconstruida e a migracao
+# custa o mesmo em 6.500 ou em 201.607 linhas.
+SCHEMA_VERSION = 8
+
+# Os estados que uma linha NAO verificada pode ter, alem de "pendente".
+#
+# **`verified` continua sendo a autoridade sobre verificada/pendente**, e este
+# campo so refina o lado pendente. Guardar "verified" aqui tambem daria dois lugares
+# dizendo a mesma coisa — e um dia eles discordariam, sem nada quebrar, que e a
+# familia de defeito que a garantia R6 existe para nomear. Verificar uma linha LIMPA
+# o status: uma traducao aceita nao esta "em duvida".
+REVIEW_STATUS_PENDING = ""
+REVIEW_STATUS_REJECTED = "rejected"
+REVIEW_STATUS_DOUBT = "doubt"
+REVIEW_STATUSES = (
+    REVIEW_STATUS_PENDING,
+    REVIEW_STATUS_REJECTED,
+    REVIEW_STATUS_DOUBT,
+)
 
 # Idioma de origem de uma linha gravada antes de o programa perguntar qual era,
 # e tambem o de uma execucao em que o usuario escolheu "detectar
@@ -34,6 +72,37 @@ SEARCH_MODE_SUBSTRING = "substring"  # `LIKE '%x%'`: casa qualquer trecho
 SEARCH_MODES = (SEARCH_MODE_TERMS, SEARCH_MODE_SUBSTRING)
 
 FTS_TABLE = "comments_fts"
+
+# O caractere de escape do `LIKE`. Precisa ser declarado na consulta
+# (`ESCAPE '\'`) — o SQLite nao tem um padrao.
+LIKE_ESCAPE_CHAR = "\\"
+
+# Fragmento pronto para as duas colunas da busca por trecho. Fica aqui, e nao
+# montado no lugar de uso, porque o `ESCAPE` e o padrao escapado sao um par: um
+# sem o outro nao da erro nenhum, so volta a tratar o texto do usuario como
+# curinga.
+LIKE_MATCH_SQL = (
+    f"(original_comment LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}'"
+    f" OR translated_comment LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}')"
+)
+
+
+def escape_like_pattern(text):
+    """Neutraliza os curingas do `LIKE` no texto digitado pelo usuario.
+
+    `%` e `_` sao curingas, e sem isto o campo de busca era uma linguagem de
+    padroes que ninguem documentou: a busca mais natural do dominio — `[%eval`,
+    uma tag de comando do Lichess, que COMECA com `%` — casava toda linha que
+    tivesse `[` seguido de qualquer coisa e `eval` em algum lugar, e devolvia
+    lixo em vez de nada.
+
+    A barra vem primeiro na lista de proposito. Escapando `%` antes dela, as
+    barras recem-inseridas seriam escapadas de novo e o padrao passaria a
+    procurar pela propria barra.
+    """
+    for char in (LIKE_ESCAPE_CHAR, "%", "_"):
+        text = text.replace(char, LIKE_ESCAPE_CHAR + char)
+    return text
 
 
 def open_database(db_path):
@@ -82,15 +151,87 @@ def open_database(db_path):
     return conn
 
 
-def quality_warning_flag(original, translated):
+def quality_warning_flag(
+    original,
+    translated,
+    source_language=None,
+    target_language=None,
+):
     """1 se a traducao tem algum aviso de qualidade, 0 caso contrario.
 
     Materializado na coluna `quality_warning` para que contar e paginar por
     "com aviso" seja uma consulta SQL, e nao uma varredura da tabela inteira em
     Python a cada troca de pagina. Precisa ser a MESMA funcao que a interface
     usa para exibir os avisos, senao a contagem diverge do que aparece na tela.
+
+    **O par de idiomas nao e opcional na pratica.** A heuristica de terminologia
+    depende dele (ROADMAP 16.1), entao gravar sem o par e exibir com ele — ou o
+    contrario — faria a coluna divergir da tela sem nada quebrar, que e
+    exatamente o que a garantia R6 proibe. Todo chamador daqui tem o par a mao:
+    ou ele veio como argumento, ou esta na linha que ele acabou de ler.
     """
-    return 1 if evaluate_translation_quality(original, translated) else 0
+    return (
+        1
+        if evaluate_translation_quality(
+            original, translated, source_language, target_language
+        )
+        else 0
+    )
+
+
+DB_METADATA_TABLE = "db_metadata"
+QUALITY_VERSION_KEY = "quality_heuristics_version"
+
+OCCURRENCES_TABLE = "occurrences"
+
+# As duas ordens da lista do editor. `id` e a ordem de INSERCAO — a que sempre
+# existiu, e que mistura todos os PGN ja processados. `occurrence` e a ordem de
+# LEITURA de um arquivo, e so existe com um arquivo escolhido: sem ele, "a
+# proxima linha da obra" nao quer dizer nada, e ordenar pelo minimo de cada
+# comentario custaria uma agregacao da tabela inteira por pagina (garantia R5).
+ORDER_BY_ID = "id"
+ORDER_BY_OCCURRENCE = "occurrence"
+
+
+def get_db_metadata(conn, key):
+    """Valor da marca, ou `None`. Tolera o banco antes da migracao 6."""
+    try:
+        row = conn.execute(
+            f"SELECT value FROM {DB_METADATA_TABLE} WHERE key = ?", (key,)
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+def set_db_metadata(conn, key, value):
+    conn.execute(
+        f"""
+        INSERT INTO {DB_METADATA_TABLE} (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, str(value)),
+    )
+
+
+def get_quality_heuristics_version(conn):
+    """A versao das heuristicas com que este banco foi avaliado.
+
+    Zero quando a marca nao existe, e zero e a resposta certa: um banco gravado
+    antes desta versao teve os avisos calculados pelas cinco heuristicas
+    genericas, e nao ha como distinguir isso de "nunca calculado". As duas
+    respostas pedem a mesma acao — reavaliar.
+    """
+    valor = get_db_metadata(conn, QUALITY_VERSION_KEY)
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        return 0
+
+
+def quality_heuristics_are_current(conn):
+    return get_quality_heuristics_version(conn) == QUALITY_HEURISTICS_VERSION
 
 
 def initialize_database(db_path):
@@ -263,9 +404,63 @@ _COMMENTS_TABLE_SQL = """
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
         verified_at TEXT,
         quality_warning INTEGER,
+        review_status TEXT NOT NULL DEFAULT '',
+        reviewer_note TEXT,
         UNIQUE(original_comment, source_language, target_language)
     )
 """
+
+
+_OCCURRENCES_TABLE_SQL = f"""
+    CREATE TABLE IF NOT EXISTS {OCCURRENCES_TABLE} (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        comment_id INTEGER NOT NULL,
+        source_file TEXT NOT NULL,
+        game_index INTEGER,
+        comment_index INTEGER NOT NULL,
+        move_number INTEGER,
+        recorded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(source_file, comment_index),
+        FOREIGN KEY(comment_id) REFERENCES comments(id) ON DELETE CASCADE
+    )
+"""
+
+
+def _create_occurrences_table(conn):
+    """A tabela de ocorrencias e os indices dela (ROADMAP 18).
+
+    **Nao ha backfill, e nao e esquecimento.** Uma ocorrencia diz em que arquivo,
+    partida e lance o comentario foi lido, e isso nao esta em lugar nenhum do
+    banco: nao ha de onde derivar. As linhas ja gravadas — 201.607 no banco real —
+    ficam sem ocorrencia nenhuma e ganham a primeira quando o arquivo delas for
+    processado de novo. Inventar um arquivo para elas seria escrever uma
+    procedencia falsa, que e pior do que a ausencia.
+
+    A chave natural e `(source_file, comment_index)`: uma posicao da obra e
+    ocupada por um comentario, e nao por varios. Note que a UNIQUE **nao** inclui
+    `comment_id` de proposito — com ele, reprocessar um arquivo cujo comentario da
+    posicao 5 mudou de texto deixaria as duas afirmacoes no banco, e a posicao 5
+    passaria a ter dois donos.
+
+    `game_index` e `move_number` aceitam nulo porque podem faltar de verdade: um
+    comentario antes do primeiro lance da partida nao tem lance anterior. Um zero
+    ali se confundiria com medicao.
+
+    A `FOREIGN KEY` e declarativa. O SQLite so a aplica com `PRAGMA foreign_keys
+    = ON`, que este programa nao liga — o mesmo caso de `comment_history`, e a
+    mesma razao: o que apaga comentario em massa e o "Zerar Traducoes", que derruba
+    as tabelas juntas em vez de contar com o cascade.
+    """
+    conn.execute(_OCCURRENCES_TABLE_SQL)
+    # A UNIQUE ja indexa `(source_file, comment_index)`, que e a ordem de leitura
+    # e tambem o filtro por arquivo. O que falta e o caminho inverso: dado um
+    # comentario, onde ele aparece. O indice cobre a consulta inteira — a
+    # ordenacao por ocorrencia pergunta `MIN(comment_index)` por linha da pagina, e
+    # sem as tres colunas aqui cada pergunta viraria uma leitura da tabela.
+    conn.execute(f"""
+        CREATE INDEX IF NOT EXISTS idx_occurrences_comment
+        ON {OCCURRENCES_TABLE}(comment_id, source_file, comment_index)
+    """)
 
 
 def _add_source_language_column(conn):
@@ -380,7 +575,13 @@ def _collapse_decimal_cache_keys(conn):
             continue
         cursor.execute(
             "UPDATE comments SET original_comment = ?, quality_warning = ? WHERE id = ?",
-            (collapsed, quality_warning_flag(collapsed, translated), row_id),
+            (
+                collapsed,
+                quality_warning_flag(
+                    collapsed, translated, source_language, target_language
+                ),
+                row_id,
+            ),
         )
         changed += 1
 
@@ -395,6 +596,13 @@ def _migrate_database(conn, from_version=0):
     # quem acerta a tabela antiga sao os `ALTER TABLE` e a reconstrucao abaixo.
     cursor.execute(_COMMENTS_TABLE_SQL.format(name="IF NOT EXISTS comments"))
 
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS {DB_METADATA_TABLE} (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """)
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS comment_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -408,6 +616,8 @@ def _migrate_database(conn, from_version=0):
         FOREIGN KEY(comment_id) REFERENCES comments(id) ON DELETE CASCADE
     )
     """)
+
+    _create_occurrences_table(conn)
 
     cursor.execute("PRAGMA table_info(comments)")
     cols = [row[1] for row in cursor.fetchall()]
@@ -434,6 +644,20 @@ def _migrate_database(conn, from_version=0):
 
     if "quality_warning" not in cols:
         cursor.execute("ALTER TABLE comments ADD COLUMN quality_warning INTEGER")
+        conn.commit()
+
+    # ROADMAP 19, item 12. `NOT NULL DEFAULT ''` para que o filtro nunca precise
+    # distinguir vazio de nulo: uma linha antiga e uma linha nova sem status dizem a
+    # mesma coisa, e sao ambas "pendente".
+    if "review_status" not in cols:
+        cursor.execute(
+            "ALTER TABLE comments ADD COLUMN review_status TEXT NOT NULL DEFAULT ''"
+        )
+        conn.commit()
+    if "reviewer_note" not in cols:
+        # A nota, essa sim, aceita nulo: "nao escreveu nota" e diferente de "escreveu
+        # e apagou", e um dia isso pode importar. Quem le trata os dois como vazio.
+        cursor.execute("ALTER TABLE comments ADD COLUMN reviewer_note TEXT")
         conn.commit()
 
     # Por ultimo entre as mudancas de coluna: a reconstrucao copia o conjunto
@@ -510,6 +734,12 @@ def backfill_quality_warnings(conn, batch_size=5000):
 
     So roda no upgrade de schema; depois disso a coluna e mantida em cada
     escrita. Devolve quantas linhas foram preenchidas.
+
+    **Nao adianta a versao das heuristicas**, e essa e a diferenca entre ele e a
+    reavaliacao. Preencher `NULL` era suficiente enquanto o unico jeito de a
+    coluna estar errada fosse nao existir; com heuristica nova, as linhas ja
+    preenchidas e que estao erradas — e sao justamente as que ele nao olha
+    (ROADMAP 16.2).
     """
     cursor = conn.cursor()
     total = 0
@@ -517,7 +747,8 @@ def backfill_quality_warnings(conn, batch_size=5000):
     while True:
         rows = cursor.execute(
             """
-            SELECT id, original_comment, translated_comment
+            SELECT id, original_comment, translated_comment,
+                   source_language, target_language
             FROM comments
             WHERE quality_warning IS NULL
             LIMIT ?
@@ -530,14 +761,104 @@ def backfill_quality_warnings(conn, batch_size=5000):
         cursor.executemany(
             "UPDATE comments SET quality_warning = ? WHERE id = ?",
             [
-                (quality_warning_flag(original, translated), row_id)
-                for row_id, original, translated in rows
+                (
+                    quality_warning_flag(original, translated, source, target),
+                    row_id,
+                )
+                for row_id, original, translated, source, target in rows
             ],
         )
         conn.commit()
         total += len(rows)
 
     return total
+
+
+class QualityReevaluationCanceled(Exception):
+    """A reavaliacao dos avisos de qualidade foi interrompida pelo usuario."""
+
+
+def reevaluate_quality_warnings(
+    conn,
+    batch_size=2000,
+    progress_callback=None,
+    should_cancel=None,
+):
+    """Recalcula `quality_warning` em TODAS as linhas (garantia Q2).
+
+    E o mecanismo que a garantia R6 passa a exigir quando as heuristicas mudam:
+    a coluna e materializada, e uma regra nova deixa as linhas ja avaliadas com o
+    veredito velho. Medido no banco de desenvolvimento (6.500 linhas): 0,8 s, dos
+    quais 0,12 ms por linha sao a avaliacao — o que extrapola para ~25 s nas 200
+    mil linhas do banco real, uma vez por mudanca de heuristica.
+
+    Devolve `{"scanned": n, "changed": n}`. `changed` conta as linhas cujo
+    veredito virou, e nao as examinadas: rodar duas vezes devolve zero na segunda.
+
+    **A versao so e gravada por quem chama, e so no sucesso.** Cancelar no meio
+    deixa a marca velha de proposito — o banco esta metade reavaliado, e dizer que
+    ele esta em dia seria mentir de um jeito que ninguem descobre depois. Na
+    proxima abertura a reavaliacao e oferecida de novo.
+
+    O par de idiomas sai da propria linha, e nao de um argumento: a terminologia
+    e escopada por idioma, e o banco tem pares diferentes na mesma tabela.
+    """
+    cursor = conn.cursor()
+    write_cursor = conn.cursor()
+    total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+    if progress_callback is not None:
+        progress_callback(0, total)
+
+    scanned = 0
+    changed = 0
+    ultimo_id = 0
+    while True:
+        rows = cursor.execute(
+            """
+            SELECT id, original_comment, translated_comment,
+                   source_language, target_language, quality_warning
+            FROM comments
+            WHERE id > ?
+            ORDER BY id
+            LIMIT ?
+            """,
+            (ultimo_id, batch_size),
+        ).fetchall()
+        if not rows:
+            break
+
+        # Paginado por `id > ?`, e nao por OFFSET: o editor pode estar gravando
+        # no mesmo banco, e um OFFSET sobre uma tabela que muda pula ou repete
+        # linhas. Aqui a chave e estavel.
+        atualizacoes = []
+        for row_id, original, translated, source, target, antigo in rows:
+            scanned += 1
+            novo = quality_warning_flag(original, translated, source, target)
+            if novo != antigo:
+                atualizacoes.append((novo, row_id))
+            ultimo_id = row_id
+
+        if atualizacoes:
+            write_cursor.executemany(
+                "UPDATE comments SET quality_warning = ? WHERE id = ?",
+                atualizacoes,
+            )
+            changed += len(atualizacoes)
+
+        # Um commit por lote, e nao um por linha nem um so no fim: o primeiro
+        # cobraria 2.000 fsync por lote e o segundo manteria a transacao de
+        # escrita aberta durante a varredura inteira, travando o "Salvar" do
+        # editor (garantia C3).
+        conn.commit()
+
+        if progress_callback is not None:
+            progress_callback(scanned, total)
+        if should_cancel is not None and should_cancel():
+            raise QualityReevaluationCanceled()
+
+    if progress_callback is not None:
+        progress_callback(total, total)
+    return {"scanned": scanned, "changed": changed}
 
 
 # Quantos comentarios por consulta ao restringir a carga do cache. O limite de
@@ -792,7 +1113,10 @@ def save_translation(
                 translated_comment,
                 source_language,
                 target_language,
-                quality_warning_flag(original_comment, translated_comment),
+                quality_warning_flag(
+                    original_comment, translated_comment,
+                    source_language, target_language,
+                ),
             )
         )
         return "inserted" if cursor.rowcount else "unchanged"
@@ -811,7 +1135,10 @@ def save_translation(
             """,
             (
                 translated_comment,
-                quality_warning_flag(original_comment, translated_comment),
+                quality_warning_flag(
+                    original_comment, translated_comment,
+                    source_language, target_language,
+                ),
                 row_id,
             )
         )
@@ -828,6 +1155,307 @@ def save_translation(
         return "filled_empty" if cursor.rowcount else "unchanged"
 
     return "unchanged"
+
+def resolve_comment_ids(
+    cursor,
+    target_language,
+    comments,
+    source_language=SOURCE_LANGUAGE_UNKNOWN,
+):
+    """`{original: id}` das linhas que existem no par, para estes comentarios.
+
+    E o que falta entre a extracao e a tabela de ocorrencias: o worker sabe o
+    TEXTO de cada posicao do arquivo, e a ocorrencia precisa do `id` da linha. Um
+    comentario que nao esta no banco simplesmente nao aparece no dicionario — e o
+    caso de quem falhou na traducao ou foi esvaziado pela limpeza, que nao tem
+    linha nenhuma para apontar.
+
+    Em lotes e restrito ao par pelos mesmos motivos de `load_translation_cache`: o
+    limite de parametros do SQLite, e a chave `UNIQUE(original_comment,
+    source_language, target_language)` — que e tambem o indice que este `IN` usa.
+    """
+    source_language = source_language or SOURCE_LANGUAGE_UNKNOWN
+    procurados = list(dict.fromkeys(comments or []))
+    if not procurados:
+        return {}
+
+    encontrados = {}
+    for inicio in range(0, len(procurados), CACHE_LOOKUP_CHUNK):
+        lote = procurados[inicio:inicio + CACHE_LOOKUP_CHUNK]
+        marcadores = ",".join("?" * len(lote))
+        cursor.execute(
+            f"""
+            SELECT original_comment, id
+            FROM comments
+            WHERE target_language = ?
+              AND source_language = ?
+              AND original_comment IN ({marcadores})
+            """,
+            [target_language, source_language] + lote,
+        )
+        encontrados.update(cursor.fetchall())
+    return encontrados
+
+
+def record_occurrences(cursor, source_file, occurrences, comment_ids):
+    """Grava onde os comentarios deste arquivo foram lidos (ROADMAP 18).
+
+    `occurrences` e a lista que a extracao devolve — `(indice, partida, lance,
+    texto)` — e `comment_ids` o mapa de `resolve_comment_ids`. Devolve
+    `(gravadas, sem_linha)`.
+
+    **O conjunto do arquivo e SUBSTITUIDO, e nao mesclado.** O arquivo em disco e
+    a verdade sobre a obra: se ele encurtou, as posicoes que sobravam nao existem
+    mais, e mesclar as deixaria no banco apontando para comentarios que ninguem le
+    mais naquele lugar. O preco esta dito porque e real: uma execucao interrompida
+    no meio de um arquivo grava so as posicoes cujos comentarios ela conseguiu
+    traduzir, e o arquivo aparece menor do que e ate a execucao seguinte — que
+    encontra o resto no cache e completa o registro.
+
+    Um comentario sem linha no banco nao vira ocorrencia: a ocorrencia aponta para
+    uma traducao, e nao ha para onde apontar. Isso e contado e devolvido para o log
+    em vez de ficar em silencio — e a diferenca entre "esta obra tem 1.200
+    posicoes" e "tem 1.200 posicoes, 40 delas ainda sem traducao".
+
+    O caminho e normalizado AQUI, e nao em quem chama, porque ele e a chave da
+    tabela: `cap01.pgn` e `.\\cap01.pgn` sao o mesmo arquivo, e duas grafias
+    entrando no banco dariam duas obras no filtro do editor — cada uma com metade
+    do livro. Esta funcao e a unica porta pela qual caminho entra na tabela, e por
+    isso a normalizacao mora nela.
+    """
+    source_file = os.path.abspath(source_file)
+    cursor.execute(
+        f"DELETE FROM {OCCURRENCES_TABLE} WHERE source_file = ?", (source_file,)
+    )
+
+    linhas = []
+    sem_linha = 0
+    for comment_index, game_index, move_number, texto in occurrences:
+        comment_id = comment_ids.get(texto)
+        if comment_id is None:
+            sem_linha += 1
+            continue
+        linhas.append(
+            (comment_id, source_file, game_index, comment_index, move_number)
+        )
+
+    if linhas:
+        cursor.executemany(
+            f"""
+            INSERT INTO {OCCURRENCES_TABLE} (
+                comment_id, source_file, game_index, comment_index, move_number,
+                recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            linhas,
+        )
+    return len(linhas), sem_linha
+
+
+def list_occurrence_files(cursor, target_language, source_language=None):
+    """`[(arquivo, posicoes, comentarios)]` do par, em ordem de nome.
+
+    Alimenta o filtro por arquivo do editor. As duas contagens sao coisas
+    diferentes e as duas interessam: `posicoes` e o tamanho da obra (cada `{...}`
+    lido), `comentarios` e quantas linhas distintas do banco ela usa. A diferenca
+    entre elas e a repeticao interna do livro — trinta "Diagram" sao trinta
+    posicoes e um comentario.
+
+    Ordenado por nome de arquivo porque e assim que capitulo se ordena
+    (`cap01.pgn`, `cap02.pgn`), e nao por quantidade: o filtro e uma lista de
+    obras para escolher, nao um ranking.
+    """
+    clauses = ["c.target_language = ?"]
+    params = [target_language]
+    if source_language is not None:
+        clauses.append("c.source_language = ?")
+        params.append(source_language)
+
+    return cursor.execute(
+        f"""
+        SELECT o.source_file, COUNT(*), COUNT(DISTINCT o.comment_id)
+        FROM {OCCURRENCES_TABLE} o
+        JOIN comments c ON c.id = o.comment_id
+        WHERE {" AND ".join(clauses)}
+        GROUP BY o.source_file
+        ORDER BY o.source_file
+        """,
+        params,
+    ).fetchall()
+
+
+def fetch_comment_occurrences(cursor, comment_id, limit=3, preferred_file=None):
+    """`(lista, total)` das ocorrencias de um comentario, na ordem de leitura.
+
+    A lista vem cortada em `limit` e o total vem inteiro, de proposito: o editor
+    mostra as primeiras e diz quantas faltam. Um comentario reusado em doze livros
+    tem doze ocorrencias, e enfiar as doze no rodape esconderia o texto que o
+    revisor esta lendo — mas ocultar que existem seria pior, porque editar ali
+    muda a traducao das doze.
+
+    `preferred_file` poe as ocorrencias daquele arquivo na frente. Sem isso, quem
+    esta lendo o capitulo 7 com o filtro nele veria no rodape a posicao do mesmo
+    comentario no capitulo 1 — informacao verdadeira que responde outra pergunta,
+    e que na tela passa por erro.
+    """
+    total = cursor.execute(
+        f"SELECT COUNT(*) FROM {OCCURRENCES_TABLE} WHERE comment_id = ?",
+        (comment_id,),
+    ).fetchone()[0]
+    if not total:
+        return [], 0
+
+    # `source_file <> ?` vale 0 para o arquivo preferido e 1 para os outros, o que
+    # o poe primeiro sem precisar de uma segunda consulta. Sem preferencia, a
+    # coluna e constante e a ordenacao e a de sempre.
+    linhas = cursor.execute(
+        f"""
+        SELECT source_file, game_index, comment_index, move_number
+        FROM {OCCURRENCES_TABLE}
+        WHERE comment_id = ?
+        ORDER BY (source_file <> ?), source_file, comment_index
+        LIMIT ?
+        """,
+        (comment_id, preferred_file or "", limit),
+    ).fetchall()
+    return linhas, total
+
+
+def get_file_progress(cursor):
+    """Progresso por obra: `[(arquivo, posicoes, comentarios, verificadas, pendentes, avisos)]`.
+
+    O `DISTINCT` na subconsulta e o que torna o numero honesto. Somar `verified`
+    sobre o `JOIN` contaria a mesma linha uma vez por posicao, e um livro que
+    repete um comentario verificado trinta vezes apareceria com trinta
+    verificacoes — o progresso passaria de 100%.
+
+    `posicoes` sai de uma contagem separada porque e a unica coisa aqui que
+    CONTA repeticao: e o tamanho da obra em comentarios lidos.
+    """
+    posicoes = dict(
+        cursor.execute(
+            f"SELECT source_file, COUNT(*) FROM {OCCURRENCES_TABLE} GROUP BY source_file"
+        ).fetchall()
+    )
+    linhas = cursor.execute(
+        f"""
+        SELECT
+            source_file,
+            COUNT(*),
+            COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN verified <> 1 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN quality_warning = 1 THEN 1 ELSE 0 END), 0)
+        FROM (
+            SELECT DISTINCT
+                o.source_file AS source_file,
+                c.id AS id,
+                c.verified AS verified,
+                c.quality_warning AS quality_warning
+            FROM {OCCURRENCES_TABLE} o
+            JOIN comments c ON c.id = o.comment_id
+        )
+        GROUP BY source_file
+        ORDER BY source_file
+        """
+    ).fetchall()
+    return [
+        (arquivo, posicoes.get(arquivo, 0), comentarios, verificadas, pendentes, avisos)
+        for arquivo, comentarios, verificadas, pendentes, avisos in linhas
+    ]
+
+
+class WordCountCanceled(Exception):
+    """A contagem de palavras foi interrompida pelo usuario."""
+
+
+# Linhas por bloco na contagem de palavras. E o intervalo entre duas chances de
+# relatar progresso ou de desistir, e tambem o teto de memoria: 5.000 linhas de
+# comentario de livro sao ~2,5 MB, contra os ~100 MB de um `fetchall` do banco
+# real. Mesmo numero e mesmo motivo do bloco da exportacao de CSV.
+WORD_COUNT_CHUNK = 5000
+
+
+def count_words_by_pair(cursor, progress_callback=None, should_cancel=None):
+    """`{(origem, destino): contagens}` de palavras, mais o total.
+
+    Devolve `(por_par, total)`. As contagens sao as de `word_count`: linhas,
+    palavras do original, palavras da traducao, e as da traducao separadas por
+    status.
+
+    **Em Python, e nao em SQL**, e a decisao custa uma passagem pelo banco. O SQL
+    contaria espacos (`LENGTH(x) - LENGTH(REPLACE(x, ' ', ''))`), o que da a
+    resposta certa para o ORIGINAL — ele e achatado, com um espaco entre palavras —
+    e errada para a TRADUCAO, que passou pela mao do revisor e pode ter quebra de
+    linha, espaco duplo, tabulacao. Um relatorio de orcamento que conta certo de um
+    lado e por aproximacao do outro nao serve para cobrar.
+
+    Em blocos e com cancelamento porque a passagem le os dois textos de todas as
+    linhas: no banco real sao ~100 MB, e materializar isso de uma vez foi o que o
+    item 2.9 do ROADMAP passou a corrigir em toda parte.
+    """
+    total_linhas = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
+    if progress_callback is not None:
+        progress_callback(0, total_linhas)
+
+    por_par = {}
+    lidas = 0
+    linhas = cursor.execute(
+        """
+        SELECT source_language, target_language, original_comment,
+               translated_comment, verified
+        FROM comments
+        ORDER BY id
+        """
+    )
+    while True:
+        if should_cancel is not None and should_cancel():
+            raise WordCountCanceled()
+        bloco = linhas.fetchmany(WORD_COUNT_CHUNK)
+        if not bloco:
+            break
+        for origem, destino, original, traducao, verified in bloco:
+            add_word_counts(por_par, (origem, destino), original, traducao, verified)
+        lidas += len(bloco)
+        if progress_callback is not None:
+            progress_callback(lidas, total_linhas)
+
+    return por_par, total_word_counts(por_par)
+
+
+def get_daily_review_activity(cursor, limit=14):
+    """`[(dia, edicoes, palavras)]` do historico, do mais recente para tras.
+
+    E a produtividade que `comment_history` ja permitia calcular sem esquema novo
+    (ROADMAP 19, item 6): cada linha dele tem carimbo e o texto que passou a valer.
+
+    As palavras sao as da traducao NOVA de cada edicao, e nao a diferenca em
+    relacao a anterior. Diferenca seria negativa quando o revisor encurta um texto,
+    e "produzi -40 palavras hoje" nao e uma metrica de trabalho — o que o tradutor
+    mede e quanto texto passou pela mao dele.
+
+    A mesma linha editada tres vezes no dia conta tres vezes, pelo mesmo motivo:
+    sao tres passagens de revisao. O numero e de atividade, e nao de acervo.
+    """
+    linhas = cursor.execute(
+        """
+        SELECT DATE(created_at) AS dia, new_translation
+        FROM comment_history
+        WHERE created_at IS NOT NULL
+        ORDER BY dia DESC
+        """
+    ).fetchall()
+
+    por_dia = {}
+    for dia, texto in linhas:
+        if dia is None:
+            continue
+        edicoes, palavras = por_dia.get(dia, (0, 0))
+        por_dia[dia] = (edicoes + 1, palavras + count_words(texto))
+
+    ordenado = sorted(por_dia.items(), key=lambda item: item[0], reverse=True)
+    return [(dia, edicoes, palavras) for dia, (edicoes, palavras) in ordenado[:limit]]
+
 
 def get_database_stats(cursor):
     total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
@@ -859,10 +1487,15 @@ def get_database_stats(cursor):
         "verified_total": verified_total,
         "pending_total": pending_total,
         "per_language": per_language,
+        # Progresso por obra (ROADMAP 18). Vem vazio num banco cujos arquivos
+        # nunca foram processados desde a migracao 7, e a tela precisa dizer isso
+        # em vez de mostrar um bloco em branco: a ausencia aqui e "ninguem
+        # reprocessou ainda", nao "nao ha traducao".
+        "per_file": get_file_progress(cursor),
     }
 
 
-def fetch_export_rows(cursor):
+def fetch_export_rows(cursor, only_ids=None):
     """Cursor das linhas do CSV — deliberadamente NAO materializado.
 
     O `fetchall` que estava aqui construia uma lista com o banco inteiro antes
@@ -870,9 +1503,41 @@ def fetch_export_rows(cursor):
     para depois entregar tudo ao `csv.writerows`, que aceita qualquer iteravel.
 
     Quem quiser a lista chama `list(...)`; o exportador nao quer.
+
+    O `id` vem PRIMEIRO (ROADMAP 19, item 8). Ele nao existia no CSV, e sem ele o
+    unico jeito de reencontrar uma linha depois de editar a planilha e o texto do
+    original — o que funciona ate alguem corrigir uma vírgula do original. Com o id
+    na planilha, o round-trip passa a ser conferivel; a importacao continua casando
+    por texto, e isso esta declarado como limite na SPEC.
+
+    `only_ids` restringe a exportacao a uma lista de ids, que e o que a selecao em
+    lote do editor usa (ROADMAP 19, item 9). Uma lista VAZIA nao e o mesmo que
+    `None`: ela exporta zero linhas, porque foi isso que quem chamou pediu. Tratar
+    as duas como a mesma coisa exportaria o banco inteiro para quem pediu nada.
     """
-    return cursor.execute("""
+    if only_ids is None:
+        return cursor.execute("""
+            SELECT
+                id,
+                original_comment,
+                translated_comment,
+                source_language,
+                target_language,
+                verified,
+                created_at,
+                updated_at,
+                verified_at,
+                review_status,
+                reviewer_note
+            FROM comments
+            ORDER BY id
+        """)
+
+    marcadores = ",".join("?" * len(only_ids))
+    return cursor.execute(
+        f"""
         SELECT
+            id,
             original_comment,
             translated_comment,
             source_language,
@@ -880,10 +1545,15 @@ def fetch_export_rows(cursor):
             verified,
             created_at,
             updated_at,
-            verified_at
+            verified_at,
+            review_status,
+            reviewer_note
         FROM comments
+        WHERE id IN ({marcadores})
         ORDER BY id
-    """)
+        """,
+        list(only_ids),
+    )
 
 
 def _review_where(
@@ -894,6 +1564,7 @@ def _review_where(
     search_mode=SEARCH_MODE_SUBSTRING,
     cursor=None,
     source_language=None,
+    source_file=None,
 ):
     """Monta o `WHERE` compartilhado por contagem, paginacao e offset.
 
@@ -905,7 +1576,9 @@ def _review_where(
       acha "bispo" com `bisp*`.
     - `substring` mantem o `LIKE '%x%'`, que acha qualquer trecho — inclusive no
       meio de uma palavra — ao preco de varrer a tabela. E o unico jeito de
-      procurar por um pedaco literal, entao continua disponivel.
+      procurar por um pedaco literal, entao continua disponivel. LITERAL e a
+      palavra: o que o usuario digita passa por `escape_like_pattern`, senao um
+      `%` no texto dele viraria curinga.
 
     Cai para `substring` sozinho quando o indice nao existe ou o SQLite nao tem
     FTS5, e tambem quando a expressao nao sobra nenhum termo utilizavel. Um
@@ -916,6 +1589,25 @@ def _review_where(
     linhas gravadas antes de o programa perguntar e o das execucoes em deteccao
     automatica —, entao filtrar por ela devolve exatamente essas. Tratar as duas
     como a mesma coisa faria o filtro "Nao informado" mostrar a tabela inteira.
+
+    `source_file` restringe ao ARQUIVO de onde o comentario foi lido (ROADMAP 18).
+    Duas decisoes moram nesta clausula, e as duas foram medidas:
+
+    **Nao e um `JOIN`.** O mesmo comentario aparece trinta vezes no mesmo arquivo —
+    "Diagram" aparece —, e um `JOIN` devolveria a mesma linha trinta vezes numa
+    lista cuja identidade e o comentario.
+
+    **E `IN`, e nao `EXISTS`.** Os dois dizem a mesma coisa (pertence ao conjunto,
+    uma vez) e custam ordens de grandeza diferentes: o `EXISTS` e correlacionado,
+    entao o SQLite varre `comments` e pergunta linha por linha, enquanto o `IN` com
+    subconsulta independente vira uma lista que ele percorre pelo indice do
+    arquivo, buscando cada comentario por `rowid`. Medido em 201.500 linhas com 200
+    mil ocorrencias (banco sintetizado, ver o apendice do ROADMAP):
+
+        pagina em ordem de leitura   EXISTS 831 ms   IN  1,6 ms
+        total do filtro              EXISTS  70 ms   IN  0,6 ms
+
+    O `EXISTS` foi a primeira escrita aqui, e a medicao e que o derrubou.
     """
     clauses = ["target_language = ?"]
     params = [target_language]
@@ -924,6 +1616,13 @@ def _review_where(
         clauses.append("source_language = ?")
         params.append(source_language)
 
+    if source_file:
+        clauses.append(
+            f"id IN (SELECT comment_id FROM {OCCURRENCES_TABLE}"
+            f" WHERE source_file = ?)"
+        )
+        params.append(source_file)
+
     if status_filter is None:
         status_filter = "pending" if only_unverified else "all"
 
@@ -931,6 +1630,15 @@ def _review_where(
         clauses.append("verified <> 1")
     elif status_filter == "verified":
         clauses.append("verified = 1")
+    elif status_filter == REVIEW_STATUS_REJECTED:
+        # `verified <> 1` junto com o status, e nao so o status: os dois campos
+        # andam em lockstep (verificar limpa o status), e exigir os dois faz o filtro
+        # continuar correto se algum dia um `UPDATE` de fora quebrar o par.
+        clauses.append("verified <> 1 AND review_status = ?")
+        params.append(REVIEW_STATUS_REJECTED)
+    elif status_filter == REVIEW_STATUS_DOUBT:
+        clauses.append("verified <> 1 AND review_status = ?")
+        params.append(REVIEW_STATUS_DOUBT)
     elif status_filter == "warnings":
         # Usa a coluna materializada: contar e paginar "com aviso" vira uma
         # consulta indexada, em vez de ler a tabela inteira e avaliar em Python.
@@ -948,11 +1656,52 @@ def _review_where(
             )
             params.append(expressao)
         else:
-            clauses.append("(original_comment LIKE ? OR translated_comment LIKE ?)")
-            pattern = f"%{search_text}%"
+            clauses.append(LIKE_MATCH_SQL)
+            pattern = f"%{escape_like_pattern(search_text)}%"
             params.extend([pattern, pattern])
 
     return " AND ".join(clauses), params
+
+
+_OCCURRENCE_RANK_SQL = (
+    f"(SELECT MIN(o.comment_index) FROM {OCCURRENCES_TABLE} o"
+    f" WHERE o.comment_id = comments.id AND o.source_file = ?)"
+)
+
+
+def reads_in_occurrence_order(order, source_file):
+    """A ordem de leitura vale? Ela exige o arquivo, e nao e capricho.
+
+    Sem arquivo escolhido, "a proxima linha da obra" nao existe: o mesmo
+    comentario aparece em varios arquivos, e ordenar pela PRIMEIRA ocorrencia de
+    cada um pediria um minimo por comentario sobre a tabela inteira a cada pagina
+    — O(n) por interacao, que e exatamente o que a garantia R5 proibe. Com um
+    arquivo, o mesmo minimo custa uma busca indexada por linha da pagina.
+
+    Devolver `False` em vez de recusar e deliberado: quem pediu ordem de leitura
+    sem arquivo recebe a lista em ordem de id, que e uma lista correta.
+    """
+    return order == ORDER_BY_OCCURRENCE and bool(source_file)
+
+
+def _review_order(order=None, source_file=None):
+    """O `ORDER BY` da lista e os parametros dele.
+
+    Paginar por `LIMIT/OFFSET` exige uma ordem TOTAL: duas linhas com a mesma
+    chave podem trocar de lugar entre duas consultas, e ai uma aparece em duas
+    paginas e a outra em nenhuma — sem erro em lugar nenhum.
+
+    **O `id` do fim e, hoje, inalcancavel, e isto esta escrito para nao ser lido
+    como protecao ativa.** `UNIQUE(source_file, comment_index)` faz os indices de
+    um arquivo serem distintos, entao os minimos de dois comentarios diferentes
+    tambem sao — o desempate nunca decide nada, e a mutacao que o remove sobrevive
+    por isso. Ele fica porque o filtro por arquivo e de UM arquivo, e no dia em que
+    for de uma obra inteira (varios arquivos) os minimos passam a poder empatar; o
+    preco de deixar e uma clausula, e o de tirar e uma pagina que repete linha.
+    """
+    if reads_in_occurrence_order(order, source_file):
+        return f"{_OCCURRENCE_RANK_SQL}, id", [source_file]
+    return "id", []
 
 
 def fetch_review_rows(
@@ -963,7 +1712,27 @@ def fetch_review_rows(
     status_filter=None,
     search_mode=SEARCH_MODE_SUBSTRING,
     source_language=None,
+    source_file=None,
+    order=None,
 ):
+    """As linhas do editor, com o par de idiomas e o aviso de qualidade no fim.
+
+    No fim de proposito, e nao no meio: o editor le as sete primeiras posicoes em
+    varios pontos (`row_label`, `row_color`, a cache da linha atual), e inserir
+    uma coluna deslocaria todas elas. Cada acrescimo entrou depois do anterior —
+    hoje sao nove colunas, e a nona e `quality_warning`.
+
+    O par esta aqui porque a avaliacao de qualidade precisa dele — a heuristica de
+    terminologia e escopada por idioma (ROADMAP 16.1). Sem ele, a tela avaliaria
+    sem par e a coluna materializada com par, e as duas divergiriam sem nada
+    quebrar: e a garantia R6.
+
+    `quality_warning` vem da COLUNA, e nao de avaliar o texto de novo em Python
+    (ROADMAP 19, item 4). Sao a mesma resposta enquanto R6 valer, e usar a coluna e
+    o que garante que o marcador da linha concorde com o filtro "Avisos QA" — que
+    tambem le a coluna. Avaliar em Python daria uma tela em que a linha nao tem
+    marcador e o filtro a mostra.
+    """
     where_sql, params = _review_where(
         target_language,
         only_unverified,
@@ -972,7 +1741,9 @@ def fetch_review_rows(
         search_mode=search_mode,
         cursor=cursor,
         source_language=source_language,
+        source_file=source_file,
     )
+    order_sql, order_params = _review_order(order, source_file)
     return cursor.execute(f"""
         SELECT
             id,
@@ -981,11 +1752,14 @@ def fetch_review_rows(
             verified,
             created_at,
             updated_at,
-            verified_at
+            verified_at,
+            source_language,
+            target_language,
+            quality_warning
         FROM comments
         WHERE {where_sql}
-        ORDER BY id
-    """, params).fetchall()
+        ORDER BY {order_sql}
+    """, params + order_params).fetchall()
 
 
 def count_review_rows(
@@ -996,6 +1770,7 @@ def count_review_rows(
     status_filter=None,
     search_mode=SEARCH_MODE_SUBSTRING,
     source_language=None,
+    source_file=None,
 ):
     where_sql, params = _review_where(
         target_language,
@@ -1005,6 +1780,7 @@ def count_review_rows(
         search_mode=search_mode,
         cursor=cursor,
         source_language=source_language,
+        source_file=source_file,
     )
     return cursor.execute(f"""
         SELECT COUNT(*)
@@ -1019,6 +1795,7 @@ def get_review_status_counts(
     search_text="",
     search_mode=SEARCH_MODE_SUBSTRING,
     source_language=None,
+    source_file=None,
 ):
     where_sql, params = _review_where(
         target_language,
@@ -1027,13 +1804,22 @@ def get_review_status_counts(
         search_mode=search_mode,
         cursor=cursor,
         source_language=source_language,
+        source_file=source_file,
     )
-    total, pending, verified, warnings = cursor.execute(f"""
+    total, pending, verified, warnings, rejected, doubt = cursor.execute(f"""
         SELECT
             COUNT(*),
             COALESCE(SUM(CASE WHEN verified <> 1 THEN 1 ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN quality_warning = 1 THEN 1 ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN quality_warning = 1 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(
+                CASE WHEN verified <> 1 AND review_status = '{REVIEW_STATUS_REJECTED}'
+                THEN 1 ELSE 0 END
+            ), 0),
+            COALESCE(SUM(
+                CASE WHEN verified <> 1 AND review_status = '{REVIEW_STATUS_DOUBT}'
+                THEN 1 ELSE 0 END
+            ), 0)
         FROM comments
         WHERE {where_sql}
     """, params).fetchone()
@@ -1042,6 +1828,11 @@ def get_review_status_counts(
         "pending": pending,
         "verified": verified,
         "warnings": warnings,
+        # Subconjuntos de `pending`, e nao categorias ao lado dela: uma linha
+        # rejeitada continua sendo uma linha que falta resolver, e some-la ao
+        # pendente daria um total maior que a tabela (ROADMAP 19, item 12).
+        REVIEW_STATUS_REJECTED: rejected,
+        REVIEW_STATUS_DOUBT: doubt,
     }
 
 
@@ -1056,6 +1847,8 @@ STATUS_COUNT_KEYS = {
     "pending": "pending",
     "verified": "verified",
     "warnings": "warnings",
+    REVIEW_STATUS_REJECTED: REVIEW_STATUS_REJECTED,
+    REVIEW_STATUS_DOUBT: REVIEW_STATUS_DOUBT,
 }
 
 
@@ -1084,6 +1877,8 @@ def fetch_review_rows_page(
     status_filter=None,
     search_mode=SEARCH_MODE_SUBSTRING,
     source_language=None,
+    source_file=None,
+    order=None,
 ):
     where_sql, params = _review_where(
         target_language,
@@ -1093,7 +1888,9 @@ def fetch_review_rows_page(
         search_mode=search_mode,
         cursor=cursor,
         source_language=source_language,
+        source_file=source_file,
     )
+    order_sql, order_params = _review_order(order, source_file)
     return cursor.execute(f"""
         SELECT
             id,
@@ -1102,12 +1899,15 @@ def fetch_review_rows_page(
             verified,
             created_at,
             updated_at,
-            verified_at
+            verified_at,
+            source_language,
+            target_language,
+            quality_warning
         FROM comments
         WHERE {where_sql}
-        ORDER BY id
+        ORDER BY {order_sql}
         LIMIT ? OFFSET ?
-    """, params + [limit, offset]).fetchall()
+    """, params + order_params + [limit, offset]).fetchall()
 
 
 def get_review_row_offset(
@@ -1119,7 +1919,17 @@ def get_review_row_offset(
     status_filter=None,
     search_mode=SEARCH_MODE_SUBSTRING,
     source_language=None,
+    source_file=None,
+    order=None,
 ):
+    """A posicao da linha NA LISTA FILTRADA, ou `None` se ela nao esta nela.
+
+    "Posicao" depende da ordem, e essa e a parte que nao da para esquecer: em
+    ordem de id, quantas linhas tem id menor; em ordem de leitura, quantas
+    aparecem ANTES no arquivo. Contar ids com a lista ordenada por ocorrencia
+    devolveria um numero coerente e errado, e o "Ir para ID" pousaria noutra
+    pagina — a mesma classe de defeito que a garantia R10 fechou.
+    """
     where_sql, params = _review_where(
         target_language,
         only_unverified,
@@ -1128,6 +1938,7 @@ def get_review_row_offset(
         search_mode=search_mode,
         cursor=cursor,
         source_language=source_language,
+        source_file=source_file,
     )
     row = cursor.execute(f"""
         SELECT id
@@ -1138,11 +1949,25 @@ def get_review_row_offset(
     if row is None:
         return None
 
+    if not reads_in_occurrence_order(order, source_file):
+        return cursor.execute(f"""
+            SELECT COUNT(*)
+            FROM comments
+            WHERE {where_sql} AND id < ?
+        """, params + [comment_id]).fetchone()[0]
+
+    # A comparacao por valor de linha (`(a, b) < (c, d)`) e o mesmo criterio do
+    # `ORDER BY` de `_review_order`, escrito uma vez. Separar os dois em duas
+    # expressoes que precisam concordar seria pedir para elas divergirem.
     return cursor.execute(f"""
         SELECT COUNT(*)
         FROM comments
-        WHERE {where_sql} AND id < ?
-    """, params + [comment_id]).fetchone()[0]
+        WHERE {where_sql}
+          AND ({_OCCURRENCE_RANK_SQL}, id) < (
+              (SELECT MIN(o.comment_index) FROM {OCCURRENCES_TABLE} o
+               WHERE o.comment_id = ? AND o.source_file = ?), ?
+          )
+    """, params + [source_file, comment_id, source_file, comment_id]).fetchone()[0]
 
 
 def fetch_translation_by_id(cursor, comment_id):
@@ -1223,9 +2048,14 @@ def update_translation_by_id(
     mark_verified=False,
     history_action=None,
 ):
+    # O par de idiomas entra na leitura que esta funcao ja fazia. Sem ele, o
+    # `quality_warning_flag` daqui avaliaria a terminologia como se o par fosse
+    # desconhecido e a exibicao a avaliaria com o par da linha: a coluna
+    # materializada divergiria da tela (garantia R6).
     existing = cursor.execute(
         """
-        SELECT translated_comment, verified, original_comment
+        SELECT translated_comment, verified, original_comment,
+               source_language, target_language
         FROM comments
         WHERE id = ?
         """,
@@ -1234,7 +2064,13 @@ def update_translation_by_id(
     if existing is None:
         return 0
 
-    previous_translation, previous_verified, original_comment = existing
+    (
+        previous_translation,
+        previous_verified,
+        original_comment,
+        source_language,
+        target_language,
+    ) = existing
     previous_verified = 1 if previous_verified == 1 else 0
     new_verified = 1 if mark_verified else previous_verified
 
@@ -1253,17 +2089,26 @@ def update_translation_by_id(
         else:
             history_action = "status"
 
+    # `review_status = ''` quando a gravacao verifica a linha: e o MESMO lockstep de
+    # `set_translation_verified_by_id` (ROADMAP 19, item 12), e ele tem de valer nos
+    # dois caminhos que ligam o `verified`. Este e o do "Salvar e verificar", e sem a
+    # clausula aqui uma linha ficava verificada E em duvida ao mesmo tempo — estado
+    # que nenhum filtro mostra direito, e que foi um teste da janela que encontrou.
     cursor.execute("""
         UPDATE comments
         SET translated_comment = ?,
             quality_warning = ?,
             verified = CASE WHEN ? THEN 1 ELSE verified END,
+            review_status = CASE WHEN ? THEN '' ELSE review_status END,
             updated_at = CURRENT_TIMESTAMP,
             verified_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE verified_at END
         WHERE id = ?
     """, (
         translated_comment,
-        quality_warning_flag(original_comment, translated_comment),
+        quality_warning_flag(
+            original_comment, translated_comment, source_language, target_language
+        ),
+        1 if mark_verified else 0,
         1 if mark_verified else 0,
         1 if mark_verified else 0,
         comment_id,
@@ -1274,6 +2119,100 @@ def update_translation_by_id(
             cursor,
             comment_id,
             history_action,
+            previous_translation,
+            translated_comment,
+            previous_verified,
+            new_verified,
+        )
+    return changed_rows
+
+
+def overwrite_translation_by_id(cursor, comment_id, translated_comment, verified=False):
+    """Sobrescreve uma traducao JA PREENCHIDA. E a excecao explicita a T1.
+
+    `save_translation` nunca sobrescreve (garantia T1), e esse e o padrao certo
+    para o worker: uma traducao gravada pode ter sido revisada a mao, e a API nao
+    tem autoridade para desfazer isso. Mas o padrao virava um beco no fluxo de
+    quem traduz um livro — exportar o CSV, corrigir 300 traducoes na planilha,
+    importar — porque a importacao devolvia as 300 como "sem alteracao".
+
+    O que muda aqui e de quem vem o texto: nao da API, e de uma decisao do
+    usuario sobre um arquivo que ele mesmo editou. Sobrescrever passa a ser
+    possivel, mas nunca por acidente — quem chama tem de pedir.
+
+    **Nao faz nada quando o texto e igual ao gravado**, nem para mexer no
+    `verified`. Um CSV montado a mao pode nao ter a coluna `verified`, e a
+    ausencia dela nao e uma afirmacao de que nada foi revisado: tratada como
+    afirmacao, uma importacao de rotina rebaixaria para "pendente" cada linha que
+    voltou igual. Marcar linhas ja gravadas como verificadas continua possivel —
+    por `set_translation_verified_by_id`, que so promove.
+
+    **`verified` volta a zero quando o texto muda**, a nao ser que o CSV diga o
+    contrario. Aqui a demissao e justificada e nao opcional: a revisao era do
+    texto anterior. Manter a marca sobre um texto que ninguem leu e exatamente o
+    que as garantias R9 e V1 existem para impedir, e e a mesma regra que
+    `save_translation` aplica ao preencher uma linha vazia.
+
+    A coluna `quality_warning` e reavaliada (garantia R6) e toda alteracao entra
+    no historico (garantia R2), com acao propria: o usuario precisa poder ver o
+    que a importacao passou por cima e voltar atras.
+    """
+    existing = cursor.execute(
+        """
+        SELECT translated_comment, verified, original_comment,
+               source_language, target_language
+        FROM comments
+        WHERE id = ?
+        """,
+        (comment_id,),
+    ).fetchone()
+    if existing is None:
+        return 0
+
+    (
+        previous_translation,
+        previous_verified,
+        original_comment,
+        source_language,
+        target_language,
+    ) = existing
+    if previous_translation == translated_comment:
+        return 0
+
+    previous_verified = 1 if previous_verified == 1 else 0
+    new_verified = 1 if verified else 0
+
+    # A sobrescrita pelo CSV troca o TEXTO da linha, entao o status de revisao
+    # anterior fala de um texto que nao existe mais: ele sai junto, verificada ou
+    # nao. E o mesmo criterio com que ela rebaixa o `verified` — a revisao era do
+    # texto anterior (ROADMAP 17.7, agora tambem para o item 12 da 19).
+    cursor.execute(
+        """
+        UPDATE comments
+        SET translated_comment = ?,
+            quality_warning = ?,
+            verified = ?,
+            review_status = '',
+            updated_at = CURRENT_TIMESTAMP,
+            verified_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END
+        WHERE id = ?
+        """,
+        (
+            translated_comment,
+            quality_warning_flag(
+                original_comment, translated_comment, source_language, target_language
+            ),
+            new_verified,
+            new_verified,
+            comment_id,
+        ),
+    )
+    changed_rows = cursor.rowcount
+    if changed_rows:
+        record_comment_history(
+            cursor,
+            comment_id,
+            "csv_overwrite",
             previous_translation,
             translated_comment,
             previous_verified,
@@ -1300,13 +2239,22 @@ def set_translation_verified_by_id(cursor, comment_id, verified=True):
     if previous_verified == new_verified:
         return 0
 
+    # Verificar LIMPA o status de revisao (ROADMAP 19, item 12): uma traducao aceita
+    # nao esta "em duvida" nem "rejeitada". E a regra que mantem os dois campos em
+    # lockstep, e ela vive aqui porque este e o unico caminho que liga o `verified`.
     cursor.execute("""
         UPDATE comments
         SET verified = ?,
+            review_status = CASE WHEN ? THEN '' ELSE review_status END,
             updated_at = CURRENT_TIMESTAMP,
             verified_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END
         WHERE id = ?
-    """, (1 if verified else 0, 1 if verified else 0, comment_id))
+    """, (
+        1 if verified else 0,
+        1 if verified else 0,
+        1 if verified else 0,
+        comment_id,
+    ))
     changed_rows = cursor.rowcount
     if changed_rows:
         record_comment_history(
@@ -1321,7 +2269,80 @@ def set_translation_verified_by_id(cursor, comment_id, verified=True):
     return changed_rows
 
 
-def set_exact_translation_matches_verified(cursor, comment_id):
+def set_review_status_by_id(cursor, comment_id, status, note=None):
+    """Marca a linha como rejeitada, em duvida ou pendente. `1` se mudou algo.
+
+    `note` a `None` deixa a nota como esta; uma string a substitui (inclusive por
+    vazia, que e como se apaga). Sao duas coisas na mesma chamada porque na tela sao
+    uma: quem rejeita escreve por que.
+
+    **Um status alem de pendente derruba o `verified`.** Rejeitar uma traducao
+    marcada como verificada e dizer que a verificacao estava errada — deixar o bit
+    de pe manteria a linha fora do filtro de pendentes, e ela nunca voltaria para a
+    fila de ninguem. O par de campos e mantido em lockstep aqui e em
+    `set_translation_verified_by_id`, que sao os dois unicos lugares que escrevem
+    qualquer um dos dois.
+    """
+    if status not in REVIEW_STATUSES:
+        raise ValueError(f"status de revisao desconhecido: {status!r}")
+
+    existing = cursor.execute(
+        "SELECT review_status, reviewer_note, verified FROM comments WHERE id = ?",
+        (comment_id,),
+    ).fetchone()
+    if existing is None:
+        return 0
+
+    status_anterior, nota_anterior, verified_anterior = existing
+    nota_nova = nota_anterior if note is None else note
+    verified_novo = 0 if status else (1 if verified_anterior == 1 else 0)
+    if (
+        (status_anterior or "") == status
+        and (nota_anterior or "") == (nota_nova or "")
+        and (verified_anterior == 1) == (verified_novo == 1)
+    ):
+        return 0
+
+    cursor.execute(
+        """
+        UPDATE comments
+        SET review_status = ?,
+            reviewer_note = ?,
+            verified = ?,
+            verified_at = CASE WHEN ? THEN verified_at ELSE NULL END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (status, nota_nova, verified_novo, verified_novo, comment_id),
+    )
+    return cursor.rowcount
+
+
+def fetch_review_status_by_id(cursor, comment_id):
+    """`(status, nota)` da linha, ou `("", "")` se ela nao existe."""
+    linha = cursor.execute(
+        "SELECT review_status, reviewer_note FROM comments WHERE id = ?",
+        (comment_id,),
+    ).fetchone()
+    if linha is None:
+        return REVIEW_STATUS_PENDING, ""
+    return (linha[0] or REVIEW_STATUS_PENDING), (linha[1] or "")
+
+
+def _exact_translation_matches(cursor, comment_id, exclude_self=False):
+    """`(traducao, [(id, original)])` — a base da previa e da escrita.
+
+    As duas leem daqui de proposito: se a previa e a gravacao montassem a
+    consulta cada uma por si, elas poderiam discordar sem que nada quebrasse na
+    tela — a armadilha dos itens 2.8, 3.6 e 11.1.
+
+    `exclude_self` e a UNICA diferenca entre as duas, e ela existe por causa do
+    que cada uma responde. A previa responde "o que mais isto vai marcar", e a
+    propria linha nao e uma consequencia — o usuario acabou de pedir para
+    verifica-la. A escrita responde "quais linhas deste par tem esta traducao", e
+    ai a propria linha entra: chamada sem passar pelo editor (que ja a verifica
+    antes), excluir-la deixaria o par metade verificado.
+    """
     existing = cursor.execute(
         """
         SELECT translated_comment, source_language, target_language
@@ -1331,38 +2352,85 @@ def set_exact_translation_matches_verified(cursor, comment_id):
         (comment_id,),
     ).fetchone()
     if existing is None:
-        return 0
+        return None, []
 
     translation, source_language, target_language = existing
     if not translation:
-        return 0
+        return translation, []
 
     # Dentro do mesmo PAR de idiomas. Verificar uma traducao vinda do espanhol
     # nao diz nada sobre a mesma frase vinda do ingles — e marcar as duas daria
     # por revisado o que o usuario nem viu, justamente na tela que ele abriu para
     # nao misturar as linguas.
+    clauses = [
+        "target_language = ?",
+        "source_language = ?",
+        "translated_comment = ?",
+        "verified <> 1",
+    ]
+    params = [target_language, source_language, translation]
+    if exclude_self:
+        clauses.append("id <> ?")
+        params.append(comment_id)
+
     rows = cursor.execute(
-        """
-        SELECT id, verified
+        f"""
+        SELECT id, original_comment
         FROM comments
-        WHERE target_language = ?
-          AND source_language = ?
-          AND translated_comment = ?
-          AND verified <> 1
+        WHERE {" AND ".join(clauses)}
         ORDER BY id
         """,
-        (target_language, source_language, translation),
+        params,
     ).fetchall()
+    return translation, rows
+
+
+def fetch_exact_translation_match_candidates(cursor, comment_id):
+    """As OUTRAS linhas que a verificacao em massa marcaria, com o original de cada.
+
+    Existe para que a propagacao possa ser mostrada antes de acontecer (garantia
+    V1). Ela casa pela TRADUCAO, que e a unica propagacao possivel — originais
+    identicos ja sao uma linha so, pela UNIQUE — e quase sempre e o que se quer;
+    o risco esta nas traducoes curtas. Se o tradutor verteu "Checkmate." errado
+    como "Empate.", verificar o "Draw." -> "Empate." legitimo marca a outra
+    junto: da por revisado o que ninguem leu, que e exatamente o que a garantia
+    R9 existe para impedir.
+
+    Devolve `(id, original_comment)` por linha, em ordem de id. Cada uma tem um
+    original DIFERENTE — dentro do par, a UNIQUE garante isso —, e e por isso que
+    a contagem que interessa ao usuario e "quantos originais", e nao "quantas
+    iguais".
+    """
+    _translation, rows = _exact_translation_matches(
+        cursor, comment_id, exclude_self=True
+    )
+    return rows
+
+
+def set_exact_translation_matches_verified(cursor, comment_id, only_ids=None):
+    """Marca como verificadas as linhas do par com a MESMA traducao.
+
+    `only_ids` restringe a propagacao ao subconjunto que o usuario aprovou na
+    previa. `None` propaga para todas as candidatas, que e o que a chamada sem
+    previa sempre fez.
+    """
+    translation, rows = _exact_translation_matches(cursor, comment_id)
+    if only_ids is not None:
+        permitidos = set(only_ids)
+        rows = [row for row in rows if row[0] in permitidos]
     if not rows:
         return 0
 
     changed_rows = 0
-    for matching_id, previous_verified in rows:
-        previous_verified = 1 if previous_verified == 1 else 0
+    for matching_id, _original in rows:
+        # Zero por construcao: o filtro da consulta e `verified <> 1`, e em SQL
+        # um `NULL` nao satisfaz essa comparacao. Nao ha o que ler de volta.
+        previous_verified = 0
         cursor.execute(
             """
             UPDATE comments
             SET verified = 1,
+                review_status = '',
                 updated_at = CURRENT_TIMESTAMP,
                 verified_at = CURRENT_TIMESTAMP
             WHERE id = ?
@@ -1399,6 +2467,11 @@ def clear_all_translations(conn):
     Nao ha cancelamento no meio, e por isso quem chama pergunta antes: depois do
     `DROP TABLE` nao existe estado anterior para voltar. O que existe e o backup,
     criado pela ferramenta antes de chamar isto.
+
+    As **ocorrencias** vao junto (garantia Z3). Elas apontam para linhas de
+    `comments` por id, e o `AUTOINCREMENT` reinicia com a tabela: uma ocorrencia
+    sobrevivente passaria a apontar para a PRIMEIRA traducao que fosse gravada
+    depois — o comentario errado, no arquivo certo, sem erro nenhum na tela.
     """
     cursor = conn.cursor()
     try:
@@ -1411,6 +2484,7 @@ def clear_all_translations(conn):
         cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
     cursor.execute("DROP TABLE IF EXISTS comments")
     cursor.execute("DROP TABLE IF EXISTS comment_history")
+    cursor.execute(f"DROP TABLE IF EXISTS {OCCURRENCES_TABLE}")
     conn.commit()
 
     _migrate_database(conn)
@@ -1476,7 +2550,8 @@ def _iter_automatic_rule_rows(
     lidas = 0
     for row in cursor.execute(
         f"""
-        SELECT id, original_comment, translated_comment, target_language, verified
+        SELECT id, original_comment, translated_comment,
+               source_language, target_language, verified
         FROM comments
         WHERE {where_sql}
         ORDER BY id
@@ -1521,7 +2596,14 @@ def analyze_automatic_translation_updates(
     scanned = 0
     changed = 0
     examples = []
-    for comment_id, original, translation, row_language, _verified in _iter_automatic_rule_rows(
+    for (
+        comment_id,
+        original,
+        translation,
+        _row_source_language,
+        row_language,
+        _verified,
+    ) in _iter_automatic_rule_rows(
         cursor,
         target_language,
         progress_callback=progress_callback,
@@ -1587,7 +2669,14 @@ def apply_automatic_translation_updates(
     changed = 0
     examples = []
 
-    for comment_id, original_comment, previous_translation, row_language, previous_verified in (
+    for (
+        comment_id,
+        original_comment,
+        previous_translation,
+        row_source_language,
+        row_language,
+        previous_verified,
+    ) in (
         _iter_automatic_rule_rows(
             cursor,
             target_language,
@@ -1612,7 +2701,10 @@ def apply_automatic_translation_updates(
             """,
             (
                 updated_translation,
-                quality_warning_flag(original_comment, updated_translation),
+                quality_warning_flag(
+                    original_comment, updated_translation,
+                    row_source_language, row_language,
+                ),
                 comment_id,
             ),
         )
@@ -1704,6 +2796,43 @@ def _move_notation_total(cursor, source_language, target_language, include_unkno
     ).fetchone()[0]
 
 
+def count_adoptable_unknown_source(cursor, target_language, source_language):
+    """Quantas linhas `adopt_unknown_source_language` de fato rotularia.
+
+    Existe para a previa poder dizer o numero antes do "Sim". Rotular e a parte
+    IRREVERSIVEL da correcao de lances — num banco com 200 mil linhas legadas, e
+    afirmar "todo o meu acervo veio do espanhol" —, e ate agora esse numero so
+    aparecia no dialogo de resultado, depois de feito.
+
+    Nao e um `COUNT(*)` do escopo do `UPDATE`: aquele seria um teto, porque o
+    `UPDATE OR IGNORE` pula a linha cuja adocao esbarraria na propria chave (ja
+    existe o mesmo comentario no par declarado). O `NOT EXISTS` desconta
+    exatamente essas, e usa o indice da UNIQUE. Um numero aproximado numa
+    confirmacao que nao tem volta seria pior do que nenhum.
+
+    Um `source_language` vazio nao rotula nada: "detectar automaticamente" nao e
+    uma declaracao — a mesma regra da funcao que aplica.
+    """
+    if not source_language:
+        return 0
+    return cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM comments AS legada
+        WHERE legada.target_language = ?
+          AND legada.source_language = ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM comments AS declarada
+              WHERE declarada.original_comment = legada.original_comment
+                AND declarada.source_language = ?
+                AND declarada.target_language = legada.target_language
+          )
+        """,
+        (target_language, SOURCE_LANGUAGE_UNKNOWN, source_language),
+    ).fetchone()[0]
+
+
 def _empty_move_notation_stats(source_language, target_language, labeled=0):
     return {
         "source_language": source_language,
@@ -1735,8 +2864,16 @@ def analyze_move_notation_updates(
 
     Nao grava nada. A previa existe porque o usuario precisa confirmar sabendo
     quantas linhas serao reescritas, e isto reescreve texto ja revisado.
+
+    `labeled` vem preenchido com quantas linhas serao ROTULADAS — a parte que a
+    previa nao dizia. So faz sentido quando as linhas sem origem estao no escopo:
+    com `include_unknown=False` a ferramenta nao rotula nada, e o campo fica zero.
     """
     stats = _empty_move_notation_stats(source_language, target_language)
+    if include_unknown:
+        stats["labeled"] = count_adoptable_unknown_source(
+            cursor, target_language, source_language
+        )
     total = _move_notation_total(
         cursor, source_language, target_language, include_unknown
     )
@@ -1832,7 +2969,13 @@ def apply_move_notation_updates(
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (novo, quality_warning_flag(original, novo), row_id),
+            (
+                novo,
+                quality_warning_flag(
+                    original, novo, source_language, target_language
+                ),
+                row_id,
+            ),
         )
         if write_cursor.rowcount:
             stats["changed"] += 1

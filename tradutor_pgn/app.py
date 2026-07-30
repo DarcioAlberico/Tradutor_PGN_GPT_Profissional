@@ -88,6 +88,12 @@ class PGNTranslatorApp:
         # arquivos numa pasta com meses de uso.
         app_actions.run_startup_cleanup(self)
 
+        # Se as heuristicas de aviso de qualidade mudaram desde a ultima vez que
+        # este banco foi avaliado, a coluna materializada esta com o veredito
+        # velho e a garantia R6 esta violada (ROADMAP 16.2). Agendado, com
+        # progresso, e sem fazer nada quando ja esta em dia.
+        app_actions.run_startup_quality_check(self)
+
     # ============================
     #       INTERFACE
     # ============================
@@ -176,6 +182,9 @@ class PGNTranslatorApp:
     def export_csv(self):
         app_actions.export_csv(self)
 
+    def export_tmx(self):
+        app_actions.export_tmx(self)
+
     def import_csv(self):
         app_actions.import_csv(self)
 
@@ -193,6 +202,9 @@ class PGNTranslatorApp:
 
     def fix_move_notation(self):
         app_actions.fix_move_notation(self)
+
+    def reevaluate_quality_warnings(self):
+        app_actions.reevaluate_quality_warnings(self)
 
     def reset_translations(self):
         app_actions.reset_translations(self)

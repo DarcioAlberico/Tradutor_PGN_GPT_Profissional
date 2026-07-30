@@ -110,8 +110,30 @@ def clear_glossary_error():
     _last_glossary_error = None
 
 
+def _print_to_console(message):
+    """Escreve no console SE houver console. Nunca levanta.
+
+    Sob `pythonw` e no executavel windowed do PyInstaller `sys.stdout` e `None`,
+    e um `print` ali levanta `AttributeError`. Isso quebrava a garantia S5 no
+    unico lugar onde ela importa: no empacotado, onde nao existe console para
+    ler o erro. O `print` vinha ANTES da chamada do handler, entao a excecao
+    subia e a mensagem nunca chegava a interface — a funcao que existe para
+    tornar a falha visivel era a que a escondia.
+
+    O `try` cobre o resto: um `stdout` fechado ou redirecionado para um pipe
+    rompido tambem levanta, e nenhum desses casos pode ser o motivo de o usuario
+    nao ser avisado.
+    """
+    if sys.stdout is None:
+        return
+    try:
+        print(f"[GLOSSÁRIO] {message}")
+    except Exception:  # pragma: no cover - stdout fechado ou pipe rompido
+        pass
+
+
 def report_glossary_error(message):
-    """Publica uma falha de carga: sempre no console, e na UI quando houver.
+    """Publica uma falha de carga: no console quando ha um, e na UI quando houver.
 
     Nunca deixa uma excecao do handler escapar — reportar um erro nao pode ser
     o motivo de um erro pior, e o chamador esta sempre num caminho de
@@ -119,7 +141,7 @@ def report_glossary_error(message):
     """
     global _last_glossary_error
     _last_glossary_error = message
-    print(f"[GLOSSÁRIO] {message}")
+    _print_to_console(message)
 
     if _glossary_error_handler is None:
         return
@@ -127,7 +149,7 @@ def report_glossary_error(message):
     try:
         _glossary_error_handler(message)
     except Exception as exc:  # pragma: no cover - defensivo
-        print(f"[GLOSSÁRIO] Falha ao exibir o erro anterior: {exc}")
+        _print_to_console(f"Falha ao exibir o erro anterior: {exc}")
 
 
 def _default_substitutions_path():
@@ -882,14 +904,20 @@ def rebuild_glossary_database(path=None, db_path=None):
 
 
 def load_glossary_entries(path=None, deduplicate=True, prefer_db=True, db_path=None):
-    """Carrega entradas persistentes do glossário sem depender de traducoes.db."""
+    """Carrega entradas persistentes do glossário sem depender de traducoes.db.
+
+    `prefer_db=False` desliga o indice, e desliga MESMO com `db_path` informado.
+    Antes, passar o caminho do indice reativava o uso dele: o argumento explicito
+    do chamador perdia para a conveniencia interna, e quem pedia "leia o arquivo
+    texto, nao o indice" recebia o indice em silencio.
+    """
     if path is None:
         path = _default_substitutions_path()
 
-    use_db = prefer_db and _is_default_substitutions_path(path)
-    if db_path is not None:
-        use_db = True
-    elif use_db:
+    use_db = prefer_db and (
+        db_path is not None or _is_default_substitutions_path(path)
+    )
+    if use_db and db_path is None:
         db_path = _default_glossary_db_path()
 
     if use_db:
@@ -906,14 +934,18 @@ def load_glossary_entries(path=None, deduplicate=True, prefer_db=True, db_path=N
 
 
 def load_glossary_entry_details(path=None, deduplicate=True, prefer_db=True, db_path=None):
-    """Carrega entradas do glossário incluindo o tipo da regra."""
+    """Carrega entradas do glossário incluindo o tipo da regra.
+
+    `prefer_db=False` desliga o indice mesmo com `db_path` informado — ver
+    `load_glossary_entries`.
+    """
     if path is None:
         path = _default_substitutions_path()
 
-    use_db = prefer_db and _is_default_substitutions_path(path)
-    if db_path is not None:
-        use_db = True
-    elif use_db:
+    use_db = prefer_db and (
+        db_path is not None or _is_default_substitutions_path(path)
+    )
+    if use_db and db_path is None:
         db_path = _default_glossary_db_path()
 
     if use_db:
@@ -1905,7 +1937,7 @@ def load_substitutions(path=None):
         return []
 
     clear_glossary_error()
-    print(f"[GLOSSÁRIO] Carregadas {len(substitutions)} entradas do glossário.")
+    _print_to_console(f"Carregadas {len(substitutions)} entradas do glossário.")
     return substitutions
 
 
@@ -2253,7 +2285,11 @@ def _load_rules(
             seed_path=seed_path,
         )
     )
-    return regras
+    # Marcada com uma versao: e a chave barata do cache de ordenacao, e cada
+    # carga e uma lista nova por definicao (ROADMAP 20.6). A marca vai no fim, com
+    # a lista pronta — a versao de uma lista que ainda vai crescer nao serviria
+    # para nada.
+    return versioned_rules(regras)
 
 
 def load_cleanup_substitutions(
@@ -2359,17 +2395,95 @@ def _specificity_order(rules):
     )
 
 
+_rules_version = 0
+
+
+def _next_rules_version():
+    global _rules_version
+    _rules_version += 1
+    return _rules_version
+
+
+class VersionedRules(list):
+    """Lista de regras que sabe dizer QUAL lista de regras ela e.
+
+    Existe pelo custo da chave do cache de ordenacao (ROADMAP 20.6). A chave era
+    a tupla do conteudo — 7.334 tuplas novas montadas e hasheadas a cada
+    consulta —, e o editor consulta a cada tecla digitada: 1,75 ms dos 9,15 ms
+    que uma tecla custava eram so a chave. Um numero de versao responde a mesma
+    pergunta ("estas regras sao as mesmas de antes?") em tempo constante.
+
+    O numero e novo a cada carga do glossario e **a cada mutacao da lista**. E o
+    que impede o modo de falha do `id()`, que a chave de conteudo nao tinha: uma
+    lista alterada no lugar continuaria valendo como a mesma e receberia a ordem
+    antiga, com regras que nao estao mais nela. Quem quiser a lista congelada nao
+    precisa fazer nada; quem a mutar paga uma reordenacao, que e o correto.
+    """
+
+    __slots__ = ("version",)
+
+    def __init__(self, rules=()):
+        super().__init__(rules)
+        self.version = _next_rules_version()
+
+
+def _invalidating(name):
+    """Envolve um metodo de `list` que muda o conteudo, para renovar a versao."""
+    herdado = getattr(list, name)
+
+    def metodo(self, *args, **kwargs):
+        try:
+            return herdado(self, *args, **kwargs)
+        finally:
+            self.version = _next_rules_version()
+
+    metodo.__name__ = name
+    metodo.__doc__ = f"`list.{name}`, renovando a versao (ver `VersionedRules`)."
+    return metodo
+
+
+# Escrito como laco, e nao a mao: sao doze metodos com o mesmo corpo, e a lista
+# explicita e o que garante que nenhum deles fique de fora — um `append` sem
+# renovar a versao seria uma ordem errada em silencio, que e o defeito que esta
+# classe existe para nao ter.
+for _nome in (
+    "append", "extend", "insert", "remove", "pop", "clear", "sort", "reverse",
+    "__setitem__", "__delitem__", "__iadd__", "__imul__",
+):
+    setattr(VersionedRules, _nome, _invalidating(_nome))
+del _nome
+
+
+def versioned_rules(rules):
+    """Marca uma lista de regras com uma versao nova. Ver `VersionedRules`.
+
+    Para quem monta uma lista de regras fora dos carregadores — o editor, ao
+    aplicar uma edicao do glossario sem reler o arquivo. Sem isto a lista dele
+    cai na chave por conteudo, que e justamente o custo por tecla de 20.6.
+    """
+    return VersionedRules(rules)
+
+
 def _ordered_rules_cache_key(rules):
     """Chave estavel para o cache de ordenacao, ou `None` se nao der para gerar.
 
     Uma lista nao e hashavel, e o `id()` dela nao serve (uma lista nova pode
-    reaproveitar o endereco de uma coletada). A tupla dos pares e hashavel e
-    identifica o conteudo, que e exatamente do que a ordem depende.
+    reaproveitar o endereco de uma coletada). Uma `VersionedRules` traz o proprio
+    numero de versao, que e barato e identifica a lista sem percorre-la.
 
-    A prioridade entra na chave porque entra na ordem. Sem ela, duas listas com
-    os mesmos pares e prioridades diferentes compartilhariam a entrada do cache
-    e a segunda receberia a ordem da primeira — errado, e em silencio.
+    Sem versao — uma lista literal de teste, um par escrito a mao — a chave volta
+    a ser a tupla do conteudo, que identifica exatamente do que a ordem depende.
+    A prioridade entra nela porque entra na ordem: sem ela, duas listas com os
+    mesmos pares e prioridades diferentes compartilhariam a entrada do cache e a
+    segunda receberia a ordem da primeira — errado, e em silencio.
+
+    A classe entra na chave como marca. Uma tupla de conteudo e uma tupla de
+    tuplas, entao nao ha como as duas formas colidirem.
     """
+    versao = getattr(rules, "version", None)
+    if versao is not None:
+        return (VersionedRules, versao)
+
     try:
         return tuple(
             (str(rule[0]), str(rule[1]), rule_priority(rule)) for rule in rules
@@ -2519,5 +2633,8 @@ def add_to_glossary(orig, new, path=None, rule_type=None):
         return True
 
     except Exception as e:
-        print(f"[GLOSSÁRIO] Erro ao adicionar entrada: {e}")
+        # Pelo `_print_to_console`, e nao por `print`: sob `pythonw` o `print`
+        # levanta e transforma "nao consegui gravar a regra" num `AttributeError`
+        # no meio do popup do editor (garantia S5).
+        _print_to_console(f"Erro ao adicionar entrada: {e}")
         return False

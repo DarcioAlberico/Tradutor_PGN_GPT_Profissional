@@ -50,12 +50,21 @@ DIALOG_MODULES = (
 )
 
 
+_UNSET = object()
+
+
 class SilentDialogs:
     """Substitui o `messagebox` do modulo sob teste e registra as chamadas."""
 
-    def __init__(self, askyesno=True):
+    def __init__(self, askyesno=True, askyesnocancel=_UNSET):
         self.calls = []
         self.askyesno_result = askyesno
+        # `None` e um valor legitimo aqui — e o "Cancelar" do dialogo de tres
+        # botoes —, entao o padrao nao pode ser `None` querendo dizer "use o do
+        # askyesno". Sem valor informado, cai no do `askyesno`.
+        self.askyesnocancel_result = (
+            askyesno if askyesnocancel is _UNSET else askyesnocancel
+        )
 
     def _record(self, kind):
         def handler(title, message, **_kwargs):
@@ -83,6 +92,11 @@ class SilentDialogs:
             def askyesno(title, message, **_kwargs):
                 recorder.calls.append(("askyesno", title, message))
                 return recorder.askyesno_result
+
+            @staticmethod
+            def askyesnocancel(title, message, **_kwargs):
+                recorder.calls.append(("askyesnocancel", title, message))
+                return recorder.askyesnocancel_result
 
         self.previous = []
         for module in modules:

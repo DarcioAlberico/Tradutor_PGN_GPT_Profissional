@@ -37,6 +37,7 @@ gravavel.
 | `traducoes.db` | Cache de traducoes + historico de edicoes | Nao |
 | `traducoes.db` (`PRAGMA user_version`) | Versao do schema; migracao so roda quando desatualizada | — |
 | `comments_fts` (dentro do `traducoes.db`) | Indice de busca FTS5, mantido por gatilhos (R8) | Nao |
+| `occurrences` (dentro do `traducoes.db`) | Onde cada comentario foi lido: arquivo, partida, indice e lance (O1) | Nao |
 | `Substituicoes.txt` | Fonte de verdade do glossario do usuario | Sim |
 | `tradutor_pgn/Substituicoes-semente.txt` | Terminologia que vem com o programa (S15) | Sim |
 | `glossario.db` | Indice SQLite derivado do `Substituicoes.txt` | Sim |
@@ -46,6 +47,8 @@ gravavel.
 | `backups/` | Copias automaticas do glossario e do banco, com retencao (S8) | Nao |
 | `logs/` | Log por execucao de traducao (`traducao-<carimbo>.log`), com retencao | Nao |
 | `spelling_ssp/spelling.ssp` | Dicionario de nomes proprios do "Normalizar PGN" | Sim |
+| `spelling_ssp/spelling.db` | Indice SQLite derivado dele, construido na primeira normalizacao (D6) | Nao |
+| `spelling.db` (`schema_version`, `source_hash`, `entry_count`) | Marcas do indice; a do hash e gravada por ultimo e significa "construcao concluida" | — |
 
 O `pgn_tradutor_pro_settings.json` guarda tambem a lista de arquivos que ficaram
 com comentarios sem traduzir na ultima execucao, usada pelo "Reprocessar Falhas"
@@ -91,13 +94,59 @@ valida a existencia e o "Iniciar Traducao", que ja o fazia.
 1. Coleta os `.pgn` do caminho escolhido (arquivo ou pasta, com ou sem
    subdiretorios). Arquivos ja gerados pelo programa (sufixo de idioma) sao
    ignorados quando a origem e uma pasta.
-2. Para cada arquivo, detecta a codificacao e le o conteudo — com `newline=''`,
-   para que o fim de linha do original chegue intacto a geracao (ver 3.6).
+2. Para cada arquivo, le os bytes **uma vez**, detecta a codificacao neles e
+   decodifica sem traduzir fim de linha, para que o do original chegue intacto a
+   geracao (ver 3.6).
 3. Extrai cada comentario `{...}` e o **achata**: colapsa espacos em branco e
    normaliza o espaco depois de `.`, `!` e `?` — **exceto quando o ponto esta
    entre dois digitos**, que e notacao (`2.5`, `[%eval +0.35]`, `v1.2.3`) e nao
    fim de frase. O texto achatado e a chave de cache; a posicao (inicio, fim)
    no arquivo original e guardada.
+4. Junto com cada comentario, extrai o **contexto de leitura**: a partida
+   (contada pelas tags `Event`), o indice do comentario no arquivo e o numero do
+   ultimo lance antes dele. E o que vai para a tabela `occurrences` (garantia
+   O1).
+
+**Garantia O1 — o banco registra onde cada comentario foi lido.** Arquivo,
+partida, indice e numero do lance entram na tabela `occurrences`, uma linha por
+posicao do arquivo, gravadas pelo worker depois dos lotes de cada PGN. E o que
+da ordem de leitura da obra ao editor e progresso por livro as estatisticas.
+
+O contexto e lido do movetext com **os comentarios apagados**: um comentario de
+livro cita lances a vontade ("melhor era 14. Bxf7"), e sem apaga-los o lance
+citado num comentario passaria a ser a posicao do seguinte. O numero de lance e
+recortado pela partida — sem lance anterior dentro dela, o valor e nulo, e nao
+zero. Nao contam como numero de lance: decimais (`+0.35`), linhas de tag
+(`[Date "2011.??.??"]`) e o resto de linha de um comentario `;`.
+
+**A extracao nao le PGN**: a partida sai da contagem de tags `Event` e o lance,
+do ultimo numero de lance do texto. Um arquivo sem `[Event` conta como uma
+partida so. Validar lance continua sendo nao-objetivo (secao 1); registrar onde o
+comentario estava e outra coisa.
+
+**Garantia D3 — cada PGN e lido uma vez por passada.** Os bytes sao lidos uma vez
+e a codificacao e detectada **neles**, e nao numa leitura propria: eram quatro
+leituras do arquivo por execucao (a deteccao lia inteiro, a extracao relia, a
+geracao repetia as duas), duas delas decodificando tudo para validar a
+codificacao (E4). O texto e a codificacao sao os mesmos que a forma antiga
+produzia, incluindo o `\r\n` do original, e ha teste comparando as duas em UTF-8,
+UTF-8 com BOM, cp1252 e UTF-16.
+
+**Garantia D5 — o conteudo de um PGN nao atravessa a fase da API.** A execucao tem
+duas passadas com papeis diferentes:
+
+- a **primeira** le todos os arquivos e guarda so o que a adocao (P2) e a carga de
+  cache precisam: os textos distintos de cada um, as contagens e os comentarios
+  `;`. Nem posicao, nem contexto de leitura;
+- na **vez de cada arquivo**, e depois dos lotes dele, ele e lido uma vez e
+  extraido por inteiro. As posicoes e o contexto vao para a gravacao e para a
+  tabela `occurrences`, e morrem com a iteracao.
+
+Antes, o resultado completo da extracao de todos os PGN ficava guardado pela
+execucao inteira. A fase da API dura minutos, e o conteudo do arquivo nao tem nada
+a fazer nela: e a diferenca entre segurar um livro de 40 MB por minutos e nao
+segurar. A segunda extracao reaproveita os objetos de texto da primeira, para que
+ler duas vezes nao faca o texto viver duas vezes.
 
 **Garantia X3 — o que o pipeline ignora e contado e anunciado.** O padrao PGN
 tem uma segunda forma de comentario, `;` ate o fim da linha, que o programa nao
@@ -189,6 +238,19 @@ e `(comentario original, idioma de origem, idioma de destino)`. O mesmo texto
 vindo do espanhol e do italiano sao duas traducoes independentes, e nenhuma e
 oferecida no lugar da outra.
 
+**Garantia O2 — o contexto entra ao lado da traducao, e nunca e inventado.** A
+chave de P1 nao ganhou coluna nenhuma: o mesmo comentario em doze livros continua
+sendo uma linha, uma traducao e uma revisao, e a procedencia vive em
+`occurrences`, N para 1. Se o arquivo fosse parte da identidade, cada livro
+criaria a sua copia e a revisao passaria a ser feita doze vezes.
+
+Do outro lado da mesma garantia: a migracao que cria a tabela **nao preenche
+nada**. Onde um comentario ja gravado foi lido nao esta em lugar nenhum do banco —
+nao ha de onde derivar —, e uma procedencia inventada apareceria no filtro por
+arquivo como uma obra que ninguem traduziu. As linhas antigas ganham a primeira
+ocorrencia quando o PGN delas for processado de novo, e ate la aparecem so em
+"Todos os arquivos".
+
 "Detectar" nao e um idioma: as linhas que ele produz ficam com a origem **nao
 informada**, o mesmo estado das linhas gravadas antes de o programa perguntar. E
 uma string vazia, e nao `NULL`, porque num indice UNIQUE o SQLite considera todo
@@ -238,10 +300,58 @@ metade da tabela a carga completa sai mais barata e e usada — o dicionario pas
 a conter mais do que foi pedido, o que e indiferente para a consulta mas torna
 `len(cache)` inutil como contagem do que veio destes arquivos.
 
+**Garantia D4 — comentario repetido no proprio arquivo vai uma vez para a API.** O
+cache so aprende a traducao depois da resposta, e o lote inteiro sai antes dela:
+um capitulo com "Diagram" trinta vezes enviava as trinta. Os lotes de cada arquivo
+sao montados sobre os textos **distintos** dele; entre arquivos quem serve e o
+cache em memoria, que ja fazia esse papel. A geracao continua trocando todas as
+ocorrencias (ela procura o texto, nao a posicao), e a tabela `occurrences` continua
+recebendo uma linha por ocorrencia.
+
+**A conta do resumo fecha, e antes nao fechava.** A segunda gravacao da mesma chave
+volta "sem alteracao", que nao era contado em contador nenhum: cinco comentarios
+processados apareciam como "2 novas" e mais nada. Hoje os repetidos tem linha
+propria, no log e no resumo, e a barra de progresso conta sobre os distintos — com o
+denominador antigo ela pararia antes do fim. As duas linhas so aparecem quando ha
+repeticao, como a dos lances corrigidos e a dos comentarios `;`.
+
 **Garantia T1 — nunca sobrescrever traducao existente.** A gravacao no cache
 so insere linhas novas ou preenche traducoes vazias. Uma traducao ja
 preenchida (possivelmente revisada por humano) jamais e substituida pelo
 processo automatico.
+
+"Automatico" e a palavra que delimita T1. Ha **um** caminho que sobrescreve, e ele
+existe porque o padrao virava um beco: exportar o CSV, corrigir 300 traducoes na
+planilha e importar nao fazia nada — as 300 voltavam como "Sem alteracao", e o
+usuario descobria depois do trabalho feito. A importacao passou a oferecer o modo
+"sobrescrever existentes", com tres condicoes que o separam do acidente:
+
+- **e uma escolha explicita**, num dialogo de tres botoes (sobrescrever / importar
+  sem sobrescrever / cancelar) que mostra quantas linhas do arquivo diferem do
+  que esta gravado, e quantas dessas estao marcadas como verificadas;
+- **passa pelas mesmas garantias de toda escrita em massa**: backup antes,
+  historico com acao propria (R2) e reavaliacao do aviso de qualidade (R6);
+- **rebaixa o `verified` da linha reescrita**, a nao ser que o CSV diga o
+  contrario: a revisao era do texto anterior, e mante-la sobre um texto que
+  ninguem leu e o que R9 e V1 existem para impedir.
+
+T1 continua sendo o padrao, e continua valendo integralmente para o worker — ele
+nunca chama esse caminho.
+
+**Garantia T5 — nenhuma ferramenta de escrita em massa roda durante uma
+traducao.** "Restaurar BD", "Importar CSV", "Aplicar Automaticas", "Corrigir
+Lances", "Zerar Traducoes" e "Zerar Glossario" recusam com uma mensagem enquanto
+o worker esta ativo. A pior era a restauracao: substituir o banco enquanto o
+worker grava produz um arquivo que nao e nem o backup nem a execucao, com o cache
+em memoria apontando para linhas que ja nao existem.
+
+A guarda e a primeira linha de cada acao, e nao um botao desabilitado, porque os
+botoes de "Ferramentas" sao criados anonimos — o clique acontece de todo jeito. E
+por isso ela e uma MENSAGEM: um `return` mudo faz o clique nao fazer nada e nao
+dizer nada, e quem clicou conclui que o programa travou. "Reprocessar Falhas" e
+"Normalizar PGN" tinham exatamente esse `return`, e "Reprocessar Falhas" tambem
+passou a ser desabilitado junto com o "Iniciar" — as duas comecam uma traducao, e
+deixar so uma apagada dizia que a outra estava disponivel.
 
 **Garantia T2 — falha e sempre reportada.** Um comentario que nao pode ser
 traduzido e contabilizado como falha, registrado no log e exibido no resumo
@@ -372,12 +482,32 @@ traducao precisa de correcao" exatamente no caso para o qual a ferramenta existe
 
 ### 3.6 Geracao do PGN traduzido
 
-O arquivo de origem e relido e cada comentario e substituido pela traducao, de
-tras para frente (para nao invalidar as posicoes). Chaves `{` e `}` dentro de
-uma traducao viram parenteses, para nao quebrar a estrutura do PGN.
+O conteudo vem da extracao da vez do arquivo (D5), e o PGN de saida e escrito
+**numa passada**: os trechos entre comentarios e as traducoes vao para o arquivo
+em ordem crescente de posicao. Chaves `{` e `}` dentro de uma traducao viram
+parenteses, para nao quebrar a estrutura do PGN.
 
 Saida: `<nome>-<SUFIXO>.pgn` ao lado do original (`BR`, `EN`, `ES`, `FR`,
 `DE`, `IT`, `RU`). Se o nome ja existir, sufixa `-2`, `-3`, ...
+
+**Garantia D1 — a gravacao e uma passada, sem uma segunda copia do arquivo.** A
+forma anterior refazia o arquivo inteiro a cada comentario
+(`content[:start] + rep + content[end:]`, de tras para frente), e o custo crescia
+com o **produto** do numero de comentarios pelo tamanho do arquivo: 15 mil
+comentarios num PGN de 3,2 MB custavam 26,9 s, e um livro de 40 MB seriam centenas
+de GB copiados. Os pedacos sao escritos direto no arquivo em vez de concatenados
+antes, porque juntar produziria o PGN de saida inteiro na memoria ao lado do de
+entrada.
+
+Duas consequencias que valem dizer: os spans precisam estar em ordem e sem
+sobreposicao (a montagem ordena, e um span sobreposto e ignorado com aviso no log),
+e um comentario cujo span foi ignorado sai no idioma original — nunca corrompido.
+
+**Garantia D2 — cancelar interrompe a gravacao.** O `cancel_flag` e conferido
+durante a montagem, e um cancelamento devolve "nao gerado" **sem criar o arquivo**:
+um PGN de saida pela metade e pior do que nenhum. A fase nao tinha checagem
+nenhuma, e num acervo grande "Cancelar" ficava sem efeito visivel enquanto ela
+rodava.
 
 **Garantia G1 — o original nunca e modificado.**
 
@@ -403,6 +533,30 @@ acervo comparado por hash mudava inteiro.
 traducao introduz acentos sai UTF-8, e sem BOM o ChessBase do Windows le ANSI
 e exibe mojibake. So afeta saidas UTF-8; um BOM nao significa nada em cp1252.
 
+**Garantia F9 — a requebra muda so espaco em branco.** `output.wrap_columns`
+requebra os comentarios do arquivo gerado (80 e o export format do padrao PGN, o
+que editora espera); zero, o padrao, mantem o comentario em linha unica como
+sempre. As palavras saem na mesma ordem e com os mesmos caracteres — um espaco
+entre duas delas vira uma quebra de linha, e nada mais. E o que permite requebrar
+sem tocar na chave de cache, que continua sendo o texto achatado.
+
+Quatro recortes, e cada um evita um estrago:
+
+- a **primeira linha** sabe que comeca no meio: depois de `12. Nf3 {` sobra menos
+  espaco. A coluna e medida no texto original — quando dois comentarios dividem a
+  linha, o primeiro pode encolher e a coluna do segundo muda com ele, e o erro
+  desloca uma quebra de linha, nunca texto;
+- um **`[%...]` conta como uma palavra** e nunca e partido. X1 gastou uma secao
+  protegendo esses spans; quebra-los na gravacao seria desfaze-lo no ultimo passo;
+- a quebra inserida e a **do arquivo** (`\r\n` num arquivo CRLF), senao a requebra
+  entregaria um PGN de fim de linha misturado — pior que o sem requebra;
+- uma **palavra maior que a linha** fica inteira e estoura a coluna: cortar no meio
+  dela produziria um token que nao existe.
+
+Larguras invalidas caem no padrao: `true` (que em Python e `1`), qualquer valor
+abaixo de 20 colunas e qualquer tipo que nao seja inteiro. Uma palavra por linha
+nao e um PGN requebrado.
+
 ### 3.7 Controle de execucao
 
 Roda em thread separada, com pausa e cancelamento cooperativos. Toda
@@ -413,6 +567,11 @@ principal; o log usa fila + polling.
 
 **Garantia C2 — cancelamento preserva o trabalho feito.** Ao cancelar, o que
 ja foi traduzido esta gravado no banco.
+
+O `cancel_flag` e conferido em cinco pontos: entre arquivos, entre lotes, entre
+comentarios de um lote, entre requisicoes do caminho individual e **durante a
+gravacao do PGN** (D2, o unico que faltava). O da gravacao nao grava arquivo
+nenhum quando dispara — meio PGN traduzido em disco seria pior do que nenhum.
 
 **Garantia C3 — o worker nao segura o banco.** O worker e o editor de traducoes
 usam o **mesmo** `traducoes.db`, cada um com sua conexao. Duas conexoes nunca
@@ -512,7 +671,14 @@ indice de busca, libera o espaco em disco (`VACUUM`) e limpa o cache em memoria 
 que tem precedencia sobre o banco e, deixado como estava, faria a proxima
 traducao reaproveitar exatamente o que acabou de ser apagado.
 
-Nenhuma das duas roda com uma traducao em andamento.
+**Garantia O4 — zerar leva as ocorrencias junto.** Elas apontam para linhas de
+`comments` por id, e o `AUTOINCREMENT` reinicia com a tabela: uma ocorrencia
+sobrevivente passaria a apontar para a PRIMEIRA traducao gravada depois do
+zeramento — o comentario errado, no arquivo certo, sem nada acusando na tela. A
+tabela e derrubada com as outras e recriada vazia pela migracao.
+
+Nenhuma das duas roda com uma traducao em andamento — e nenhuma das outras
+ferramentas de escrita em massa tambem (garantia T5, secao 3.4).
 
 ---
 
@@ -665,6 +831,20 @@ No arquivo, a prioridade e o quarto elemento da tupla e so aparece quando nao e
 zero (`('orig', 'novo', 'suggestion', 2)`); no CSV e a coluna `priority`, opcional
 na leitura. Um `Substituicoes.txt` ou um CSV de antes desta versao continua
 valendo, com prioridade zero em tudo.
+
+**Garantia D7 — a ordem das regras e identificada por versao.** A ordenacao por
+especificidade e memorizada, porque as mesmas regras entram nela muitas vezes
+seguidas: o editor de traducoes reordena o glossario a cada tecla digitada. A
+chave dessa memoria era a **tupla do conteudo** — uma entrada por regra, montada e
+hasheada em cada consulta —, o que custava 1,75 ms dos 9,15 ms de uma tecla com o
+glossario real (7.334 regras).
+
+Cada lista carregada traz um numero de versao, e a chave passou a ser ele. O
+`id()` da lista nao serviria (uma lista nova reaproveita o endereco de uma
+coletada), e a versao cobre tambem o caso que a chave por conteudo cobria de
+graca: **mutar a lista renova a versao**. Sem isso, uma lista alterada no lugar
+receberia a ordem antiga, com regras que nao estao mais nela. Uma lista comum —
+escrita a mao, ou de teste — continua sendo identificada pelo conteudo.
 
 **Garantia S4 — o texto substituido e final.** Um trecho ja produzido por uma
 regra nao e reexaminado pelas regras seguintes. Sem isso, duas regras
@@ -828,6 +1008,14 @@ O destino nao e lembrado de proposito: guarda-lo faria quem marcasse "Ingles" na
 janela principal abrir o editor em portugues, sem nada na tela explicando de onde
 aquilo veio.
 
+**Garantia R10 — o filtro de origem vale para navegar tambem.** "Ir para ID" e
+"Proximo aviso QA" (F7) consultam o banco com o mesmo filtro que a lista, porque
+os dois trabalham com POSICOES: o offset de uma linha e a posicao dela na lista
+filtrada, e o limite da varredura de F7 e o total filtrado. Sem o filtro na
+consulta, digitar um ID de outra origem selecionava uma linha arbitraria — e F7
+anunciava o aviso de uma linha que nao esta na tela. Nos dois casos, sem
+mensagem. E a mesma classe do bug que R7 fechou: navegar pela posicao errada.
+
 A barra de status nomeia o par da **linha carregada**, que com "Origem: Todos" nao
 e o mesmo que o filtro — e e justamente ai que a informacao importa, porque e o
 unico momento em que a lista mistura idiomas de origem de proposito.
@@ -837,6 +1025,174 @@ antigo e sai da lista na troca) e volta para a primeira pagina — a pagina 40 d
 par anterior nao quer dizer nada no novo. Com um filtro de origem ativo,
 "Aplicar automaticas" fica restrito a ele: reescrever tambem as linhas das outras
 linguas seria uma alteracao em massa que o usuario nao pediu nem consegue ver.
+
+**Garantia O3 — com um arquivo escolhido, a lista e a obra em ordem de
+leitura.** Um terceiro seletor, "Arquivo", lista as obras do par (as que tem
+ocorrencia gravada) mais "Todos os arquivos". Escolher uma filtra a lista e a
+ordena pela posicao do comentario NAQUELE arquivo; "Todos os arquivos" volta a
+ordem de `id`, que e a ordem de insercao no cache.
+
+Cada comentario aparece **uma vez**, ordenado pela primeira posicao em que o
+leitor o encontra: um livro repete o mesmo comentario ("Diagram") dezenas de
+vezes, e a identidade da lista e o comentario, nao a posicao.
+
+Nao existe um seletor de ordem, e a ausencia e a decisao: escolher um arquivo E
+pedir a obra em ordem de leitura. Sem arquivo, a ordem de leitura nao existe — o
+mesmo comentario esta em varios — e ordenar pela primeira ocorrencia de cada um
+custaria uma agregacao da tabela inteira por pagina, o que R5 proibe. O rotulo da
+pagina diz "· ordem de leitura" quando ela esta ativa.
+
+R10 vale para o arquivo como vale para a origem, e com um agravante proprio:
+**"quantas linhas vem antes deste id" deixa de ser "quantas tem id menor"** no
+momento em que a lista se ordena por ocorrencia. O offset do "Ir para ID" e a
+varredura do F7 usam o mesmo criterio do `ORDER BY`; um id fora do arquivo
+recebe "nao encontrado nos filtros atuais", como fora da origem.
+
+O rodape do original diz onde ele foi lido — arquivo, partida, lance e indice do
+comentario —, com preferencia pelo arquivo aberto: quem le o capitulo 7 nao pode
+ver no rodape a posicao do mesmo comentario no capitulo 1, que e verdade e
+responde outra pergunta. Quando a traducao serve a varias posicoes, o rodape diz
+quantas — editar ali muda todas elas, e e isso que o numero avisa. Uma linha sem
+ocorrencia (as gravadas antes desta versao, e as importadas por CSV) deixa o
+rodape vazio.
+
+A escolha e lembrada entre sessoes **pelo caminho do arquivo**, e nao pelo rotulo
+do menu: o rotulo ganha a pasta quando dois nomes coincidem, entao ele pode
+significar outro arquivo amanha. Um arquivo lembrado que nao esta mais na lista
+cai em "Todos os arquivos".
+
+### 6.1 O fluxo de quem trabalha o dia inteiro nisso
+
+**Garantia F1 — trocar a orientacao dos dois textos nao perde a edicao.** Original
+e traducao vivem num divisor proprio, e um botao alterna entre empilhado (o padrao,
+como sempre foi) e lado a lado. A troca e `configure(orient=...)`, e nao a
+reconstrucao dos paineis: o texto digitado, a pilha de desfazer, a selecao e as
+marcas de busca vivem DENTRO dos widgets de texto, e recria-los perderia os quatro
+no meio de uma edicao nao salva.
+
+A orientacao e lembrada, e a posicao do divisor e lembrada **por orientacao**: o
+divisor horizontal mede largura e o vertical mede altura, e reaproveitar o numero
+de um no outro poria o divisor num lugar sem relacao com o escolhido.
+
+**Garantia F2 — a linha da lista diz status, aviso e origem.** A primeira linha do
+rotulo carrega o que decide se vale abrir a linha: o status, o id, o marcador de
+aviso QA e o idioma de origem. O marcador sai da COLUNA `quality_warning`, que e a
+mesma que o filtro "Avisos QA" le — reavaliar o texto no rotulo daria uma tela em
+que a linha nao esta marcada e o filtro a mostra (R6). Uma linha que nao traz a
+coluna nao ganha marcador, em vez de ganhar "sem aviso".
+
+**`Ctrl+F` busca no TEXTO aberto e `Ctrl+L` na lista.** Era o contrario, e o gesto
+universal caia no campo que TROCA a pagina — quem procurava uma palavra no
+comentario perdia o lugar em que estava.
+
+**Garantia F3 — "voltar" restaura a linha e os filtros.** `Alt+Backspace` (ou o
+botao "< Voltar") desfaz o ultimo SALTO: buscar, limpar a busca, ir para um id ou
+uma pagina, trocar de filtro, de arquivo ou de par, e o F7. Navegar para a linha
+vizinha nao empilha nada — um "voltar" que andasse linha por linha nao devolveria
+nada a quem revisa um livro.
+
+O que a pilha guarda e um **retrato** (linha aberta, busca, status, origem, arquivo
+e pagina), e nao um id: usar a busca como concordancia troca a lista, e voltar para
+um id que a busca nova nao contem nao e voltar. A pilha guarda 50 retratos, e um
+retrato que nao da para repor — a linha foi apagada por outra janela — nao a trava:
+o proximo assume.
+
+**Garantia F7 — a selecao em lote e por id.** Uma marca por linha; "Verificar" e
+"Exportar" valem para o que esta marcado, e a selecao sobrevive a trocar de pagina
+(juntar 30 linhas de tres paginas e o caso real de quem prepara uma entrega). Ela
+morre na troca de par, porque um id do par anterior nao esta na lista nova.
+
+Verificar em lote passa pelo mesmo caminho de uma linha so, entao cada linha ganha
+carimbo e historico (R2), e **nao propaga para traducoes iguais**: a propagacao tem
+confirmacao propria (V1) porque marca originais que ninguem leu, e encadea-la aqui
+abriria uma confirmacao por linha marcada — ou nenhuma. A confirmacao do lote diz
+isso em palavras.
+
+**Garantia F11 — a previa de "Aplicar todas" marca o que muda.** As faixas trocadas
+sao pintadas nos dois lados e a previa diz quantos trechos mudaram. O diff e
+calculado entre os dois textos PRONTOS, e nao acumulado regra a regra: a segunda
+substituicao desloca as faixas da primeira, e a previa mostra o texto depois de
+todas. E por palavra, e nao por caractere — `torre` -> `Torre` como um `T` trocado
+no meio de uma palavra pintada de igual nao e o que o revisor precisa ver.
+
+**Garantia F10 — `verified` e `review_status` andam em lockstep.** Uma linha nao
+verificada pode estar **rejeitada** ou **em duvida**, com uma nota do revisor:
+"pendente/verificada" nao expressa "voltar aqui com o autor". `verified` continua
+sendo a autoridade sobre verificada/pendente, e o campo novo so refina o lado
+pendente — guardar "verified" nos dois daria duas fontes para a mesma verdade.
+
+A regra e uma frase: **verificar limpa o status, e um status alem de pendente
+derruba o verificado.** Rejeitar uma linha verificada e dizer que a verificacao
+estava errada; deixar o bit de pe a manteria fora do filtro de pendentes e ela
+nunca voltaria para a fila de ninguem. Sao **quatro** os caminhos que escrevem
+`verified` — marcar, salvar-e-verificar, a propagacao e a sobrescrita pelo CSV —, e
+a frase vale nos quatro.
+
+Os dois status novos sao filtros da lista e aparecem no rodape **so quando
+existem**. Eles sao recortes das pendentes, e nao categorias ao lado delas: somar os
+tres daria um total maior que a tabela.
+
+**Garantia F5 — as estatisticas saem do clique.** "Estatisticas do BD" abre uma
+janela propria, copiavel e salvavel em `.txt`, com o conteudo computado numa thread
+de trabalho e com progresso cancelavel. Era a ultima operacao pesada dentro do
+callback de um botao (C1), e o resultado era um `messagebox` que nao rola, nao se
+seleciona e nao se copia — sendo justamente o numero que vai para um orcamento.
+
+A janela e modeless: o proposito dela e ser consultada enquanto se trabalha. O
+texto e selecionavel e nao editavel — `state="disabled"` no Tk impediria tambem a
+selecao, e um relatorio que nao se copia e o defeito que ela veio corrigir.
+
+**Garantia F4 — "palavra" e a mesma unidade em todo o programa.** Palavra e
+sequencia separada por espaco em branco, a mesma definicao do `wc -w`, do Word e do
+OmegaT — a que o cliente usa para pagar. `14.Bxf7` conta como uma. A contagem
+aparece no acervo inteiro e por par, com o original e a traducao separados: o
+tradutor orca pelo original (e o que o cliente manda) e mede o trabalho feito pela
+traducao.
+
+A contagem e feita em Python, e nao em SQL: contar espacos acerta o original — ele
+e achatado — e erra a traducao, que passou pela mao do revisor e pode ter quebra de
+linha e espaco duplo.
+
+**A produtividade por dia sai do `comment_history`**: cada edicao conta uma, com as
+palavras da traducao NOVA. A mesma linha editada tres vezes conta tres, porque sao
+tres passagens de revisao — o numero e de atividade, e nao de acervo. Diferenca em
+relacao ao texto anterior seria negativa quando o revisor encurta, e "produzi -40
+palavras hoje" nao e uma metrica de trabalho.
+
+**Garantia F8 — o rascunho grava fora da thread da interface.** A pausa que dispara
+a gravacao subiu de 700 ms para 2,5 s e o disco saiu da thread do Tk: cada gravacao
+rele o JSON inteiro, serializa tudo e troca o arquivo de nome, o que em disco lento
+ou com antivirus e o programa parando entre duas teclas.
+
+O que roda na thread e so o disco; os valores sao capturados antes e o rotulo e
+escrito de volta por `after` (C1). E `update_settings` passou a serializar o ciclo
+ler-alterar-gravar sob um lock: com duas threads gravando, a segunda lia o disco
+antes de a primeira gravar e o que a primeira escreveu desaparecia — a perda que R4
+existe para impedir, agora por corrida.
+
+**Garantia F6 — o acervo sai em TMX 1.4.** "Exportar TMX" escreve o banco como
+memoria de traducao: um `<tu>` por linha, o `id` como `tuid`, os dois idiomas nos
+`<tuv>`. Abre em OmegaT, Trados e memoQ. Sem isso, 200 mil pares revisados ficavam
+presos num formato que so este programa le.
+
+Tres decisoes do arquivo:
+
+- **`srclang="*all*"`** — o acervo tem varios idiomas de origem ao mesmo tempo, e
+  esse e o valor que o padrao define para isso. Declarar um so faria toda
+  ferramenta importar o acervo inteiro como se fosse dele;
+- **origem nao declarada vira `und`** (ISO 639-2, "indeterminado"). `xml:lang=""`
+  nao e valido, inventar `en` seria mentir, e pular essas linhas deixaria de fora a
+  maioria de um banco anterior a 9.2;
+- **linha sem traducao fica fora.** Uma memoria com o lado de destino vazio nao
+  ajuda ferramenta nenhuma e polui a concordancia de quem a importar.
+
+O texto e escapado e os controles C0 sao removidos — o XML 1.0 nao os aceita nem
+escapados, e um deles produz um arquivo que nao abre. Um TMX interrompido no meio e
+apagado, como o CSV: sem `</body>` ele nao abre em lugar nenhum.
+
+**O `id` passou a ser a primeira coluna do CSV de traducoes**, com o status de
+revisao e a nota no fim. E a unica coluna que identifica a linha sem depender do
+texto, e e o que torna o round-trip pela planilha conferivel.
 
 **Garantia R1 — gravacao e sempre intencional.** Apenas uma acao deliberada do
 usuario altera o banco. Navegar pela lista nao reescreve traducoes.
@@ -894,6 +1250,13 @@ A busca por termos **degrada para o `LIKE`** — sem avisar, porque o resultado
 continua correto — quando o SQLite nao tem o modulo FTS5, quando o indice ainda
 nao existe no arquivo, ou quando a expressao nao sobra nenhum termo utilizavel.
 
+No modo "Trecho" o texto digitado tambem nao vai cru: `%`, `_` e `\` sao
+escapados e a consulta declara `ESCAPE '\'`. Sem isso o campo de busca era uma
+linguagem de padroes que ninguem documentou, e a busca mais natural do dominio —
+`[%eval`, uma tag de comando do Lichess, que **comeca** com `%` — era justamente
+a que quebrava: ela casava toda linha com `[`, qualquer coisa e `eval`, e
+devolvia lixo em vez de nada.
+
 Eram duas varreduras por interacao ate 2026-07-27: o total do filtro ativo era
 pedido numa segunda consulta, com o mesmo `WHERE` da agregada de status que ja
 havia acabado de rodar. Hoje ele sai do proprio resumo (`STATUS_COUNT_KEYS`), e a
@@ -903,9 +1266,85 @@ divergirem, a lista pagina por um numero errado sem erro visivel.
 
 **Garantia R6 — o cache de avisos nunca diverge.** `quality_warning` e derivada
 de `evaluate_translation_quality` e atualizada em toda escrita de traducao
-(insercao, preenchimento de vazia, edicao manual e aplicacao em massa das regras
-automaticas). A contagem exibida e sempre igual ao que a avaliacao em Python
-produziria para as mesmas linhas.
+(insercao, preenchimento de vazia, edicao manual, sobrescrita por CSV e aplicacao
+em massa das regras automaticas). A contagem exibida e sempre igual ao que a
+avaliacao em Python produziria para as mesmas linhas.
+
+Isso passou a exigir que o PAR DE IDIOMAS chegue aos dois caminhos, porque uma
+das heuristicas depende dele (ver Q1 abaixo): as linhas do editor trazem origem e
+destino nas duas ultimas posicoes, e todo ponto que grava a coluna le o par da
+propria linha. Um caminho avaliando com par e o outro sem faria o numero do
+rodape parar de bater com a lista, sem erro nenhum.
+
+**Garantia Q1 — o aviso de qualidade sabe que o texto e xadrez.** As cinco
+heuristicas originais eram genericas de traducao (vazia, igual ao original,
+chaves perdidas, curta demais, longa demais). A medicao que motivou isto, no
+banco de desenvolvimento (6.500 traducoes en -> pt, reais, de livro):
+
+| | |
+|---|---|
+| linhas com erro de terminologia enxadristica | **321 (4,9%)** |
+| linhas que o `quality_warning` marcava | 11 |
+| intersecao entre os dois conjuntos | **0** |
+
+As heuristicas de xadrez, todas comparando ORIGINAL com TRADUCAO:
+
+| # | heuristica | o que ela pega |
+|---|---|---|
+| 1 | **lance perdido ou inventado** | o multiconjunto de ANCORAS de lance tem de bater. A ancora e a parte que nao muda de idioma (`f1`, `xe4+`), entao o aviso vale sem saber a lingua — inclusive nas linhas legadas |
+| 2 | **anotacao `[%...]` rompida** | os spans do original presentes e identicos na traducao. E a prova de que a mascara de X1 funcionou, e a unica forma de achar o que execucoes anteriores ja corromperam |
+| 3 | **NAGs e simbolos de avaliacao** | multiconjunto de `$n` e dos simbolos de mais de um caractere (`!!`, `+-`, `∞`) |
+| 4 | **`U+FFFD`** | o sinal direto de que `errors='replace'` engoliu bytes. E4/G2 impedem na leitura nova; isto acha o legado |
+| 5 | **separador vazado** | `\|\|\|` no texto gravado e desalinhamento que a contagem de partes nao pegou (B2) |
+| 6 | **quase-igualdade** | uma traducao 95% identica ao original e o tradutor tendo desistido |
+| 7 | **terminologia por par** | o termo X no original com a forma errada Y na traducao, com escopo de idioma (S11) |
+
+A lista de termos vive em `Termos-suspeitos.txt`, ao lado do dicionario-semente e
+com as mesmas regras: vem com o programa, e substituida na atualizacao, e um
+defeito nela avisa em vez de derrubar (S5). Ela e escopada por DESTINO, e nao por
+par, pela mesma razao que a semente: o termo procurado esta em ingles, e um padrao
+ingles nao casa texto portugues por acaso — o proprio padrao ja e a guarda de
+origem, e escopar por par deixaria de fora as linhas legadas.
+
+**Garantia Q2 — as heuristicas tem versao, e muda-las reavalia o banco.**
+`quality_warning` e materializada e o backfill so preenche `NULL` — correto para a
+coluna nova, insuficiente para heuristica nova: com uma regra a mais, as linhas
+ja avaliadas ficam com o veredito velho e R6 passa a ser violada exatamente pela
+melhoria. A versao das heuristicas e gravada em `db_metadata`, e na abertura o
+programa compara: se mudou, reavalia o banco com barra de progresso e
+cancelamento, como toda escrita em massa. Medido: 0,127 ms por linha, ~25 s nas
+200 mil do banco real, uma vez por mudanca.
+
+**A versao so e gravada quando a reavaliacao TERMINA.** Cancelar deixa a marca
+antiga de proposito — o banco esta metade reavaliado, e dizer que ele esta em dia
+seria mentir de um jeito que ninguem descobre depois, porque a coluna nao tem como
+acusar que esta velha. Na proxima abertura a reavaliacao acontece de novo, e o
+botao "Reavaliar QA" existe para quem quiser faze-la na hora.
+
+E a unica escrita em massa **sem backup**, e a razao e o que a coluna e:
+`quality_warning` nao guarda nada que o usuario escreveu, e o seu conteudo e
+recomputavel a partir do texto — que e exatamente o que a operacao faz. Um backup
+de 115 MB para proteger um bit por linha, derivado, seria custo sem risco.
+
+**Garantia V1 — a verificacao em massa diz o que vai marcar, por original.**
+Marcar uma traducao como verificada propaga para as linhas do mesmo par cuja
+**traducao** e identica. E a unica propagacao possivel — originais identicos ja
+sao uma linha so, pela UNIQUE — e quase sempre e o que se quer; o risco esta nas
+traducoes curtas. Se o tradutor verteu "Checkmate." errado como "Empate.",
+verificar o "Draw." -> "Empate." legitimo marcaria a outra linha junto.
+
+Por isso a propagacao **pergunta antes**, e a pergunta e por ORIGINAL: ela nomeia
+quantos originais distintos serao marcados e lista os primeiros. A mensagem
+antiga — "N iguais também verificadas", depois do fato — descrevia as traducoes, e
+era exatamente por isso que nao alarmava ninguem: o que estava sendo dado por
+revisado eram N textos diferentes que o usuario nao leu. Responder "Nao" verifica
+so a linha aberta.
+
+Os ids propagados sao os que a previa mostrou. Uma linha que o worker gravar com
+a mesma traducao enquanto o dialogo estiver aberto nao entra — o usuario nao a
+viu. E a pergunta acontece com a transacao ja comitada e a conexao fechada
+(garantia C3): um dialogo modal sobre uma transacao de escrita seguraria o banco
+enquanto ninguem clica.
 
 **Garantia R2 — historico completo.** Toda alteracao registra estado anterior,
 novo, e status de verificacao, em `comment_history`.
@@ -943,6 +1382,49 @@ que reconhece as linhas candidatas e derivado dela. Mantidas em dois lugares,
 as duas copias falhavam em silencio ao divergir: uma tag declarada e nao
 reconhecida simplesmente nao era corrigida, e uma tag reconhecida e nao
 declarada derrubava a normalizacao do arquivo inteiro.
+
+**Uma secao repetida no `spelling.ssp` acrescenta, e nao substitui.** O jeito
+natural de acrescentar nomes ao arquivo e abrir um segundo bloco `@PLAYER` no
+fim, e isso APAGAVA as entradas do bloco anterior — 512.668 grafias de jogador no
+arquivo que vem com o projeto, medidas —, sem uma linha de aviso. Entre blocos
+vale a mesma regra que dentro de um: o primeiro a definir uma chave vence. O
+`ignore_chars` do bloco repetido substitui o anterior, porque e um parametro do
+bloco e nao uma lista para acumular.
+
+**Garantia D6 — o dicionario de grafias tem indice derivado, com hash do fonte.**
+O `spelling.ssp` sao 30,5 MB e 985.829 linhas, e ele era reparseado por inteiro a
+cada uso: 1,0 s e 72 MB de pico para corrigir cinco tags de um PGN de 20 KB. O
+indice e um SQLite ao lado do fonte, com o mesmo desenho do `glossario.db`:
+
+- **construido em fluxo**, na primeira normalizacao de cada maquina (2,0 s, 5,4 MB
+  de pico, 513.797 entradas). O dicionario inteiro nunca existe em memoria;
+- **valido enquanto o hash do conteudo do fonte for o mesmo**. Trocar o
+  `spelling.ssp` por uma versao nova das classificacoes reconstroi o indice; o
+  `mtime` nao serviria (muda quando o arquivo e reescrito igual);
+- a marca de conclusao e gravada **por ultimo**, entao uma construcao interrompida
+  e refeita em vez de consultada pela metade;
+- as respostas sao as do arquivo, chave por chave, inclusive a precedencia entre
+  blocos repetidos (`INSERT OR IGNORE` reproduz "o primeiro vence");
+- **se o indice nao puder ser usado** — pasta sem escrita, banco corrompido —, a
+  normalizacao le o arquivo direto, com aviso no log dizendo por que. O botao
+  continua funcionando pelo custo que sempre teve.
+
+O indice **nao** e versionado no repositorio, ao contrario do `glossario.db`, e a
+diferenca e de tamanho: 1,1 MB que viajam junto para poupar uma reconstrucao,
+contra 25,5 MB para poupar 2 s.
+
+**O valor gravado e re-escapado.** O `spelling.ssp` fala na forma que se escreve
+(`O"Kelly`) e o PGN na forma escapada (`O\\"Kelly`); a conversao acontece nas duas
+pontas — desescapar para comparar com o dicionario, reescapar para gravar. Sem a
+segunda, um `"` no nome canonico era inserido cru e a tag deixava de ser valida:
+o dano nao aparece neste programa, aparece no ChessBase de quem abre o arquivo.
+
+**Um arquivo que falha nao derruba o lote.** Permissao negada, arquivo aberto no
+ChessBase, disco cheio na gravacao: a excecao subia daqui ate a interface, que
+mostrava "Erro ao normalizar PGN" e nenhuma estatistica — os arquivos ja
+corrigidos ficavam em disco sem que nada dissesse quais eram, e os seguintes nunca
+eram tentados. Hoje cada falha e contada com o motivo, o lote segue, e o resultado
+e um AVISO em vez de um "concluida" liso.
 
 ---
 
@@ -989,8 +1471,24 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | T1 | Nao sobrescrever traducao existente | — |
 | T2 | Falhas contabilizadas e exibidas | Bug: sucesso reportado com PGN bilingue |
 | T4 | A lista de falhas sobrevive a execucao, e so ela e reprocessada | Custo: reexecutar tudo por causa de dois arquivos |
+| T5 | Nenhuma ferramenta de escrita em massa roda durante uma traducao | Bug: restaurar um backup durante uma execucao produz um banco que nao e nem um nem outro |
 | P1 | O par (original, origem, destino) e a identidade da traducao | Limite: o mesmo texto em duas linguas era uma linha so |
 | P2 | Declarar o idioma adota o cache existente em vez de paga-lo de novo | Risco: a mudanca de chave cobrar 201.607 traducoes ja feitas |
+| O1 | O banco registra onde cada comentario foi lido: arquivo, partida, indice e lance | Limite: `ORDER BY id` nao e ordem de leitura de obra nenhuma |
+| O2 | O contexto entra ao lado da traducao (N para 1), e nunca e inventado | Risco: o arquivo na chave faria a revisao ser feita uma vez por livro |
+| O3 | Com um arquivo escolhido, a lista e a obra em ordem de leitura, cada comentario uma vez | Limite: nao havia como revisar um livro na ordem em que ele se le |
+| O4 | "Zerar Traducoes" leva as ocorrencias junto | Risco: o `AUTOINCREMENT` reinicia, e a ocorrencia velha aponta para a traducao nova |
+| F1 | Trocar a orientacao dos dois textos nao perde o que esta sendo editado | Risco: reconstruir os paineis apaga texto, desfazer e selecao no meio de uma edicao |
+| F2 | A linha da lista diz status, aviso e origem, e o marcador vem da coluna | Limite: achar as linhas com aviso exigia trocar o filtro e perder a obra de vista |
+| F3 | "Voltar" restaura a linha E os filtros que a traziam | Limite: usar a busca como concordancia descartava a pagina, sem volta |
+| F4 | "Palavra" e a mesma unidade em todo o programa | Risco: duas contagens fariam o orcamento discordar do relatorio |
+| F5 | As estatisticas sao computadas fora da thread da interface, e o resultado se copia | Bug: a ultima operacao pesada dentro do callback do botao, num `messagebox` que nao se copia |
+| F6 | O TMX exportado e XML valido, e so leva par com traducao | Risco: um acervo de 200 mil pares preso num formato que so este programa le |
+| F7 | A selecao em lote e por id, verifica so o que esta marcado e nao propaga | Risco: 100 linhas marcadas abrindo 100 confirmacoes de propagacao, ou nenhuma |
+| F8 | O rascunho grava fora da thread da interface, e duas gravacoes nao se perdem | Bug: engasgo na digitacao em disco lento; corrida entre as duas threads que gravam |
+| F9 | A requebra muda so espaco em branco, e nunca dentro de `[%...]` | Risco: requebrar tocando a chave de cache, ou partindo uma anotacao que X1 protegeu |
+| F10 | `verified` e `review_status` andam em lockstep, nos quatro caminhos que os escrevem | Bug: linha verificada E em duvida ao mesmo tempo, que nenhum filtro mostra direito |
+| F11 | A previa de "Aplicar todas" marca as faixas trocadas nos dois lados | Risco: conferir 80 substituicoes comparando dois blocos de texto a olho nu |
 | P3 | As letras dos lances vem do original, numa passagem so | Bug: `Rd1` (Torre) traduzido como `Rd1` (Rei) |
 | P4 | A correcao alcanca tambem o que ja estava gravado | Limite: P3 so valia para traducao nova, e 4.144 linhas ficariam erradas |
 | S1 | Matches disjuntos | Bug: `"de de de"` -> `"dede"` |
@@ -1012,8 +1510,12 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | R5 | Navegar custa O(pagina) | Perf: paginacao anulada por varredura |
 | R8 | Navegar custa O(pagina) tambem com busca ativa | Perf: `LIKE '%x%'` varre a tabela a cada interacao |
 | R6 | Cache de avisos nao diverge | Risco da coluna materializada |
+| Q1 | Lance perdido e anotacao rompida geram aviso | Medicao: 401 erros de terminologia contra 11 linhas marcadas, intersecao zero |
+| Q2 | As heuristicas de QA tem versao, e muda-las reavalia o banco | Risco: a melhoria violar R6 nas 200 mil linhas ja avaliadas |
 | R7 | A lista carrega o item clicado | Bug: clicar em B carregava C |
 | R9 | O editor mostra um par de idiomas de cada vez | Queixa de uso: revisar em espanhol achando que era italiano |
+| R10 | "Ir para ID" e "Proximo aviso" respeitam o filtro de origem | Bug: com "Origem: Espanhol", um ID ingles selecionava uma linha espanhola arbitraria |
+| V1 | A verificacao em massa diz o que vai marcar, por original | Risco: "Draw." e "Checkmate." com a mesma traducao curta, e um deles dado por revisado sem ninguem ver |
 | Z1 | O backup vem antes da pergunta, e o caminho dele aparece nela | Risco: a unica volta atras depender de o que vem depois do "Apagar" |
 | Z2 | Apagar exige a palavra digitada, e o botao parece inerte ate la | Risco: "Sim" a um pixel do "Nao" para 201 mil traducoes |
 | Z3 | Zerar um nao toca no outro, e leva junto historico, indice e cache | Risco: o cache em memoria reviver o que foi apagado |
@@ -1025,6 +1527,13 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | X1 | Anotacoes `[%...]` atravessam a traducao byte a byte, ou o comentario conta como falha | Bug: `[%cal Ra1h8]` virava `[%cal Ta1h8]`; `[%eval +0.35]` quebrado antes da API |
 | X2 | Comentario esvaziado pela limpeza sai do arquivo sem deixar `{}` | Sujeira: o PGN gerado saia pontilhado de `{}` |
 | X3 | Comentarios `;` sao contados e anunciados | Bug de percepcao: PGN so com `;` respondia "nenhum comentario encontrado" |
+| D1 | O PGN traduzido e escrito numa passada, sem uma segunda copia dele na memoria | Perf: 15 mil comentarios em 3,2 MB custavam 26,9 s de copia; o custo cresce com o produto |
+| D2 | Cancelar interrompe a gravacao do PGN, e sem deixar arquivo pela metade | Bug: a fase nao olhava o `cancel_flag`, e "Cancelar" ficava sem efeito visivel |
+| D3 | Cada PGN e lido uma vez por passada, com a codificacao detectada nos bytes lidos | Perf: quatro leituras do arquivo por execucao, duas delas decodificando tudo |
+| D4 | Comentario repetido no proprio arquivo vai uma vez para a API, e a conta do resumo fecha | Custo: um lote com "Diagram" 30 vezes enviava as 30; tres comentarios sumiam da aritmetica |
+| D5 | Conteudo, posicoes e contexto de leitura de um PGN nao atravessam a fase da API | Perf: `info_by_file` segurava o acervo inteiro pela execucao toda |
+| D6 | O indice de grafias responde como o arquivo, e um fonte trocado o reconstroi | Perf: 1,0 s e 72 MB por uso para corrigir cinco tags de um PGN de 20 KB |
+| D7 | A ordem das regras do glossario e identificada por versao, e mutar a lista renova a versao | Perf: uma tupla de 7.334 elementos montada e hasheada a cada tecla do editor |
 
 ---
 
@@ -1043,11 +1552,11 @@ leia uma garantia acima como mais ampla do que ela e.
   CPU: a thread de trabalho segura o GIL entre dois relatos, e a atualizacao so
   chega quando a thread da interface e escalonada. A janela responde e o
   "Cancelar" funciona; o que atrasa e o numero. (ROADMAP 2.11)
-- "Restaurar BD", "Importar CSV" e "Aplicar Automaticas" **nao recusam** rodar
-  com uma traducao em andamento — as tres ferramentas que ja recusam ("Zerar",
-  "Corrigir Lances") mostram o desenho certo, e estas ficaram de fora.
-  Restaurar durante uma execucao produz um banco que nao e nem o backup nem a
-  execucao. (ROADMAP 17.2)
+- **"Backup BD" continua permitido durante uma traducao**, e e a unica
+  ferramenta fora de T5. Ele so LE o banco de trabalho, e a API de backup do
+  SQLite ve o banco logico (`-wal` incluido): a copia sai consistente com o
+  worker escrevendo. Recusar negaria a copia justamente a quem quer guardar o
+  estado de uma execucao longa. (ROADMAP 17.2)
 
 **Anotacoes embutidas e conteudo que nao e prosa**
 
@@ -1057,11 +1566,16 @@ X3). O que resta declarado como limite:
 - **NAGs `$n` e simbolos de avaliacao dentro de comentarios vao crus para a
   API.** A mascara de X1 cobre so os spans `[%...]`; um `$14` ou um `+-` na
   prosa fica sujeito ao tradutor. NAG vive no movetext — que nunca e tocado —,
-  entao o caso e raro; se o QA (ROADMAP 16) mostrar mutilacao em uso, a
-  mascara tem onde crescer.
-- **Anotacoes ja corrompidas por execucoes anteriores continuam no banco.** X1
-  protege a traducao nova; achar o legado corrompido e trabalho do QA
-  (ROADMAP 16).
+  entao o caso e raro. A garantia Q1 passou a **acusar** o que isso produz (o
+  multiconjunto de NAGs e simbolos tem de bater dos dois lados), mas nao a
+  impedir: mascarar tambem esses tokens continua sendo o passo que falta, e agora
+  ha como medir se ele vale a pena. Medido no banco de desenvolvimento: zero
+  comentarios com NAG ou simbolo divergente.
+- **Anotacoes ja corrompidas por execucoes anteriores continuam no banco**, e
+  agora ELAS GERAM AVISO (Q1, heuristica 2): X1 protege a traducao nova, e a
+  comparacao byte a byte entre os spans dos dois lados e o que faz o legado
+  corrompido aparecer no filtro "Avisos QA". Corrigi-lo continua sendo trabalho
+  manual, uma linha por vez.
 - **O arquivo gerado sai com comentarios em linha unica**, fora do export
   format de 80 colunas que editoras esperam. Requebrar na gravacao esta na
   secao 19 do ROADMAP (item 13).
@@ -1081,6 +1595,50 @@ X3). O que resta declarado como limite:
   digito` com espaco nas chaves de cache gravadas pelo achatamento antigo, uma
   vez (ROADMAP 13.2). Uma chave cujo par colapsado ja exista fica como esta —
   peso morto que nunca mais casa com arquivo nenhum, e nao erro.
+- A migracao para o schema 7 cria a tabela `occurrences` e nada mais: 0,05 s no
+  banco de dev. Nao ha backfill (O2), entao ela e barata em qualquer tamanho de
+  banco.
+- A migracao para o schema 8 sao dois `ALTER TABLE` (`review_status` e
+  `reviewer_note`): nenhuma restricao muda, entao a tabela nao e reconstruida.
+  Medido em 201.500 linhas: 1,86 s, uma vez.
+- **A contagem de palavras le os dois textos de todas as linhas** — 675 ms em
+  201.500 linhas, dentro da coleta das estatisticas (1,12 s no total). E uma
+  passagem completa por definicao, e por isso ela roda fora da thread da interface,
+  com progresso e cancelamento (F5).
+- **Exportar o acervo custa ~1,2 s e ~55 MB** em TMX (201.500 unidades) e ~1,3 s em
+  CSV. Os dois escrevem em blocos, sem materializar o banco em memoria, e os dois
+  apagam o arquivo se forem cancelados.
+- A requebra de 80 colunas custa **277 ms para 15.000 comentarios** de 60
+  palavras — o tamanho do PGN de 40 MB que o ROADMAP 20 usa como pior caso.
+- **O pico de memoria de um livro unico e maior do que era, e a troca foi
+  deliberada.** Medido num PGN de 9 MB com 15 mil comentarios: 67,4 MB antes,
+  75,5 MB depois. A parte cara da extracao — a copia do conteudo que apaga os
+  comentarios para ler partida e lance (O1) — passou a acontecer na vez do
+  arquivo, quando os textos e as traducoes ja estao em memoria, em vez de no
+  comeco da execucao. Em troca, a fase da API deixou de segurar o conteudo dos
+  PGN: 4,1 MB de memoria viva contra 10,5 MB, e num livro de 40 MB sao 40 MB que
+  nao ficam retidos por minutos. Baixar esse pico exige tirar a copia de
+  `comment_reading_context`, que e desenho da secao 18 e nao da 20. (ROADMAP 20.4)
+- **A primeira passada le todos os arquivos uma vez a mais do que o estritamente
+  necessario para um arquivo so.** Ela existe para saber o total (a barra de
+  progresso precisa do denominador antes do primeiro lote) e para carregar o cache
+  numa consulta (ROADMAP 2.9). Com um arquivo unico, isso e uma leitura e uma
+  varredura de comentarios que a execucao poderia evitar; com um acervo, e o que
+  substitui guardar tudo na memoria. (ROADMAP 20.4)
+- **A primeira normalizacao de metadados de cada maquina paga a construcao do
+  indice** do `spelling.ssp`: 2,0 s para 513.797 entradas, anunciada no log. As
+  seguintes abrem em 29 ms, dos quais 27 sao o hash do fonte — o preco de notar
+  que o dicionario foi trocado. (ROADMAP 20.5)
+- **O menu de arquivos do editor custa um `GROUP BY` sobre as ocorrencias do
+  par** — 137 ms medidos em 200 mil ocorrencias. Ele e refeito na abertura da
+  janela e na troca de par, e nao a cada interacao: por isso o filtro por arquivo
+  nao viola R5, e por isso um arquivo processado enquanto a janela esta aberta so
+  aparece no menu depois de trocar o par ou reabri-la. (ROADMAP 18.4)
+- **O progresso por obra le todas as ocorrencias** — 207 a 309 ms em 200 mil,
+  dentro de "Estatisticas do BD", que ainda roda na thread da interface. E uma
+  agregacao por definicao; o que resolve o congelamento e tirar as estatisticas do
+  clique (ROADMAP 19, item 7), nao a consulta. Um terceiro indice foi medido e
+  recusado: economizou 3 ms de 207. (ROADMAP 18.1)
 
 **Rede**
 
@@ -1147,10 +1705,10 @@ X3). O que resta declarado como limite:
 - Padronizar os **tres estilos de aspas** da coluna "e" (`'peão "e"'`,
   `"coluna 'e'"`, `'coluna e'`) ficou de fora: escolher qual aparece no texto
   publicado e decisao editorial, nao correcao. (ROADMAP 14.9)
-- A saida com sufixo numerico de colisao (`game-BR-2.pgn`) **nao** e
-  reconhecida como arquivo gerado: uma terceira execucao da mesma pasta a
-  retraduz (portugues para portugues) e produz `game-BR-2-BR.pgn`. Confirmado.
-  (ROADMAP 17.10)
+- O reconhecimento de arquivo gerado e por **nome**, e so alcanca os sufixos
+  que este programa escreve (`-BR`, `-BR-2`, `-NORM-3`). Um PGN renomeado a mao,
+  ou traduzido por outra ferramenta, volta como entrada — nao ha marca dentro do
+  arquivo dizendo que ele e uma saida. (ROADMAP 17.10)
 - **Regra de `cleanup` nao e oferecida no editor**: o contexto interativo
   carrega sugestoes e automaticas. Para as 50 regras de delecao isso e o
   desenho certo — elas agem no PGN de origem, antes da API —, mas significa que
@@ -1160,28 +1718,113 @@ X3). O que resta declarado como limite:
 
 **Revisao e qualidade**
 
-- As heuristicas de qualidade sao genericas de traducao; nenhuma sabe que o
-  texto e xadrez. Medido no banco de desenvolvimento (6.500 linhas en -> pt):
-  401 traducoes com erro de terminologia detectavel por padrao simples, 11
-  linhas marcadas pelo `quality_warning`, intersecao zero. Lance perdido,
-  anotacao `[%...]` rompida e NAG sumido tampouco geram aviso. (ROADMAP 16)
-- As heuristicas nao tem versao: acrescentar uma regra nova deixa as linhas ja
-  avaliadas com o veredito antigo, e o backfill so preenche `NULL`. (ROADMAP
-  16.2)
-- "Ir para ID" e "Proximo aviso QA" consultam o banco **sem** o filtro de
-  origem: com "Origem: Espanhol" ativo, os dois podem selecionar uma linha
-  errada sem mensagem. (ROADMAP 17.1)
-- A verificacao em massa propaga pela **traducao** identica dentro do par (a
-  unica propagacao possivel — originais identicos ja sao uma linha so), o que
-  pode dar por revisado um original que o usuario nao viu quando duas frases
-  diferentes receberam a mesma traducao curta. A confirmacao nao mostra os
-  originais afetados. (ROADMAP 17.4)
-- O CSV de traducoes e somente-exportacao na pratica: o reimport respeita T1 e
-  devolve "Sem alteracao" para toda linha ja preenchida, inclusive descartando
-  o `verified` editado. Nao ha modo explicito de sobrescrever. (ROADMAP 17.7)
-- No modo de busca "Trecho", `%` e `_` do texto do usuario sao curingas do
-  `LIKE` (sem `ESCAPE`): buscar `[%eval` — a busca mais natural do dominio —
-  devolve lixo. (ROADMAP 17.8)
+- **A lista de termos suspeitos cobre um idioma de destino.** Para portugues ela
+  foi medida termo a termo nas 6.500 traducoes reais; para es/fr/de/it/ru so
+  existem `White`/`Black` (o caso "nao foi traduzido", que nao depende de saber a
+  forma consagrada de cada lingua). Os demais termos estao ausentes de proposito:
+  nao ha medicao deles nesta maquina, e uma lacuna e melhor do que um aviso
+  errado — a mesma decisao que o dicionario-semente registra. (ROADMAP 16.1)
+- **Dois candidatos do plano nao sobreviveram a medicao e ficaram fora**, e o
+  numero de cada um esta no ROADMAP 16.3: o multiconjunto de DIGITOS (marcava 3
+  linhas, e as 3 eram formatacao correta em portugues — `2.500`, seculo `XIX`) e o
+  par `exchange` -> `troca` (178 linhas, a maioria certa: "trocar" e a traducao boa
+  do verbo). (ROADMAP 16.3)
+- **A terminologia depende de o termo estar em ingles no original.** Um
+  comentario original em espanhol traduzido para portugues nao e coberto por
+  nenhuma entrada de hoje, e um erro de terminologia ali nao gera aviso.
+- **O aviso nao sabe se a linha ja foi revisada por alguem.** Uma traducao
+  marcada como verificada que gera aviso continua gerando: o aviso e sobre o
+  texto, e "verificada" e sobre quem olhou. O editor mostra os dois, e o
+  relatorio de QA separa por status.
+- **A reavaliacao nao acontece quando so o `Termos-suspeitos.txt` e editado a
+  mao.** A versao das heuristicas e uma constante no codigo (Q2), e nao um hash do
+  arquivo: quem editar a lista tem de subir a constante ou clicar em "Reavaliar
+  QA". Um hash pareceria mais automatico e reavaliaria 200 mil linhas a cada
+  atualizacao do programa que mexesse num comentario do arquivo. (ROADMAP 16.2)
+- A verificacao em massa propaga pela **traducao** identica dentro do par, e
+  continua sendo a unica propagacao possivel: originais identicos ja sao uma
+  linha so, pela UNIQUE. V1 faz a operacao se anunciar antes — os originais
+  aparecem na confirmacao —, e nao muda o criterio. Quem responder "Sim" sem ler
+  a lista marca como revisado um texto que nao viu. (ROADMAP 17.4)
+- O modo "sobrescrever existentes" da importacao **so promove** o `verified` do
+  CSV: uma linha marcada como verificada no arquivo passa a verificada no banco,
+  mas a coluna vazia (ou ausente, num CSV montado a mao) nao rebaixa nada. A
+  ausencia de uma afirmacao nao e a afirmacao contraria — e rebaixar em massa por
+  uma coluna que ninguem preencheu seria o pior acidente possivel dessa
+  ferramenta. Voltar uma linha para pendente continua sendo acao do editor.
+  (ROADMAP 17.7)
+- A sobrescrita compara o texto **byte a byte**: um CSV que so mudou espacos em
+  branco conta como diferente e sera gravado. Normalizar antes de comparar
+  esconderia edicoes de espacamento que o tradutor fez de proposito.
+  (ROADMAP 17.7)
+
+**Fluxo de revisao (o que a secao 19 deixou de fora)**
+
+- **Nao ha corretor ortografico da PROSA traduzida.** O `spelling.ssp` que o
+  programa traz e dicionario de nomes proprios, para as tags; um corretor de
+  verdade precisa de um dicionario hunspell por idioma de destino e de uma
+  dependencia nova, que mudam o `requirements.txt` e o empacotamento. Nao ha
+  esqueleto nem botao desabilitado no lugar: um recurso que parece existir e nao
+  funciona e pior que a ausencia. Os erros de digitacao da revisao continuam
+  chegando ao proximo leitor. (ROADMAP 19.14)
+- **O status de revisao e a nota nao entram no historico de edicoes.** O
+  `comment_history` e do TEXTO — quem mudou a traducao, quando, e para o que. Uma
+  linha que foi rejeitada e depois aceita nao deixa rastro dessa ida e volta.
+- **A importacao de CSV ignora `review_status` e `reviewer_note`**, que ela
+  exporta. E o mesmo criterio do `verified` (a importacao so promove) levado ao
+  limite: nao ha resposta segura para "quem vence" numa nota de texto livre escrita
+  na planilha. O efeito e que um round-trip pelo CSV perde o que o revisor escreveu
+  — e essa e a razao de estar escrito aqui.
+- **A importacao continua casando por TEXTO, e nao pelo `id`** que agora ela
+  exporta. Corrigir o original na planilha continua criando uma linha nova em vez de
+  atualizar a antiga. (ROADMAP 19.8)
+- **O TMX nao leva data de criacao nem de alteracao.** Os carimbos do SQLite sao
+  hora local sem fuso; convertidos como UTC embutiriam o erro do fuso, e o padrao
+  nao tem onde dizer "isto e local". O `tuid` continua sendo o que identifica a
+  unidade.
+- **A produtividade por dia so conta o que passou pelo EDITOR.** Traducao gravada
+  pelo worker nao gera historico, entao um dia de traducao automatica aparece como
+  zero — o numero e de revisao, e nao de producao.
+- **A requebra de 80 colunas alcanca os comentarios, e nao o movetext.** As linhas
+  de lances continuam como estavam no original: reflui-las seria reescrever o que a
+  garantia N1 promete sair identico.
+- **A contagem de palavras nao distingue prosa de notacao.** `14.Bxf7` conta como
+  uma palavra, e um orcamento feito sobre um PGN muito anotado inclui esses tokens.
+  E deliberado — e a mesma unidade que o cliente usa para pagar —, mas quem orca
+  precisa saber.
+
+**Procedencia (de onde cada traducao veio)**
+
+- **As linhas gravadas antes do schema 7 nao tem procedencia**, e nao vao ganhar
+  uma por heuristica (O2). Elas aparecem so em "Todos os arquivos", e **nao existe
+  um filtro "sem arquivo"**: ele seria um anti-join da tabela inteira por
+  interacao, e R5 vale para os filtros novos como vale para os velhos.
+- **A obra e identificada pelo CAMINHO do arquivo.** Mover ou renomear a pasta e
+  reprocessar cria uma segunda obra no filtro, com o mesmo nome de arquivo e a
+  pasta no rotulo para desempatar. E a falha escolhida: identificar pelo nome
+  faria `Livro A/cap01.pgn` e `Livro B/cap01.pgn` disputarem as mesmas posicoes, e
+  ai uma sobrescreveria a outra em silencio.
+- **Uma execucao interrompida no meio de um arquivo encurta a obra.** O conjunto
+  de ocorrencias do arquivo e substituido a cada processamento, e um comentario
+  sem traducao no banco nao tem para onde apontar: a obra aparece menor ate a
+  execucao seguinte, que acha o resto no cache e completa. O log diz quantas
+  posicoes ficaram de fora. (ROADMAP 18.3)
+- **Importar traducoes por CSV cria linhas sem procedencia**, como as legadas: o
+  formato do CSV nao carrega arquivo, partida nem lance. Levar o contexto no CSV
+  conversa com a exportacao TMX (ROADMAP 19, item 8).
+- **Nao ha como reverter "tudo que a execucao de ontem gravou".** A ocorrencia
+  guarda `recorded_at`, entao da para ver QUANDO uma posicao foi lida, mas
+  reverter uma execucao e apagar traducoes — e decidir entre o que ela inseriu, o
+  que reaproveitou do cache e o que foi revisado a mao depois. O backup continua
+  sendo o caminho de volta. (ROADMAP 18.7)
+- **A partida e o lance nao vem de um leitor de PGN.** A partida e a contagem de
+  tags `Event` antes do comentario, e o lance e o ultimo numero de lance da mesma
+  partida. Um arquivo sem `[Event` conta como uma partida so; um com tags fora de
+  ordem conta o que estiver escrito. Sao numeros para localizar o comentario na
+  obra, e nao uma leitura da posicao — validar lance segue nao-objetivo (secao 1).
+- **Nao existe FEN por ocorrencia.** O esquema tem onde pendura-la, e nenhuma
+  coluna foi criada para ficar nula: uma coluna que ninguem escreve em 200 mil
+  linhas nao e preparo. (ROADMAP 18.1)
 
 **Estrutura**
 
@@ -1207,13 +1850,23 @@ Declaradas aqui para que a secao 9 continue sendo apenas o que os testes ja
 protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
-Da revisao de 2026-07-29 (ROADMAP 16 a 20; as garantias das secoes 13, 14 e 15 —
-X1-X3, S11-S15 — foram entregues no mesmo dia e ja estao na secao 9):
+**Nenhuma pendente.** As garantias das revisoes de 2026-07-29 e 2026-07-30 — X1-X3
+e S11-S15 (secoes 13 a 15), Q1-Q2 (secao 16), R10, T5 e V1 (secao 17), O1-O4 (secao
+18), F1-F11 (secao 19) e D1-D7 (secao 20) — estao todas na secao 9.
 
-| # | Garantia | Item |
-|---|---|---|
-| Q1 | Lance perdido e anotacao rompida geram aviso de qualidade | 16 |
-| Q2 | As heuristicas de QA tem versao, e muda-las reavalia o banco | 16 |
-| R10 | "Ir para ID" e "Proximo aviso" respeitam o filtro de origem | 17 |
-| T5 | Nenhuma ferramenta de escrita em massa roda durante uma traducao | 17 |
-| V1 | A verificacao em massa diz o que vai marcar, por original | 17 |
+**A secao 20 acabou declarando garantia nova, ao contrario do que estava previsto
+aqui.** A previsao era que ela nao declararia nada: sendo custo e nao
+comportamento, o mesmo resultado por menos memoria seria protegido pelos testes
+que ja existiam. Duas coisas mudaram isso. Primeiro, "o resultado nao muda" **e**
+uma afirmacao que precisa de teste quando a implementacao inteira muda — e um
+deles achou um bug real (dois comentarios esvaziados lado a lado apagavam o resto
+do arquivo). Segundo, custo tem forma observavel: cancelar durante a gravacao, o
+numero de leituras do arquivo, o comentario repetido que nao volta para a API, o
+indice que se reconstroi quando o fonte muda. D1-D7 sao essas afirmacoes, e duas
+delas sao medidas com cronometro e `tracemalloc`, porque em teste de igualdade
+"correto e lento" e indistinguivel de "correto e rapido".
+
+**O item 11 da secao 19 (corretor ortografico de prosa) nao foi feito**, e nao
+declara garantia planejada: ele depende de escolher um dicionario e uma dependencia
+nova, que e decisao de quem mantem o programa e nao um desenho pendente. Esta como
+limite na secao 10.

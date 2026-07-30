@@ -37,6 +37,7 @@ janela nem criar arquivo.
 """
 
 import re
+from collections import Counter
 
 
 # As letras de cada peca, por idioma. As chaves sao os identificadores canonicos
@@ -247,6 +248,37 @@ def extract_moves(text, language):
         and _explained_by(m, letras)
         and not _inside_any(m.start(), anotacoes)
     ]
+
+
+def move_anchors(text):
+    """Multiconjunto das ancoras de lance de `text`, sem olhar para idioma nenhum.
+
+    E a mesma `_anchor` que a correcao usa — de proposito. Duas definicoes de
+    "ancora" divergindo seria a classe de defeito dos itens 2.8, 3.6 e 11.1: nada
+    quebraria, elas so discordariam.
+
+    Duas diferencas em relacao a `extract_moves`, e as duas sao por causa do uso:
+
+    - **Nao filtra por idioma.** A ancora e justamente a parte que nao muda de
+      lingua, entao comparar as ancoras dos dois lados nao precisa saber de qual
+      idioma o texto veio — e por isso funciona tambem nas linhas legadas, cuja
+      origem ninguem declarou.
+    - **Inclui lances de peao.** `extract_moves` os descarta porque nao ha letra
+      para corrigir; aqui um `h5` que sumiu da traducao importa tanto quanto um
+      `Nf3`. Medido no banco de desenvolvimento: dos 6 comentarios em que as
+      ancoras divergem, 2 sao exatamente lances de peao.
+
+    O que esta dentro de uma anotacao `[%...]` fica de fora, pela mesma razao de
+    sempre: `[%cal Ra1h8]` tem a forma de um lance de Torre e nao e lance nenhum
+    (garantia X1).
+    """
+    anotacoes = _command_spans(text or "")
+    achadas = Counter()
+    for match in _move_pattern(_all_known_letters()).finditer(text or ""):
+        if _inside_any(match.start(), anotacoes):
+            continue
+        achadas[_anchor(match)] += 1
+    return achadas
 
 
 def fix_move_notation(original, translated, source_language, target_language):

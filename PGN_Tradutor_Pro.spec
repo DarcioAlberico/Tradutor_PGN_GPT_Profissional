@@ -59,10 +59,14 @@ SPELLING = os.path.join("spelling_ssp", "spelling.ssp")
 if os.path.exists(SPELLING):
     datas += [(SPELLING, "spelling_ssp")]
 else:
-    # Nao aborta: o `spelling.ssp` nao e versionado, entao um clone limpo nao o
-    # tem, e o resto do programa nao depende dele. O aviso existe para que a
-    # ausencia seja uma decisao vista, e nao um botao que falha na maquina do
-    # usuario final.
+    # Nao aborta: o resto do programa nao depende do dicionario, e quem quiser
+    # empacotar sem ele (ou tiver apagado os 30 MB da pasta) continua conseguindo
+    # gerar o executavel. O aviso existe para que a ausencia seja uma decisao
+    # vista, e nao um botao que falha na maquina do usuario final.
+    #
+    # A versao anterior deste comentario dizia que o `spelling.ssp` nao e
+    # versionado, e ele **e** — esta no repositorio desde o commit que o
+    # acrescentou, e um clone limpo o tem.
     print(
         f"AVISO: {SPELLING} nao encontrado. O executavel sai sem o dicionario, "
         'e o botao "Normalizar PGN" vai falhar dizendo que o arquivo nao existe.'

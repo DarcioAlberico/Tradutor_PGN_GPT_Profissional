@@ -211,6 +211,10 @@ def setup_main_ui(app):
         [
             {"text": "Estatísticas do BD", "command": app.show_db_stats},
             {"text": "Exportar CSV", "command": app.export_csv},
+            # Ao lado do CSV porque e a mesma acao vista de outro angulo: o CSV e
+            # para a planilha, o TMX e para as ferramentas de traducao (ROADMAP 19,
+            # item 8).
+            {"text": "Exportar TMX", "command": app.export_tmx},
             {"text": "Importar CSV", "command": app.import_csv},
             {"text": "Backup BD", "command": app.backup_database},
             {"text": "Restaurar BD", "command": app.restore_database},
@@ -219,6 +223,10 @@ def setup_main_ui(app):
             {"text": "Editar Traduções", "command": app.open_edit_window},
             {"text": "Editar Glossário", "command": app.open_glossary_window},
             {"text": "Corrigir Lances", "command": app.fix_move_notation},
+            # A abertura ja reavalia sozinha quando as heuristicas mudam
+            # (garantia Q2); este botao e para quem cancelou aquela, ou quem quer
+            # conferir em que versao o banco esta.
+            {"text": "Reavaliar QA", "command": app.reevaluate_quality_warnings},
             # As duas ultimas, e em vermelho. Sao as unicas acoes da janela que
             # destroem trabalho, e ficam distinguiveis a distancia de um clique
             # apressado — a confirmacao digitada e a defesa, isto e o aviso.

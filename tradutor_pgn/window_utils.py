@@ -117,6 +117,16 @@ def install_callback_error_reporter(
 
 
 def bring_window_to_front(window, parent=None, maximize=False):
+    """Levanta a janela, e opcionalmente a maximiza.
+
+    **`maximize` e agendado a +50 ms, e por isso ele VENCE qualquer
+    `geometry()` chamado depois.** Era esse o defeito: os dois editores
+    restauravam a geometria salva na construcao e a chamada agendada aqui a
+    sobrescrevia meio segundo depois — todo o caminho de `safe_geometry`, com
+    `clamp_geometry` e testes, estava morto na pratica. Quem quer restaurar
+    tamanho e posicao nao pode pedir `maximize=True`; ver
+    `restore_or_maximize`.
+    """
     def maximize_window():
         try:
             window.state("zoomed")
@@ -156,3 +166,33 @@ def bring_window_to_front(window, parent=None, maximize=False):
             pass
 
     window.after(50, raise_window)
+
+
+def restore_or_maximize(window, parent, geometry):
+    """Restaura a geometria salva; sem ela, maximiza.
+
+    Os dois editores faziam as duas coisas — `bring_window_to_front(...,
+    maximize=True)` na construcao e `geometry(saved)` logo depois — e a segunda
+    perdia sempre, porque a primeira e agendada e roda por ultimo. O resultado
+    era que a janela ignorava em silencio o tamanho e a posicao que o usuario
+    tinha deixado, e nada no codigo parecia errado: as duas linhas estavam la.
+
+    Escolher aqui, num lugar so, e o que torna a decisao visivel — sao
+    alternativas, e nao duas configuracoes que se somam. Sem geometria salva
+    (primeira abertura) maximizar continua sendo o certo: as duas janelas sao
+    listas largas, e abrir em 1280x760 num monitor grande desperdicaria a tela.
+
+    Devolve `True` se restaurou, `False` se maximizou — o teste precisa poder
+    distinguir os dois sem inspecionar a janela.
+    """
+    if isinstance(geometry, str) and geometry:
+        try:
+            window.geometry(geometry)
+        except Exception:
+            bring_window_to_front(window, parent, maximize=True)
+            return False
+        bring_window_to_front(window, parent, maximize=False)
+        return True
+
+    bring_window_to_front(window, parent, maximize=True)
+    return False

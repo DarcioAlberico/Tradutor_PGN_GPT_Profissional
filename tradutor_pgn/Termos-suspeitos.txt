@@ -1,0 +1,91 @@
+# -*- coding: utf-8 -*-
+# Termos suspeitos do PGN Tradutor Pro (ROADMAP 16.1, item 8)
+#
+# ESTE ARQUIVO VEM COM O PROGRAMA, como o `Substituicoes-semente.txt` e o
+# `spelling.ssp`, e e substituido quando ele e atualizado.
+#
+# O QUE ELE E. Cada linha diz: "se o comentario ORIGINAL tem o termo X e a
+# traducao tem a forma Y, isto provavelmente e um erro de terminologia
+# enxadristica". Ele nao corrige nada — gera um aviso de qualidade, e o aviso
+# leva o revisor ate a linha. E o que transforma o conhecimento que ja esta no
+# glossario (como sugestao, esperando alguem abrir a linha certa) em algo
+# localizavel.
+#
+# ESCOPO POR DESTINO, e nao por par. O terceiro campo e o idioma de DESTINO
+# ('pt', 'es', ...) ou um par ('en>pt'). Quase tudo aqui e por destino, e a razao
+# e a mesma que a semente documenta: o termo procurado esta em INGLES, e um
+# padrao ingles nao casa texto portugues por acaso — o proprio padrao ja e a
+# guarda de origem. Escopar por par deixaria de fora as linhas legadas, cuja
+# origem ninguem declarou, que sao a maior parte de um banco anterior a esta
+# versao.
+#
+# MEDIDO, NAO SUPOSTO. A lista de 'pt' saiu de rodar cada candidato nas 6.500
+# traducoes reais (en -> pt, livro de xadrez) do banco de desenvolvimento e LER o
+# que cada um marcava. Duas candidatas do plano nao sobreviveram a leitura e
+# ficaram de fora:
+#
+#   - ('exchange', 'troca') marcava 178 linhas e a maioria estava CERTA: "to
+#     exchange the knight" -> "troca o cavalo" e a traducao boa do verbo. So o
+#     substantivo "the exchange" (a qualidade: torre por peca menor) e erro, e
+#     separar um do outro exige o contexto, nao o termo.
+#   - ('rank', 'classificacao') marcava 2 e uma estava certa: "reached the rank
+#     of master player" -> "classificacao" e o sentido de titulo, nao de fila.
+#     Sobrou 'back rank', que e sempre a ultima fila.
+#
+# As de 'pt' que ficaram marcam 321 linhas (4,9% do banco de desenvolvimento), e
+# as amostras lidas eram todas erro de verdade.
+#
+# WHITE E BLACK VALEM PARA TODO DESTINO NAO-INGLES, e isso nao e palpite sobre a
+# forma consagrada de cada lingua: o que se detecta e o termo ter ficado EM
+# INGLES. Para 'en' nao existe — la "White" e a palavra certa.
+#
+# Para es/fr/de/it/ru os demais termos estao AUSENTES de proposito. Nao ha
+# medicao deles nesta maquina, e uma lacuna e melhor do que um aviso errado — a
+# mesma decisao que o dicionario-semente registra.
+
+termos = [
+    # ------------------------------------------------------------------------
+    # O termo nao foi traduzido. Vale para todo destino que nao seja o ingles.
+    # Medido no banco de desenvolvimento: 153 linhas com "Black" e 107 com
+    # "White" em ingles na traducao.
+    # ------------------------------------------------------------------------
+    ('White', 'White', 'pt'),
+    ('Black', 'Black', 'pt'),
+    ('White', 'White', 'es'),
+    ('Black', 'Black', 'es'),
+    ('White', 'White', 'fr'),
+    ('Black', 'Black', 'fr'),
+    ('White', 'White', 'de'),
+    ('Black', 'Black', 'de'),
+    ('White', 'White', 'it'),
+    ('Black', 'Black', 'it'),
+    ('White', 'White', 'ru'),
+    ('Black', 'Black', 'ru'),
+
+    # ------------------------------------------------------------------------
+    # Portugues: o termo existe na lingua, mas nao neste sentido. Cada um foi
+    # contado no banco de desenvolvimento (o numero esta no comentario).
+    # ------------------------------------------------------------------------
+    # 30 linhas. "cheque" e o do banco; o xeque do xadrez e com x.
+    ('check', 'cheque', 'pt'),
+    # 16 linhas. "file" e a coluna do tabuleiro, nunca um arquivo.
+    ('file', 'arquivo', 'pt'),
+    # 11 linhas (9 "ritmo" + 2 "andamento"). "tempo" em xadrez fica "tempo".
+    ('tempo', 'ritmo', 'pt'),
+    ('tempo', 'andamento', 'pt'),
+    # 3 linhas. "piece" e peca; "pedaco" e o que sobra de uma.
+    ('piece', 'pedaço', 'pt'),
+    ('piece', 'pedaco', 'pt'),
+    # 3 linhas. "pin" e cravada.
+    ('pin', 'alfinete', 'pt'),
+    # 2 linhas. "square" e casa.
+    ('square', 'quadrado', 'pt'),
+    # 1 linha. "Is this sound?" nao fala de som.
+    ('sound', 'som', 'pt'),
+    # 1 linha. "back rank" e a ultima fila.
+    ('back rank', 'classificação', 'pt'),
+    ('back rank', 'classificacao', 'pt'),
+    # 0 linhas no banco de desenvolvimento, e mantido: "castle" e rocar, e
+    # "castelo" e o erro que o item 14.2 do ROADMAP ja corrigiu no glossario.
+    ('castle', 'castelo', 'pt'),
+]

@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import xml.etree.ElementTree as ET
 import os
 import re
 import sqlite3
@@ -10,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections import Counter
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,6 +19,7 @@ from pathlib import Path
 from tradutor_pgn import database, glossario, settings
 from tradutor_pgn.app_config import (
     DATABASE_BACKUP_KEEP_COUNT,
+    LANGUAGES,
     DATABASE_BACKUP_MAX_TOTAL_MB,
     GLOSSARY_BACKUP_KEEP_COUNT,
     LOG_KEEP_COUNT,
@@ -24,6 +27,14 @@ from tradutor_pgn.app_config import (
 )
 from tradutor_pgn.database import (
     FTS_TABLE,
+    OCCURRENCES_TABLE,
+    REVIEW_STATUS_DOUBT,
+    REVIEW_STATUS_PENDING,
+    REVIEW_STATUS_REJECTED,
+    ORDER_BY_ID,
+    ORDER_BY_OCCURRENCE,
+    QUALITY_VERSION_KEY,
+    QualityReevaluationCanceled,
     MoveNotationCanceled,
     SCHEMA_VERSION,
     analyze_move_notation_updates,
@@ -38,26 +49,47 @@ from tradutor_pgn.database import (
     AutomaticRulesCanceled,
     apply_automatic_translation_updates,
     backfill_quality_warnings,
+    count_adoptable_unknown_source,
     count_from_status_counts,
     count_review_rows,
+    count_words_by_pair,
+    escape_like_pattern,
     fetch_comment_history,
+    fetch_comment_occurrences,
+    fetch_exact_translation_match_candidates,
     fetch_export_rows,
     fetch_review_rows,
     fetch_review_rows_page,
+    fetch_review_status_by_id,
     fetch_translation_by_id,
+    get_daily_review_activity,
+    get_db_metadata,
+    get_file_progress,
+    get_quality_heuristics_version,
     get_review_row_offset,
     get_review_status_counts,
     get_database_stats,
     initialize_database,
+    list_occurrence_files,
     load_translation_cache,
+    overwrite_translation_by_id,
+    quality_heuristics_are_current,
+    reads_in_occurrence_order,
+    record_occurrences,
+    reevaluate_quality_warnings,
+    resolve_comment_ids,
     save_translation,
+    set_review_status_by_id,
+    set_db_metadata,
     set_exact_translation_matches_verified,
     set_translation_verified_by_id,
     update_translation_by_id,
 )
 from tradutor_pgn.glossario import (
+    VersionedRules,
     build_glossary_lookup,
     order_rules_by_specificity,
+    versioned_rules,
     GLOSSARY_PRIORITY_DEFAULT,
     GLOSSARY_RULE_AUTOMATIC,
     GLOSSARY_RULE_CLEANUP,
@@ -102,22 +134,45 @@ from tradutor_pgn.glossario import (
     update_glossary_entry_by_entry,
     validate_glossary_entry,
 )
+from tradutor_pgn.word_count import add_word_counts, count_words, total_word_counts
+from tradutor_pgn.editor_text import diff_spans
+from tradutor_pgn.background_task import TaskCanceled
 from tradutor_pgn.pgn_utils import (
     BATCH_MAX_CHARS,
+    batch_index_groups,
     collect_pgn_files,
+    comment_reading_context,
     count_semicolon_comments,
     create_comment_batches,
     detect_encoding,
+    detect_encoding_from_bytes,
+    extract_comment_texts,
+    extract_comment_texts_from_file,
+    extract_comments_from_content,
     extract_comments_from_file,
     flatten_comment,
     generate_translated_pgn,
+    read_pgn_text,
     is_generated_pgn,
     join_comments_for_batch,
     split_batch_translation,
+    strip_generated_suffix,
     translated_output_path,
+    wrap_pgn_comment,
 )
 from tradutor_pgn.pgn_spellcheck import (
+    SPELLING_DB_FILENAME,
+    build_spelling_index,
+    close_spelling_data,
     collect_spellcheck_pgn_files,
+    correct_spelling_value,
+    default_spelling_db_path,
+    escape_pgn_tag_value,
+    is_normalized_pgn,
+    iter_spelling_records,
+    load_spelling_data,
+    spelling_index_is_stale,
+    unescape_pgn_tag_value,
     normalize_pgn_metadata_content,
     normalize_pgn_metadata_file,
     normalize_pgn_metadata_path,
@@ -127,12 +182,15 @@ from tradutor_pgn.pgn_spellcheck import (
     parse_spelling_file,
 )
 from tradutor_pgn.review_quality import (
+    QUALITY_HEURISTICS_VERSION,
     QUALITY_REPORT_HEADERS,
+    eval_symbols,
     build_quality_report_rows,
     evaluate_translation_quality,
     filter_quality_warning_rows,
     find_first_quality_warning,
     row_has_quality_warning,
+    row_language_pair,
     summarize_quality_warnings,
 )
 from tradutor_pgn import app_config
@@ -141,8 +199,15 @@ from tradutor_pgn.background_task import BackgroundTask, TaskCanceled
 from tradutor_pgn.chess_notation import (
     PIECE_LETTERS,
     extract_moves,
+    move_anchors,
     fix_move_notation,
     supports_notation,
+)
+from tradutor_pgn import chess_terms
+from tradutor_pgn.chess_terms import (
+    find_suspect_terms,
+    load_suspect_terms,
+    suspect_terms_for,
 )
 from tradutor_pgn.confirm_dialog import CONFIRMATION_WORD, confirmation_accepted
 from tradutor_pgn.db_tools import (
@@ -152,6 +217,7 @@ from tradutor_pgn.db_tools import (
     create_database_backup,
     export_translations_to_csv,
     format_automatic_rule_examples,
+    format_import_preview,
     format_quality_stats,
     import_translations_from_csv,
     restore_database_from_backup,
@@ -167,7 +233,7 @@ from tradutor_pgn.editor_common import (
     row_index_for_id,
 )
 from tradutor_pgn.editor_text import find_text_ranges, replace_all_text, replace_text_range
-from tradutor_pgn.edit_window import safe_geometry
+from tradutor_pgn.edit_window import format_propagation_confirmation, safe_geometry
 from tradutor_pgn.glossary_editor import safe_geometry as glossary_safe_geometry
 from tradutor_pgn.glossary_editor import (
     build_glossary_diagnostics,
@@ -197,6 +263,7 @@ from tradutor_pgn import (
     editor_common,
     editor_widgets,
     failed_runs,
+    pgn_spellcheck,
     translation_worker,
     window_utils,
 )
@@ -1004,10 +1071,18 @@ class DatabaseTests(unittest.TestCase):
             conn.commit()
 
             row = fetch_review_rows_page(cursor, "pt", limit=1, offset=0)[0]
-            self.assertEqual(len(row), 7)
+            # Dez campos: os sete que o editor le por posicao, o par de idiomas
+            # (ROADMAP 16.1) e o bit de aviso (ROADMAP 19, item 4). Os tres
+            # acrescimos entraram DEPOIS dos sete, cada um depois do anterior — se
+            # qualquer um tivesse entrado no meio, os carimbos abaixo passariam a
+            # ser lidos da coluna errada, e e por isso que este teste conta os
+            # campos.
+            self.assertEqual(len(row), 10)
             self.assertIsNotNone(row[4])
             self.assertIsNotNone(row[5])
             self.assertIsNone(row[6])
+            self.assertEqual((row[7], row[8]), ("", "pt"))
+            self.assertEqual(row[9], 0)
 
             comment_id = row[0]
             self.assertEqual(fetch_comment_history(cursor, comment_id), [])
@@ -1173,11 +1248,28 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(count_review_rows(cursor, "pt", status_filter="verified"), 1)
             self.assertEqual(
                 get_review_status_counts(cursor, "pt"),
-                {"total": 5, "pending": 4, "verified": 1, "warnings": 0},
+                {
+                    "total": 5,
+                    "pending": 4,
+                    "verified": 1,
+                    "warnings": 0,
+                    # Recortes das pendentes (ROADMAP 19, item 12). A comparacao e do
+                    # dicionario INTEIRO de proposito: uma chave nova que a lista nao
+                    # soubesse ler deixaria um filtro paginando pelo total errado.
+                    "rejected": 0,
+                    "doubt": 0,
+                },
             )
             self.assertEqual(
                 get_review_status_counts(cursor, "pt", search_text="orig 4"),
-                {"total": 1, "pending": 0, "verified": 1, "warnings": 0},
+                {
+                    "total": 1,
+                    "pending": 0,
+                    "verified": 1,
+                    "warnings": 0,
+                    "rejected": 0,
+                    "doubt": 0,
+                },
             )
             self.assertEqual(count_review_rows(cursor, "pt", search_text="orig 1"), 1)
             self.assertEqual(
@@ -1237,7 +1329,14 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(count_review_rows(cursor, "pt", status_filter="pending"), 5)
             self.assertEqual(
                 get_review_status_counts(cursor, "pt"),
-                {"total": 5, "pending": 5, "verified": 0, "warnings": 0},
+                {
+                    "total": 5,
+                    "pending": 5,
+                    "verified": 0,
+                    "warnings": 0,
+                    "rejected": 0,
+                    "doubt": 0,
+                },
             )
             conn.close()
 
@@ -7971,11 +8070,16 @@ class ApplyAutomaticRulesFlowTests(unittest.TestCase):
 
 
 class ShowDatabaseStatsTests(unittest.TestCase):
-    """O botao "Estatisticas". A funcao inteira estava sem teste.
+    """O relatorio de "Estatisticas". A funcao inteira estava sem teste.
 
     E so leitura, mas e um relatorio: numero errado aqui nao quebra nada e
     engana em silencio. O que se exige e que os totais batam com o banco e que
     a contagem por idioma nao se misture.
+
+    Desde o item 7 da secao 19 o relatorio e montado em DUAS partes: uma que le o
+    banco fora da thread do Tk (`collect_database_stats`) e uma pura que formata o
+    texto (`format_database_stats`). Os testes atacam as duas juntas, sem janela e
+    sem `messagebox` — o que antes precisava interceptar um dialogo.
     """
 
     def _montar(self, db_path):
@@ -8001,28 +8105,47 @@ class ShowDatabaseStatsTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
-    def _mostrar(self, db_path):
-        vistos = []
-        self.addCleanup(setattr, db_tools, "messagebox", db_tools.messagebox)
-        db_tools.messagebox = types.SimpleNamespace(
-            showinfo=lambda t, m, **_kw: vistos.append(("info", t, m)),
-            showerror=lambda t, m, **_kw: vistos.append(("error", t, m)),
+    def _relatorio(self, db_path):
+        """O texto do relatorio, pelo mesmo caminho que a janela usa."""
+        return db_tools.format_database_stats(
+            db_tools.collect_database_stats(str(db_path))
         )
-        db_tools.show_db_stats(types.SimpleNamespace(output_db=str(db_path)))
-        return vistos
 
     def test_the_totals_match_the_database(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "cache.db"
             self._montar(db_path)
 
-            vistos = self._mostrar(db_path)
+            msg = self._relatorio(db_path)
 
-            self.assertEqual([tipo for tipo, _t, _m in vistos], ["info"])
-            msg = vistos[0][2]
             self.assertIn("Total de traducoes armazenadas: 5", msg)
             self.assertIn("Verificadas: 1", msg)
             self.assertIn("Pendentes: 4", msg)
+
+    def test_the_word_counts_reach_the_report(self):
+        """Numeros de VERDADE, e nao so a presenca das linhas: a mutacao que zerava
+        a contagem na coleta sobrevivia a um teste que so procurava o rotulo
+        (ROADMAP 19, item 6).
+
+        As cinco linhas de `_montar` somam 14 palavras de original e 11 de traducao;
+        a unica verificada — `orig pt 1` -> `traducao boa` — tem 2.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._montar(db_path)
+
+            stats = db_tools.collect_database_stats(str(db_path))
+            msg = db_tools.format_database_stats(stats)
+
+            self.assertEqual(stats["words"]["original"], 14)
+            self.assertEqual(stats["words"]["translated"], 11)
+            self.assertEqual(stats["words"]["verified"], 2)
+            self.assertEqual(stats["words"]["pending"], 9)
+            self.assertIn("Palavras no original: 14", msg)
+            self.assertIn("Palavras verificadas: 2", msg)
+            # E por par, que e o recorte com que se orca um trabalho: as duas linhas
+            # de `Inglês -> pt` tem 6 palavras de original e 5 de traducao.
+            self.assertIn("palavras: 6 no original, 5 na traducao", msg)
 
     def test_each_language_pair_is_counted_on_its_own(self):
         """Duas traducoes em pt vindas do ingles e uma vinda de origem nao dita.
@@ -8035,7 +8158,7 @@ class ShowDatabaseStatsTests(unittest.TestCase):
             db_path = Path(tmp) / "cache.db"
             self._montar(db_path)
 
-            msg = self._mostrar(db_path)[0][2]
+            msg = self._relatorio(db_path)
 
             self.assertIn("- Inglês -> pt: 2 | verificadas: 1 | pendentes: 1", msg)
             self.assertIn("- Não informado -> pt: 1 | verificadas: 0 | pendentes: 1", msg)
@@ -8053,7 +8176,7 @@ class ShowDatabaseStatsTests(unittest.TestCase):
             db_path = Path(tmp) / "cache.db"
             self._montar(db_path)
 
-            msg = self._mostrar(db_path)[0][2]
+            msg = self._relatorio(db_path)
 
             def linha(prefixo):
                 return next(l for l in msg.splitlines() if l.strip().startswith(prefixo))
@@ -8076,20 +8199,94 @@ class ShowDatabaseStatsTests(unittest.TestCase):
             db_path = Path(tmp) / "vazio.db"
             initialize_database(str(db_path)).close()
 
-            vistos = self._mostrar(db_path)
+            msg = self._relatorio(db_path)
 
-            self.assertEqual([tipo for tipo, _t, _m in vistos], ["info"])
-            self.assertIn("Total de traducoes armazenadas: 0", vistos[0][2])
+            self.assertIn("Total de traducoes armazenadas: 0", msg)
+            self.assertIn("Palavras no original: 0", msg)
 
-    def test_a_broken_database_becomes_an_error_dialog(self):
+    def test_the_progress_of_each_work_is_shown(self):
+        """ROADMAP 18: "faltam 120 comentarios do capitulo 7".
+
+        O numero por par de idiomas nunca respondeu isso — ele soma todos os PGN
+        ja processados no mesmo balde.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._montar(db_path)
+            conn = initialize_database(str(db_path))
+            cur = conn.cursor()
+            arquivo = str(Path(tmp) / "cap07.pgn")
+            record_occurrences(
+                cur,
+                arquivo,
+                [(1, 1, 1, "orig pt 1"), (2, 1, 4, "orig pt 2")],
+                resolve_comment_ids(cur, "pt", ["orig pt 1", "orig pt 2"], "en"),
+            )
+            conn.commit()
+            conn.close()
+
+            msg = self._relatorio(db_path)
+
+            self.assertIn("Por arquivo de origem (obra):", msg)
+            self.assertIn(
+                "- cap07.pgn: 2 posicoes | 2 comentarios | verificadas: 1 (50%)"
+                " | pendentes: 1 | QA: 0",
+                msg,
+            )
+
+    def test_a_bank_with_no_occurrence_says_why_the_block_is_empty(self):
+        """O estado de todo banco recem-migrado.
+
+        Um bloco em branco leva a conclusao errada — "o programa nao registrou" —
+        quando a verdade e que as linhas ja gravadas nao tinham de onde tirar
+        procedencia, e a ganham ao reprocessar o PGN.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            self._montar(db_path)
+
+            msg = self._relatorio(db_path)
+
+            self.assertIn("Nenhum arquivo registrado ainda", msg)
+            self.assertIn("processar o PGN de novo", msg)
+
+    def test_the_work_list_is_cut_and_says_so(self):
+        """O resumo e um `messagebox`: 200 capitulos dariam um dialogo mais alto
+        que a tela, e as linhas de cima — as que o usuario leu primeiro — sairiam
+        da tela sem aviso."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "cache.db"
+            conn = initialize_database(str(db_path))
+            cur = conn.cursor()
+            save_translation(cur, "um", "T um", "pt", "en")
+            conn.commit()
+            ids = resolve_comment_ids(cur, "pt", ["um"], "en")
+            quantos = db_tools.FILE_PROGRESS_LIMIT + 3
+            for indice in range(quantos):
+                record_occurrences(
+                    cur,
+                    str(Path(tmp) / f"cap{indice:03d}.pgn"),
+                    [(1, 1, 1, "um")],
+                    ids,
+                )
+            conn.commit()
+            conn.close()
+
+            msg = self._relatorio(db_path)
+
+            self.assertEqual(msg.count(".pgn:"), db_tools.FILE_PROGRESS_LIMIT)
+            self.assertIn("... e mais 3 arquivo(s).", msg)
+
+    def test_a_broken_database_raises_for_the_error_callback(self):
+        """O dialogo de erro passou a ser do `run_with_progress` (item 7): a
+        coleta LEVANTA, e quem exibe e o `on_error`. Testar a excecao e mais
+        forte do que interceptar o dialogo — ela e o que a thread devolve."""
         with tempfile.TemporaryDirectory() as tmp:
             quebrado = Path(tmp) / "nao-e-banco.db"
             quebrado.write_bytes(b"isto nao e um banco sqlite" * 100)
 
-            vistos = self._mostrar(quebrado)
-
-            self.assertEqual([tipo for tipo, _t, _m in vistos], ["error"])
-            self.assertIn("Nao foi possivel acessar", vistos[0][2])
+            with self.assertRaises(sqlite3.DatabaseError):
+                db_tools.collect_database_stats(str(quebrado))
 
             # E o arquivo NAO pode ficar preso: ver o teste abaixo.
             quebrado.unlink()
@@ -8127,7 +8324,7 @@ class ShowDatabaseStatsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "cache.db"
             self._montar(db_path)
-            self._mostrar(db_path)
+            self._relatorio(db_path)
 
             # Se a leitura tivesse deixado conexao aberta, esta escrita
             # exclusiva falharia.
@@ -10082,6 +10279,50 @@ class FixMoveNotationToolTests(unittest.TestCase):
         self.assertIn("A torre Rf8 segura.", pergunta)
         self.assertIn("A torre Tf8 segura.", pergunta)
 
+    def test_the_preview_says_how_many_rows_will_be_labeled(self):
+        """A parte irreversivel, que a previa nao dizia (ROADMAP 17.5).
+
+        Corrigir reescreve texto, e o backup desfaz; rotular declara de que
+        idioma veio o acervo inteiro. Num banco com 200 mil linhas legadas, esse
+        "Sim" era dado sem que o numero tivesse aparecido em lugar nenhum — ele
+        so era dito no dialogo de RESULTADO, depois de feito.
+        """
+        self.confirma = False
+
+        db_tools.fix_move_notation_in_database(self.app_falso(), "en", "pt")
+
+        pergunta = next(m for t, _tt, m in self.dialogos if t == "askyesno")
+        self.assertIn("serao rotuladas como 'en': 2", pergunta)
+
+    def test_the_result_and_the_preview_say_the_same_number(self):
+        """Duas consultas em dois lugares nao quebram nada visivel — elas so
+        discordam (a licao dos itens 2.8, 3.6 e 11.1)."""
+        db_tools.fix_move_notation_in_database(self.app_falso(), "en", "pt")
+
+        pergunta = next(m for t, _tt, m in self.dialogos if t == "askyesno")
+        resultado = next(m for t, _tt, m in self.dialogos if t == "info")
+        self.assertIn("serao rotuladas como 'en': 2", pergunta)
+        self.assertIn("rotuladas como 'en': 2", resultado)
+
+    def test_with_nothing_to_label_the_line_is_not_shown(self):
+        """Um "0 linhas serao rotuladas" fixo faria o usuario procurar um
+        problema que nao existe — o mesmo criterio das linhas de lances e de
+        comentarios ';' no resumo do worker."""
+        # Primeira passada rotula tudo; a segunda nao tem mais o que rotular.
+        db_tools.fix_move_notation_in_database(self.app_falso(), "en", "pt")
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        save_translation(cur, "The queen Qd8 waits.", "A dama Qd8 espera.", "pt", "en")
+        conn.commit()
+        conn.close()
+        self.dialogos.clear()
+
+        db_tools.fix_move_notation_in_database(self.app_falso(), "en", "pt")
+
+        pergunta = next(m for t, _tt, m in self.dialogos if t == "askyesno")
+        self.assertIn("Traducoes que serao alteradas: 1", pergunta)
+        self.assertNotIn("rotuladas", pergunta)
+
 # ===========================================================================
 # A janela principal lembra o que foi escolhido
 # ===========================================================================
@@ -10822,22 +11063,45 @@ class OutputFidelityTests(unittest.TestCase):
             self.assertFalse(sem_bom.read_bytes().startswith(b"\xef\xbb\xbf"))
 
     def test_read_output_settings_validates_types_for_output(self):
-        self.assertEqual(
-            settings.read_output_settings({}), {"utf8_bom": False}
-        )
+        padrao = {"utf8_bom": False, "wrap_columns": 0}
+        self.assertEqual(settings.read_output_settings({}), padrao)
         self.assertEqual(
             settings.read_output_settings({"output": {"utf8_bom": True}}),
-            {"utf8_bom": True},
+            dict(padrao, utf8_bom=True),
         )
         # Tipo errado cai no padrao: o arquivo e editavel a mao.
         self.assertEqual(
             settings.read_output_settings({"output": {"utf8_bom": "yes"}}),
-            {"utf8_bom": False},
+            padrao,
+        )
+        self.assertEqual(settings.read_output_settings({"output": "lixo"}), padrao)
+
+    def test_the_wrap_width_is_validated(self):
+        """A requebra e um numero de colunas, e o arquivo e editavel a mao
+        (ROADMAP 19, item 13)."""
+        self.assertEqual(
+            settings.read_output_settings({"output": {"wrap_columns": 80}})["wrap_columns"],
+            80,
         )
         self.assertEqual(
-            settings.read_output_settings({"output": "lixo"}),
-            {"utf8_bom": False},
+            settings.read_output_settings({"output": {"wrap_columns": 0}})["wrap_columns"],
+            0,
         )
+        # `True` E um int em Python: sem a checagem de bool, um `true` no arquivo
+        # requebraria em UMA coluna — uma palavra por linha.
+        self.assertEqual(
+            settings.read_output_settings({"output": {"wrap_columns": True}})["wrap_columns"],
+            0,
+        )
+        # E o mesmo acidente escrito com numero.
+        for invalido in (1, 19, -80, "80", 12.5):
+            self.assertEqual(
+                settings.read_output_settings(
+                    {"output": {"wrap_columns": invalido}}
+                )["wrap_columns"],
+                0,
+                invalido,
+            )
 
 
 class CaseShadowConflictTests(unittest.TestCase):
@@ -11542,6 +11806,5086 @@ class CuratedGlossaryTests(unittest.TestCase):
             if prio != glossario.GLOSSARY_PRIORITY_DEFAULT
         ]
         self.assertIn(("Black", "as pretas", 1), priorizadas)
+
+
+# ===========================================================================
+# Secao 17 — guardas e navegacao: onde o programa errava em silencio
+# ===========================================================================
+
+
+class LikeEscapeTests(unittest.TestCase):
+    """Buscar `[%eval` no modo "Trecho" devolvia lixo (ROADMAP 17.8).
+
+    O `LIKE` era montado sem `ESCAPE`, entao `%` e `_` do texto digitado viravam
+    curinga — e a busca mais natural do dominio e uma tag de comando, que COMECA
+    com `%`.
+    """
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        db_path = Path(sandbox.name) / "cache.db"
+        conn = initialize_database(str(db_path))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+        save_translation(cur, "Boa jogada [%eval +0.35]", "Boa jogada [%eval +0.35]", "pt")
+        save_translation(cur, "Erro de calculo aqui", "Erro de calculo aqui", "pt")
+        save_translation(cur, "Ameaca dupla no centro", "Ameaca dupla no centro", "pt")
+        conn.commit()
+        return cur
+
+    def busca(self, cur, texto):
+        return [
+            linha[1]
+            for linha in fetch_review_rows(
+                cur, "pt", search_text=texto, search_mode=SEARCH_MODE_SUBSTRING
+            )
+        ]
+
+    def test_the_escape_helper_neutralizes_the_three_characters(self):
+        self.assertEqual(escape_like_pattern("100%"), "100\\%")
+        self.assertEqual(escape_like_pattern("a_b"), "a\\_b")
+        self.assertEqual(escape_like_pattern("[%eval"), "[\\%eval")
+
+    def test_the_backslash_is_escaped_first(self):
+        """Escapando `%` antes da barra, as barras recem-inseridas seriam
+        escapadas de novo e o padrao passaria a procurar a propria barra."""
+        self.assertEqual(escape_like_pattern("\\%"), "\\\\\\%")
+
+    def test_searching_for_a_command_tag_finds_only_it(self):
+        """O bug: `[%eval` casava `[` + qualquer coisa + `eval`."""
+        cur = self.banco()
+        self.assertEqual(self.busca(cur, "[%eval"), ["Boa jogada [%eval +0.35]"])
+
+    def test_a_lone_percent_no_longer_matches_everything(self):
+        cur = self.banco()
+        self.assertEqual(self.busca(cur, "%"), ["Boa jogada [%eval +0.35]"])
+
+    def test_the_underscore_is_literal_too(self):
+        cur = self.banco()
+        self.assertEqual(self.busca(cur, "a_b"), [])
+
+    def test_ordinary_searches_keep_working(self):
+        cur = self.banco()
+        self.assertEqual(self.busca(cur, "calculo"), ["Erro de calculo aqui"])
+
+    def test_counting_and_listing_agree_under_the_escape(self):
+        """A contagem e a lista usam o mesmo `WHERE`; escapar em um so faria a
+        paginacao andar por um numero que a tela nao mostra (garantia R5)."""
+        cur = self.banco()
+        for texto in ("[%eval", "%", "a_b", "calculo"):
+            with self.subTest(texto=texto):
+                self.assertEqual(
+                    count_review_rows(
+                        cur, "pt", search_text=texto, search_mode=SEARCH_MODE_SUBSTRING
+                    ),
+                    len(self.busca(cur, texto)),
+                )
+
+
+class BulkVerificationPreviewTests(unittest.TestCase):
+    """Garantia V1: a verificacao em massa diz o que vai marcar, por original."""
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        db_path = Path(sandbox.name) / "cache.db"
+        conn = initialize_database(str(db_path))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+        # O caso que doi: duas frases diferentes com a MESMA traducao curta, uma
+        # delas errada. Verificar a legitima marcava a errada junto.
+        save_translation(cur, "Draw.", "Empate.", "pt", "en")
+        save_translation(cur, "Checkmate.", "Empate.", "pt", "en")
+        save_translation(cur, "Tablas.", "Empate.", "pt", "es")
+        save_translation(cur, "Good move.", "Bom lance.", "pt", "en")
+        conn.commit()
+        return cur
+
+    def id_de(self, cur, original):
+        return cur.execute(
+            "SELECT id FROM comments WHERE original_comment = ?", (original,)
+        ).fetchone()[0]
+
+    def test_the_candidates_name_the_other_originals(self):
+        cur = self.banco()
+        candidatas = fetch_exact_translation_match_candidates(
+            cur, self.id_de(cur, "Draw.")
+        )
+        self.assertEqual([orig for _id, orig in candidatas], ["Checkmate."])
+
+    def test_the_candidates_never_include_the_open_row(self):
+        """Ela e marcada pela acao direta do usuario; contar a escolha dele junto
+        com as consequencias dela faria o numero dizer uma coisa a mais."""
+        cur = self.banco()
+        row_id = self.id_de(cur, "Draw.")
+        self.assertNotIn(
+            row_id, [i for i, _o in fetch_exact_translation_match_candidates(cur, row_id)]
+        )
+
+    def test_the_candidates_stay_inside_the_pair(self):
+        """`Tablas.` tem a mesma traducao, e vem do espanhol (garantia R9)."""
+        cur = self.banco()
+        candidatas = fetch_exact_translation_match_candidates(
+            cur, self.id_de(cur, "Draw.")
+        )
+        self.assertNotIn("Tablas.", [orig for _id, orig in candidatas])
+
+    def test_a_translation_that_repeats_nowhere_has_no_candidates(self):
+        cur = self.banco()
+        self.assertEqual(
+            fetch_exact_translation_match_candidates(cur, self.id_de(cur, "Good move.")),
+            [],
+        )
+
+    def test_an_empty_translation_propagates_to_nothing(self):
+        cur = self.banco()
+        save_translation(cur, "Sem traducao ainda.", "", "pt", "en")
+        self.assertEqual(
+            fetch_exact_translation_match_candidates(
+                cur, self.id_de(cur, "Sem traducao ainda.")
+            ),
+            [],
+        )
+
+    def test_only_ids_restricts_what_is_written(self):
+        """Os ids sao os que a previa mostrou: uma linha gravada pelo worker
+        enquanto o dialogo esta aberto nao entra — o usuario nao a viu.
+
+        A linha aberta (`Draw.`) tambem fica de fora, e nao por descuido: quem a
+        verifica e o `update_translation_by_id` do editor, na acao direta do
+        usuario, antes de esta propagacao ser sequer oferecida.
+        """
+        cur = self.banco()
+        origem = self.id_de(cur, "Draw.")
+        save_translation(cur, "Remis.", "Empate.", "pt", "en")
+        aprovadas = [self.id_de(cur, "Checkmate.")]
+
+        self.assertEqual(
+            set_exact_translation_matches_verified(cur, origem, only_ids=aprovadas), 1
+        )
+        self.assertEqual(
+            dict(
+                cur.execute(
+                    "SELECT original_comment, verified FROM comments"
+                    " WHERE translated_comment = 'Empate.' AND source_language = 'en'"
+                ).fetchall()
+            ),
+            {"Draw.": 0, "Checkmate.": 1, "Remis.": 0},
+        )
+
+    def test_without_only_ids_the_whole_pair_is_verified(self):
+        """A chamada sem previa mantem o comportamento de sempre, a linha aberta
+        inclusive: usada assim, excluir-la deixaria o par metade verificado."""
+        cur = self.banco()
+
+        self.assertEqual(
+            set_exact_translation_matches_verified(cur, self.id_de(cur, "Draw.")), 2
+        )
+        self.assertEqual(
+            dict(
+                cur.execute(
+                    "SELECT original_comment, verified FROM comments"
+                    " WHERE translated_comment = 'Empate.' AND source_language = 'en'"
+                ).fetchall()
+            ),
+            {"Draw.": 1, "Checkmate.": 1},
+        )
+
+    def test_an_empty_approval_writes_nothing(self):
+        cur = self.banco()
+        self.assertEqual(
+            set_exact_translation_matches_verified(
+                cur, self.id_de(cur, "Draw."), only_ids=[]
+            ),
+            0,
+        )
+
+    def test_the_message_shows_the_originals_and_not_just_a_count(self):
+        """"N iguais" descreve as traducoes, e por isso nao alarmava ninguem: o
+        que esta sendo dado por revisado sao N originais diferentes."""
+        texto = format_propagation_confirmation(
+            "Empate.", [(7, "Checkmate."), (9, "Resign.")]
+        )
+        self.assertIn("2 original(is) diferente(s)", texto)
+        self.assertIn("Checkmate.", texto)
+        self.assertIn("Resign.", texto)
+        self.assertIn("Empate.", texto)
+
+    def test_the_message_caps_the_list_and_says_how_many_are_left(self):
+        candidatas = [(i, f"Original {i}") for i in range(20)]
+        texto = format_propagation_confirmation("Igual.", candidatas, limit=3)
+        self.assertIn("Original 0", texto)
+        self.assertNotIn("Original 9", texto)
+        self.assertIn("mais 17", texto)
+
+
+class MoveNotationLabelPreviewTests(unittest.TestCase):
+    """A previa de "Corrigir Lances" escondia a parte irreversivel (17.5)."""
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        db_path = Path(sandbox.name) / "cache.db"
+        conn = initialize_database(str(db_path))
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_it_counts_the_rows_without_a_source_language(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "The rook Rf8.", "A torre Rf8.", "pt")
+        save_translation(cur, "The king Kf1.", "O rei Kf1.", "pt")
+        save_translation(cur, "Ja rotulada.", "Ja rotulada.", "pt", "en")
+        save_translation(cur, "Outro destino.", "Outro destino.", "en")
+        conn.commit()
+
+        self.assertEqual(count_adoptable_unknown_source(cur, "pt", "en"), 2)
+
+    def test_a_row_that_would_collide_is_not_counted(self):
+        """O `UPDATE OR IGNORE` pula a linha cuja adocao esbarraria na chave. Um
+        teto no lugar do numero exato seria pior que nenhum numero: e uma
+        confirmacao que nao tem volta."""
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "Mesmo texto.", "Traducao legada.", "pt")
+        save_translation(cur, "Mesmo texto.", "Traducao declarada.", "pt", "en")
+        save_translation(cur, "Texto sozinho.", "Sozinho.", "pt")
+        conn.commit()
+
+        self.assertEqual(count_adoptable_unknown_source(cur, "pt", "en"), 1)
+        # E o numero bate com o que a adocao de verdade faz.
+        self.assertEqual(adopt_unknown_source_language(cur, "pt", "en", None), 1)
+
+    def test_detecting_labels_nothing(self):
+        """"Detectar automaticamente" nao e uma declaracao."""
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "Sem origem.", "Sem origem.", "pt")
+        conn.commit()
+
+        self.assertEqual(count_adoptable_unknown_source(cur, "pt", ""), 0)
+
+    def test_the_analysis_reports_the_label_count(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "The rook Rf8 holds.", "A torre Rf8 segura.", "pt")
+        conn.commit()
+
+        stats = analyze_move_notation_updates(
+            cur, "en", "pt", fix_move_notation
+        )
+        self.assertEqual(stats["labeled"], 1)
+
+    def test_without_the_legacy_rows_in_scope_nothing_is_labeled(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "The rook Rf8 holds.", "A torre Rf8 segura.", "pt")
+        conn.commit()
+
+        stats = analyze_move_notation_updates(
+            cur, "en", "pt", fix_move_notation, include_unknown=False
+        )
+        self.assertEqual(stats["labeled"], 0)
+
+
+class BackupDoesNotMigrateTests(unittest.TestCase):
+    """Um backup copia o que esta la, como esta (ROADMAP 17.6).
+
+    `create_database_backup` abria a origem com `initialize_database`, que roda a
+    migracao de schema e o backfill: o "backup de seguranca" pre-restauracao
+    ALTERAVA o banco de trabalho antes de copia-lo. Se a migracao fosse a causa
+    do problema que o usuario quer desfazer, nao havia mais volta.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.db_path = self.base / "traducoes.db"
+        _schema3_database(self.db_path)
+
+    def versao(self, path):
+        conn = sqlite3.connect(str(path))
+        try:
+            return conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
+
+    def colunas(self, path):
+        conn = sqlite3.connect(str(path))
+        try:
+            return [row[1] for row in conn.execute("PRAGMA table_info(comments)")]
+        finally:
+            conn.close()
+
+    def test_the_source_is_left_in_the_schema_it_was(self):
+        create_database_backup(str(self.db_path))
+
+        self.assertEqual(self.versao(self.db_path), 3)
+        self.assertNotIn("source_language", self.colunas(self.db_path))
+
+    def test_the_copy_is_the_old_schema_too(self):
+        """Migrar a copia seria igualmente errado: o backup deixaria de ser o
+        estado que o usuario quer poder recuperar."""
+        backup_path = create_database_backup(str(self.db_path))
+
+        self.assertEqual(self.versao(backup_path), 3)
+        self.assertNotIn("source_language", self.colunas(backup_path))
+
+    def test_the_journal_mode_of_the_source_is_not_changed_either(self):
+        """`open_database` grava `WAL` no arquivo. Ler para copiar nao precisa
+        disso, e um backup nao pode reconfigurar o original."""
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute("PRAGMA journal_mode = delete")
+        conn.close()
+
+        create_database_backup(str(self.db_path))
+
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            modo = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(modo.lower(), "delete")
+
+    def test_the_content_still_arrives_in_the_copy(self):
+        """A defesa contra "nao migrar" virar "nao copiar"."""
+        conn = sqlite3.connect(str(self.db_path))
+        conn.execute(
+            "INSERT INTO comments (original_comment, translated_comment,"
+            " target_language) VALUES (?, ?, ?)",
+            ("the rook", "a torre", "pt"),
+        )
+        conn.commit()
+        conn.close()
+
+        backup_path = create_database_backup(str(self.db_path))
+
+        conn = sqlite3.connect(backup_path)
+        try:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT original_comment, translated_comment FROM comments"
+                ).fetchall(),
+                [("the rook", "a torre")],
+            )
+        finally:
+            conn.close()
+
+    def test_restoring_still_migrates_the_restored_database(self):
+        """A migracao continua acontecendo onde ela deve: no banco de trabalho,
+        depois da restauracao. So o backup e que nao a provoca."""
+        backup_path = create_database_backup(str(self.db_path), prune=False)
+        alvo = self.base / "trabalho.db"
+        _schema3_database(alvo)
+
+        restore_database_from_backup(str(alvo), backup_path)
+
+        self.assertEqual(self.versao(alvo), SCHEMA_VERSION)
+        self.assertIn("source_language", self.colunas(alvo))
+
+
+class TranslationCsvOverwriteTests(unittest.TestCase):
+    """O CSV era somente-exportacao na pratica (ROADMAP 17.7).
+
+    Exportar, corrigir 300 traducoes na planilha e importar nao fazia NADA: a
+    gravacao respeita T1, entao toda linha voltava como "Sem alteracao".
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.db_path = self.base / "traducoes.db"
+
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        save_translation(cur, "The rook", "a torre errada", "pt", "en")
+        save_translation(cur, "The king", "o rei", "pt", "en")
+        conn.commit()
+        conn.close()
+
+    def csv_com(self, linhas):
+        caminho = self.base / "traducoes.csv"
+        with open(caminho, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                ["original_comment", "translated_comment", "source_language",
+                 "target_language", "verified"]
+            )
+            writer.writerows(linhas)
+        return str(caminho)
+
+    def linhas(self):
+        conn = initialize_database(str(self.db_path))
+        try:
+            return {
+                orig: (trad, verificada)
+                for orig, trad, verificada in conn.execute(
+                    "SELECT original_comment, translated_comment, verified FROM comments"
+                )
+            }
+        finally:
+            conn.close()
+
+    def historico(self, original):
+        conn = initialize_database(str(self.db_path))
+        try:
+            return conn.execute(
+                """
+                SELECT h.action, h.previous_translation, h.new_translation
+                FROM comment_history h
+                JOIN comments c ON c.id = h.comment_id
+                WHERE c.original_comment = ?
+                ORDER BY h.id
+                """,
+                (original,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------- a previa
+
+    def test_the_preview_counts_what_the_default_mode_would_skip(self):
+        caminho = self.csv_com(
+            [
+                ["The rook", "a torre", "en", "pt", ""],
+                ["The king", "o rei", "en", "pt", ""],
+                ["The bishop", "o bispo", "en", "pt", ""],
+            ]
+        )
+
+        preview_stats = analyze_translations_csv_import(str(self.db_path), caminho)
+
+        self.assertEqual(preview_stats["inserted"], 1)
+        self.assertEqual(preview_stats["unchanged"], 2)
+        self.assertEqual(preview_stats["overwritable"], 1, "so 'The rook' difere")
+
+    def test_the_preview_says_how_many_of_them_are_verified(self):
+        """Sobrescrever uma linha revisada apaga revisao humana — a unica parte
+        desta operacao que o backup nao devolve de graca."""
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        set_translation_verified_by_id(
+            cur,
+            cur.execute(
+                "SELECT id FROM comments WHERE original_comment = 'The rook'"
+            ).fetchone()[0],
+            True,
+        )
+        conn.commit()
+        conn.close()
+
+        caminho = self.csv_com([["The rook", "a torre", "en", "pt", ""]])
+        preview_stats = analyze_translations_csv_import(str(self.db_path), caminho)
+
+        self.assertEqual(preview_stats["overwritable_verified"], 1)
+
+    def test_the_preview_text_names_the_difference(self):
+        caminho = self.csv_com([["The rook", "a torre", "en", "pt", ""]])
+        texto = format_import_preview(
+            analyze_translations_csv_import(str(self.db_path), caminho)
+        )
+
+        self.assertIn("DIFEREM", texto)
+        self.assertIn("1 traducao(oes)", texto)
+
+    def test_with_nothing_to_overwrite_the_text_says_t1_holds(self):
+        caminho = self.csv_com([["The rook", "a torre errada", "en", "pt", ""]])
+        texto = format_import_preview(
+            analyze_translations_csv_import(str(self.db_path), caminho)
+        )
+
+        self.assertIn("nao serao sobrescritas", texto)
+        self.assertNotIn("DIFEREM", texto)
+
+    # ------------------------------------------------------- a importacao
+
+    def test_by_default_nothing_is_overwritten(self):
+        """T1 continua sendo o padrao: sobrescrever passa a ser uma decisao."""
+        caminho = self.csv_com([["The rook", "a torre", "en", "pt", ""]])
+
+        stats = import_translations_from_csv(
+            str(self.db_path), caminho, backup_dir=str(self.base / "backups")
+        )
+
+        self.assertEqual(stats["unchanged"], 1)
+        self.assertEqual(stats["overwritten"], 0)
+        self.assertEqual(self.linhas()["The rook"][0], "a torre errada")
+
+    def test_asking_to_overwrite_writes_the_corrected_text(self):
+        caminho = self.csv_com([["The rook", "a torre", "en", "pt", ""]])
+
+        stats = import_translations_from_csv(
+            str(self.db_path),
+            caminho,
+            backup_dir=str(self.base / "backups"),
+            overwrite_existing=True,
+        )
+
+        self.assertEqual(stats["overwritten"], 1)
+        self.assertEqual(stats["unchanged"], 0)
+        self.assertEqual(self.linhas()["The rook"][0], "a torre")
+
+    def test_identical_text_is_not_an_overwrite(self):
+        """Num CSV exportado e corrigido em parte, o igual e a grande maioria:
+        contar essas linhas inflaria o numero do dialogo."""
+        caminho = self.csv_com([["The king", "o rei", "en", "pt", ""]])
+
+        stats = import_translations_from_csv(
+            str(self.db_path),
+            caminho,
+            backup_dir=str(self.base / "backups"),
+            overwrite_existing=True,
+        )
+
+        self.assertEqual(stats["overwritten"], 0)
+        self.assertEqual(stats["unchanged"], 1)
+        self.assertEqual(self.historico("The king"), [])
+
+    def test_overwriting_records_the_history(self):
+        """Garantia R2: o usuario precisa poder ver o que a importacao passou
+        por cima e voltar atras."""
+        caminho = self.csv_com([["The rook", "a torre", "en", "pt", ""]])
+
+        import_translations_from_csv(
+            str(self.db_path),
+            caminho,
+            backup_dir=str(self.base / "backups"),
+            overwrite_existing=True,
+        )
+
+        self.assertEqual(
+            self.historico("The rook"),
+            [("csv_overwrite", "a torre errada", "a torre")],
+        )
+
+    def test_overwriting_reevaluates_the_quality_warning(self):
+        """Garantia R6: o texto mudou, e a coluna materializada nao pode
+        divergir do que a avaliacao em Python diria."""
+        caminho = self.csv_com([["The rook", "The rook", "en", "pt", ""]])
+
+        import_translations_from_csv(
+            str(self.db_path),
+            caminho,
+            backup_dir=str(self.base / "backups"),
+            overwrite_existing=True,
+        )
+
+        conn = initialize_database(str(self.db_path))
+        try:
+            aviso = conn.execute(
+                "SELECT quality_warning FROM comments WHERE original_comment = 'The rook'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(aviso, 1, "traducao igual ao original e um aviso QA")
+
+    def test_overwriting_sends_the_row_back_to_pending(self):
+        """A revisao era do texto anterior. Manter a marca sobre um texto que
+        ninguem leu e o que R9 e V1 existem para impedir."""
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        set_translation_verified_by_id(
+            cur,
+            cur.execute(
+                "SELECT id FROM comments WHERE original_comment = 'The rook'"
+            ).fetchone()[0],
+            True,
+        )
+        conn.commit()
+        conn.close()
+
+        caminho = self.csv_com([["The rook", "a torre", "en", "pt", ""]])
+        import_translations_from_csv(
+            str(self.db_path),
+            caminho,
+            backup_dir=str(self.base / "backups"),
+            overwrite_existing=True,
+        )
+
+        self.assertEqual(self.linhas()["The rook"], ("a torre", 0))
+
+    def test_the_csv_can_say_the_overwritten_row_is_verified(self):
+        caminho = self.csv_com([["The rook", "a torre", "en", "pt", "1"]])
+
+        stats = import_translations_from_csv(
+            str(self.db_path),
+            caminho,
+            backup_dir=str(self.base / "backups"),
+            overwrite_existing=True,
+        )
+
+        self.assertEqual(self.linhas()["The rook"], ("a torre", 1))
+        self.assertEqual(stats["verified_applied"], 1)
+
+    def test_a_verified_flag_alone_promotes_an_existing_row(self):
+        """A outra metade do beco: o `verified` editado na planilha era
+        descartado em silencio porque so linhas inseridas ou preenchidas o
+        recebiam."""
+        caminho = self.csv_com([["The king", "o rei", "en", "pt", "1"]])
+
+        stats = import_translations_from_csv(
+            str(self.db_path),
+            caminho,
+            backup_dir=str(self.base / "backups"),
+            overwrite_existing=True,
+        )
+
+        self.assertEqual(self.linhas()["The king"], ("o rei", 1))
+        self.assertEqual(stats["verified_applied"], 1)
+        self.assertEqual(stats["unchanged"], 1, "promover nao e sobrescrever")
+
+    def test_a_missing_verified_column_never_demotes_anything(self):
+        """Um CSV montado a mao nao tem a coluna, e a ausencia dela nao e uma
+        afirmacao de que nada foi revisado."""
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        set_translation_verified_by_id(
+            cur,
+            cur.execute(
+                "SELECT id FROM comments WHERE original_comment = 'The king'"
+            ).fetchone()[0],
+            True,
+        )
+        conn.commit()
+        conn.close()
+
+        caminho = self.base / "sem-coluna.csv"
+        with open(caminho, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                ["original_comment", "translated_comment", "source_language",
+                 "target_language"]
+            )
+            writer.writerow(["The king", "o rei", "en", "pt"])
+
+        import_translations_from_csv(
+            str(self.db_path),
+            str(caminho),
+            backup_dir=str(self.base / "backups"),
+            overwrite_existing=True,
+        )
+
+        self.assertEqual(self.linhas()["The king"], ("o rei", 1))
+
+    def test_the_preview_counts_the_promotions_the_overwrite_mode_would_do(self):
+        caminho = self.csv_com([["The king", "o rei", "en", "pt", "1"]])
+
+        preview_stats = analyze_translations_csv_import(str(self.db_path), caminho)
+
+        self.assertEqual(preview_stats["verified_on_existing"], 1)
+        self.assertEqual(
+            preview_stats["verified_applied"], 0, "no padrao, nada e aplicado"
+        )
+
+    def test_a_backup_comes_before_the_overwrite(self):
+        caminho = self.csv_com([["The rook", "a torre", "en", "pt", ""]])
+
+        stats = import_translations_from_csv(
+            str(self.db_path),
+            caminho,
+            backup_dir=str(self.base / "backups"),
+            overwrite_existing=True,
+        )
+
+        self.assertTrue(Path(stats["backup_path"]).exists())
+        conn = sqlite3.connect(stats["backup_path"])
+        try:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT translated_comment FROM comments"
+                    " WHERE original_comment = 'The rook'"
+                ).fetchone()[0],
+                "a torre errada",
+                "o backup tem de ter o texto de ANTES",
+            )
+        finally:
+            conn.close()
+
+    def test_the_row_level_overwrite_refuses_identical_text(self):
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        row_id = cur.execute(
+            "SELECT id FROM comments WHERE original_comment = 'The king'"
+        ).fetchone()[0]
+
+        self.assertEqual(overwrite_translation_by_id(cur, row_id, "o rei"), 0)
+        self.assertEqual(overwrite_translation_by_id(cur, row_id, "o rei novo"), 1)
+        conn.close()
+
+    def test_the_row_level_overwrite_on_a_missing_id_writes_nothing(self):
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        self.assertEqual(overwrite_translation_by_id(cur, 999999, "qualquer"), 0)
+        conn.close()
+
+
+class GeneratedSuffixWithCollisionTests(unittest.TestCase):
+    """`game-BR-2.pgn` nao era reconhecido como gerado (ROADMAP 17.10).
+
+    Confirmado: a terceira execucao sobre a mesma pasta pegava aquele arquivo
+    como ENTRADA, traduzia portugues para portugues e produzia
+    `game-BR-2-BR.pgn` — e cada execucao seguinte acrescentava mais um.
+    """
+
+    def test_the_collision_suffix_is_stripped(self):
+        self.assertEqual(strip_generated_suffix("game-BR"), "game")
+        self.assertEqual(strip_generated_suffix("game-BR-2"), "game")
+        self.assertEqual(strip_generated_suffix("game-BR-17"), "game")
+
+    def test_a_generated_file_with_a_collision_suffix_is_recognized(self):
+        for nome in ("game-BR-2.pgn", "game-EN-3.pgn", "partida-br-2.pgn"):
+            with self.subTest(nome=nome):
+                self.assertTrue(is_generated_pgn(nome))
+
+    def test_an_ordinary_numbered_name_is_left_alone(self):
+        """`torneio-2.pgn` e um arquivo do usuario: nao tem sufixo de idioma."""
+        self.assertEqual(strip_generated_suffix("torneio-2"), "torneio-2")
+        self.assertFalse(is_generated_pgn("torneio-2.pgn"))
+        self.assertFalse(is_generated_pgn("game-2.pgn"))
+
+    def test_the_scan_of_a_folder_skips_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for nome in ("game.pgn", "game-BR.pgn", "game-BR-2.pgn"):
+                (base / nome).write_text("[Event \"T\"]\n", encoding="utf-8")
+
+            arquivos, ignorados = collect_pgn_files(str(base), False)
+
+            self.assertEqual([os.path.basename(a) for a in arquivos], ["game.pgn"])
+            self.assertEqual(ignorados, 2)
+
+    def test_the_normalizer_recognizes_its_own_collision_output(self):
+        for nome in ("game-NORM.pgn", "game-NORM-2.pgn", "game-norm-3.pgn"):
+            with self.subTest(nome=nome):
+                self.assertTrue(is_normalized_pgn(nome))
+        self.assertFalse(is_normalized_pgn("game-2.pgn"))
+
+    def test_the_normalizer_scan_skips_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for nome in ("game.pgn", "game-NORM.pgn", "game-NORM-2.pgn"):
+                (base / nome).write_text("[Event \"T\"]\n", encoding="utf-8")
+
+            arquivos, ignorados = collect_spellcheck_pgn_files(str(base), False)
+
+            self.assertEqual([os.path.basename(a) for a in arquivos], ["game.pgn"])
+            self.assertEqual(ignorados, 2)
+
+    def test_the_output_name_of_a_collision_input_does_not_grow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            entrada = os.path.join(tmp, "game-BR-2.pgn")
+            Path(entrada).write_text("[Event \"T\"]\n", encoding="utf-8")
+            self.assertEqual(
+                os.path.basename(translated_output_path(entrada, "pt")), "game-BR.pgn"
+            )
+
+
+class SpellingSectionMergeTests(unittest.TestCase):
+    """Uma secao repetida no `spelling.ssp` APAGAVA a anterior (ROADMAP 17.10).
+
+    Era uma atribuicao onde devia ser merge — e o jeito natural de acrescentar
+    nomes ao arquivo e criar um segundo bloco `@PLAYER` no fim.
+    """
+
+    def arquivo(self, texto):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        caminho = Path(sandbox.name) / "spelling.ssp"
+        caminho.write_text(texto, encoding="utf-8")
+        return str(caminho)
+
+    def test_a_repeated_section_adds_instead_of_replacing(self):
+        caminho = self.arquivo(
+            '@PLAYER ""\n'
+            "Kasparov, Garry\n"
+            "=Garry Kasparov\n"
+            '@PLAYER ""\n'
+            "Karpov, Anatoly\n"
+            "=Anatoly Karpov\n"
+        )
+
+        secoes = parse_spelling_file(caminho)
+
+        entradas = secoes["PLAYER"]["entries"]
+        self.assertIn("kasparov, garry", entradas)
+        self.assertIn("karpov, anatoly", entradas)
+
+    def test_the_first_block_still_wins_a_repeated_key(self):
+        """Dentro de um bloco o primeiro a definir a chave vence
+        (`setdefault`); entre blocos vale a mesma regra."""
+        caminho = self.arquivo(
+            '@PLAYER ""\n'
+            "Kasparov, Garry\n"
+            '@PLAYER ""\n'
+            "KASPAROV, GARRY JR\n"
+            "=Kasparov, Garry\n"
+        )
+
+        entradas = parse_spelling_file(caminho)["PLAYER"]["entries"]
+
+        self.assertEqual(entradas["kasparov, garry"], "Kasparov, Garry")
+
+    def test_affix_rules_of_both_blocks_survive(self):
+        caminho = self.arquivo(
+            '@PLAYER ""\n'
+            '%Prefix "Van " "van "\n'
+            '@PLAYER ""\n'
+            '%Suffix " Jr" " Jr."\n'
+        )
+
+        secao = parse_spelling_file(caminho)["PLAYER"]
+
+        self.assertEqual(secao["prefix_rules"], [("Van ", "van ")])
+        self.assertEqual(secao["suffix_rules"], [(" Jr", " Jr.")])
+
+    def test_different_sections_stay_separate(self):
+        caminho = self.arquivo(
+            '@PLAYER ""\n'
+            "Kasparov, Garry\n"
+            '@SITE ""\n'
+            "Linares\n"
+        )
+
+        secoes = parse_spelling_file(caminho)
+
+        self.assertIn("kasparov, garry", secoes["PLAYER"]["entries"])
+        self.assertIn("linares", secoes["SITE"]["entries"])
+        self.assertNotIn("linares", secoes["PLAYER"]["entries"])
+
+
+class PgnTagValueEscapingTests(unittest.TestCase):
+    """O valor corrigido era inserido sem re-escapar aspas (ROADMAP 17.10)."""
+
+    def test_the_two_helpers_are_inverses(self):
+        for valor in ('O"Kelly', "barra\\aqui", 'os dois \\ e "', "sem nada"):
+            with self.subTest(valor=valor):
+                self.assertEqual(
+                    unescape_pgn_tag_value(escape_pgn_tag_value(valor)), valor
+                )
+
+    def test_a_quote_in_the_canonical_value_does_not_break_the_tag(self):
+        """`[White "O"Kelly"]` deixa de ser uma tag valida, e o dano aparece no
+        ChessBase de quem abre o arquivo, nao aqui."""
+        dados = {
+            "PLAYER": {
+                "entries": {"okelly": 'O"Kelly'},
+                "ignore_chars": "",
+                "prefix_rules": [],
+                "suffix_rules": [],
+            }
+        }
+
+        saida, mudancas = normalize_pgn_metadata_content(
+            '[White "OKelly"]\n', dados
+        )
+
+        self.assertEqual(len(mudancas), 1)
+        self.assertEqual(saida, '[White "O\\"Kelly"]\n')
+        # E o resultado volta a ser lido como o nome com aspas.
+        self.assertEqual(
+            unescape_pgn_tag_value(PGN_TAG_RE.match(saida.rstrip("\n")).group(3)),
+            'O"Kelly',
+        )
+
+    def test_an_escaped_value_in_the_file_is_compared_unescaped(self):
+        """O dicionario fala na forma que se escreve; o arquivo, na escapada.
+        Comparar sem desescapar fazia o nome com aspas nunca casar."""
+        dados = {
+            "PLAYER": {
+                "entries": {'o"kelly': 'O\'Kelly, Albéric'},
+                "ignore_chars": "",
+                "prefix_rules": [],
+                "suffix_rules": [],
+            }
+        }
+
+        _saida, mudancas = normalize_pgn_metadata_content(
+            '[White "O\\"Kelly"]\n', dados
+        )
+
+        self.assertEqual([m["new"] for m in mudancas], ["O'Kelly, Albéric"])
+
+    def test_a_value_without_quotes_comes_out_byte_for_byte(self):
+        dados = {
+            "PLAYER": {
+                "entries": {"kasparov": "Kasparov, Garry"},
+                "ignore_chars": "",
+                "prefix_rules": [],
+                "suffix_rules": [],
+            }
+        }
+
+        saida, _mudancas = normalize_pgn_metadata_content(
+            '[White "Kasparov"]\n[Black "Karpov"]\n', dados
+        )
+
+        self.assertEqual(saida, '[White "Kasparov, Garry"]\n[Black "Karpov"]\n')
+
+
+class NormalizerPartialFailureTests(unittest.TestCase):
+    """Uma falha num arquivo derrubava o lote inteiro (ROADMAP 17.10)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+        self.spelling = self.base / "spelling.ssp"
+        self.spelling.write_text(
+            '@PLAYER ""\nKasparov, Garry\n=Kasparov\n', encoding="utf-8"
+        )
+
+        for nome in ("a.pgn", "b.pgn", "c.pgn"):
+            (self.base / nome).write_text(
+                '[White "Kasparov"]\n\n1. e4 *\n', encoding="utf-8"
+            )
+
+    def rodar(self, quebrar=None):
+        original = pgn_spellcheck.normalize_pgn_metadata_file
+
+        def falso(input_file, spelling_data, **kwargs):
+            if quebrar and os.path.basename(input_file) == quebrar:
+                raise OSError("permissao negada")
+            return original(input_file, spelling_data, **kwargs)
+
+        pgn_spellcheck.normalize_pgn_metadata_file = falso
+        self.addCleanup(
+            setattr, pgn_spellcheck, "normalize_pgn_metadata_file", original
+        )
+        self.logs = []
+        return normalize_pgn_metadata_path(
+            str(self.base),
+            spelling_path=str(self.spelling),
+            log_message=self.logs.append,
+        )
+
+    def test_the_other_files_are_still_normalized(self):
+        stats = self.rodar(quebrar="b.pgn")
+
+        self.assertEqual(stats["changed_files"], 2)
+        self.assertEqual([f["file"] for f in stats["failed"]].__len__(), 1)
+        self.assertTrue(os.path.basename(stats["failed"][0]["file"]) == "b.pgn")
+
+    def test_the_reason_reaches_the_log(self):
+        self.rodar(quebrar="b.pgn")
+
+        self.assertTrue(
+            any("permissao negada" in linha for linha in self.logs),
+            f"o motivo nao apareceu no log: {self.logs}",
+        )
+
+    def test_the_progress_still_reaches_the_end(self):
+        valores = []
+        original = pgn_spellcheck.normalize_pgn_metadata_file
+
+        def falso(input_file, spelling_data, **kwargs):
+            if os.path.basename(input_file) == "a.pgn":
+                raise OSError("disco cheio")
+            return original(input_file, spelling_data, **kwargs)
+
+        pgn_spellcheck.normalize_pgn_metadata_file = falso
+        self.addCleanup(
+            setattr, pgn_spellcheck, "normalize_pgn_metadata_file", original
+        )
+
+        normalize_pgn_metadata_path(
+            str(self.base),
+            spelling_path=str(self.spelling),
+            progress_callback=valores.append,
+        )
+
+        self.assertEqual(valores[-1], 1.0)
+
+    def test_a_clean_run_reports_no_failures(self):
+        stats = self.rodar()
+
+        self.assertEqual(stats["failed"], [])
+        self.assertEqual(stats["changed_files"], 3)
+
+
+class BatchSizedOnWhatIsSentTests(unittest.TestCase):
+    """B1 media o texto CRU e enviava o LIMPO (ROADMAP 17.10).
+
+    A folga de 200 caracteres segurava na pratica; era acoplamento, nao
+    garantia. Estourar o limite faz a camada de API dividir por sentenca, e o
+    corte pode cair no meio de um `|||`.
+    """
+
+    def test_the_index_groups_match_the_batches(self):
+        comentarios = ["a" * 100, "b" * 100, "c" * 100]
+        grupos = batch_index_groups(comentarios, max_chars=250)
+        lotes = create_comment_batches(comentarios, max_chars=250)
+
+        self.assertEqual(
+            [[comentarios[i] for i in grupo] for grupo in grupos], lotes
+        )
+
+    def test_a_comment_larger_than_the_limit_is_its_own_group(self):
+        comentarios = ["curto", "x" * 500, "outro"]
+        self.assertEqual(
+            batch_index_groups(comentarios, max_chars=100), [[0], [1], [2]]
+        )
+
+    def test_an_empty_list_has_no_groups(self):
+        self.assertEqual(batch_index_groups([]), [])
+
+    def test_the_separator_is_counted_between_items(self):
+        """Dois de 50 com o separador de 5 nao cabem em 100."""
+        comentarios = ["a" * 50, "b" * 50]
+        self.assertEqual(batch_index_groups(comentarios, max_chars=100), [[0], [1]])
+        self.assertEqual(batch_index_groups(comentarios, max_chars=110), [[0, 1]])
+
+
+class GlossaryErrorWithoutConsoleTests(unittest.TestCase):
+    """Garantia S5 sob `pythonw` (ROADMAP 17.9).
+
+    `report_glossary_error` fazia `print(...)` ANTES de chamar o handler da
+    interface — e sob `pythonw` / PyInstaller windowed `sys.stdout` e `None`,
+    entao o `print` levantava e o handler nunca rodava. A funcao que existe para
+    tornar a falha visivel era a unica que quebrava no empacotado, que e
+    exatamente onde nao ha console para ler o erro.
+    """
+
+    def setUp(self):
+        self.reported = []
+        self.previous = set_glossary_error_handler(self.reported.append)
+        self.addCleanup(set_glossary_error_handler, self.previous)
+        self.addCleanup(clear_glossary_error)
+        clear_glossary_error()
+
+    def sem_console(self):
+        """Simula o `pythonw`: `sys.stdout` e `None`, e nao um arquivo fechado."""
+        self.addCleanup(setattr, sys, "stdout", sys.stdout)
+        sys.stdout = None
+
+    def test_the_message_reaches_the_interface_without_a_console(self):
+        self.sem_console()
+
+        report_glossary_error("glossario quebrado")
+
+        self.assertEqual(self.reported, ["glossario quebrado"])
+        self.assertEqual(last_glossary_error(), "glossario quebrado")
+
+    def test_a_load_failure_still_degrades_and_reports(self):
+        """O caminho de verdade: carregar um arquivo quebrado devolve lista vazia
+        E avisa, com ou sem console."""
+        self.sem_console()
+        with tempfile.TemporaryDirectory() as tmp:
+            glossary = Path(tmp) / "Substituicoes.txt"
+            glossary.write_text("substituicoes = [('a', ", encoding="utf-8")
+
+            self.assertEqual(load_substitutions(str(glossary)), [])
+
+        self.assertEqual(len(self.reported), 1)
+        self.assertIn("Substituicoes.txt", self.reported[0])
+
+    def test_a_closed_stdout_is_survived_too(self):
+        """Um `stdout` fechado (pipe rompido) levanta `ValueError`, e tambem nao
+        pode ser o motivo de o usuario nao ser avisado."""
+        fechado = io.StringIO()
+        fechado.close()
+        self.addCleanup(setattr, sys, "stdout", sys.stdout)
+        sys.stdout = fechado
+
+        report_glossary_error("com stdout fechado")
+
+        self.assertEqual(self.reported, ["com stdout fechado"])
+
+    def test_adding_an_entry_that_fails_does_not_raise_without_a_console(self):
+        """O mesmo `print` cru estava no `except` de `add_to_glossary`: sob
+        `pythonw` ele transformava "nao consegui gravar a regra" num
+        `AttributeError` no meio do popup do editor."""
+        self.sem_console()
+        with tempfile.TemporaryDirectory() as tmp:
+            # Um diretorio no lugar do arquivo: a gravacao falha, e a funcao
+            # precisa devolver False em vez de levantar.
+            caminho = Path(tmp) / "Substituicoes.txt"
+            caminho.mkdir()
+
+            self.assertFalse(add_to_glossary("rook", "torre", path=str(caminho)))
+
+    def test_with_a_console_the_message_is_printed(self):
+        """Contraprova: a guarda nao pode ter calado o log de quem tem console."""
+        saida = io.StringIO()
+        with redirect_stdout(saida):
+            report_glossary_error("com console")
+
+        self.assertIn("com console", saida.getvalue())
+
+
+class PreferDbIsHonoredTests(unittest.TestCase):
+    """`prefer_db=False` era ignorado quando `db_path` era passado (17.10).
+
+    O argumento explicito do chamador perdia para a conveniencia interna: quem
+    pedia "leia o arquivo texto, nao o indice" recebia o indice em silencio.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+        self.arquivo = self.base / "Substituicoes.txt"
+        self.arquivo.write_text(
+            "substituicoes = [('rook', 'torre')]\n", encoding="utf-8"
+        )
+        self.indice = self.base / "glossario.db"
+        # O indice existe e diz OUTRA coisa: e assim que da para saber de qual
+        # dos dois a resposta veio.
+        rebuild_glossary_database(str(self.arquivo), str(self.indice))
+        self.arquivo.write_text(
+            "substituicoes = [('queen', 'dama')]\n", encoding="utf-8"
+        )
+
+    def test_the_file_is_read_when_the_index_is_refused(self):
+        entradas = load_glossary_entries(
+            str(self.arquivo), prefer_db=False, db_path=str(self.indice)
+        )
+
+        self.assertEqual(entradas, [("queen", "dama")])
+
+    def test_the_details_loader_honors_it_too(self):
+        entradas = load_glossary_entry_details(
+            str(self.arquivo), prefer_db=False, db_path=str(self.indice)
+        )
+
+        self.assertEqual([orig for orig, *_resto in entradas], ["queen"])
+
+    def test_the_index_is_still_used_when_it_is_asked_for(self):
+        """Contraprova: sem `prefer_db=False`, passar o indice continua usando-o
+        (e a sincronizacao o traz em dia)."""
+        entradas = load_glossary_entries(
+            str(self.arquivo), db_path=str(self.indice)
+        )
+
+        self.assertEqual(entradas, [("queen", "dama")])
+
+    def test_the_index_is_not_even_touched(self):
+        """Nao basta a resposta bater: o indice nao pode ser aberto nem
+        reconstruido, senao `prefer_db=False` ainda pagaria o custo dele."""
+        chamadas = []
+        original = glossario.load_glossary_entries_from_db
+        glossario.load_glossary_entries_from_db = lambda *a, **k: chamadas.append(a)
+        self.addCleanup(
+            setattr, glossario, "load_glossary_entries_from_db", original
+        )
+
+        load_glossary_entries(
+            str(self.arquivo), prefer_db=False, db_path=str(self.indice)
+        )
+
+        self.assertEqual(chamadas, [])
+
+
+class WorkerProgressEndStateTests(WorkerFallbackHarness, unittest.TestCase):
+    """A barra tem de terminar num estado que signifique algo (ROADMAP 17.10).
+
+    Interrompida pelo disjuntor — ou morta por excecao — ela congelava no valor
+    em que estava: 43% para sempre, e era o unico sinal na tela que continuava
+    dizendo "estou trabalhando" depois do dialogo de aviso.
+    """
+
+    def test_a_clean_run_fills_the_bar(self):
+        def translate(text, *_args, **_kwargs):
+            if " ||| " in text:
+                return " ||| ".join(f"[{p}]" for p in text.split(" ||| "))
+            return f"[{text}]"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _pgn = self.run_worker(Path(tmp), translate)
+
+        self.assertEqual(app.progress.value, 1.0)
+
+    def test_the_circuit_breaker_puts_the_bar_back_to_rest(self):
+        # Comentarios grandes o bastante para render mais lotes que o limite do
+        # disjuntor: com um lote so ele nunca dispara, e o teste passaria sem
+        # exercitar nada.
+        movetext = " ".join(
+            f"{i + 1}. e4 {{Comentario {i} " + "x" * (BATCH_MAX_CHARS // 2) + "}}"
+            for i in range(12)
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = Path(tmp) / "game.pgn"
+            pgn.write_text(
+                '[Event "T"]\n\n' + movetext + " *\n", encoding="utf-8"
+            )
+            app = FakeApp(Path(tmp) / "cache.db")
+
+            originais = (
+                translation_worker.translate_text,
+                translation_worker.messagebox.showwarning,
+            )
+            translation_worker.translate_text = lambda *_a, **_k: None
+            translation_worker.messagebox.showwarning = lambda *_a, **_k: None
+            try:
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+            finally:
+                (
+                    translation_worker.translate_text,
+                    translation_worker.messagebox.showwarning,
+                ) = originais
+
+        self.assertTrue(
+            any("ABORTADO" in linha for linha in app.logs),
+            "o disjuntor devia ter agido",
+        )
+        self.assertEqual(app.progress.value, 0.0)
+
+    def test_a_general_exception_puts_the_bar_back_to_rest(self):
+        original = translation_worker.generate_translated_pgn
+        translation_worker.generate_translated_pgn = lambda *_a, **_k: 1 / 0
+        self.addCleanup(
+            setattr, translation_worker, "generate_translated_pgn", original
+        )
+
+        def translate(text, *_args, **_kwargs):
+            if " ||| " in text:
+                return " ||| ".join(f"[{p}]" for p in text.split(" ||| "))
+            return f"[{text}]"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            originais = (
+                translation_worker.messagebox.showerror,
+            )
+            translation_worker.messagebox.showerror = lambda *_a, **_k: None
+            try:
+                app, _pgn = self.run_worker(Path(tmp), translate)
+            finally:
+                (translation_worker.messagebox.showerror,) = originais
+
+        self.assertTrue(any("ERRO GERAL" in linha for linha in app.logs))
+        self.assertEqual(app.progress.value, 0.0)
+
+    def test_a_cancelled_run_puts_the_bar_back_to_rest(self):
+        def translate(text, *_args, **_kwargs):
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = Path(tmp) / "game.pgn"
+            pgn.write_text(self.PGN, encoding="utf-8")
+            app = FakeApp(Path(tmp) / "cache.db")
+            app.cancel_flag.set()
+            original = translation_worker.translate_text
+            translation_worker.translate_text = translate
+            try:
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+            finally:
+                translation_worker.translate_text = original
+
+        self.assertEqual(app.progress.value, 0.0)
+
+
+class WorkerFailureListSurvivesAnExceptionTests(
+    WorkerFallbackHarness, unittest.TestCase
+):
+    """Garantia T4 no caminho da excecao (ROADMAP 17.10).
+
+    A lista era gravada so no caminho feliz. Uma excecao geral a perdia — e o
+    resultado nao era "sem lista", era pior: a da execucao ANTERIOR continuava
+    valendo, e "Reprocessar Falhas" reprocessava com confianca os arquivos de
+    outra execucao.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+        # Configuracoes proprias, para nao encostar no arquivo de ninguem.
+        self.settings_path = self.base / "settings.json"
+        original = settings.default_settings_path
+        settings.default_settings_path = lambda: str(self.settings_path)
+        self.addCleanup(setattr, settings, "default_settings_path", original)
+
+        # A lista de uma execucao ANTERIOR, apontando para outro arquivo.
+        failed_runs.save_failed_run(
+            {
+                "target_language": "pt",
+                "source_language": "en",
+                "files": [str(self.base / "execucao-antiga.pgn")],
+                "failed_count": 7,
+                "when": "2026-07-01T10:00:00",
+            }
+        )
+
+    def roda_e_explode_na_geracao(self):
+        original = translation_worker.generate_translated_pgn
+        translation_worker.generate_translated_pgn = lambda *_a, **_k: 1 / 0
+        self.addCleanup(
+            setattr, translation_worker, "generate_translated_pgn", original
+        )
+
+        def translate(text, *_args, **_kwargs):
+            if " ||| " in text:
+                return "desalinhado"          # cai no modo individual
+            if text == "Second comment here":
+                return None                   # ...e uma falha de verdade
+            return f"[{text}]"
+
+        erro = translation_worker.messagebox.showerror
+        translation_worker.messagebox.showerror = lambda *_a, **_k: None
+        try:
+            return self.run_worker(self.base, translate)
+        finally:
+            translation_worker.messagebox.showerror = erro
+
+    def test_the_stale_list_is_replaced_by_this_run(self):
+        app, pgn = self.roda_e_explode_na_geracao()
+
+        registro = failed_runs.load_failed_run()
+        self.assertIsNotNone(registro, "a lista desta execucao devia ter sido gravada")
+        self.assertEqual(registro["files"], [str(pgn)])
+        self.assertEqual(registro["failed_count"], 1)
+        self.assertTrue(any("ERRO GERAL" in linha for linha in app.logs))
+
+    def test_it_is_written_only_once(self):
+        """O caminho normal grava no fim, e o tratador de excecao grava se o
+        normal nao chegou la — nunca os dois."""
+        chamadas = []
+        original = translation_worker.save_failed_run
+        translation_worker.save_failed_run = lambda record, *a, **k: chamadas.append(
+            record
+        )
+        self.addCleanup(
+            setattr, translation_worker, "save_failed_run", original
+        )
+
+        self.roda_e_explode_na_geracao()
+
+        self.assertEqual(len(chamadas), 1)
+
+    def test_a_cancelled_run_still_keeps_the_previous_list(self):
+        """Cancelar nao registra: os arquivos ainda nao visitados nao foram
+        avaliados, e gravar essa lista parcial perderia o que a anterior sabia."""
+        pgn = self.base / "game.pgn"
+        pgn.write_text(self.PGN, encoding="utf-8")
+        app = FakeApp(self.base / "cache.db")
+        app.cancel_flag.set()
+
+        original = translation_worker.translate_text
+        translation_worker.translate_text = lambda *_a, **_k: None
+        try:
+            translation_worker.run_translation(app, str(pgn), "pt", False)
+        finally:
+            translation_worker.translate_text = original
+
+        registro = failed_runs.load_failed_run()
+        self.assertEqual(registro["failed_count"], 7, "a lista antiga devia ficar")
+
+
+class WorkerBatchFitsWhatIsSentTests(unittest.TestCase):
+    """Garantia B1 sobre o texto ENVIADO, e nao sobre o cru (ROADMAP 17.10)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+    def roda(self, comentarios, cleanup_rules):
+        """Uma execucao com regras de limpeza que EXPANDEM o comentario."""
+        movetext = " ".join(
+            f"{i + 1}. e4 {{{texto}}}" for i, texto in enumerate(comentarios)
+        )
+        pgn = self.base / "game.pgn"
+        pgn.write_text(f'[Event "T"]\n\n{movetext} *\n', encoding="utf-8")
+
+        app = FakeApp(self.base / "cache.db")
+        enviados = []
+
+        def translate(text, *_args, **_kwargs):
+            enviados.append(text)
+            if " ||| " in text:
+                return " ||| ".join(f"[{p}]" for p in text.split(" ||| "))
+            return f"[{text}]"
+
+        originais = (
+            translation_worker.translate_text,
+            translation_worker.load_cleanup_substitutions,
+            translation_worker.messagebox.showinfo,
+            translation_worker.messagebox.showwarning,
+        )
+        translation_worker.translate_text = translate
+        translation_worker.load_cleanup_substitutions = lambda **_k: cleanup_rules
+        translation_worker.messagebox.showinfo = lambda *_a, **_k: None
+        translation_worker.messagebox.showwarning = lambda *_a, **_k: None
+        try:
+            translation_worker.run_translation(app, str(pgn), "pt", False)
+        finally:
+            (
+                translation_worker.translate_text,
+                translation_worker.load_cleanup_substitutions,
+                translation_worker.messagebox.showinfo,
+                translation_worker.messagebox.showwarning,
+            ) = originais
+
+        return app, enviados
+
+    # Medido nesta maquina com as funcoes reais: cada comentario tem 970
+    # caracteres crus e 1.362 depois da regra de limpeza. O lote cru fica com 4
+    # deles (3.895 <= 4.800); enviado, esse mesmo lote tem 5.463 — acima do
+    # limite. E a situacao exata que a folga de 200 caracteres nao cobria.
+    REGRAS_QUE_EXPANDEM = [("EXPANDIR", "b" * 400)]
+
+    def comentarios_que_expandem(self, quantos=5):
+        return [f"{i} " + "x " * 480 + "EXPANDIR" for i in range(quantos)]
+
+    def test_a_cleanup_rule_that_expands_never_overflows_the_limit(self):
+        """Medido no texto cru, o lote cabia; enviado, ele passava de
+        `BATCH_MAX_CHARS` — e a camada de API dividiria por sentenca, podendo
+        cortar no meio de um `|||` e tornando o realinhamento impossivel.
+        """
+        _app, enviados = self.roda(
+            self.comentarios_que_expandem(), self.REGRAS_QUE_EXPANDEM
+        )
+
+        self.assertTrue(enviados)
+        for texto in enviados:
+            with self.subTest(tamanho=len(texto)):
+                self.assertLessEqual(len(texto), BATCH_MAX_CHARS)
+
+    def test_the_split_is_announced(self):
+        app, _enviados = self.roda(
+            self.comentarios_que_expandem(), self.REGRAS_QUE_EXPANDEM
+        )
+
+        self.assertTrue(
+            any("dividido em" in linha for linha in app.logs),
+            f"a divisao devia aparecer no log: {app.logs}",
+        )
+
+    def test_every_comment_still_gets_its_own_translation(self):
+        """O que a divisao nao pode fazer e trocar as traducoes de lugar — o
+        pior defeito possivel deste programa."""
+        comentarios = self.comentarios_que_expandem()
+
+        self.roda(comentarios, self.REGRAS_QUE_EXPANDEM)
+
+        conn = sqlite3.connect(str(self.base / "cache.db"))
+        try:
+            gravadas = dict(
+                conn.execute(
+                    "SELECT original_comment, translated_comment FROM comments"
+                ).fetchall()
+            )
+        finally:
+            conn.close()
+
+        self.assertEqual(len(gravadas), len(comentarios))
+        for original, traduzida in gravadas.items():
+            with self.subTest(original=original[:6]):
+                # A limpeza trocou o `X` final, entao o prefixo e o que da para
+                # comparar — e e ele que identifica o comentario.
+                self.assertTrue(traduzida.startswith(f"[{original[:2]}"))
+
+    def test_without_expansion_there_is_no_extra_request(self):
+        """Contraprova: no caminho comum sai um grupo so, e nada muda."""
+        comentarios = [f"Comentario {i} do arquivo." for i in range(5)]
+
+        app, enviados = self.roda(comentarios, [])
+
+        self.assertEqual(len(enviados), 1)
+        self.assertFalse(any("dividido em" in linha for linha in app.logs))
+
+
+class RestoreOrMaximizeTests(unittest.TestCase):
+    """A geometria salva era ignorada em silencio (ROADMAP 17.10).
+
+    Os dois editores restauravam a geometria na construcao, e o `maximize=True`
+    agendado a +50 ms a sobrescrevia depois: todo o caminho de `safe_geometry`,
+    com `clamp_geometry` e testes proprios, estava morto na pratica.
+    """
+
+    class JanelaFalsa:
+        def __init__(self, falhar=False):
+            self.geometrias = []
+            self.agendados = []
+            self.falhar = falhar
+
+        def geometry(self, valor):
+            if self.falhar:
+                raise RuntimeError("geometria invalida")
+            self.geometrias.append(valor)
+
+        def after(self, _delay, callback=None):
+            self.agendados.append(callback)
+
+    def test_a_saved_geometry_is_applied_and_nothing_maximizes(self):
+        win = self.JanelaFalsa()
+
+        self.assertTrue(window_utils.restore_or_maximize(win, None, "900x600+10+20"))
+
+        self.assertEqual(win.geometrias, ["900x600+10+20"])
+
+    def test_without_a_saved_geometry_it_maximizes(self):
+        """Primeira abertura: as duas janelas sao listas largas, e 1280x760 num
+        monitor grande desperdicaria a tela."""
+        win = self.JanelaFalsa()
+
+        for vazio in (None, "", 0):
+            with self.subTest(vazio=vazio):
+                self.assertFalse(window_utils.restore_or_maximize(win, None, vazio))
+
+        self.assertEqual(win.geometrias, [], "nao ha geometria para aplicar")
+
+    def test_a_geometry_the_tk_refuses_falls_back_to_maximizing(self):
+        win = self.JanelaFalsa(falhar=True)
+
+        self.assertFalse(
+            window_utils.restore_or_maximize(win, None, "isto-nao-e-geometria")
+        )
+
+    def test_the_editors_do_not_ask_for_both(self):
+        """A prova de que a escolha ficou num lugar so: nenhum dos dois editores
+        chama `bring_window_to_front` com `maximize=True` na construcao."""
+        for modulo in ("edit_window.py", "glossary_editor.py"):
+            with self.subTest(modulo=modulo):
+                fonte = (
+                    Path(__file__).resolve().parent.parent / "tradutor_pgn" / modulo
+                ).read_text(encoding="utf-8")
+                self.assertNotIn(
+                    "bring_window_to_front(self.win", fonte,
+                    "a janela principal do editor deve passar por restore_or_maximize",
+                )
+
+
+class ImportCsvOverwriteFlowTests(unittest.TestCase):
+    """O dialogo da importacao, com os tres desfechos (ROADMAP 17.7).
+
+    Reduzir a escolha a um "sim/nao" era o que fazia o fluxo natural — exportar,
+    corrigir na planilha, importar — terminar em "Sem alteracao" para tudo, com o
+    trabalho da planilha jogado fora sem que nada tivesse falhado.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.db_path = self.base / "traducoes.db"
+
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        save_translation(cur, "The rook", "a torre errada", "pt", "en")
+        conn.commit()
+        conn.close()
+
+        self.csv_path = self.base / "traducoes.csv"
+        with open(self.csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                ["original_comment", "translated_comment", "source_language",
+                 "target_language", "verified"]
+            )
+            writer.writerow(["The rook", "a torre", "en", "pt", ""])
+
+        self.dialogos = []
+        self.resposta = True
+        original = db_tools.messagebox
+        db_tools.messagebox = types.SimpleNamespace(
+            showinfo=lambda t, m, **_k: self.dialogos.append(("info", t, m)),
+            showerror=lambda t, m, **_k: self.dialogos.append(("error", t, m)),
+            askyesno=lambda t, m, **_k: (
+                self.dialogos.append(("askyesno", t, m)) or True
+            ),
+            askyesnocancel=lambda t, m, **_k: (
+                self.dialogos.append(("askyesnocancel", t, m)) or self.resposta
+            ),
+        )
+        self.addCleanup(setattr, db_tools, "messagebox", original)
+
+        original_picker = db_tools.filedialog
+        db_tools.filedialog = types.SimpleNamespace(
+            askopenfilename=lambda **_k: str(self.csv_path),
+            asksaveasfilename=lambda **_k: "",
+        )
+        self.addCleanup(setattr, db_tools, "filedialog", original_picker)
+
+        original_run = db_tools.run_with_progress
+        db_tools.run_with_progress = self.rodar_sincrono
+        self.addCleanup(setattr, db_tools, "run_with_progress", original_run)
+
+    def rodar_sincrono(self, _parent, _titulo, work, on_success=None, on_cancel=None, **_kw):
+        try:
+            resultado = work(BackgroundTask())
+        except TaskCanceled:
+            if on_cancel is not None:
+                on_cancel(None)
+            return
+        if on_success is not None:
+            on_success(resultado)
+
+    def app_falso(self):
+        return types.SimpleNamespace(
+            output_db=str(self.db_path),
+            root=None,
+            translation_cache={"The rook": "a torre errada"},
+            log_message=lambda _m: None,
+        )
+
+    def gravada(self):
+        conn = initialize_database(str(self.db_path))
+        try:
+            return conn.execute(
+                "SELECT translated_comment FROM comments WHERE original_comment = ?",
+                ("The rook",),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def pergunta(self, tipo="askyesnocancel"):
+        return next(m for t, _tt, m in self.dialogos if t == tipo)
+
+    def test_the_dialog_offers_the_three_outcomes(self):
+        self.resposta = None
+
+        db_tools.import_csv(self.app_falso())
+
+        texto = self.pergunta()
+        self.assertIn("Sim:", texto)
+        self.assertIn("Nao:", texto)
+        self.assertIn("Cancelar:", texto)
+        self.assertIn("DIFEREM", texto)
+
+    def test_yes_overwrites(self):
+        self.resposta = True
+
+        db_tools.import_csv(self.app_falso())
+
+        self.assertEqual(self.gravada(), "a torre")
+        self.assertIn("Sobrescritas: 1", self.pergunta("info"))
+
+    def test_no_imports_respecting_t1(self):
+        self.resposta = False
+
+        db_tools.import_csv(self.app_falso())
+
+        self.assertEqual(self.gravada(), "a torre errada")
+        self.assertIn("Sem alteracao: 1", self.pergunta("info"))
+
+    def test_cancel_writes_nothing_and_says_nothing_more(self):
+        self.resposta = None
+
+        db_tools.import_csv(self.app_falso())
+
+        self.assertEqual(self.gravada(), "a torre errada")
+        self.assertEqual([t for t, _tt, _m in self.dialogos], ["askyesnocancel"])
+
+    def test_overwriting_clears_the_in_memory_cache(self):
+        """Ele tem precedencia sobre o banco: deixado como estava, a proxima
+        traducao reescreveria no PGN o texto que acabou de ser corrigido."""
+        self.resposta = True
+        app = self.app_falso()
+
+        db_tools.import_csv(app)
+
+        self.assertEqual(app.translation_cache, {})
+
+    def test_without_anything_to_overwrite_it_is_a_plain_yes_or_no(self):
+        """A pergunta de tres botoes so aparece quando ha o que sobrescrever;
+        no resto, o dialogo continua sendo o de sempre."""
+        with open(self.csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                ["original_comment", "translated_comment", "source_language",
+                 "target_language", "verified"]
+            )
+            writer.writerow(["The bishop", "o bispo", "en", "pt", ""])
+
+        db_tools.import_csv(self.app_falso())
+
+        tipos = [t for t, _tt, _m in self.dialogos]
+        self.assertIn("askyesno", tipos)
+        self.assertNotIn("askyesnocancel", tipos)
+        self.assertIn("nao serao sobrescritas", self.pergunta("askyesno"))
+
+
+# ===========================================================================
+# Secao 16 — o aviso de qualidade passa a conhecer xadrez
+# ===========================================================================
+
+
+class MoveAnchorTests(unittest.TestCase):
+    """A ancora que a garantia Q1 compara, e por que ela nao tem idioma."""
+
+    def test_the_anchor_is_the_same_move_in_two_languages(self):
+        """`Nf3` e `Cf3` sao o mesmo lance: so a letra muda."""
+        self.assertEqual(move_anchors("plays Nf3 here"), move_anchors("joga Cf3 aqui"))
+
+    def test_pawn_moves_count_too(self):
+        """`extract_moves` os descarta (nao ha letra para corrigir); aqui um
+        `h5` que sumiu importa tanto quanto um `Nf3`."""
+        self.assertEqual(move_anchors("then h5"), Counter({("h5", "", ""): 1}))
+
+    def test_the_check_mark_is_part_of_the_anchor(self):
+        self.assertNotEqual(move_anchors("Bxf7+"), move_anchors("Bxf7"))
+
+    def test_the_capture_mark_is_normalized(self):
+        """O original traz `N×d4` e a traducao chega com `Nxd4`, porque uma regra
+        automatica do glossario ja converteu o sinal."""
+        self.assertEqual(move_anchors("N×d4"), move_anchors("Cxd4"))
+
+    def test_a_command_annotation_is_not_a_move(self):
+        """`[%cal Ra1h8]` tem a forma de um lance de Torre e nao e lance nenhum
+        (garantia X1)."""
+        self.assertEqual(move_anchors("boa {[%cal Ra1h8]}"), Counter())
+
+    def test_repetition_is_counted(self):
+        """Multiconjunto, e nao conjunto: a traducao que repetiu um lance a mais
+        que o original tambem divergiu."""
+        self.assertEqual(move_anchors("Nf3 Nf3")[("f3", "", "")], 2)
+
+    def test_empty_text_has_no_anchors(self):
+        for vazio in ("", None):
+            with self.subTest(vazio=vazio):
+                self.assertEqual(move_anchors(vazio), Counter())
+
+
+class ChessQualityHeuristicsTests(unittest.TestCase):
+    """Garantia Q1 e as demais heuristicas de xadrez (ROADMAP 16.1)."""
+
+    def avisos(self, original, traduzida, origem=None, destino=None):
+        return evaluate_translation_quality(original, traduzida, origem, destino)
+
+    def um(self, original, traduzida, trecho, origem=None, destino=None):
+        """Exige que algum aviso contenha `trecho`, e devolve esse aviso."""
+        avisos = self.avisos(original, traduzida, origem, destino)
+        achados = [a for a in avisos if trecho in a]
+        self.assertTrue(achados, f"nenhum aviso com {trecho!r}; havia {avisos}")
+        return achados[0]
+
+    def nenhum(self, original, traduzida, trecho, origem=None, destino=None):
+        avisos = self.avisos(original, traduzida, origem, destino)
+        self.assertEqual(
+            [a for a in avisos if trecho in a], [], f"avisos: {avisos}"
+        )
+
+    # --------------------------------------------------- Q1: lance perdido
+
+    def test_a_move_the_translator_ate_is_a_warning(self):
+        """O aviso de maior valor da secao: o texto continua lendo bem e diz
+        outra coisa."""
+        aviso = self.um(
+            "White plays Bxf7+ and then Qd5+ wins.",
+            "As brancas jogam Bxf7+ e ganham.",
+            "não aparece na tradução",
+        )
+        self.assertIn("d5+", aviso)
+
+    def test_a_move_the_translator_invented_is_a_warning(self):
+        aviso = self.um(
+            "White plays Bxf7+ and wins the game right there.",
+            "As brancas jogam Bxf7+ e Dd5+ e ganham a partida ali mesmo.",
+            "não está no original",
+        )
+        self.assertIn("d5+", aviso)
+
+    def test_translating_the_piece_letter_is_not_a_warning(self):
+        """A contraprova que faz o aviso valer: `Nf3` -> `Cf3` e o certo."""
+        self.nenhum(
+            "White plays Nf3 and Rd1, a good setup for the coming attack.",
+            "As brancas jogam Cf3 e Td1, uma boa formação para o ataque.",
+            "aparece na tradução",
+        )
+
+    def test_the_number_glued_to_the_move_is_caught(self):
+        """Medido no banco de desenvolvimento: 4 dos 6 casos reais. `20 Na2` ->
+        `20Ca2` deixa de ser notacao valida, e o aviso e o que faz alguem ver."""
+        self.um(
+            "on account of 20 Na2, winning a pawn for White in the endgame.",
+            "por conta de 20Ca2, ganhando um peão para as brancas no final.",
+            "não aparece na tradução",
+        )
+
+    # ------------------------------------------------ Q1: anotacao rompida
+
+    def test_a_broken_annotation_is_a_warning(self):
+        """Enquanto a mascara da secao 13 nao existia, este aviso era a rede;
+        depois dela, e como se acha o legado que ja esta no banco."""
+        aviso = self.um(
+            "Good move {[%eval +0.35]} in this position, says the engine.",
+            "Bom lance {[%eval +0. 35]} nesta posição, diz o motor.",
+            "Anotação do original ausente",
+        )
+        self.assertIn("[%eval +0.35]", aviso)
+
+    def test_an_intact_annotation_is_not_a_warning(self):
+        self.nenhum(
+            "Good move [%eval +0.35] in this position, says the engine here.",
+            "Bom lance [%eval +0.35] nesta posição, diz o motor aqui.",
+            "Anotação",
+        )
+
+    def test_an_annotation_that_appeared_out_of_nowhere_is_a_warning(self):
+        self.um(
+            "Good move in this position, or so the engine seems to believe.",
+            "Bom lance [%clk 0:05:00] nesta posição, ou o motor assim acredita.",
+            "Anotação na tradução",
+        )
+
+    # ------------------------------------------------- NAGs e simbolos
+
+    def test_a_lost_nag_is_a_warning(self):
+        self.um(
+            "This is the critical moment of the whole game $14 for both sides.",
+            "Este é o momento crítico de toda a partida para os dois lados.",
+            "NAG do original ausente",
+        )
+
+    def test_a_lost_evaluation_symbol_is_a_warning(self):
+        self.um(
+            "White is much better here $$ and the position speaks +- for itself.",
+            "As brancas estão muito melhor aqui e a posição fala por si.",
+            "Símbolo de avaliação do original ausente",
+        )
+
+    def test_ordinary_question_marks_are_not_symbols(self):
+        """`!` e `?` sozinhos sao pontuacao. "Is this sound?" -> "Isso e
+        correto?" tem um `?` de cada lado por acidente, e uma frase que ganha ou
+        perde um ponto de interrogacao e prosa normal."""
+        self.nenhum(
+            "Is this really the best that White can do in such a position?",
+            "Será que isto é realmente o melhor que as brancas podem fazer!",
+            "Símbolo de avaliação",
+        )
+
+    def test_a_longer_symbol_is_not_counted_twice(self):
+        """Contando do mais curto para o mais longo, `+/-` viraria tambem um
+        `+/` e todo texto com avaliacao pareceria ter simbolos a mais."""
+        self.assertEqual(eval_symbols("+/-"), Counter({"+/-": 1}))
+        self.assertEqual(eval_symbols("+/- +/-"), Counter({"+/-": 2}))
+
+    # ------------------------------------------------------- sinais diretos
+
+    def test_the_replacement_character_is_a_warning(self):
+        """As garantias E4 e G2 impedem isso na leitura nova; isto acha o legado
+        que ja esta gravado."""
+        self.um(
+            "A posi�ao das brancas e melhor aqui do que parece a primeira vista.",
+            "A posição das brancas é melhor aqui do que parece à primeira vista.",
+            "U+FFFD",
+        )
+
+    def test_the_batch_separator_in_the_stored_text_is_a_warning(self):
+        """No texto GRAVADO ele e evidencia de um desalinhamento que a contagem
+        de partes nao pegou (garantia B2)."""
+        self.um(
+            "First comment here about the position of the white pieces.",
+            "Primeiro comentário ||| segundo comentário que vazou para cá.",
+            "separador de lote",
+        )
+
+    # -------------------------------------------------------- quase-igualdade
+
+    def test_a_translation_that_barely_changed_is_a_warning(self):
+        original = (
+            "The position after 15 Nf3 is balanced and both sides have chances."
+        )
+        self.um(original, original.replace("balanced", "balancedo"), "quase idêntica")
+
+    def test_a_citation_that_is_almost_identical_is_not_a_warning(self):
+        """O falso positivo que a medicao achou, e a razao de a conta ter dois
+        passos: o `quick_ratio` da 0,953 aqui porque a citacao domina a contagem
+        de caracteres, e o `ratio` ve o bloco comum e responde 0,822."""
+        self.nenhum(
+            "is about equal, Z. Hracek-G. Jones, Porto Carras 2011.",
+            "é quase igual, Z. Hracek-G. Jones, Porto Carras 2011.",
+            "quase idêntica",
+        )
+
+    def test_a_short_original_is_left_alone(self):
+        """Abaixo do piso, ser quase identica e o resultado certo: nao ha o que
+        traduzir numa citacao curta."""
+        self.nenhum("Tilburg 1993", "Tilburgo 1993", "quase idêntica")
+
+    def test_an_exactly_equal_translation_keeps_its_own_warning(self):
+        """"Igual" e "quase igual" nao podem virar dois avisos para o mesmo
+        fato."""
+        texto = "The position after 15 Nf3 is balanced and both sides have chances."
+        avisos = self.avisos(texto, texto)
+        self.assertIn("Tradução igual ao original.", avisos)
+        self.assertEqual([a for a in avisos if "quase" in a], [])
+
+    # ----------------------------------------------------- as cinco antigas
+
+    def test_the_five_generic_heuristics_still_answer(self):
+        """A secao 16 acrescenta; nao substitui. Medido no banco de
+        desenvolvimento: das 11 linhas que o `quality_warning` marcava, zero
+        deixaram de ser marcadas."""
+        self.assertEqual(self.avisos("qualquer", ""), ["Tradução vazia."])
+        self.assertIn("igual ao original", " ".join(self.avisos("mesmo", "mesmo")))
+        self.assertIn("chaves", " ".join(self.avisos("a", "b {c}")))
+        longo = "palavra " * 20
+        self.assertIn("muito curta", " ".join(self.avisos(longo, "curta")))
+        self.assertIn("muito longa", " ".join(self.avisos(longo, longo * 3)))
+
+
+class SuspectTerminologyTests(unittest.TestCase):
+    """Terminologia suspeita por par de idiomas (ROADMAP 16.1, item 8)."""
+
+    def arquivo(self, linhas):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        caminho = Path(sandbox.name) / "Termos-suspeitos.txt"
+        corpo = ",\n    ".join(repr(t) for t in linhas)
+        caminho.write_text(f"termos = [\n    {corpo},\n]\n", encoding="utf-8")
+        return str(caminho)
+
+    def test_the_term_must_be_in_the_original_and_the_form_in_the_translation(self):
+        """As duas condicoes juntas sao o que faz o aviso ser especifico:
+        "ritmo" numa traducao e palavra comum, e so vira suspeita quando o
+        original diz "tempo"."""
+        caminho = self.arquivo([("tempo", "ritmo", "pt")])
+
+        self.assertEqual(
+            find_suspect_terms("loses a tempo", "perde um ritmo", "en", "pt", caminho),
+            [("tempo", "ritmo")],
+        )
+        self.assertEqual(
+            find_suspect_terms("a fast game", "um jogo de ritmo alto", "en", "pt", caminho),
+            [],
+            "sem o termo no original nao ha suspeita",
+        )
+        self.assertEqual(
+            find_suspect_terms("loses a tempo", "perde um tempo", "en", "pt", caminho),
+            [],
+            "com a forma certa na traducao nao ha suspeita",
+        )
+
+    def test_the_suspect_form_matches_inflected(self):
+        """Em portugues ela chega flexionada: "quadrado" aparece como
+        "quadrados", "fixado" como "fixada"."""
+        caminho = self.arquivo([("square", "quadrado", "pt")])
+        self.assertEqual(
+            find_suspect_terms("the squares", "os quadrados", "en", "pt", caminho),
+            [("square", "quadrado")],
+        )
+
+    def test_the_term_matches_whole_words_only(self):
+        """Sem a fronteira, `pin` casaria "opinion" e o aviso viraria ruido.
+
+        A palavra do exemplo tem de conter o termo DE VERDADE. A primeira versao
+        deste teste usava "opening", que nao tem "pin" nenhum — e ele passava com
+        a fronteira e sem ela, o que e a definicao de nao proteger nada.
+        """
+        caminho = self.arquivo([("pin", "alfinete", "pt")])
+        for palavra in ("opinion", "spinning"):
+            with self.subTest(palavra=palavra):
+                self.assertEqual(
+                    find_suspect_terms(
+                        f"in my {palavra}", "o alfinete", "en", "pt", caminho
+                    ),
+                    [],
+                )
+        # Contraprova: o termo sozinho continua sendo achado.
+        self.assertEqual(
+            find_suspect_terms("a nasty pin", "um alfinete", "en", "pt", caminho),
+            [("pin", "alfinete")],
+        )
+
+    def test_the_scope_keeps_the_list_inside_its_pair(self):
+        """Garantia S11: a lista de portugues nao pode acusar erro numa traducao
+        para o italiano."""
+        caminho = self.arquivo([("file", "arquivo", "pt")])
+        self.assertEqual(
+            find_suspect_terms("the open file", "o arquivo aberto", "en", "pt", caminho),
+            [("file", "arquivo")],
+        )
+        self.assertEqual(
+            find_suspect_terms("the open file", "o arquivo aberto", "en", "it", caminho),
+            [],
+        )
+
+    def test_without_a_target_language_nothing_is_applied(self):
+        """E o oposto do que `scope_matches` faz sozinho — la o destino ausente
+        nao filtra nada, o que e certo para o glossario e errado aqui."""
+        caminho = self.arquivo([("file", "arquivo", "pt")])
+        self.assertEqual(
+            find_suspect_terms("the open file", "o arquivo aberto", "en", None, caminho),
+            [],
+        )
+        self.assertEqual(suspect_terms_for(None, None, caminho), [])
+
+    def test_a_pair_scope_needs_the_declared_source(self):
+        caminho = self.arquivo([("file", "arquivo", "en>pt")])
+        self.assertEqual(
+            find_suspect_terms("the open file", "o arquivo", "en", "pt", caminho),
+            [("file", "arquivo")],
+        )
+        self.assertEqual(
+            find_suspect_terms("the open file", "o arquivo", "", "pt", caminho),
+            [],
+            "origem nao declarada nao satisfaz um escopo de par",
+        )
+
+    def test_a_malformed_entry_is_skipped_and_the_rest_survives(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        caminho = Path(sandbox.name) / "Termos-suspeitos.txt"
+        caminho.write_text(
+            "termos = [\n"
+            "    ('so', 'dois'),\n"
+            "    ('', 'vazio', 'pt'),\n"
+            "    ('check', 'cheque', 'pt'),\n"
+            "]\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            load_suspect_terms(str(caminho)), [("check", "cheque", "pt")]
+        )
+
+    def test_a_broken_file_degrades_and_reports(self):
+        """Ela vem com o programa, entao um defeito nela e nosso — e nao pode
+        impedir o programa de funcionar nem passar calado (garantia S5)."""
+        reportados = []
+        anterior = set_glossary_error_handler(reportados.append)
+        self.addCleanup(set_glossary_error_handler, anterior)
+
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        caminho = Path(sandbox.name) / "Termos-suspeitos.txt"
+        caminho.write_text("termos = [('a',\n", encoding="utf-8")
+
+        self.assertEqual(call_quietly(load_suspect_terms, str(caminho)), [])
+        self.assertEqual(len(reportados), 1)
+        self.assertIn("termos suspeitos", reportados[0])
+
+    def test_a_missing_file_is_simply_empty(self):
+        self.assertEqual(load_suspect_terms("nao-existe-em-lugar-nenhum.txt"), [])
+
+
+class ShippedSuspectTermsTests(unittest.TestCase):
+    """O arquivo que vem com o programa, medido no banco de desenvolvimento."""
+
+    def setUp(self):
+        self.entradas = load_suspect_terms(chess_terms._default_terms_path())
+
+    def test_it_is_not_empty(self):
+        self.assertGreater(len(self.entradas), 10)
+
+    def test_white_and_black_cover_every_non_english_target(self):
+        """O que se detecta e o termo ter ficado EM INGLES. Para 'en' nao existe:
+        la "White" e a palavra certa."""
+        for idioma, _nome in [(code, nome) for nome, code in LANGUAGES]:
+            escopos = {
+                escopo for termo, _s, escopo in self.entradas if termo == "White"
+            }
+            with self.subTest(idioma=idioma):
+                if idioma == "en":
+                    self.assertNotIn("en", escopos)
+                else:
+                    self.assertIn(idioma, escopos)
+
+    def test_the_measured_pt_terms_are_there(self):
+        pares_pt = {
+            (termo, suspeito)
+            for termo, suspeito, escopo in self.entradas
+            if escopo == "pt"
+        }
+        for par in [
+            ("check", "cheque"),
+            ("file", "arquivo"),
+            ("tempo", "ritmo"),
+            ("square", "quadrado"),
+            ("pin", "alfinete"),
+            ("sound", "som"),
+        ]:
+            with self.subTest(par=par):
+                self.assertIn(par, pares_pt)
+
+    def test_the_two_that_the_measurement_rejected_are_absent(self):
+        """`exchange` -> `troca` marcava 178 linhas e a maioria estava CERTA
+        ("trocar" e a traducao boa do verbo); `rank` -> `classificacao` marcava 2
+        e uma estava certa ("the rank of master player"). Sobrou `back rank`."""
+        pares = {(termo, suspeito) for termo, suspeito, _e in self.entradas}
+        self.assertNotIn(("exchange", "troca"), pares)
+        self.assertNotIn(("rank", "classificação"), pares)
+        self.assertIn(("back rank", "classificação"), pares)
+
+    def test_no_entry_is_its_own_correct_translation(self):
+        """Uma entrada em que a forma suspeita e a certa marcaria toda traducao
+        boa. So `White`/`Black` sao iguais dos dois lados, e ai o suspeito e
+        justamente NAO ter mudado."""
+        for termo, suspeito, escopo in self.entradas:
+            if termo in ("White", "Black"):
+                self.assertEqual(termo, suspeito)
+                continue
+            with self.subTest(termo=termo):
+                self.assertNotEqual(termo.casefold(), suspeito.casefold())
+
+    def test_a_real_sentence_from_the_book_is_flagged(self):
+        """Uma das 321 linhas que o filtro "Avisos QA" nao mostrava."""
+        avisos = evaluate_translation_quality(
+            "White has more space and control of the only entirely open file.",
+            "As brancas têm mais espaço e controle do único arquivo aberto.",
+            "en",
+            "pt",
+        )
+        self.assertTrue(
+            any("'file' no original e 'arquivo'" in a for a in avisos), avisos
+        )
+
+
+class QualityHeuristicsVersionTests(unittest.TestCase):
+    """Garantia Q2: as heuristicas tem versao, e muda-las reavalia o banco."""
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        conn = initialize_database(str(Path(sandbox.name) / "cache.db"))
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_a_fresh_database_records_the_current_version_when_reevaluated(self):
+        conn = self.banco()
+        self.assertEqual(get_quality_heuristics_version(conn), 0)
+        self.assertFalse(quality_heuristics_are_current(conn))
+
+        set_db_metadata(conn, QUALITY_VERSION_KEY, QUALITY_HEURISTICS_VERSION)
+        self.assertTrue(quality_heuristics_are_current(conn))
+
+    def test_a_missing_mark_reads_as_zero(self):
+        """Zero e a resposta certa: um banco gravado antes desta versao teve os
+        avisos calculados pelas cinco genericas, e nao ha como distinguir isso de
+        "nunca calculado" — as duas pedem a mesma acao."""
+        conn = self.banco()
+        self.assertEqual(get_quality_heuristics_version(conn), 0)
+
+    def test_a_garbage_mark_reads_as_zero_too(self):
+        conn = self.banco()
+        set_db_metadata(conn, QUALITY_VERSION_KEY, "nao e numero")
+        self.assertEqual(get_quality_heuristics_version(conn), 0)
+
+    def test_metadata_survives_a_reopen(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        db_path = str(Path(sandbox.name) / "cache.db")
+
+        conn = initialize_database(db_path)
+        set_db_metadata(conn, QUALITY_VERSION_KEY, 7)
+        conn.commit()
+        conn.close()
+
+        conn = initialize_database(db_path)
+        try:
+            self.assertEqual(get_quality_heuristics_version(conn), 7)
+        finally:
+            conn.close()
+
+    def test_reading_the_mark_tolerates_a_database_without_the_table(self):
+        """Um banco antes da migracao 6 nao tem `db_metadata`, e perguntar pela
+        marca nao pode levantar."""
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        db_path = Path(sandbox.name) / "antigo.db"
+        _schema3_database(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            self.assertIsNone(get_db_metadata(conn, QUALITY_VERSION_KEY))
+            self.assertEqual(get_quality_heuristics_version(conn), 0)
+        finally:
+            conn.close()
+
+    def test_the_backfill_does_not_advance_the_version(self):
+        """E a diferenca entre ele e a reavaliacao: preencher `NULL` bastava
+        enquanto o unico jeito de a coluna estar errada fosse nao existir."""
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "orig", "trans", "pt", "en")
+        cur.execute("UPDATE comments SET quality_warning = NULL")
+        conn.commit()
+
+        self.assertEqual(backfill_quality_warnings(conn), 1)
+        self.assertEqual(get_quality_heuristics_version(conn), 0)
+
+
+class QualityReevaluationTests(unittest.TestCase):
+    """A reavaliacao em massa: o que ela muda, o que ela relata, o que ela nao grava."""
+
+    def banco(self):
+        self.sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(self.sandbox.cleanup)
+        self.db_path = str(Path(self.sandbox.name) / "cache.db")
+        conn = initialize_database(self.db_path)
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+        save_translation(cur, "White plays Nf3.", "As brancas jogam Cf3.", "pt", "en")
+        save_translation(cur, "The open file.", "O arquivo aberto.", "pt", "en")
+        conn.commit()
+        return conn
+
+    def flags(self, conn):
+        return dict(
+            conn.execute("SELECT original_comment, quality_warning FROM comments")
+        )
+
+    def test_a_stale_verdict_is_corrected(self):
+        conn = self.banco()
+        conn.execute("UPDATE comments SET quality_warning = 0")
+        conn.commit()
+
+        stats = reevaluate_quality_warnings(conn)
+
+        self.assertEqual(stats["scanned"], 2)
+        self.assertEqual(stats["changed"], 1)
+        self.assertEqual(
+            self.flags(conn), {"White plays Nf3.": 0, "The open file.": 1}
+        )
+
+    def test_running_twice_changes_nothing_the_second_time(self):
+        conn = self.banco()
+        conn.execute("UPDATE comments SET quality_warning = 0")
+        conn.commit()
+
+        reevaluate_quality_warnings(conn)
+        self.assertEqual(reevaluate_quality_warnings(conn)["changed"], 0)
+
+    def test_the_pair_comes_from_the_row_and_not_from_an_argument(self):
+        """O banco tem pares diferentes na mesma tabela, e a terminologia e
+        escopada por idioma: avaliar tudo com um par so acusaria erro onde nao
+        ha."""
+        conn = self.banco()
+        cur = conn.cursor()
+        # Mesmo texto, destino italiano: a lista de portugues nao vale aqui.
+        save_translation(cur, "The open file.", "O arquivo aberto.", "it", "en")
+        conn.commit()
+
+        reevaluate_quality_warnings(conn)
+
+        self.assertEqual(
+            conn.execute(
+                "SELECT quality_warning FROM comments"
+                " WHERE target_language = 'it'"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_progress_is_reported_and_ends_at_the_total(self):
+        conn = self.banco()
+        marcos = []
+        reevaluate_quality_warnings(conn, progress_callback=lambda f, t: marcos.append((f, t)))
+        self.assertEqual(marcos[0], (0, 2))
+        self.assertEqual(marcos[-1], (2, 2))
+
+    def test_cancelling_raises_and_leaves_the_rest_alone(self):
+        conn = self.banco()
+        conn.execute("UPDATE comments SET quality_warning = 0")
+        conn.commit()
+
+        with self.assertRaises(QualityReevaluationCanceled):
+            reevaluate_quality_warnings(conn, batch_size=1, should_cancel=lambda: True)
+
+    def test_an_empty_database_is_scanned_without_error(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        conn = initialize_database(str(Path(sandbox.name) / "vazio.db"))
+        try:
+            self.assertEqual(
+                reevaluate_quality_warnings(conn), {"scanned": 0, "changed": 0}
+            )
+        finally:
+            conn.close()
+
+
+class QualityColumnMatchesTheScreenTests(unittest.TestCase):
+    """Garantia R6 com as heuristicas novas: a coluna nao pode divergir da tela.
+
+    A terminologia depende do par de idiomas, entao o par tem de chegar aos DOIS
+    caminhos — a gravacao (que materializa o bit) e a leitura (que mostra as
+    frases). Se um deles avaliar sem par, a contagem do rodape passa a nao bater
+    com o que a lista exibe, e nada quebra.
+    """
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        conn = initialize_database(str(Path(sandbox.name) / "cache.db"))
+        self.addCleanup(conn.close)
+        return conn
+
+    def linhas(self, conn, destino="pt"):
+        return fetch_review_rows(conn.cursor(), destino)
+
+    def test_the_saved_flag_agrees_with_the_row_evaluation(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "The open file.", "O arquivo aberto.", "pt", "en")
+        save_translation(cur, "White plays Nf3.", "As brancas jogam Cf3.", "pt", "en")
+        conn.commit()
+
+        for row in self.linhas(conn):
+            with self.subTest(original=row[1]):
+                gravado = conn.execute(
+                    "SELECT quality_warning FROM comments WHERE id = ?", (row[0],)
+                ).fetchone()[0]
+                self.assertEqual(gravado, 1 if row_has_quality_warning(row) else 0)
+
+    def test_the_row_carries_the_pair_at_the_end(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "The open file.", "O arquivo aberto.", "pt", "en")
+        conn.commit()
+
+        row = self.linhas(conn)[0]
+        self.assertEqual(row_language_pair(row), ("en", "pt"))
+
+    def test_a_row_without_the_pair_is_still_evaluated(self):
+        """Tolerante de proposito: uma tupla de sete campos continua sendo
+        avaliada, so sem a parte de terminologia."""
+        curta = (1, "The open file.", "O arquivo aberto.", 0, None, None, None)
+        self.assertEqual(row_language_pair(curta), (None, None))
+        self.assertFalse(row_has_quality_warning(curta))
+
+    def test_editing_a_translation_keeps_the_flag_in_agreement(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "The open file.", "A coluna aberta.", "pt", "en")
+        conn.commit()
+        row_id = self.linhas(conn)[0][0]
+
+        # A edicao introduz o erro de terminologia: o bit tem de acompanhar.
+        update_translation_by_id(cur, row_id, "O arquivo aberto.")
+        conn.commit()
+
+        row = self.linhas(conn)[0]
+        gravado = conn.execute(
+            "SELECT quality_warning FROM comments WHERE id = ?", (row_id,)
+        ).fetchone()[0]
+        self.assertEqual(gravado, 1)
+        self.assertTrue(row_has_quality_warning(row))
+
+    def test_the_counts_agree_with_the_rows(self):
+        """A agregada de status conta pela coluna; a lista avalia em Python. Os
+        dois numeros tem de ser o mesmo."""
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "The open file.", "O arquivo aberto.", "pt", "en")
+        save_translation(cur, "White plays Nf3.", "As brancas jogam Cf3.", "pt", "en")
+        save_translation(cur, "A nasty check.", "Um cheque desagradável.", "pt", "en")
+        conn.commit()
+
+        resumo = get_review_status_counts(cur, "pt")
+        self.assertEqual(
+            resumo["warnings"],
+            len(filter_quality_warning_rows(self.linhas(conn))),
+        )
+
+
+# ===========================================================================
+# Secao 18 — o banco passa a saber de onde cada traducao veio
+# ===========================================================================
+
+
+class ReadingContextTests(unittest.TestCase):
+    """O contexto de leitura sai do PGN: partida, indice e numero do lance.
+
+    Tudo aqui roda sobre `comment_reading_context`, que e a funcao pura, e sobre a
+    extracao de verdade num arquivo em disco. Nenhum destes numeros existia no
+    banco antes desta secao — a lista do editor era ordem de insercao, e ordem de
+    insercao mistura todos os PGN ja processados.
+    """
+
+    def contexto(self, texto):
+        spans = [(m.start(), m.end()) for m in re.finditer(r"\{.*?\}", texto, re.DOTALL)]
+        return comment_reading_context(texto, spans)
+
+    def test_the_move_cited_inside_a_comment_is_not_the_position(self):
+        """O caso que obriga a apagar os spans antes de ler o movetext.
+
+        Comentario de livro cita lance a vontade ("melhor era 14. Bxf7"). Lido
+        junto com o movetext, o lance CITADO no comentario 1 passaria a ser a
+        posicao do comentario 2 — um numero errado com cara de medido.
+        """
+        texto = '[Event "A"]\n\n1. e4 {melhor era 14. Bxf7} 2. Nf3 {aqui}\n'
+        self.assertEqual(self.contexto(texto), [(1, 1), (1, 2)])
+
+    def test_an_event_tag_inside_a_comment_does_not_start_a_game(self):
+        """A mesma protecao, do outro lado: o comentario tambem nao cria partida."""
+        texto = '[Event "A"]\n\n1. e4 {citando\n[Event "B"]\nno meio} 2. Nf3 {aqui}\n'
+        self.assertEqual([partida for partida, _lance in self.contexto(texto)], [1, 1])
+
+    def test_a_comment_before_the_first_move_has_no_move_number(self):
+        """E `None`, e nao o lance da partida ANTERIOR.
+
+        Sem o recorte por partida, um comentario colado nas tags da partida 2
+        herdaria o lance 41 da partida 1 e afirmaria com confianca uma posicao que
+        nao existe. `None` e a unica resposta verdadeira.
+        """
+        texto = (
+            '[Event "A"]\n\n1. e4 e5 41. Kf1 1-0\n\n'
+            '[Event "B"]\n[White "X"]\n\n{antes de tudo} 1. d4 {depois} 1/2-1/2\n'
+        )
+        self.assertEqual(self.contexto(texto), [(2, None), (2, 1)])
+
+    def test_the_game_number_counts_the_event_tags(self):
+        texto = (
+            '[Event "A"]\n\n1. e4 {um} 1-0\n\n'
+            '[Event "B"]\n\n1. d4 {dois} 1-0\n\n'
+            '[Event "C"]\n\n1. c4 {tres} 1-0\n'
+        )
+        self.assertEqual([p for p, _l in self.contexto(texto)], [1, 2, 3])
+
+    def test_a_date_tag_is_not_a_move_number(self):
+        """`[Date "2011.??.??"]` — a data com mes e dia desconhecidos.
+
+        A data COMPLETA (`2011.05.12`) nao serve para este teste, e descobri-lo foi
+        o que a mutacao deu: ela ja e recusada pela regra do decimal, entao o teste
+        passava com a checagem de linha de tag e sem ela. A forma com `??` e comum
+        em PGN de banco de dados, e nela o `2011.` vira lance 2011 se ninguem
+        reparar que aquilo e uma linha de tag.
+        """
+        texto = '[Event "A"]\n[Date "2011.??.??"]\n\n{antes do primeiro lance} 1. e4\n'
+        self.assertEqual(self.contexto(texto), [(1, None)])
+
+    def test_a_semicolon_comment_does_not_give_a_move_number(self):
+        """Comentario `;` e texto, nao movetext — e o programa nem o traduz.
+
+        O `;` tem de ser a ULTIMA coisa antes do comentario, e isto tambem saiu da
+        mutacao: com um `2. Nf3` depois dele, o lance certo vinha do `2.` e o teste
+        passava sem a checagem nenhuma.
+        """
+        texto = '[Event "A"]\n\n1. e4 ; ver a partida 99. Kh1\n{aqui}\n'
+        self.assertEqual(self.contexto(texto), [(1, 1)])
+
+    def test_movetext_with_no_tags_is_a_single_game(self):
+        """Nao existe partida zero em ordem de leitura."""
+        self.assertEqual(self.contexto("1. e4 {um} 2. Nf3 {dois}"), [(1, 1), (1, 2)])
+
+    def test_the_decimal_inside_the_movetext_is_not_taken_as_a_move(self):
+        """`+0.35` num comentario nao chega aqui (o span e apagado), mas um
+        decimal solto no movetext tambem nao pode virar lance.
+
+        Este teste falhou quando foi escrito: o `0.` casava e o comentario
+        seguinte saia com "lance 0" — um numero errado, e visivel na tela.
+        """
+        texto = "1. e4 {um} +0.35 {dois}"
+        self.assertEqual([lance for _p, lance in self.contexto(texto)], [1, 1])
+
+    def test_castling_written_with_zeros_is_still_a_move(self):
+        """A contraprova do recorte acima, e o que impede a correcao larga.
+
+        Recusar todo digito depois do ponto (`1. 0-0`, roque escrito com zeros em
+        PGN antigo) apagaria um lance legitimo. O que caracteriza decimal e o
+        digito COLADO no ponto.
+        """
+        self.assertEqual(self.contexto("1. 0-0 {depois do roque}"), [(1, 1)])
+
+    def test_the_index_counts_only_the_comments_that_become_rows(self):
+        """Um `{}` vazio nao ocupa posicao: ele nao vira linha no banco.
+
+        Se ocupasse, o indice do comentario seguinte pularia um numero e a ordem
+        de leitura teria um buraco que nada explica.
+        """
+        base = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: None)
+        pgn = base / "vazio.pgn"
+        pgn.write_text(
+            '[Event "A"]\n\n1. e4 {um} 2. Nf3 {} 3. Bb5 {dois}\n', encoding="utf-8"
+        )
+
+        info = extract_comments_from_file(str(pgn))
+        self.assertEqual(
+            info["occurrences"],
+            [(1, 1, 1, "um"), (2, 1, 3, "dois")],
+        )
+
+    def test_the_extraction_keeps_the_occurrences_aligned_with_the_comments(self):
+        """`comments[i]` e `occurrences[i]` falam da mesma posicao do arquivo."""
+        base = Path(tempfile.mkdtemp())
+        pgn = base / "alinhado.pgn"
+        pgn.write_text(
+            '[Event "A"]\n\n1. e4 {um} 2. Nf3 {dois} 3. Bb5 {tres}\n',
+            encoding="utf-8",
+        )
+
+        info = extract_comments_from_file(str(pgn))
+        self.assertEqual(
+            [texto for _i, _p, _l, texto in info["occurrences"]], info["comments"]
+        )
+        self.assertEqual(
+            [indice for indice, _p, _l, _t in info["occurrences"]], [1, 2, 3]
+        )
+
+    def test_a_file_that_cannot_be_read_returns_an_empty_occurrence_list(self):
+        """O worker le a chave sem checar; ela precisa existir sempre."""
+        info = extract_comments_from_file(str(Path(tempfile.mkdtemp()) / "nao-existe.pgn"))
+        self.assertEqual(info["occurrences"], [])
+
+
+class OccurrenceTestCase(unittest.TestCase):
+    """Base das ocorrencias: um banco novo e dois PGN de mentira em disco."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.conn = initialize_database(str(self.base / "cache.db"))
+        self.addCleanup(self.conn.close)
+        self.cur = self.conn.cursor()
+
+    def caminho(self, nome, pasta=None):
+        """Um caminho ABSOLUTO, que e como a ocorrencia guarda arquivo."""
+        destino = self.base if pasta is None else self.base / pasta
+        destino.mkdir(parents=True, exist_ok=True)
+        return str(destino / nome)
+
+    def gravar(self, *textos, source="en", target="pt"):
+        for texto in textos:
+            save_translation(self.cur, texto, f"T {texto}", target, source)
+        self.conn.commit()
+        return resolve_comment_ids(self.cur, target, list(textos), source)
+
+    def registrar(self, arquivo, ocorrencias, ids=None, target="pt", source="en"):
+        if ids is None:
+            ids = resolve_comment_ids(
+                self.cur, target, [t for _i, _p, _l, t in ocorrencias], source
+            )
+        resultado = record_occurrences(self.cur, arquivo, ocorrencias, ids)
+        self.conn.commit()
+        return resultado
+
+    def linhas_de_ocorrencia(self):
+        return self.cur.execute(
+            f"SELECT source_file, game_index, comment_index, move_number"
+            f" FROM {OCCURRENCES_TABLE} ORDER BY source_file, comment_index"
+        ).fetchall()
+
+
+class OccurrenceRecordingTests(OccurrenceTestCase):
+    """Gravar de onde o comentario veio, sem tocar na identidade da traducao."""
+
+    def test_the_same_comment_in_two_books_is_one_row_and_two_occurrences(self):
+        """O coracao do desenho (ROADMAP 18): a relacao e N para 1.
+
+        O reuso e o que faz o acervo valer — o mesmo comentario em doze livros e
+        uma traducao e uma revisao. Se o contexto tivesse entrado como coluna de
+        `comments`, cada livro teria criado a sua linha e a revisao passaria a ser
+        feita doze vezes.
+        """
+        ids = self.gravar("Diagram")
+        self.registrar(self.caminho("cap01.pgn"), [(1, 1, 5, "Diagram")], ids)
+        self.registrar(self.caminho("cap02.pgn"), [(1, 3, 9, "Diagram")], ids)
+
+        self.assertEqual(
+            self.cur.execute("SELECT COUNT(*) FROM comments").fetchone()[0], 1
+        )
+        self.assertEqual(
+            self.cur.execute(f"SELECT COUNT(*) FROM {OCCURRENCES_TABLE}").fetchone()[0],
+            2,
+        )
+
+    def test_the_occurrence_keeps_the_game_and_the_move(self):
+        ids = self.gravar("um")
+        arquivo = self.caminho("cap01.pgn")
+        self.registrar(arquivo, [(7, 3, 24, "um")], ids)
+
+        self.assertEqual(self.linhas_de_ocorrencia(), [(arquivo, 3, 7, 24)])
+
+    def test_a_comment_before_the_first_move_stores_a_null_move(self):
+        """`None` chega ao banco como NULL, e nao como zero: zero se confundiria
+        com medicao."""
+        ids = self.gravar("um")
+        self.registrar(self.caminho("cap01.pgn"), [(1, 1, None, "um")], ids)
+
+        self.assertIsNone(self.linhas_de_ocorrencia()[0][3])
+
+    def test_reprocessing_the_same_file_does_not_duplicate_the_positions(self):
+        """Traduzir a mesma pasta duas vezes e rotina (o cache existe para isso)."""
+        ids = self.gravar("um", "dois")
+        arquivo = self.caminho("cap01.pgn")
+        posicoes = [(1, 1, 1, "um"), (2, 1, 2, "dois")]
+
+        self.registrar(arquivo, posicoes, ids)
+        self.registrar(arquivo, posicoes, ids)
+
+        self.assertEqual(len(self.linhas_de_ocorrencia()), 2)
+
+    def test_a_file_that_shrank_loses_the_positions_that_no_longer_exist(self):
+        """O arquivo em disco e a verdade sobre a obra.
+
+        O usuario apagou metade do capitulo e reprocessou: as posicoes que
+        sobravam nao existem mais, e mante-las deixaria o banco afirmando que o
+        comentario 2 daquele arquivo e um texto que nao esta la.
+        """
+        ids = self.gravar("um", "dois")
+        arquivo = self.caminho("cap01.pgn")
+        self.registrar(arquivo, [(1, 1, 1, "um"), (2, 1, 2, "dois")], ids)
+
+        self.registrar(arquivo, [(1, 1, 1, "um")], ids)
+
+        self.assertEqual(self.linhas_de_ocorrencia(), [(arquivo, 1, 1, 1)])
+
+    def test_a_comment_without_a_row_is_counted_and_not_recorded(self):
+        """Um comentario que falhou na traducao nao tem linha para apontar.
+
+        A ocorrencia aponta para uma traducao; sem ela nao ha para onde apontar. O
+        que nao pode acontecer e o numero desaparecer — "a obra tem 2 posicoes" e
+        diferente de "tem 2, uma ainda sem traducao".
+        """
+        ids = self.gravar("um")
+        gravadas, sem_linha = self.registrar(
+            self.caminho("cap01.pgn"),
+            [(1, 1, 1, "um"), (2, 1, 2, "o que falhou")],
+            ids,
+        )
+
+        self.assertEqual((gravadas, sem_linha), (1, 1))
+        self.assertEqual(len(self.linhas_de_ocorrencia()), 1)
+
+    def test_two_spellings_of_the_same_path_are_one_work(self):
+        """O caminho e a chave da obra, e `cap01.pgn` e `./cap01.pgn` sao o mesmo
+        arquivo. Duas grafias no banco dariam duas obras no filtro, cada uma com
+        metade do livro."""
+        ids = self.gravar("um")
+        arquivo = self.caminho("cap01.pgn")
+        self.registrar(arquivo, [(1, 1, 1, "um")], ids)
+        self.registrar(os.path.join(str(self.base), ".", "cap01.pgn"),
+                       [(1, 1, 1, "um")], ids)
+
+        self.assertEqual(self.linhas_de_ocorrencia(), [(arquivo, 1, 1, 1)])
+
+    def test_a_position_of_the_work_has_a_single_owner(self):
+        """A UNIQUE da tabela, exercitada por fora de `record_occurrences`.
+
+        Ela nao inclui `comment_id` de proposito: com ele, o comentario 5 de um
+        arquivo poderia ter dois donos ao mesmo tempo — a afirmacao velha e a nova
+        convivendo, e a ordem de leitura decidindo por sorteio qual aparece.
+        """
+        ids = self.gravar("um", "dois")
+        arquivo = self.caminho("cap01.pgn")
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.cur.executemany(
+                f"INSERT INTO {OCCURRENCES_TABLE}"
+                f" (comment_id, source_file, game_index, comment_index)"
+                f" VALUES (?, ?, 1, 5)",
+                [(ids["um"], arquivo), (ids["dois"], arquivo)],
+            )
+
+    def test_resolve_only_answers_inside_the_pair(self):
+        """O mesmo texto vindo do espanhol e outra traducao (garantia P1).
+
+        Resolver sem o par faria a ocorrencia de um PGN ingles apontar para a linha
+        espanhola — o contexto certo no comentario errado.
+        """
+        save_translation(self.cur, "Nada", "Nothing", "pt", "es")
+        self.conn.commit()
+
+        self.assertEqual(resolve_comment_ids(self.cur, "pt", ["Nada"], "en"), {})
+        self.assertEqual(
+            list(resolve_comment_ids(self.cur, "pt", ["Nada"], "es")), ["Nada"]
+        )
+
+    def test_recording_nothing_still_clears_the_file(self):
+        """Um arquivo que ficou sem nenhuma posicao resolvivel nao pode manter as
+        antigas: elas falam de um conteudo que ninguem mais le ali."""
+        ids = self.gravar("um")
+        arquivo = self.caminho("cap01.pgn")
+        self.registrar(arquivo, [(1, 1, 1, "um")], ids)
+
+        self.registrar(arquivo, [(1, 1, 1, "outro texto")], ids)
+
+        self.assertEqual(self.linhas_de_ocorrencia(), [])
+
+
+class ReadingOrderTests(OccurrenceTestCase):
+    """A lista do editor em ordem de leitura da obra, e o filtro por arquivo."""
+
+    def setUp(self):
+        super().setUp()
+        # Inseridos FORA da ordem de leitura, de proposito: e o que acontece de
+        # verdade, porque quem grava e a ordem em que a API respondeu e o cache
+        # encheu. Com `ORDER BY id` a lista sai nesta ordem aqui.
+        self.ids = self.gravar("C terceiro", "A primeiro", "B segundo")
+        self.arquivo = self.caminho("cap01.pgn")
+        self.outro = self.caminho("cap02.pgn")
+        self.registrar(
+            self.arquivo,
+            [
+                (1, 1, 1, "A primeiro"),
+                (2, 1, 3, "B segundo"),
+                (3, 2, 12, "C terceiro"),
+            ],
+            self.ids,
+        )
+
+    def originais(self, **kwargs):
+        return [
+            linha[1]
+            for linha in fetch_review_rows_page(self.cur, "pt", **kwargs)
+        ]
+
+    def leitura(self, **kwargs):
+        return self.originais(
+            source_file=self.arquivo, order=ORDER_BY_OCCURRENCE, **kwargs
+        )
+
+    def test_the_list_follows_the_work_and_not_the_insertion_order(self):
+        """O item inteiro da secao 18, numa linha: `ORDER BY id` nao e ordem de
+        leitura de nada."""
+        self.assertEqual(self.originais(), ["C terceiro", "A primeiro", "B segundo"])
+        self.assertEqual(self.leitura(), ["A primeiro", "B segundo", "C terceiro"])
+
+    def test_a_comment_repeated_in_the_file_appears_once(self):
+        """"Diagram" aparece trinta vezes num livro, e a lista e de comentarios."""
+        self.registrar(
+            self.arquivo,
+            [
+                (1, 1, 1, "A primeiro"),
+                (2, 1, 2, "A primeiro"),
+                (3, 1, 3, "A primeiro"),
+                (4, 1, 4, "B segundo"),
+            ],
+            self.ids,
+        )
+
+        self.assertEqual(self.leitura(), ["A primeiro", "B segundo"])
+
+    def test_the_repeated_comment_is_ordered_by_its_first_position(self):
+        """Onde o leitor o encontra primeiro, e nao onde ele reaparece."""
+        self.registrar(
+            self.arquivo,
+            [
+                (1, 1, 1, "B segundo"),
+                (2, 1, 2, "A primeiro"),
+                (3, 1, 3, "B segundo"),
+            ],
+            self.ids,
+        )
+
+        self.assertEqual(self.leitura(), ["B segundo", "A primeiro"])
+
+    def test_the_file_filter_leaves_out_the_other_book(self):
+        self.registrar(self.outro, [(1, 1, 1, "C terceiro")], self.ids)
+
+        self.assertEqual(
+            self.originais(source_file=self.outro, order=ORDER_BY_OCCURRENCE),
+            ["C terceiro"],
+        )
+        self.assertEqual(
+            count_review_rows(self.cur, "pt", source_file=self.outro), 1
+        )
+
+    def test_a_row_with_no_occurrence_is_outside_every_file(self):
+        """As 201.607 linhas migradas nao pertencem a obra nenhuma — e o filtro
+        "Todos" continua sendo o unico lugar em que elas aparecem."""
+        self.gravar("sem arquivo")
+
+        self.assertEqual(len(self.originais()), 4)
+        self.assertNotIn("sem arquivo", self.leitura())
+
+    def test_the_status_counts_respect_the_file(self):
+        self.registrar(self.outro, [(1, 1, 1, "C terceiro")], self.ids)
+
+        resumo = get_review_status_counts(self.cur, "pt", source_file=self.outro)
+        self.assertEqual((resumo["total"], resumo["pending"]), (1, 1))
+
+    def test_the_offset_of_an_id_follows_the_active_order(self):
+        """A classe de defeito que a garantia R10 fechou, pelo outro lado.
+
+        "C terceiro" e o primeiro id do banco e o ULTIMO da obra. Com a lista em
+        ordem de leitura e o offset contado por id, o "Ir para ID" mandaria a
+        janela para a pagina do offset 0 e selecionaria outra linha — sem erro
+        nenhum na tela.
+        """
+        alvo = self.ids["C terceiro"]
+
+        self.assertEqual(get_review_row_offset(self.cur, "pt", alvo), 0)
+        self.assertEqual(
+            get_review_row_offset(
+                self.cur, "pt", alvo,
+                source_file=self.arquivo, order=ORDER_BY_OCCURRENCE,
+            ),
+            2,
+        )
+
+    def test_the_offset_and_the_page_agree_in_reading_order(self):
+        """O offset serve para posicionar na pagina: os dois criterios tem de ser
+        o mesmo. Conferido linha por linha, e nao so na primeira."""
+        for esperado, texto in enumerate(["A primeiro", "B segundo", "C terceiro"]):
+            offset = get_review_row_offset(
+                self.cur, "pt", self.ids[texto],
+                source_file=self.arquivo, order=ORDER_BY_OCCURRENCE,
+            )
+            self.assertEqual(offset, esperado, texto)
+            self.assertEqual(
+                self.leitura(limit=1, offset=offset), [texto], texto
+            )
+
+    def test_paging_in_reading_order_neither_repeats_nor_skips(self):
+        """Ordem total: sem desempate, duas linhas podem trocar de lugar entre
+        duas paginas — uma sai duas vezes e a outra nenhuma."""
+        paginas = [
+            self.leitura(limit=2, offset=0),
+            self.leitura(limit=2, offset=2),
+        ]
+
+        self.assertEqual(
+            paginas[0] + paginas[1], ["A primeiro", "B segundo", "C terceiro"]
+        )
+
+    def test_asking_for_reading_order_without_a_file_falls_back_to_id(self):
+        """Sem arquivo, ordenar pela primeira ocorrencia de cada comentario
+        custaria uma agregacao da tabela por pagina — a garantia R5."""
+        self.assertFalse(reads_in_occurrence_order(ORDER_BY_OCCURRENCE, None))
+        self.assertEqual(
+            self.originais(order=ORDER_BY_OCCURRENCE),
+            ["C terceiro", "A primeiro", "B segundo"],
+        )
+
+    def test_the_search_and_the_file_filter_compose(self):
+        self.assertEqual(
+            self.leitura(search_text="segundo", search_mode=SEARCH_MODE_SUBSTRING),
+            ["B segundo"],
+        )
+
+    def test_the_status_filter_and_the_reading_order_compose(self):
+        set_translation_verified_by_id(self.cur, self.ids["B segundo"])
+        self.conn.commit()
+
+        self.assertEqual(self.leitura(status_filter="verified"), ["B segundo"])
+        self.assertEqual(
+            self.leitura(status_filter="pending"), ["A primeiro", "C terceiro"]
+        )
+
+    def test_the_full_row_fetch_takes_the_order_too(self):
+        """`fetch_review_rows` alimenta o relatorio QA e as estatisticas; sem a
+        ordem, o relatorio de uma obra sairia embaralhado."""
+        self.assertEqual(
+            [
+                linha[1]
+                for linha in fetch_review_rows(
+                    self.cur, "pt",
+                    source_file=self.arquivo, order=ORDER_BY_OCCURRENCE,
+                )
+            ],
+            ["A primeiro", "B segundo", "C terceiro"],
+        )
+
+
+class OccurrenceListingTests(OccurrenceTestCase):
+    """O que o filtro por arquivo e o rodape do editor leem do banco."""
+
+    def test_the_file_list_separates_positions_from_comments(self):
+        """As duas contagens dizem coisas diferentes: tamanho da obra e trabalho
+        de revisao. A diferenca entre elas e a repeticao interna do livro."""
+        ids = self.gravar("um", "dois")
+        arquivo = self.caminho("cap01.pgn")
+        self.registrar(
+            arquivo,
+            [(1, 1, 1, "um"), (2, 1, 2, "um"), (3, 1, 3, "dois")],
+            ids,
+        )
+
+        self.assertEqual(list_occurrence_files(self.cur, "pt"), [(arquivo, 3, 2)])
+
+    def test_the_file_list_is_scoped_to_the_pair(self):
+        """O editor mostra um par por vez (garantia R9), e o menu de arquivos
+        precisa acompanhar: um arquivo do par espanhol no menu do ingles seria um
+        filtro que devolve zero linhas."""
+        ids_en = self.gravar("um", source="en")
+        ids_es = self.gravar("uno", source="es")
+        self.registrar(self.caminho("ingles.pgn"), [(1, 1, 1, "um")], ids_en)
+        self.registrar(
+            self.caminho("espanhol.pgn"), [(1, 1, 1, "uno")], ids_es, source="es"
+        )
+
+        self.assertEqual(
+            [linha[0] for linha in list_occurrence_files(self.cur, "pt", "en")],
+            [self.caminho("ingles.pgn")],
+        )
+        self.assertEqual(
+            len(list_occurrence_files(self.cur, "pt")), 2
+        )
+
+    def test_the_file_list_is_ordered_by_name(self):
+        """E como capitulo se ordena — e nao por quantidade, que faria a ordem do
+        menu mudar a cada execucao."""
+        ids = self.gravar("um")
+        for nome in ("cap03.pgn", "cap01.pgn", "cap02.pgn"):
+            self.registrar(self.caminho(nome), [(1, 1, 1, "um")], ids)
+
+        self.assertEqual(
+            [os.path.basename(linha[0]) for linha in list_occurrence_files(self.cur, "pt")],
+            ["cap01.pgn", "cap02.pgn", "cap03.pgn"],
+        )
+
+    def test_the_occurrences_of_a_comment_come_with_the_full_total(self):
+        """A lista vem cortada e o total vem inteiro: o rodape mostra as primeiras
+        e diz quantas faltam."""
+        ids = self.gravar("Diagram")
+        for nome in ("cap01.pgn", "cap02.pgn", "cap03.pgn"):
+            self.registrar(self.caminho(nome), [(1, 1, 1, "Diagram")], ids)
+
+        linhas, total = fetch_comment_occurrences(self.cur, ids["Diagram"], limit=2)
+
+        self.assertEqual(total, 3)
+        self.assertEqual(len(linhas), 2)
+
+    def test_the_preferred_file_comes_first(self):
+        """Quem esta lendo o capitulo 7 nao pode ver no rodape a posicao do mesmo
+        comentario no capitulo 1: e verdade, responde outra pergunta, e na tela
+        passa por erro."""
+        ids = self.gravar("Diagram")
+        self.registrar(self.caminho("cap01.pgn"), [(1, 1, 1, "Diagram")], ids)
+        self.registrar(self.caminho("cap07.pgn"), [(1, 1, 1, "Diagram")], ids)
+
+        linhas, _total = fetch_comment_occurrences(
+            self.cur, ids["Diagram"], limit=1,
+            preferred_file=self.caminho("cap07.pgn"),
+        )
+
+        self.assertEqual([os.path.basename(l[0]) for l in linhas], ["cap07.pgn"])
+
+    def test_a_comment_with_no_occurrence_answers_empty(self):
+        ids = self.gravar("um")
+        self.assertEqual(fetch_comment_occurrences(self.cur, ids["um"]), ([], 0))
+
+
+class FileProgressTests(OccurrenceTestCase):
+    """Progresso por obra: "faltam 120 comentarios do capitulo 7"."""
+
+    def test_a_comment_repeated_in_the_file_counts_once(self):
+        """O numero mais facil de errar aqui.
+
+        Somando `verified` sobre o `JOIN`, um comentario verificado que aparece
+        tres vezes viraria tres verificacoes e o progresso passaria de 100%.
+        """
+        ids = self.gravar("um", "dois")
+        arquivo = self.caminho("cap01.pgn")
+        self.registrar(
+            arquivo,
+            [
+                (1, 1, 1, "um"),
+                (2, 1, 2, "um"),
+                (3, 1, 3, "um"),
+                (4, 1, 4, "dois"),
+            ],
+            ids,
+        )
+        set_translation_verified_by_id(self.cur, ids["um"])
+        self.conn.commit()
+
+        (linha,) = get_file_progress(self.cur)
+        _arquivo, posicoes, comentarios, verificadas, pendentes, _avisos = linha
+
+        self.assertEqual((comentarios, verificadas, pendentes), (2, 1, 1))
+        # As posicoes, essas sim, contam a repeticao: e o tamanho da obra.
+        self.assertEqual(posicoes, 4)
+
+    def test_the_progress_counts_the_quality_warnings_of_the_work(self):
+        arquivo = self.caminho("cap01.pgn")
+        save_translation(self.cur, "The open file.", "O arquivo aberto.", "pt", "en")
+        save_translation(self.cur, "The rook.", "A torre.", "pt", "en")
+        self.conn.commit()
+        self.registrar(
+            arquivo,
+            [(1, 1, 1, "The open file."), (2, 1, 2, "The rook.")],
+        )
+
+        self.assertEqual(get_file_progress(self.cur)[0][5], 1)
+
+    def test_each_work_is_counted_on_its_own(self):
+        ids = self.gravar("um", "dois")
+        self.registrar(self.caminho("cap01.pgn"), [(1, 1, 1, "um")], ids)
+        self.registrar(
+            self.caminho("cap02.pgn"),
+            [(1, 1, 1, "um"), (2, 1, 2, "dois")],
+            ids,
+        )
+
+        self.assertEqual(
+            [(os.path.basename(l[0]), l[2]) for l in get_file_progress(self.cur)],
+            [("cap01.pgn", 1), ("cap02.pgn", 2)],
+        )
+
+    def test_a_database_with_no_occurrence_has_no_work(self):
+        """O estado de todo banco migrado: traducao ha, procedencia nao."""
+        self.gravar("um")
+        self.assertEqual(get_file_progress(self.cur), [])
+        self.assertEqual(get_database_stats(self.cur)["per_file"], [])
+
+    def test_the_stats_carry_the_progress_per_work(self):
+        ids = self.gravar("um")
+        self.registrar(self.caminho("cap01.pgn"), [(1, 1, 1, "um")], ids)
+
+        self.assertEqual(
+            get_database_stats(self.cur)["per_file"], get_file_progress(self.cur)
+        )
+
+
+class OccurrenceSchemaTests(unittest.TestCase):
+    """A migracao 6 -> 7, e o que ela deliberadamente NAO faz."""
+
+    def banco_no_schema_6(self):
+        """Um banco completo, menos a tabela de ocorrencias.
+
+        Feito derrubando a tabela e voltando a marca de versao: o ponto do teste e
+        que a abertura seguinte reconheca o banco antigo e complete o schema, e
+        essa e exatamente a situacao do banco do usuario depois da atualizacao.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "cache.db"
+
+        conn = initialize_database(str(db_path))
+        cur = conn.cursor()
+        save_translation(cur, "the rook", "a torre", "pt", "en")
+        save_translation(cur, "the bishop", "o bispo", "pt", "en")
+        conn.commit()
+        conn.execute(f"DROP TABLE {OCCURRENCES_TABLE}")
+        conn.execute("PRAGMA user_version = 6")
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_opening_an_older_database_creates_the_table(self):
+        db_path = self.banco_no_schema_6()
+
+        conn = initialize_database(str(db_path))
+        self.addCleanup(conn.close)
+
+        self.assertEqual(
+            conn.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION
+        )
+        self.assertEqual(
+            conn.execute(f"SELECT COUNT(*) FROM {OCCURRENCES_TABLE}").fetchone()[0], 0
+        )
+
+    def test_the_migration_does_not_invent_a_provenance(self):
+        """Nao ha de onde derivar arquivo, partida e lance das linhas ja gravadas.
+
+        Um backfill teria de inventar, e uma procedencia falsa e pior do que a
+        ausencia: ela apareceria no filtro por arquivo como uma obra que ninguem
+        traduziu.
+        """
+        db_path = self.banco_no_schema_6()
+
+        conn = initialize_database(str(db_path))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+
+        self.assertEqual(list_occurrence_files(cur, "pt"), [])
+        self.assertEqual(
+            cur.execute("SELECT COUNT(*) FROM comments").fetchone()[0], 2
+        )
+
+    def test_the_unique_of_comments_is_untouched(self):
+        """A tabela ao lado nao pode ter mexido no que define uma traducao."""
+        db_path = self.banco_no_schema_6()
+        conn = initialize_database(str(db_path))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+
+        self.assertEqual(save_translation(cur, "the rook", "outra", "pt", "en"), "unchanged")
+        self.assertEqual(save_translation(cur, "the rook", "la torre", "es", "en"), "inserted")
+
+
+class ClearTranslationsTakesOccurrencesTests(OccurrenceTestCase):
+    """Garantia Z3: zerar leva historico, indice, cache — e ocorrencias."""
+
+    def test_zeroing_the_bank_takes_the_occurrences(self):
+        """O `AUTOINCREMENT` reinicia com a tabela.
+
+        Uma ocorrencia sobrevivente apontaria para a PRIMEIRA traducao gravada
+        depois do zeramento: o comentario errado, no arquivo certo, sem nada
+        acusando na tela.
+        """
+        ids = self.gravar("um")
+        self.registrar(self.caminho("cap01.pgn"), [(1, 1, 1, "um")], ids)
+
+        clear_all_translations(self.conn)
+
+        cur = self.conn.cursor()
+        self.assertEqual(
+            cur.execute(f"SELECT COUNT(*) FROM {OCCURRENCES_TABLE}").fetchone()[0], 0
+        )
+        self.assertEqual(get_file_progress(cur), [])
+
+    def test_the_table_still_exists_after_zeroing(self):
+        """Derrubar sem recriar deixaria o proximo filtro por arquivo em erro."""
+        clear_all_translations(self.conn)
+        cur = self.conn.cursor()
+
+        ids = self.gravar("um")
+        self.registrar(self.caminho("cap01.pgn"), [(1, 1, 1, "um")], ids)
+        self.assertEqual(len(get_file_progress(cur)), 1)
+
+
+class WorkerOccurrenceTests(unittest.TestCase):
+    """O worker grava a procedencia com os dados que ele ja tem na mao."""
+
+    def setUp(self):
+        original = translation_worker.messagebox
+
+        class SemDialogos:
+            showinfo = staticmethod(lambda *_a, **_k: None)
+            showwarning = staticmethod(lambda *_a, **_k: None)
+            showerror = staticmethod(lambda *_a, **_k: None)
+
+        translation_worker.messagebox = SemDialogos
+        self.addCleanup(setattr, translation_worker, "messagebox", original)
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.db_path = self.base / "cache.db"
+
+    def falso_translate(self, resposta=None):
+        def falso(text, *_a, **_k):
+            if resposta is not None:
+                return resposta
+            # Devolve o texto com um prefixo, preservando os separadores de lote:
+            # assim o realinhamento continua valendo e cada comentario ganha uma
+            # traducao propria.
+            return " ||| ".join(f"T {parte}" for parte in text.split(" ||| "))
+
+        original = translation_worker.translate_text
+        translation_worker.translate_text = falso
+        self.addCleanup(setattr, translation_worker, "translate_text", original)
+
+    def escreve(self, nome, conteudo):
+        caminho = self.base / nome
+        caminho.write_text(conteudo, encoding="utf-8")
+        return caminho
+
+    def ocorrencias(self):
+        conn = initialize_database(str(self.db_path))
+        try:
+            return conn.execute(
+                f"SELECT o.source_file, o.game_index, o.comment_index,"
+                f" o.move_number, c.original_comment"
+                f" FROM {OCCURRENCES_TABLE} o JOIN comments c ON c.id = o.comment_id"
+                f" ORDER BY o.source_file, o.comment_index"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def test_a_run_records_where_each_comment_was_read(self):
+        """Ponta a ponta: do PGN em disco a tabela de ocorrencias."""
+        self.falso_translate()
+        pgn = self.escreve(
+            "cap01.pgn",
+            '[Event "A"]\n\n1. e4 {um} 2. Nf3 {dois} 1-0\n\n'
+            '[Event "B"]\n\n1. d4 {tres} 1-0\n',
+        )
+
+        translation_worker.run_translation(
+            FakeApp(self.db_path), str(pgn), "pt", False, source_language="en"
+        )
+
+        self.assertEqual(
+            self.ocorrencias(),
+            [
+                (str(pgn), 1, 1, 1, "um"),
+                (str(pgn), 1, 2, 2, "dois"),
+                (str(pgn), 2, 3, 1, "tres"),
+            ],
+        )
+
+    def test_a_comment_reused_from_the_cache_is_recorded_too(self):
+        """A segunda execucao nao chama a API — e a procedencia do arquivo novo
+        tem de aparecer do mesmo jeito. Registrar so o que a API respondeu deixaria
+        de fora justamente o acervo que o cache existe para reaproveitar."""
+        self.falso_translate()
+        primeiro = self.escreve("cap01.pgn", '[Event "A"]\n\n1. e4 {um} 1-0\n')
+        translation_worker.run_translation(
+            FakeApp(self.db_path), str(primeiro), "pt", False, source_language="en"
+        )
+
+        segundo = self.escreve("cap02.pgn", '[Event "A"]\n\n1. e4 e5 2. Nf3 {um} 1-0\n')
+        translation_worker.run_translation(
+            FakeApp(self.db_path), str(segundo), "pt", False, source_language="en"
+        )
+
+        self.assertEqual(
+            [(os.path.basename(l[0]), l[3]) for l in self.ocorrencias()],
+            [("cap01.pgn", 1), ("cap02.pgn", 2)],
+        )
+
+    def test_the_run_says_how_many_positions_it_recorded(self):
+        """O numero no log e o que separa "a obra tem 2 posicoes" de "tem 2, uma
+        ainda sem traducao"."""
+        self.falso_translate()
+        pgn = self.escreve("cap01.pgn", '[Event "A"]\n\n1. e4 {um} 2. Nf3 {dois} 1-0\n')
+        app = FakeApp(self.db_path)
+
+        translation_worker.run_translation(
+            app, str(pgn), "pt", False, source_language="en"
+        )
+
+        self.assertTrue(
+            any("Posicoes registradas: 2/2" in linha for linha in app.logs),
+            app.logs,
+        )
+
+    def test_a_comment_the_api_refused_is_reported_as_missing(self):
+        """A API nao respondeu: o comentario fica no idioma original e sem linha no
+        banco, e a posicao dele nao pode ser inventada."""
+        self.falso_translate(resposta="")
+        pgn = self.escreve("cap01.pgn", '[Event "A"]\n\n1. e4 {um} 1-0\n')
+        app = FakeApp(self.db_path)
+
+        translation_worker.run_translation(
+            app, str(pgn), "pt", False, source_language="en"
+        )
+
+        self.assertEqual(self.ocorrencias(), [])
+        self.assertTrue(
+            any("1 sem traducao no banco" in linha for linha in app.logs), app.logs
+        )
+
+    def test_the_occurrence_is_recorded_under_the_declared_pair(self):
+        """A ocorrencia aponta para a LINHA, e a linha e do par: o mesmo PGN
+        declarado como espanhol e como ingles da duas traducoes, cada uma com a
+        sua procedencia."""
+        self.falso_translate()
+        pgn = self.escreve("cap01.pgn", '[Event "A"]\n\n1. e4 {Nada} 1-0\n')
+
+        translation_worker.run_translation(
+            FakeApp(self.db_path), str(pgn), "pt", False, source_language="es"
+        )
+        translation_worker.run_translation(
+            FakeApp(self.db_path), str(pgn), "pt", False, source_language="it"
+        )
+
+        conn = initialize_database(str(self.db_path))
+        self.addCleanup(conn.close)
+        # O arquivo e o mesmo, entao a posicao 1 dele tem um dono so: a ultima
+        # execucao. As duas linhas de traducao continuam existindo.
+        self.assertEqual(
+            conn.execute(
+                f"SELECT c.source_language FROM {OCCURRENCES_TABLE} o"
+                f" JOIN comments c ON c.id = o.comment_id"
+            ).fetchall(),
+            [("it",)],
+        )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0], 2
+        )
+
+
+# ===========================================================================
+# Secao 19 — o fluxo do tradutor profissional
+# ===========================================================================
+
+
+class WordCountTests(unittest.TestCase):
+    """A metrica com que tradutor orca, mede e cobra (ROADMAP 19, item 6)."""
+
+    def test_words_are_separated_by_whitespace(self):
+        self.assertEqual(count_words("a coluna aberta"), 3)
+        self.assertEqual(count_words("  espaco   duplo\ne quebra\tde linha  "), 6)
+
+    def test_nothing_counts_zero(self):
+        """Somar o banco inteiro tem linhas sem traducao; um `None` aqui nao pode
+        derrubar a agregacao."""
+        self.assertEqual(count_words(None), 0)
+        self.assertEqual(count_words(""), 0)
+        self.assertEqual(count_words("   "), 0)
+
+    def test_notation_counts_as_one_word(self):
+        """`14.Bxf7` e uma palavra pela definicao de espaco — que e a mesma que o
+        cliente usa para pagar. Contar so o que tem letra daria um numero MENOR do
+        que aquele pelo qual o tradutor cobra."""
+        self.assertEqual(count_words("melhor era 14.Bxf7 aqui"), 4)
+
+    def test_the_five_counters_move_together(self):
+        """`add_word_counts` existe para que as cinco somas nao possam divergir: um
+        `+=` esquecido daria um relatorio que fecha em quase tudo."""
+        acumulador = {}
+        add_word_counts(acumulador, ("en", "pt"), "the open file", "a coluna aberta", 1)
+        add_word_counts(acumulador, ("en", "pt"), "the rook", "a torre", 0)
+
+        self.assertEqual(
+            acumulador[("en", "pt")],
+            {"rows": 2, "original": 5, "translated": 5, "verified": 3, "pending": 2},
+        )
+
+    def test_the_total_sums_every_pair(self):
+        acumulador = {}
+        add_word_counts(acumulador, ("en", "pt"), "one two", "um dois", 1)
+        add_word_counts(acumulador, ("es", "pt"), "tres", "tres", 0)
+
+        self.assertEqual(
+            total_word_counts(acumulador),
+            {"rows": 2, "original": 3, "translated": 3, "verified": 2, "pending": 1},
+        )
+
+
+class WordCountByPairTests(unittest.TestCase):
+    """A contagem sobre o banco: por par, por status, em blocos e cancelavel."""
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        conn = initialize_database(str(Path(sandbox.name) / "cache.db"))
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_the_counts_are_separated_by_pair_and_status(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "the open file", "a coluna aberta", "pt", "en")
+        save_translation(cur, "el alfil", "o bispo", "pt", "es")
+        conn.commit()
+        set_translation_verified_by_id(
+            cur,
+            cur.execute(
+                "SELECT id FROM comments WHERE source_language = 'en'"
+            ).fetchone()[0],
+        )
+        conn.commit()
+
+        por_par, total = count_words_by_pair(cur)
+
+        self.assertEqual(por_par[("en", "pt")]["verified"], 3)
+        self.assertEqual(por_par[("en", "pt")]["pending"], 0)
+        self.assertEqual(por_par[("es", "pt")]["pending"], 2)
+        self.assertEqual(total["original"], 5)
+        self.assertEqual(total["translated"], 5)
+
+    def test_the_translation_is_counted_as_the_reviewer_left_it(self):
+        """O original e achatado (um espaco entre palavras) e a traducao passou pela
+        mao do revisor: ela pode ter quebra de linha e espaco duplo.
+
+        E o motivo de a contagem ser em Python e nao em SQL: contar espacos daria a
+        resposta certa de um lado e errada do outro.
+        """
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "one two three", "um  dois\ntres", "pt", "en")
+        conn.commit()
+
+        _por_par, total = count_words_by_pair(cur)
+
+        self.assertEqual((total["original"], total["translated"]), (3, 3))
+
+    def test_it_reports_progress_and_can_be_canceled(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        for i in range(12):
+            save_translation(cur, f"orig {i} um dois", f"trad {i} um", "pt", "en")
+        conn.commit()
+
+        self.addCleanup(setattr, database, "WORD_COUNT_CHUNK", database.WORD_COUNT_CHUNK)
+        database.WORD_COUNT_CHUNK = 5
+
+        progresso = []
+        por_par, _total = count_words_by_pair(
+            cur, progress_callback=lambda f, t: progresso.append((f, t))
+        )
+        self.assertEqual(por_par[("en", "pt")]["rows"], 12)
+        self.assertEqual(progresso[0], (0, 12))
+        self.assertEqual(progresso[-1], (12, 12))
+
+        with self.assertRaises(database.WordCountCanceled):
+            count_words_by_pair(cur, should_cancel=lambda: True)
+
+
+class DailyReviewActivityTests(unittest.TestCase):
+    """Produtividade por dia, do `comment_history` (ROADMAP 19, item 6)."""
+
+    def banco(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        conn = initialize_database(str(Path(sandbox.name) / "cache.db"))
+        self.addCleanup(conn.close)
+        return conn
+
+    def test_each_edit_counts_and_the_words_are_the_new_ones(self):
+        """A mesma linha editada duas vezes conta duas: sao duas passagens de
+        revisao, e o numero e de ATIVIDADE, nao de acervo."""
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "orig", "uma palavra", "pt", "en")
+        conn.commit()
+        row_id = cur.execute("SELECT id FROM comments").fetchone()[0]
+        update_translation_by_id(cur, row_id, "duas palavras aqui")
+        update_translation_by_id(cur, row_id, "agora sao quatro palavras aqui")
+        conn.commit()
+
+        atividade = get_daily_review_activity(cur)
+
+        self.assertEqual(len(atividade), 1)
+        _dia, edicoes, palavras = atividade[0]
+        self.assertEqual(edicoes, 2)
+        self.assertEqual(palavras, 3 + 5)
+
+    def test_a_bank_without_history_answers_empty(self):
+        """Traducao gravada pelo worker nao gera historico: o numero de um banco
+        recem-traduzido e zero, e a tela precisa dizer isso em palavras."""
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "orig", "trad", "pt", "en")
+        conn.commit()
+
+        self.assertEqual(get_daily_review_activity(cur), [])
+
+    def test_the_most_recent_days_come_first_and_the_list_is_cut(self):
+        conn = self.banco()
+        cur = conn.cursor()
+        save_translation(cur, "orig", "trad", "pt", "en")
+        conn.commit()
+        row_id = cur.execute("SELECT id FROM comments").fetchone()[0]
+        for dia in range(1, 6):
+            cur.execute(
+                "INSERT INTO comment_history (comment_id, action, previous_translation,"
+                " new_translation, previous_verified, new_verified, created_at)"
+                " VALUES (?, 'edit', 'a', 'uma palavra', 0, 0, ?)",
+                (row_id, f"2026-07-0{dia} 10:00:00"),
+            )
+        conn.commit()
+
+        atividade = get_daily_review_activity(cur, limit=3)
+
+        self.assertEqual([dia for dia, _e, _p in atividade],
+                         ["2026-07-05", "2026-07-04", "2026-07-03"])
+
+
+class TmxExportTests(unittest.TestCase):
+    """Exportacao TMX 1.4 (ROADMAP 19, item 8)."""
+
+    def setUp(self):
+        self.sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(self.sandbox.cleanup)
+        self.base = Path(self.sandbox.name)
+        self.db_path = self.base / "cache.db"
+
+    def semear(self, linhas):
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        for original, traducao, origem, destino in linhas:
+            cur.execute(
+                "INSERT INTO comments (original_comment, translated_comment,"
+                " source_language, target_language) VALUES (?, ?, ?, ?)",
+                (original, traducao, origem, destino),
+            )
+        conn.commit()
+        conn.close()
+
+    def exportar(self):
+        destino = self.base / "memoria.tmx"
+        unidades = db_tools.export_translations_to_tmx(str(self.db_path), str(destino))
+        return unidades, destino
+
+    def test_the_file_is_valid_xml_with_one_unit_per_row(self):
+        self.semear([
+            ("the rook", "a torre", "en", "pt"),
+            ("the bishop", "o bispo", "en", "pt"),
+        ])
+
+        unidades, destino = self.exportar()
+
+        raiz = ET.parse(destino).getroot()
+        self.assertEqual(unidades, 2)
+        self.assertEqual(raiz.get("version"), "1.4")
+        self.assertEqual(len(raiz.findall(".//tu")), 2)
+
+    def test_the_header_declares_many_source_languages(self):
+        """O acervo tem varios idiomas de origem ao mesmo tempo. Declarar um so
+        faria toda ferramenta importar o acervo inteiro como se fosse dele; `*all*`
+        e o valor que o proprio padrao TMX define para isso."""
+        self.semear([("a", "b", "en", "pt"), ("c", "d", "es", "pt")])
+
+        _unidades, destino = self.exportar()
+
+        raiz = ET.parse(destino).getroot()
+        self.assertEqual(raiz.find("header").get("srclang"), "*all*")
+
+    def test_a_row_without_source_language_becomes_und(self):
+        """`xml:lang=""` nao e valido, inventar `en` seria mentir, e pular as linhas
+        deixaria de fora a maioria de um banco anterior a secao 9.2."""
+        self.semear([("sem origem", "sin origen", "", "pt")])
+
+        _unidades, destino = self.exportar()
+
+        idiomas = [
+            tuv.get("{http://www.w3.org/XML/1998/namespace}lang")
+            for tuv in ET.parse(destino).getroot().findall(".//tuv")
+        ]
+        self.assertEqual(idiomas, ["und", "pt"])
+
+    def test_a_row_without_translation_is_left_out(self):
+        """Uma memoria com o lado de destino vazio nao ajuda ferramenta nenhuma e
+        polui a busca por concordancia de quem a importar."""
+        self.semear([
+            ("com traducao", "tem", "en", "pt"),
+            ("sem traducao", "", "en", "pt"),
+            ("nula", None, "en", "pt"),
+        ])
+
+        unidades, destino = self.exportar()
+
+        self.assertEqual(unidades, 1)
+        self.assertEqual(len(ET.parse(destino).getroot().findall(".//tu")), 1)
+
+    def test_the_markup_of_the_comment_is_escaped(self):
+        """Um `&` ou um `<` no comentario sao comuns em livro de xadrez ("Black &
+        White"), e crus eles produzem um arquivo que nenhuma ferramenta abre."""
+        self.semear([("Black & <White>", "Pretas & <Brancas>", "en", "pt")])
+
+        _unidades, destino = self.exportar()
+
+        bruto = destino.read_text(encoding="utf-8")
+        self.assertIn("Black &amp; &lt;White&gt;", bruto)
+        segmentos = [s.text for s in ET.parse(destino).getroot().findall(".//seg")]
+        self.assertEqual(segmentos, ["Black & <White>", "Pretas & <Brancas>"])
+
+    def test_a_forbidden_control_character_is_removed(self):
+        """O XML 1.0 nao aceita controle C0 nem escapado: um deles no meio de um
+        comentario produz um arquivo que nao abre — e o erro apareceria na
+        ferramenta do usuario, nao aqui."""
+        self.semear([("antes\x01depois", "traducao", "en", "pt")])
+
+        _unidades, destino = self.exportar()
+
+        segmentos = [s.text for s in ET.parse(destino).getroot().findall(".//seg")]
+        self.assertEqual(segmentos[0], "antesdepois")
+
+    def test_the_tuid_is_the_database_id(self):
+        """E o que permite reconhecer a mesma unidade depois de uma ida e volta pelo
+        OmegaT (ROADMAP 19, item 8)."""
+        self.semear([("a", "b", "en", "pt")])
+        conn = initialize_database(str(self.db_path))
+        row_id = conn.execute("SELECT id FROM comments").fetchone()[0]
+        conn.close()
+
+        _unidades, destino = self.exportar()
+
+        self.assertEqual(
+            ET.parse(destino).getroot().find(".//tu").get("tuid"), str(row_id)
+        )
+
+    def test_canceling_leaves_no_half_written_file(self):
+        """Um TMX truncado nao fecha `</body>`, entao ele nao abre em ferramenta
+        nenhuma — mas o usuario so descobre isso depois de ter contado com ele."""
+        self.semear([("a", "b", "en", "pt")])
+        destino = self.base / "memoria.tmx"
+
+        with self.assertRaises(TaskCanceled):
+            db_tools.export_translations_to_tmx(
+                str(self.db_path), str(destino), should_cancel=lambda: True
+            )
+
+        self.assertFalse(destino.exists())
+
+
+class ExportCsvIdColumnTests(unittest.TestCase):
+    """O `id` no CSV (ROADMAP 19, item 8) e a exportacao de uma selecao (item 9)."""
+
+    def setUp(self):
+        self.sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(self.sandbox.cleanup)
+        self.base = Path(self.sandbox.name)
+        self.db_path = self.base / "cache.db"
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        for i in range(4):
+            save_translation(cur, f"orig {i}", f"trad {i}", "pt", "en")
+        conn.commit()
+        self.ids = [r[0] for r in cur.execute("SELECT id FROM comments ORDER BY id")]
+        conn.close()
+
+    def exportar(self, **kwargs):
+        destino = self.base / "saida.csv"
+        db_tools.export_translations_to_csv(str(self.db_path), str(destino), **kwargs)
+        with open(destino, encoding="utf-8-sig", newline="") as f:
+            return list(csv.reader(f))
+
+    def test_the_id_is_the_first_column(self):
+        gravadas = self.exportar()
+
+        self.assertEqual(gravadas[0][0], "id")
+        self.assertEqual([linha[0] for linha in gravadas[1:]], [str(i) for i in self.ids])
+
+    def test_the_exported_file_is_still_importable(self):
+        """A coluna nova nao pode quebrar o round-trip: o CSV exportado tem de voltar
+        pela importacao, que le por NOME de coluna."""
+        destino = self.base / "saida.csv"
+        db_tools.export_translations_to_csv(str(self.db_path), str(destino))
+
+        previa = db_tools.analyze_translations_csv_import(
+            str(self.db_path), str(destino)
+        )
+
+        self.assertEqual(previa["total_rows"], 4)
+        self.assertEqual(previa["inserted"], 0)
+
+    def test_the_status_and_the_note_are_exported(self):
+        """Nada do que o revisor escreveu pode ficar preso no programa."""
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        set_review_status_by_id(cur, self.ids[0], REVIEW_STATUS_DOUBT, note="ver autor")
+        conn.commit()
+        conn.close()
+
+        gravadas = self.exportar()
+        cabecalho = gravadas[0]
+        linha = gravadas[1]
+
+        self.assertEqual(linha[cabecalho.index("review_status")], "doubt")
+        self.assertEqual(linha[cabecalho.index("reviewer_note")], "ver autor")
+
+    def test_only_the_selected_ids_are_exported(self):
+        gravadas = self.exportar(only_ids=[self.ids[1], self.ids[3]])
+
+        self.assertEqual(
+            [linha[0] for linha in gravadas[1:]],
+            [str(self.ids[1]), str(self.ids[3])],
+        )
+
+    def test_an_empty_selection_exports_nothing(self):
+        """Lista vazia nao e o mesmo que `None`: exportar o banco inteiro para quem
+        pediu nada e o pior desfecho possivel de "exportar a selecao"."""
+        gravadas = self.exportar(only_ids=[])
+
+        self.assertEqual(len(gravadas), 1, "so o cabecalho")
+
+
+class WrapPgnCommentTests(unittest.TestCase):
+    """Requebra em 80 colunas na gravacao (ROADMAP 19, item 13)."""
+
+    def test_no_line_passes_the_width(self):
+        texto = " ".join(["palavra"] * 30)
+        linhas = wrap_pgn_comment(texto, 40, 40).split("\n")
+
+        self.assertTrue(len(linhas) > 1)
+        self.assertTrue(all(len(l) <= 40 for l in linhas), linhas)
+
+    def test_only_whitespace_changes(self):
+        """A promessa que permite requebrar sem tocar na chave de cache: as palavras
+        saem na mesma ordem e com os mesmos caracteres."""
+        texto = "a coluna aberta e uma estrada para a torre"
+        requebrado = wrap_pgn_comment(texto, 20, 20)
+
+        self.assertEqual(requebrado.split(), texto.split())
+
+    def test_the_first_line_knows_it_starts_mid_line(self):
+        """Depois de `12. Nf3 {` sobra menos espaco. Sem isso, a requebra acertaria
+        todas as linhas menos a unica que divide espaco com o movetext."""
+        texto = "uma duas tres quatro cinco"
+
+        primeira = wrap_pgn_comment(texto, 30, 10).split("\n")[0]
+
+        self.assertLessEqual(len(primeira), 10)
+
+    def test_an_annotation_is_never_broken(self):
+        """A garantia X1 gastou uma secao protegendo esses spans; quebra-los na
+        gravacao seria desfazer o trabalho no ultimo passo."""
+        texto = "antes [%cal Ra1h8,Rb2b7] depois"
+
+        for largura in range(12, 32):
+            requebrado = wrap_pgn_comment(texto, largura, largura)
+            self.assertIn("[%cal Ra1h8,Rb2b7]", requebrado, largura)
+
+    def test_a_word_longer_than_the_line_stays_whole(self):
+        """Cortar no meio dela produziria um token que nao existe."""
+        gigante = "a" * 50
+        requebrado = wrap_pgn_comment(f"antes {gigante} depois", 20, 20)
+
+        self.assertIn(gigante, requebrado)
+
+    def test_an_empty_comment_survives(self):
+        self.assertEqual(wrap_pgn_comment("", 80, 80), "")
+        self.assertEqual(wrap_pgn_comment(None, 80, 80), "")
+
+
+class WrapOnDiskTests(unittest.TestCase):
+    """A requebra dentro da gravacao do PGN, com o fim de linha do arquivo."""
+
+    def setUp(self):
+        self.sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(self.sandbox.cleanup)
+        self.base = Path(self.sandbox.name)
+        self.texto = (
+            "A coluna aberta e uma estrada para a torre, e as pretas precisam "
+            "disputa-la agora mesmo antes que seja tarde demais para isso."
+        )
+
+    def gerar(self, eol, **kwargs):
+        entrada = self.base / "entrada.pgn"
+        entrada.write_bytes(
+            f'[Event "A"]{eol}{eol}1. e4 {{{self.texto}}} 1-0{eol}'.encode("utf-8")
+        )
+        info = extract_comments_from_file(str(entrada))
+        saida = self.base / "saida.pgn"
+        generate_translated_pgn(
+            str(entrada), str(saida), {info["comments"][0]: self.texto},
+            info["positions"], **kwargs
+        )
+        return saida.read_bytes()
+
+    def test_it_is_off_by_default(self):
+        """O comportamento de sempre: comentario em linha unica."""
+        bruto = self.gerar("\n").decode("utf-8")
+
+        self.assertIn("{" + self.texto + "}", bruto)
+
+    def test_with_the_width_no_line_passes_it(self):
+        bruto = self.gerar("\n", wrap_columns=80).decode("utf-8")
+
+        self.assertTrue(any("\n" in l for l in [bruto]))
+        for linha in bruto.split("\n"):
+            self.assertLessEqual(len(linha), 80, linha)
+
+    def test_the_line_ending_of_the_file_is_used(self):
+        """O conteudo e lido com `newline=''` justamente para o `\\r\\n` sobreviver
+        (ROADMAP 13.6): inserir `\\n` puro daria um PGN de fim de linha misturado."""
+        bruto = self.gerar("\r\n", wrap_columns=80)
+
+        self.assertNotIn(b"\n", bruto.replace(b"\r\n", b""))
+
+    def test_the_words_are_the_same_as_without_wrapping(self):
+        sem = self.gerar("\n").decode("utf-8")
+        com = self.gerar("\n", wrap_columns=60).decode("utf-8")
+
+        self.assertEqual(sem.split(), com.split())
+
+
+class ReviewStatusTests(unittest.TestCase):
+    """Status alem do binario, e o par de campos em lockstep (item 12)."""
+
+    def setUp(self):
+        self.sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(self.sandbox.cleanup)
+        self.conn = initialize_database(str(Path(self.sandbox.name) / "cache.db"))
+        self.addCleanup(self.conn.close)
+        self.cur = self.conn.cursor()
+        save_translation(self.cur, "the rook", "a torre", "pt", "en")
+        save_translation(self.cur, "the bishop", "o bispo", "pt", "en")
+        self.conn.commit()
+        self.ids = [r[0] for r in self.cur.execute("SELECT id FROM comments ORDER BY id")]
+
+    def status(self, comment_id):
+        return fetch_review_status_by_id(self.cur, comment_id)
+
+    def verified(self, comment_id):
+        return self.cur.execute(
+            "SELECT verified FROM comments WHERE id = ?", (comment_id,)
+        ).fetchone()[0]
+
+    def test_rejecting_stores_the_status_and_the_note(self):
+        set_review_status_by_id(
+            self.cur, self.ids[0], REVIEW_STATUS_REJECTED, note="termo inventado"
+        )
+        self.conn.commit()
+
+        self.assertEqual(
+            self.status(self.ids[0]), (REVIEW_STATUS_REJECTED, "termo inventado")
+        )
+
+    def test_a_status_beyond_pending_drops_the_verified_bit(self):
+        """Rejeitar uma linha verificada e dizer que a verificacao estava errada.
+        Deixar o bit de pe a manteria fora do filtro de pendentes, e ela nunca
+        voltaria para a fila de ninguem."""
+        set_translation_verified_by_id(self.cur, self.ids[0])
+        self.conn.commit()
+        self.assertEqual(self.verified(self.ids[0]), 1)
+
+        set_review_status_by_id(self.cur, self.ids[0], REVIEW_STATUS_DOUBT)
+        self.conn.commit()
+
+        self.assertEqual(self.verified(self.ids[0]), 0)
+        self.assertIsNone(
+            self.cur.execute(
+                "SELECT verified_at FROM comments WHERE id = ?", (self.ids[0],)
+            ).fetchone()[0]
+        )
+
+    def test_verifying_clears_the_status(self):
+        """O outro lado do lockstep: uma traducao aceita nao esta "em duvida"."""
+        set_review_status_by_id(self.cur, self.ids[0], REVIEW_STATUS_DOUBT, note="ver")
+        self.conn.commit()
+
+        set_translation_verified_by_id(self.cur, self.ids[0])
+        self.conn.commit()
+
+        self.assertEqual(self.status(self.ids[0])[0], REVIEW_STATUS_PENDING)
+        self.assertEqual(self.verified(self.ids[0]), 1)
+        # A NOTA fica: ela e o que o revisor escreveu, e verificar a linha nao
+        # apaga o que ele disse sobre ela.
+        self.assertEqual(self.status(self.ids[0])[1], "ver")
+
+    def test_the_note_is_kept_when_only_the_status_changes(self):
+        set_review_status_by_id(self.cur, self.ids[0], REVIEW_STATUS_DOUBT, note="ver")
+        set_review_status_by_id(self.cur, self.ids[0], REVIEW_STATUS_REJECTED)
+        self.conn.commit()
+
+        self.assertEqual(self.status(self.ids[0]), (REVIEW_STATUS_REJECTED, "ver"))
+
+    def test_an_unknown_status_is_refused(self):
+        """O campo e um enum de tres valores. Um quarto valor gravado por engano
+        criaria uma linha que nenhum filtro mostra."""
+        with self.assertRaises(ValueError):
+            set_review_status_by_id(self.cur, self.ids[0], "arquivada")
+
+    def test_the_filters_separate_the_two_new_states(self):
+        set_review_status_by_id(self.cur, self.ids[0], REVIEW_STATUS_REJECTED)
+        set_review_status_by_id(self.cur, self.ids[1], REVIEW_STATUS_DOUBT)
+        self.conn.commit()
+
+        rejeitadas = fetch_review_rows(
+            self.cur, "pt", status_filter=REVIEW_STATUS_REJECTED
+        )
+        duvidas = fetch_review_rows(self.cur, "pt", status_filter=REVIEW_STATUS_DOUBT)
+
+        self.assertEqual([l[1] for l in rejeitadas], ["the rook"])
+        self.assertEqual([l[1] for l in duvidas], ["the bishop"])
+
+    def test_the_new_states_are_subsets_of_pending(self):
+        """Somar rejeitadas e em duvida ao pendente daria um total maior que a
+        tabela."""
+        set_review_status_by_id(self.cur, self.ids[0], REVIEW_STATUS_REJECTED)
+        self.conn.commit()
+
+        resumo = get_review_status_counts(self.cur, "pt")
+
+        self.assertEqual(resumo["total"], 2)
+        self.assertEqual(resumo["pending"], 2)
+        self.assertEqual(resumo[REVIEW_STATUS_REJECTED], 1)
+        self.assertEqual(resumo[REVIEW_STATUS_DOUBT], 0)
+
+    def test_the_page_count_of_the_new_filters_comes_from_the_summary(self):
+        """Se o resumo e o total do filtro divergirem, a lista pagina pelo numero
+        errado sem nada quebrar na tela."""
+        set_review_status_by_id(self.cur, self.ids[0], REVIEW_STATUS_REJECTED)
+        self.conn.commit()
+
+        resumo = get_review_status_counts(self.cur, "pt")
+        for filtro in (REVIEW_STATUS_REJECTED, REVIEW_STATUS_DOUBT):
+            self.assertEqual(
+                count_from_status_counts(resumo, filtro),
+                count_review_rows(self.cur, "pt", status_filter=filtro),
+                filtro,
+            )
+
+    def test_an_inconsistent_row_does_not_leak_into_the_filter(self):
+        """A guarda `verified <> 1` do filtro, exercitada pelo caso que ela existe
+        para pegar.
+
+        Pelo caminho do programa esse estado nao acontece — o lockstep o impede —,
+        entao o teste o escreve com SQL cru, que e o que um `UPDATE` de fora (uma
+        restauracao pela metade, uma ferramenta externa) produziria. Sem a guarda, a
+        linha apareceria ao mesmo tempo em "Verificadas" e em "Rejeitadas", e nenhuma
+        das duas contagens fecharia com o total.
+        """
+        self.cur.execute(
+            "UPDATE comments SET verified = 1, review_status = ? WHERE id = ?",
+            (REVIEW_STATUS_REJECTED, self.ids[0]),
+        )
+        self.conn.commit()
+
+        rejeitadas = fetch_review_rows(
+            self.cur, "pt", status_filter=REVIEW_STATUS_REJECTED
+        )
+        resumo = get_review_status_counts(self.cur, "pt")
+
+        self.assertEqual(rejeitadas, [])
+        self.assertEqual(resumo[REVIEW_STATUS_REJECTED], 0)
+        self.assertEqual(resumo["verified"], 1)
+
+    def test_a_migrated_database_reads_every_row_as_pending(self):
+        """Um banco anterior ao schema 8 nao tem a coluna: ela entra com `''` para
+        todas as linhas, e `''` e pendente."""
+        self.assertEqual(self.status(self.ids[1]), (REVIEW_STATUS_PENDING, ""))
+        self.assertEqual(
+            get_review_status_counts(self.cur, "pt")[REVIEW_STATUS_REJECTED], 0
+        )
+
+
+class DiffSpansTests(unittest.TestCase):
+    """As faixas pintadas na previa de "Aplicar todas" (item 5)."""
+
+    def test_the_changed_word_is_marked_on_both_sides(self):
+        antes = "a coluna aberta"
+        depois = "a fileira aberta"
+
+        faixas_antes, faixas_depois = diff_spans(antes, depois)
+
+        self.assertEqual([antes[i:f] for i, f in faixas_antes], ["coluna"])
+        self.assertEqual([depois[i:f] for i, f in faixas_depois], ["fileira"])
+
+    def test_identical_texts_have_no_spans(self):
+        self.assertEqual(diff_spans("igual", "igual"), ([], []))
+
+    def test_the_diff_is_by_word_and_not_by_character(self):
+        """Por caractere, `torre`/`Torre` viraria um `T` trocado no meio de uma
+        palavra inteira pintada de igual — e o que o revisor precisa ver e a palavra
+        que mudou."""
+        antes, depois = "a torre", "a Torre"
+
+        _antes_spans, faixas_depois = diff_spans(antes, depois)
+
+        self.assertEqual([depois[i:f] for i, f in faixas_depois], ["Torre"])
+
+    def test_an_insertion_marks_only_the_new_side(self):
+        faixas_antes, faixas_depois = diff_spans("a torre", "a torre branca")
+
+        self.assertEqual(faixas_antes, [])
+        self.assertEqual(len(faixas_depois), 1)
+
+    def test_many_replacements_are_all_marked(self):
+        """O caso do item: conferir 80 substituicoes a olho nu e o mesmo que nao
+        conferir."""
+        antes = " ".join(f"palavra{i}" for i in range(10))
+        depois = " ".join(
+            (f"trocada{i}" if i % 2 == 0 else f"palavra{i}") for i in range(10)
+        )
+
+        _faixas_antes, faixas_depois = diff_spans(antes, depois)
+
+        self.assertEqual(len(faixas_depois), 5)
+
+
+class SettingsConcurrencyTests(unittest.TestCase):
+    """O rascunho passou a gravar em segundo plano (item 10).
+
+    Duas threads chamando `update_settings` sem lock fazem a segunda ler o disco
+    ANTES de a primeira gravar, e o que a primeira escreveu desaparece — a perda que
+    a garantia R4 existe para impedir, agora por corrida.
+    """
+
+    def test_concurrent_updates_do_not_lose_each_other(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            caminho = str(Path(tmp) / "settings.json")
+
+            def gravar(indice):
+                def mutator(disk):
+                    disk[f"chave_{indice}"] = indice
+                settings.update_settings(mutator, caminho)
+
+            threads = [
+                threading.Thread(target=gravar, args=(i,)) for i in range(24)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            gravado = settings.load_settings(caminho)
+            self.assertEqual(
+                sorted(gravado), sorted(f"chave_{i}" for i in range(24))
+            )
+
+
+def _pgn_com_comentarios(caminho, quantos, tamanho=180, prefixo="c"):
+    """PGN sintetico com `quantos` comentarios distintos. Devolve o caminho.
+
+    Usado nas medicoes da secao 20: os testes de custo precisam de um arquivo
+    grande o bastante para que a diferenca entre O(n) e O(n.m) apareca, e pequeno
+    o bastante para a suite nao demorar.
+    """
+    partes = ['[Event "Medicao"]\n[Site "?"]\n\n']
+    for i in range(quantos):
+        partes.append(f"{i % 60 + 1}. Nf3 {{{prefixo} {i} " + "x" * tamanho + "}} Nf6 ")
+        if i % 20 == 19:
+            partes.append("\n")
+    partes.append("1-0\n")
+    Path(caminho).write_text("".join(partes), encoding="utf-8", newline="")
+    return str(caminho)
+
+
+class GenerationIsLinearTests(unittest.TestCase):
+    """A gravacao refazia o arquivo INTEIRO a cada comentario (ROADMAP 20.1).
+
+    `content[:start] + rep + content[end:]`, uma vez por comentario, custa o
+    PRODUTO do numero de comentarios pelo tamanho do arquivo. Medido nesta
+    maquina: 15.000 comentarios num PGN de 3,2 MB levavam 26,9 s; com uma passada
+    e `"".join`, 18,9 ms.
+
+    E uma das duas familias que mutacao nenhuma pega (a producao estava correta,
+    so lenta), entao o que a protege e cronometro — como no teste do `busy_timeout`.
+    """
+
+    def test_eight_thousand_comments_are_written_in_well_under_a_second(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            entrada = _pgn_com_comentarios(Path(tmp) / "grande.pgn", 8000)
+            info = extract_comments_from_file(entrada)
+            mapa = {c: c.upper() for c in info["comments"]}
+            saida = str(Path(tmp) / "grande-BR.pgn")
+
+            comeco = time.perf_counter()
+            ok = generate_translated_pgn(entrada, saida, mapa, info["positions"])
+            decorrido = time.perf_counter() - comeco
+
+        self.assertTrue(ok)
+        # A versao quadratica levava 6,5 s aqui; a linear, 9,6 ms. O limite e
+        # generoso de proposito — o que ele precisa distinguir e uma ordem de
+        # grandeza, e nao a velocidade desta maquina.
+        self.assertLess(
+            decorrido,
+            0.5,
+            f"a geracao levou {decorrido:.2f}s; a versao O(n.m) levava 6,5s",
+        )
+
+    def test_the_output_is_the_same_the_slow_version_produced(self):
+        """A forma nova nao pode mudar o arquivo, so o tempo de escreve-lo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = Path(tmp) / "game.pgn"
+            pgn.write_text(
+                '[Event "T"]\r\n\r\n'
+                "1. e4 {Primeiro} e5 {Segundo} 2. Nf3 {Terceiro} Nc6 *\r\n",
+                encoding="utf-8",
+                newline="",
+            )
+            info = extract_comments_from_file(str(pgn))
+            saida = str(Path(tmp) / "game-BR.pgn")
+            generate_translated_pgn(
+                str(pgn),
+                saida,
+                {"Primeiro": "Um", "Segundo": "", "Terceiro": "Tres"},
+                info["positions"],
+            )
+            texto = Path(saida).read_text(encoding="utf-8", newline="")
+
+        # `{Segundo}` sai inteiro, com um espaco vizinho (garantia X2); os outros
+        # dois viram a traducao; o `\r\n` do original sobrevive (ROADMAP 13.6).
+        self.assertEqual(
+            texto,
+            '[Event "T"]\r\n\r\n1. e4 {Um} e5 2. Nf3 {Tres} Nc6 *\r\n',
+        )
+
+    def test_two_emptied_comments_side_by_side_do_not_eat_the_rest_of_the_file(self):
+        """O caso que a versao anterior destruia, e que precisava de DOIS erros.
+
+        `{a} {b}` com os dois esvaziados: o span de `{b}` reclamava para tras o
+        espaco que o de `{a}` ja havia levado, e os dois spans sobrepostos, com a
+        substituicao da direita para a esquerda, apagavam tudo o que vinha depois.
+
+        A rodada de mutacao mostrou que cada uma das duas mudancas basta: com a
+        passada unica, uma sobreposicao de um caractere so produz uma fatia vazia;
+        com o limite do span anterior, ela nao se forma. Por isso a mutacao que
+        tira **so** o limite sobrevive a este teste — o que ele protege e o
+        comportamento, e o comportamento tem duas trancas.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = Path(tmp) / "game.pgn"
+            pgn.write_text(
+                '[Event "T"]\n\n1. e4 {a} {b}1-0\n', encoding="utf-8", newline=""
+            )
+            info = extract_comments_from_file(str(pgn))
+            saida = str(Path(tmp) / "game-BR.pgn")
+            generate_translated_pgn(
+                str(pgn), saida, {"a": "", "b": ""}, info["positions"]
+            )
+            texto = Path(saida).read_text(encoding="utf-8", newline="")
+
+        self.assertIn("1-0", texto)
+        self.assertNotIn("{a}", texto)
+        self.assertNotIn("{b}", texto)
+        self.assertEqual(texto, '[Event "T"]\n\n1. e4 1-0\n')
+
+    def test_the_generation_does_not_hold_a_second_copy_of_the_file(self):
+        """Gravar pedaco por pedaco, em vez de juntar tudo antes.
+
+        O `"".join` produzia o PGN de saida inteiro na memoria ao lado do de
+        entrada. Medido nesta maquina, num PGN de 3,2 MB: 15,1 MB de pico com o
+        `join` contra 7,8 MB gravando os pedacos. Trocar 27 s por 8 MB de pico
+        seria consertar metade do item.
+        """
+        import tracemalloc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            entrada = _pgn_com_comentarios(Path(tmp) / "grande.pgn", 15000)
+            tamanho = os.path.getsize(entrada)
+            info = extract_comments_from_file(entrada)
+            mapa = {c: c.upper() for c in info["comments"]}
+            saida = str(Path(tmp) / "grande-BR.pgn")
+
+            tracemalloc.start()
+            generate_translated_pgn(entrada, saida, mapa, info["positions"])
+            pico = tracemalloc.get_traced_memory()[1]
+            tracemalloc.stop()
+
+            self.assertEqual(
+                len(Path(saida).read_text(encoding="utf-8")),
+                len(Path(entrada).read_text(encoding="utf-8")),
+                "o arquivo de saida saiu incompleto",
+            )
+
+        # Duas vezes o arquivo: o conteudo lido e o mapa das traducoes. A terceira
+        # copia — o arquivo de saida montado por `join` — e a que saiu.
+        self.assertLess(
+            pico,
+            3 * tamanho,
+            f"pico de {pico/1e6:.1f} MB para um PGN de {tamanho/1e6:.1f} MB",
+        )
+
+    def test_the_bom_is_written_once_and_not_once_per_piece(self):
+        """O risco que a gravacao por pedacos cria, fixado como teste.
+
+        `utf-8-sig` e `utf-16` escrevem a marca de ordem de bytes na PRIMEIRA
+        codificacao, e o encoder incremental sabe disso. Se algum dia deixar de
+        saber — ou se alguem trocar o `write` por um `open` por pedaco —, cada
+        pedaco levaria a sua BOM e o arquivo sairia impresstavel para qualquer
+        leitor. Um `assertIn` no texto nao pegaria: as BOMs viram caracteres
+        invisiveis no meio da prosa.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            casos = {
+                "com-bom.pgn": ("utf-8", True, b"\xef\xbb\xbf"),
+                "sig.pgn": ("utf-8-sig", False, b"\xef\xbb\xbf"),
+                "utf16.pgn": ("utf-16", False, b"\xff\xfe"),
+            }
+            for nome, (codificacao, bom, marca) in casos.items():
+                alvo = Path(tmp) / nome
+                pgn_utils.write_pgn_pieces(
+                    str(alvo),
+                    lambda: ["um ", "dois ", "tres"],
+                    codificacao,
+                    use_bom=bom,
+                )
+                cru = alvo.read_bytes()
+
+                self.assertTrue(cru.startswith(marca), nome)
+                self.assertEqual(cru.count(marca), 1, f"{nome}: {cru[:30]!r}")
+
+    def test_a_translation_the_input_encoding_cannot_hold_falls_back_to_utf8(self):
+        """O fallback de codificacao, agora que a gravacao e por pedacos.
+
+        O erro de codificacao acontece NO MEIO da gravacao — o `w` da segunda
+        tentativa e o que trunca o arquivo pela metade que a primeira deixou. Sem
+        isso, o PGN de saida ficaria cortado no primeiro caractere que o cp1252
+        nao aceita, e o log diria que deu tudo certo.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = Path(tmp) / "game.pgn"
+            # Com acento: um PGN so de ASCII e detectado como UTF-8 (nunca como
+            # 'ascii'), e o fallback que este teste exercita nao aconteceria.
+            movetext = " ".join(
+                f"{i + 1}. e4 {{comentário {i} com ação}}" for i in range(400)
+            )
+            pgn.write_text(f'[Event "T"]\n\n{movetext} *\n', encoding="cp1252")
+            info = extract_comments_from_file(str(pgn))
+            self.assertEqual(detect_encoding(str(pgn)), "cp1252")
+
+            # O ultimo comentario recebe um caractere que o cp1252 nao representa.
+            mapa = {c: c for c in info["comments"]}
+            mapa[info["comments"][-1]] = "posicao ganha 中"
+            saida = str(Path(tmp) / "game-BR.pgn")
+            logs = []
+
+            ok = generate_translated_pgn(
+                str(pgn), saida, mapa, info["positions"], logs.append
+            )
+
+            self.assertTrue(ok)
+            texto = Path(saida).read_text(encoding="utf-8")
+            self.assertIn("posicao ganha 中", texto)
+            self.assertTrue(texto.rstrip().endswith("*"), "o arquivo saiu truncado")
+            self.assertEqual(texto.count("{"), 400)
+
+        self.assertTrue(
+            any("UTF-8" in linha for linha in logs),
+            f"a troca de codificacao tem de aparecer no log: {logs}",
+        )
+
+    def test_cancelling_stops_the_generation_before_writing_anything(self):
+        """A fase nao tinha checagem de `cancel_flag` nenhuma (ROADMAP 20.1)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            entrada = _pgn_com_comentarios(Path(tmp) / "grande.pgn", 600)
+            info = extract_comments_from_file(entrada)
+            mapa = {c: c.upper() for c in info["comments"]}
+            saida = Path(tmp) / "grande-BR.pgn"
+            bandeira = threading.Event()
+            bandeira.set()
+            logs = []
+
+            ok = generate_translated_pgn(
+                entrada,
+                str(saida),
+                mapa,
+                info["positions"],
+                logs.append,
+                cancel_flag=bandeira,
+            )
+
+            self.assertFalse(ok)
+            self.assertFalse(
+                saida.exists(),
+                "um arquivo cancelado no meio nao pode ficar em disco",
+            )
+
+        self.assertTrue(
+            any("cancelada" in linha.lower() for linha in logs),
+            f"o cancelamento tem de aparecer no log: {logs}",
+        )
+
+    def test_a_flag_that_is_not_set_generates_the_file(self):
+        """O cenario parte do valor que NAO e o padrao, e depois volta a ele."""
+        with tempfile.TemporaryDirectory() as tmp:
+            entrada = _pgn_com_comentarios(Path(tmp) / "g.pgn", 30)
+            info = extract_comments_from_file(entrada)
+            saida = Path(tmp) / "g-BR.pgn"
+
+            ok = generate_translated_pgn(
+                entrada,
+                str(saida),
+                {c: "x" for c in info["comments"]},
+                info["positions"],
+                cancel_flag=threading.Event(),
+            )
+
+            self.assertTrue(ok)
+            self.assertTrue(saida.exists())
+
+
+class ReadPgnOnceTests(unittest.TestCase):
+    """Cada PGN era lido quatro vezes por execucao (ROADMAP 20.2).
+
+    A deteccao de codificacao lia o arquivo inteiro em bytes, a extracao abria
+    de novo em modo texto, e a geracao repetia as duas. `read_pgn_text` le uma
+    vez e detecta nos bytes que leu.
+    """
+
+    def contar_leituras(self, alvo, acao):
+        real = open
+        leituras = []
+
+        def contando(path, mode="r", *args, **kwargs):
+            if os.path.abspath(str(path)) == os.path.abspath(alvo) and "r" in mode:
+                leituras.append(mode)
+            return real(path, mode, *args, **kwargs)
+
+        import builtins
+
+        builtins.open = contando
+        try:
+            resultado = acao()
+        finally:
+            builtins.open = real
+        return leituras, resultado
+
+    def test_the_extraction_opens_the_file_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = _pgn_com_comentarios(Path(tmp) / "game.pgn", 20)
+            leituras, info = self.contar_leituras(
+                pgn, lambda: extract_comments_from_file(pgn)
+            )
+
+        self.assertEqual(len(leituras), 1, f"leituras: {leituras}")
+        self.assertEqual(len(info["comments"]), 20)
+
+    def test_the_generation_does_not_reread_when_it_gets_the_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = _pgn_com_comentarios(Path(tmp) / "game.pgn", 20)
+            conteudo, enc = read_pgn_text(pgn)
+            info = extract_comments_from_content(conteudo)
+            saida = str(Path(tmp) / "game-BR.pgn")
+
+            leituras, ok = self.contar_leituras(
+                pgn,
+                lambda: generate_translated_pgn(
+                    pgn,
+                    saida,
+                    {c: c.upper() for c in info["comments"]},
+                    info["positions"],
+                    content=conteudo,
+                    encoding=enc,
+                ),
+            )
+
+            self.assertTrue(ok)
+            self.assertEqual(leituras, [], "o arquivo nao devia ser lido de novo")
+            self.assertIn("X" * 10, Path(saida).read_text(encoding="utf-8"))
+
+    def test_the_generation_still_reads_the_file_when_it_gets_nothing(self):
+        """O caminho antigo continua valendo: quem nao passa conteudo, le."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = _pgn_com_comentarios(Path(tmp) / "game.pgn", 5)
+            info = extract_comments_from_file(pgn)
+            saida = str(Path(tmp) / "game-BR.pgn")
+
+            leituras, ok = self.contar_leituras(
+                pgn,
+                lambda: generate_translated_pgn(
+                    pgn, saida, {c: "y" for c in info["comments"]}, info["positions"]
+                ),
+            )
+
+            self.assertTrue(ok)
+            self.assertEqual(len(leituras), 1)
+
+    def test_read_pgn_text_agrees_with_detect_plus_open(self):
+        """Sem mudanca de comportamento: o texto e a codificacao sao os mesmos.
+
+        As codificacoes cobertas sao as que as garantias E1-E4 protegem, e o
+        `\\r\\n` esta ali por 13.6: `read_pgn_text` nao pode traduzir fim de linha,
+        como o `open(..., newline='')` que ele substitui nao traduzia.
+        """
+        casos = {
+            "utf8.pgn": ('[Event "Ação"]\r\n\r\n1. e4 {Comentário} *\r\n', "utf-8"),
+            "bom.pgn": ('[Event "Ação"]\n\n1. e4 {ok} *\n', "utf-8-sig"),
+            "cp1252.pgn": ('[Event "Ação"]\n\n1. e4 {ok} *\n', "cp1252"),
+            "utf16.pgn": ('[Event "Ação"]\n\n1. e4 {ok} *\n', "utf-16"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for nome, (texto, codificacao) in casos.items():
+                caminho = Path(tmp) / nome
+                caminho.write_text(texto, encoding=codificacao, newline="")
+
+                esperado_enc = detect_encoding(str(caminho))
+                with open(
+                    str(caminho), "r", encoding=esperado_enc, errors="replace",
+                    newline="",
+                ) as handle:
+                    esperado = handle.read()
+
+                conteudo, enc = read_pgn_text(str(caminho))
+
+                self.assertEqual(enc, esperado_enc, nome)
+                self.assertEqual(conteudo, esperado, nome)
+
+    def test_detect_from_bytes_answers_like_detect_from_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            caminho = Path(tmp) / "x.pgn"
+            caminho.write_text("1. e4 {ação} *\n", encoding="cp1252")
+
+            self.assertEqual(
+                detect_encoding_from_bytes(caminho.read_bytes()),
+                detect_encoding(str(caminho)),
+            )
+
+
+class CheapFirstPassTests(unittest.TestCase):
+    """A primeira passada le so os textos (ROADMAP 20.4).
+
+    Posicao e contexto de leitura custam 174 ms dos 263 ms da extracao num PGN de
+    3,2 MB, e nao servem para nada antes da vez do arquivo.
+    """
+
+    def test_the_cheap_extraction_finds_the_same_texts(self):
+        conteudo = (
+            '[Event "T"]\n\n1. e4 {Primeiro} e5 {} 2. Nf3 {Segundo} ; nota\n'
+        )
+        completa = extract_comments_from_content(conteudo)
+        barata = extract_comment_texts(conteudo)
+
+        self.assertEqual(barata["comments"], completa["comments"])
+        self.assertEqual(
+            barata["semicolon_comments"], completa["semicolon_comments"]
+        )
+        self.assertEqual(barata["semicolon_comments"], 1)
+        self.assertNotIn("positions", barata)
+
+    def test_the_cheap_extraction_reports_the_encoding_and_survives_a_bad_file(self):
+        logs = []
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = Path(tmp) / "game.pgn"
+            pgn.write_text('[Event "T"]\n\n1. e4 {ok} *\n', encoding="utf-8")
+
+            info = extract_comment_texts_from_file(str(pgn), logs.append)
+            self.assertEqual(info["comments"], ["ok"])
+            self.assertTrue(
+                any("Codificacao detectada" in linha for linha in logs), logs
+            )
+
+            ausente = extract_comment_texts_from_file(
+                str(Path(tmp) / "nao-existe.pgn"), logs.append
+            )
+
+        self.assertEqual(ausente["comments"], [])
+        self.assertEqual(ausente["semicolon_comments"], 0)
+        self.assertTrue(any("[ERRO]" in linha for linha in logs), logs)
+
+    def test_known_texts_reuses_the_object_instead_of_a_second_equal_one(self):
+        """Ler o arquivo duas vezes nao pode fazer o texto viver duas vezes.
+
+        A segunda extracao devolve o MESMO objeto que a primeira passada guardou.
+        `assertEqual` passaria de qualquer jeito — o que este teste afirma e
+        identidade, que e o que decide se a memoria e uma copia ou um ponteiro
+        (ROADMAP 20.4).
+        """
+        conteudo = '[Event "T"]\n\n1. e4 {Primeiro} e5 {Segundo} *\n'
+        primeiro = extract_comment_texts(conteudo)["comments"][0]
+        conhecidos = {primeiro: primeiro}
+
+        com = extract_comments_from_content(conteudo, known_texts=conhecidos)
+        sem = extract_comments_from_content(conteudo)
+
+        self.assertIs(com["comments"][0], primeiro)
+        self.assertIs(com["positions"][0][2], primeiro)
+        self.assertIsNot(sem["comments"][0], primeiro)
+        # O que nao esta no mapa continua saindo como texto novo, e igual.
+        self.assertEqual(com["comments"][1], "Segundo")
+
+    def test_skipping_the_semicolon_count_does_not_change_the_comments(self):
+        conteudo = '[Event "T"]\n\n1. e4 {ok} ; nota\n'
+        com = extract_comments_from_content(conteudo)
+        sem = extract_comments_from_content(conteudo, count_semicolons=False)
+
+        self.assertEqual(sem["comments"], com["comments"])
+        self.assertEqual(sem["positions"], com["positions"])
+        self.assertEqual(com["semicolon_comments"], 1)
+        self.assertEqual(sem["semicolon_comments"], 0)
+
+
+class WorkerDeduplicatesTheBatchTests(unittest.TestCase):
+    """Duplicatas dentro do arquivo pagavam API (ROADMAP 20.3).
+
+    O cache so aprende a traducao depois da resposta, e o lote inteiro sai antes
+    dela: um capitulo com "Diagram" trinta vezes enviava as trinta.
+    """
+
+    PGN = (
+        '[Event "T"]\n\n'
+        "1. e4 {Diagram} e5 {Diagram} 2. Nf3 {Comentario unico} "
+        "Nc6 {Diagram} 3. Bb5 {Diagram} *\n"
+    )
+
+    def rodar(self, tmp_path, conteudo=None, nome="game.pgn"):
+        pgn = tmp_path / nome
+        pgn.write_text(conteudo or self.PGN, encoding="utf-8")
+        app = FakeApp(tmp_path / "cache.db")
+        enviados = []
+
+        def translate(text, *_args, **_kwargs):
+            enviados.append(text)
+            if " ||| " in text:
+                return " ||| ".join(f"[{p}]" for p in text.split(" ||| "))
+            return f"[{text}]"
+
+        originais = (
+            translation_worker.translate_text,
+            translation_worker.messagebox.showinfo,
+            translation_worker.messagebox.showwarning,
+        )
+        translation_worker.translate_text = translate
+        translation_worker.messagebox.showinfo = lambda *_a, **_k: None
+        translation_worker.messagebox.showwarning = lambda *_a, **_k: None
+        try:
+            translation_worker.run_translation(app, str(pgn), "pt", False)
+        finally:
+            (
+                translation_worker.translate_text,
+                translation_worker.messagebox.showinfo,
+                translation_worker.messagebox.showwarning,
+            ) = originais
+
+        return app, pgn, enviados
+
+    def test_the_repeated_comment_is_sent_to_the_api_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _app, _pgn, enviados = self.rodar(Path(tmp))
+
+        partes = [p for envio in enviados for p in envio.split(" ||| ")]
+        self.assertEqual(
+            partes.count("Diagram"),
+            1,
+            f"o comentario repetido foi enviado {partes.count('Diagram')} vezes: "
+            f"{enviados}",
+        )
+        self.assertEqual(partes.count("Comentario unico"), 1)
+
+    def test_every_occurrence_is_still_replaced_in_the_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _app, pgn, _enviados = self.rodar(Path(tmp))
+            saida = Path(str(pgn).replace("game.pgn", "game-BR.pgn"))
+            texto = saida.read_text(encoding="utf-8")
+
+        self.assertEqual(texto.count("{[Diagram]}"), 4)
+        self.assertIn("{[Comentario unico]}", texto)
+        self.assertNotIn("{Diagram}", texto)
+
+    def test_the_counters_account_for_every_comment(self):
+        """5 comentarios = 2 traduzidos + 3 repeticoes, e o log diz os tres.
+
+        Antes, o resumo mostrava "Total: 5" e "Novas: 2" e os outros tres nao
+        apareciam em contador nenhum: a segunda gravacao da mesma chave volta
+        "unchanged", que nao e contado em lugar nenhum.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _pgn, _enviados = self.rodar(Path(tmp))
+
+        self.assertTrue(
+            any("Total de comentarios detectados: 5" in l for l in app.logs), app.logs
+        )
+        self.assertTrue(
+            any(
+                "Comentarios repetidos dentro do proprio arquivo: 3" in l
+                for l in app.logs
+            ),
+            app.logs,
+        )
+        self.assertTrue(
+            any("Comentarios novos traduzidos nesta execucao: 2" in l for l in app.logs),
+            app.logs,
+        )
+        self.assertTrue(
+            any(
+                "Comentarios repetidos no proprio arquivo (nao reenviados): 3" in l
+                for l in app.logs
+            ),
+            app.logs,
+        )
+
+    def test_a_file_without_repetition_says_nothing_about_repetition(self):
+        """O mesmo criterio das linhas de lances e de `;`: so quando existe."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _pgn, _enviados = self.rodar(
+                Path(tmp),
+                conteudo='[Event "T"]\n\n1. e4 {Um} e5 {Outro} *\n',
+            )
+
+        self.assertFalse(
+            any("repetido" in linha.lower() for linha in app.logs), app.logs
+        )
+
+    def test_the_progress_bar_reaches_the_end_while_processing(self):
+        """Com o denominador antigo (5) e dois passos, a barra parava em 40%.
+
+        O `finally` poe a barra em 100% de qualquer jeito, entao o que este teste
+        olha e o ultimo valor ANTES dele.
+        """
+        valores = []
+
+        class ProgressoQueGrava(FakeProgress):
+            def set(self, value):
+                valores.append(value)
+                super().set(value)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = Path(tmp) / "game.pgn"
+            pgn.write_text(self.PGN, encoding="utf-8")
+            app = FakeApp(Path(tmp) / "cache.db")
+            app.progress = ProgressoQueGrava()
+
+            def translate(text, *_args, **_kwargs):
+                if " ||| " in text:
+                    return " ||| ".join(f"[{p}]" for p in text.split(" ||| "))
+                return f"[{text}]"
+
+            originais = (
+                translation_worker.translate_text,
+                translation_worker.messagebox.showinfo,
+            )
+            translation_worker.translate_text = translate
+            translation_worker.messagebox.showinfo = lambda *_a, **_k: None
+            try:
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+            finally:
+                (
+                    translation_worker.translate_text,
+                    translation_worker.messagebox.showinfo,
+                ) = originais
+
+        self.assertEqual(
+            valores[-1], 1.0, "o `finally` sempre fecha a barra numa execucao limpa"
+        )
+        self.assertIn(
+            1.0,
+            valores[:-1],
+            f"a barra nunca chegou ao fim durante o processamento: {valores}",
+        )
+
+    def test_the_same_comment_in_two_files_still_comes_from_the_cache(self):
+        """A deduplicacao e por arquivo; entre arquivos quem serve e o cache."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for nome in ("a.pgn", "b.pgn"):
+                (base / nome).write_text(
+                    '[Event "T"]\n\n1. e4 {Diagram} *\n', encoding="utf-8"
+                )
+            app = FakeApp(base / "cache.db")
+            enviados = []
+
+            def translate(text, *_args, **_kwargs):
+                enviados.append(text)
+                return f"[{text}]"
+
+            originais = (
+                translation_worker.translate_text,
+                translation_worker.messagebox.showinfo,
+            )
+            translation_worker.translate_text = translate
+            translation_worker.messagebox.showinfo = lambda *_a, **_k: None
+            try:
+                translation_worker.run_translation(app, str(base), "pt", False)
+            finally:
+                (
+                    translation_worker.translate_text,
+                    translation_worker.messagebox.showinfo,
+                ) = originais
+
+        self.assertEqual(enviados, ["Diagram"])
+        self.assertTrue(
+            any("Traducoes reutilizadas do cache: 1" in l for l in app.logs), app.logs
+        )
+
+
+class WorkerReleasesEachFileTests(unittest.TestCase):
+    """`info_by_file` segurava todos os PGN a execucao inteira (ROADMAP 20.4)."""
+
+    def rodar(self, base, arquivos):
+        app = FakeApp(base / "cache.db")
+
+        def translate(text, *_args, **_kwargs):
+            if " ||| " in text:
+                return " ||| ".join(f"[{p}]" for p in text.split(" ||| "))
+            return f"[{text}]"
+
+        originais = (
+            translation_worker.translate_text,
+            translation_worker.messagebox.showinfo,
+        )
+        translation_worker.translate_text = translate
+        translation_worker.messagebox.showinfo = lambda *_a, **_k: None
+        try:
+            translation_worker.run_translation(app, str(base), "pt", False)
+        finally:
+            (
+                translation_worker.translate_text,
+                translation_worker.messagebox.showinfo,
+            ) = originais
+        return app
+
+    def test_the_positions_are_extracted_after_the_api_phase_of_each_file(self):
+        """O sinal observavel de "processar e soltar por arquivo".
+
+        Antes, a extracao completa de TODOS os arquivos acontecia antes de a
+        primeira linha "Processando arquivo" existir, e o resultado ficava
+        guardado ate o fim. Agora cada arquivo e lido na vez dele e **depois** da
+        fase da API: o conteudo so serve para gravar, e a fase da API dura
+        minutos — atravessa-la segurando um livro de 40 MB e o custo que 20.4
+        existe para nao pagar.
+        """
+        ordem = []
+        original = pgn_utils.extract_comments_from_content
+
+        def registrando(*args, **kwargs):
+            ordem.append("extraiu")
+            return original(*args, **kwargs)
+
+        # Os DOIS nomes: o worker importou a funcao no import dele, entao trocar
+        # so a de `pgn_utils` deixaria passar uma primeira passada que voltasse a
+        # chamar `extract_comments_from_file` — que e a forma antiga, e e ela que
+        # este teste tem de pegar.
+        for modulo in (pgn_utils, translation_worker):
+            setattr(modulo, "extract_comments_from_content", registrando)
+            self.addCleanup(
+                setattr, modulo, "extract_comments_from_content", original
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for nome in ("a.pgn", "b.pgn", "c.pgn"):
+                _pgn_com_comentarios(base / nome, 3, prefixo=nome)
+
+            app = FakeApp(base / "cache.db")
+
+            def translate(text, *_args, **_kwargs):
+                ordem.append("api")
+                if " ||| " in text:
+                    return " ||| ".join(f"[{p}]" for p in text.split(" ||| "))
+                return f"[{text}]"
+
+            originais = (
+                translation_worker.translate_text,
+                translation_worker.messagebox.showinfo,
+            )
+            translation_worker.translate_text = translate
+            translation_worker.messagebox.showinfo = lambda *_a, **_k: None
+            try:
+                translation_worker.run_translation(app, str(base), "pt", False)
+            finally:
+                (
+                    translation_worker.translate_text,
+                    translation_worker.messagebox.showinfo,
+                ) = originais
+
+        self.assertEqual(ordem.count("extraiu"), 3)
+        self.assertEqual(
+            ordem,
+            ["api", "extraiu", "api", "extraiu", "api", "extraiu"],
+            "cada arquivo devia ser lido na vez dele, depois da fase da API",
+        )
+
+    def test_the_run_does_not_hold_every_file_in_memory(self):
+        """A outra familia que mutacao nao pega: correto e gordo.
+
+        Sete arquivos de 1.200 comentarios com so 120 textos distintos cada. A
+        forma antiga guardava os 8.400 comentarios, as 8.400 posicoes e as 8.400
+        ocorrencias de todos eles ate o fim; medido nesta maquina, 8,6 MB de pico
+        contra 2,3 MB. O limite e generoso — o que ele distingue e "guarda tudo"
+        de "guarda um arquivo".
+        """
+        import tracemalloc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for indice in range(7):
+                partes = ['[Event "T"]\n\n']
+                for i in range(1200):
+                    texto = f"comentario {i % 120} " + "x" * 200
+                    partes.append(f"{i % 60 + 1}. Nf3 {{{texto}}} Nf6 ")
+                    if i % 20 == 19:
+                        partes.append("\n")
+                partes.append("1-0\n")
+                (base / f"f{indice}.pgn").write_text(
+                    "".join(partes), encoding="utf-8", newline=""
+                )
+
+            tracemalloc.start()
+            app = self.rodar(base, 7)
+            pico = tracemalloc.get_traced_memory()[1]
+            tracemalloc.stop()
+
+        self.assertTrue(any("Total de comentarios: 8400" in l for l in app.logs), app.logs)
+        self.assertLess(
+            pico,
+            5_000_000,
+            f"pico de {pico/1e6:.1f} MB; a forma antiga chegava a 8,6 MB",
+        )
+
+
+class SpellingIndexTests(unittest.TestCase):
+    """O `spelling.ssp` era reparseado a cada uso (ROADMAP 20.5).
+
+    985 mil linhas, 1,0 s e 72 MB de pico para corrigir cinco tags de um PGN de
+    20 KB. O indice derivado abre em 29 ms — 27 deles conferindo o hash do
+    fonte — e consulta por chave.
+    """
+
+    SSP = (
+        '@PLAYER ",."\n'
+        "Kasparov, Garry\n"
+        "=Kasparov\n"
+        "=Kasparow\n"
+        '%Prefix "Van " "van "\n'
+        '@SITE ""\n'
+        "Linares ESP\n"
+        "=Linares\n"
+        '%Suffix " ESP" " Espanha"\n'
+        '@PLAYER ""\n'
+        "Karpov, Anatoly\n"
+        "=Karpov\n"
+        "=Kasparov\n"
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.fonte = self.base / "spelling.ssp"
+        self.fonte.write_text(self.SSP, encoding="utf-8")
+        self.db = self.base / SPELLING_DB_FILENAME
+
+    def abrir(self, **kwargs):
+        dados = load_spelling_data(str(self.fonte), str(self.db), **kwargs)
+        self.addCleanup(close_spelling_data, dados)
+        return dados
+
+    def test_the_index_sits_next_to_the_source(self):
+        """Junto do fonte, e nao numa pasta de cache do sistema.
+
+        E a mesma escolha do `glossario.db`: apagar um e obvio quando se apaga o
+        outro, e ninguem procura por um cache invisivel para forcar a
+        reconstrucao.
+        """
+        self.assertEqual(
+            default_spelling_db_path(str(self.fonte)), str(self.db)
+        )
+
+    def test_the_index_answers_exactly_like_the_dictionary(self):
+        dicionario = parse_spelling_file(str(self.fonte))
+        indice = self.abrir()
+
+        casos = [
+            ("Kasparov", "PLAYER"),
+            ("kasparow", "PLAYER"),
+            ("Karpov", "PLAYER"),
+            ("Van der Wiel", "PLAYER"),
+            ("desconhecido", "PLAYER"),
+            ("Linares", "SITE"),
+            ("Linares ESP", "SITE"),
+            ("qualquer", "EVENT"),
+        ]
+        for valor, secao in casos:
+            self.assertEqual(
+                correct_spelling_value(valor, secao, indice),
+                correct_spelling_value(valor, secao, dicionario),
+                f"{secao}: {valor!r}",
+            )
+
+    def test_a_repeated_section_keeps_appending_in_the_index(self):
+        """A semantica de 17.10, atravessada pelo indice.
+
+        Um segundo bloco `@PLAYER` ACRESCENTA; e a chave repetida (`=Kasparov`
+        nos dois blocos) continua valendo pelo PRIMEIRO. Sem o `INSERT OR
+        IGNORE`, o bloco de baixo passaria a sobrescrever o de cima.
+        """
+        indice = self.abrir()
+
+        self.assertEqual(indice.entry("PLAYER", "kasparov"), "Kasparov, Garry")
+        self.assertEqual(indice.entry("PLAYER", "karpov"), "Karpov, Anatoly")
+
+    def test_the_section_parameters_come_from_the_last_block(self):
+        indice = self.abrir()
+        dicionario = parse_spelling_file(str(self.fonte))
+
+        self.assertEqual(
+            indice.get("PLAYER")["ignore_chars"],
+            dicionario["PLAYER"]["ignore_chars"],
+        )
+        self.assertEqual(
+            indice.get("PLAYER")["prefix_rules"],
+            dicionario["PLAYER"]["prefix_rules"],
+        )
+        self.assertEqual(
+            indice.get("SITE")["suffix_rules"], dicionario["SITE"]["suffix_rules"]
+        )
+
+    def test_the_second_use_does_not_read_the_source_again(self):
+        """O ponto do item: o custo de 1,0 s acontece uma vez, e nao por uso."""
+        self.abrir()
+
+        leituras = []
+        original = pgn_spellcheck.iter_spelling_records
+
+        def contando(*args, **kwargs):
+            leituras.append(args)
+            return original(*args, **kwargs)
+
+        pgn_spellcheck.iter_spelling_records = contando
+        self.addCleanup(
+            setattr, pgn_spellcheck, "iter_spelling_records", original
+        )
+
+        indice = self.abrir()
+
+        self.assertEqual(leituras, [], "o indice valido nao devia ser reconstruido")
+        self.assertEqual(indice.entry("PLAYER", "kasparov"), "Kasparov, Garry")
+
+    def test_a_changed_source_rebuilds_the_index(self):
+        self.abrir()
+        self.assertFalse(spelling_index_is_stale(str(self.fonte), str(self.db)))
+
+        self.fonte.write_text(
+            '@PLAYER ""\nTal, Mihail\n=Tal\n', encoding="utf-8"
+        )
+
+        self.assertTrue(spelling_index_is_stale(str(self.fonte), str(self.db)))
+        indice = self.abrir()
+        self.assertEqual(indice.entry("PLAYER", "tal"), "Tal, Mihail")
+        self.assertIsNone(indice.entry("PLAYER", "kasparov"))
+
+    def test_an_index_without_the_final_mark_is_rebuilt(self):
+        """Construcao interrompida: a marca e gravada por ultimo, de proposito."""
+        build_spelling_index(str(self.fonte), str(self.db))
+        conn = sqlite3.connect(str(self.db))
+        try:
+            conn.execute("DELETE FROM spelling_metadata WHERE key = 'source_hash'")
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertTrue(spelling_index_is_stale(str(self.fonte), str(self.db)))
+
+    def test_an_index_from_another_schema_is_rebuilt(self):
+        build_spelling_index(str(self.fonte), str(self.db))
+        conn = sqlite3.connect(str(self.db))
+        try:
+            conn.execute(
+                "UPDATE spelling_metadata SET value = '0' WHERE key = 'schema_version'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertTrue(spelling_index_is_stale(str(self.fonte), str(self.db)))
+
+    def test_a_corrupt_index_is_rebuilt_instead_of_breaking_the_button(self):
+        self.db.write_bytes(b"isto nao e um banco sqlite")
+
+        self.assertTrue(spelling_index_is_stale(str(self.fonte), str(self.db)))
+        indice = self.abrir()
+        self.assertEqual(indice.entry("PLAYER", "kasparov"), "Kasparov, Garry")
+
+    def test_it_falls_back_to_the_dictionary_when_the_index_cannot_be_used(self):
+        """Disco sem permissao de escrita: o botao continua funcionando.
+
+        O log tem de dizer o motivo — degradar em silencio faria a normalizacao
+        custar 1,0 s por arquivo sem que nada explicasse por que.
+        """
+        logs = []
+        original = pgn_spellcheck.sqlite3.connect
+
+        def recusando(*_args, **_kwargs):
+            raise sqlite3.OperationalError("unable to open database file")
+
+        pgn_spellcheck.sqlite3.connect = recusando
+        try:
+            dados = load_spelling_data(
+                str(self.fonte), str(self.db), log_message=logs.append
+            )
+        finally:
+            pgn_spellcheck.sqlite3.connect = original
+
+        self.assertIsInstance(dados, dict)
+        self.assertEqual(
+            correct_spelling_value("Kasparov", "PLAYER", dados), "Kasparov, Garry"
+        )
+        self.assertTrue(any("[AVISO]" in linha for linha in logs), logs)
+
+    def test_use_index_false_never_touches_the_disk(self):
+        dados = load_spelling_data(str(self.fonte), str(self.db), use_index=False)
+
+        self.assertIsInstance(dados, dict)
+        self.assertFalse(self.db.exists())
+
+    def test_the_index_starts_from_scratch_and_forgets_what_left_the_source(self):
+        indice = self.abrir()
+        self.assertEqual(indice.entry("PLAYER", "kasparow"), "Kasparov, Garry")
+        close_spelling_data(indice)
+
+        self.fonte.write_text(
+            '@PLAYER ",."\nKasparov, Garry\n=Kasparov\n', encoding="utf-8"
+        )
+        indice = self.abrir()
+
+        self.assertIsNone(
+            indice.entry("PLAYER", "kasparow"),
+            "o apelido saiu do arquivo e nao pode sobreviver no indice",
+        )
+
+    def test_the_normalizer_uses_the_index_and_closes_it(self):
+        """No Windows, um `spelling.db` preso ao processo nao pode ser trocado."""
+        pgn = self.base / "game.pgn"
+        pgn.write_text('[White "Kasparov"]\n\n1. e4 *\n', encoding="utf-8")
+        logs = []
+
+        stats = normalize_pgn_metadata_path(
+            str(self.base), spelling_path=str(self.fonte), log_message=logs.append
+        )
+
+        self.assertEqual(stats["changed_files"], 1)
+        self.assertTrue(self.db.exists())
+        saida = Path(stats["outputs"][0]).read_text(encoding="utf-8")
+        self.assertIn('[White "Kasparov, Garry"]', saida)
+        # Se a conexao tivesse ficado aberta, o `os.remove` levantaria aqui.
+        os.remove(self.db)
+
+    def test_the_records_are_a_stream_and_not_a_list(self):
+        """O gerador e o que mantem o pico de memoria baixo na construcao."""
+        registros = iter_spelling_records(str(self.fonte))
+
+        self.assertTrue(hasattr(registros, "__next__"))
+        self.assertEqual(next(registros), ("section", "PLAYER", ",.", None))
+
+
+class GlossaryOrderingKeyTests(unittest.TestCase):
+    """A chave do cache de ordenacao era O(n) por consulta (ROADMAP 20.6).
+
+    Uma tupla de 7.334 elementos montada e hasheada a cada tecla do editor:
+    1,75 ms dos 9,15 ms que uma tecla custava. Com o numero de versao, 0,0002 ms.
+    """
+
+    def test_a_loaded_list_has_a_constant_sized_key(self):
+        regras = versioned_rules([(f"palavra {i}", f"outra {i}") for i in range(5000)])
+
+        chave = glossario._ordered_rules_cache_key(regras)
+
+        self.assertEqual(len(chave), 2, "a chave nao pode crescer com as regras")
+        self.assertIs(chave[0], VersionedRules)
+
+    def test_two_loads_of_the_same_content_do_not_share_the_entry(self):
+        pares = [("a", "b"), ("cc", "dd")]
+        primeira = versioned_rules(pares)
+        segunda = versioned_rules(pares)
+
+        self.assertNotEqual(
+            glossario._ordered_rules_cache_key(primeira),
+            glossario._ordered_rules_cache_key(segunda),
+        )
+        # E as duas continuam recebendo a MESMA ordem: a chave nova custa uma
+        # reordenacao, nunca uma resposta errada.
+        self.assertEqual(
+            order_rules_by_specificity(primeira),
+            order_rules_by_specificity(segunda),
+        )
+
+    def test_mutating_the_list_invalidates_the_cached_order(self):
+        """O modo de falha que a chave por conteudo nao tinha.
+
+        Uma lista marcada por identidade que mude no lugar continuaria valendo
+        como a mesma, e a ordem devolvida traria regras que nao estao mais nela.
+        Cada mutacao renova a versao.
+        """
+        regras = versioned_rules([("curta", "x")])
+        self.assertEqual(order_rules_by_specificity(regras), [("curta", "x")])
+
+        regras.append(("uma regra bem mais longa", "y"))
+
+        self.assertEqual(
+            order_rules_by_specificity(regras),
+            [("uma regra bem mais longa", "y"), ("curta", "x")],
+        )
+
+    def test_every_mutation_renews_the_version(self):
+        regras = versioned_rules([("a", "b"), ("cc", "dd"), ("eee", "fff")])
+        vistas = {regras.version}
+
+        for mutacao in (
+            lambda r: r.append(("z", "z")),
+            lambda r: r.extend([("y", "y")]),
+            lambda r: r.insert(0, ("x", "x")),
+            lambda r: r.remove(("x", "x")),
+            lambda r: r.pop(),
+            lambda r: r.sort(),
+            lambda r: r.reverse(),
+            lambda r: r.clear(),
+            lambda r: r.__setitem__(0, ("w", "w")),
+            lambda r: r.__delitem__(0),
+            lambda r: r.__iadd__([("v", "v")]),
+            lambda r: r.__imul__(2),
+        ):
+            antes = regras.version
+            if not regras:
+                regras.extend([("a", "b"), ("cc", "dd")])
+            mutacao(regras)
+            self.assertNotEqual(
+                regras.version, antes, f"{mutacao} nao renovou a versao"
+            )
+            self.assertNotIn(regras.version, vistas)
+            vistas.add(regras.version)
+
+    def test_a_plain_list_still_gets_the_content_key(self):
+        """Uma lista literal — de teste, ou escrita a mao — continua valendo."""
+        chave = glossario._ordered_rules_cache_key([("a", "b"), ("cc", "dd", 5)])
+
+        self.assertEqual(chave, (("a", "b", 0), ("cc", "dd", 5)))
+
+    def test_the_loaders_hand_out_versioned_lists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            arquivo = Path(tmp) / "Substituicoes.txt"
+            arquivo.write_text(
+                "substituicoes = [\n"
+                "    ('knight', 'cavalo', 'suggestion', 0, '*'),\n"
+                "]\n",
+                encoding="utf-8",
+            )
+
+            regras = load_interactive_substitutions(str(arquivo))
+
+        self.assertIsInstance(regras, VersionedRules)
+        self.assertEqual(len(glossario._ordered_rules_cache_key(regras)), 2)
+
+    def test_the_suggestions_are_the_same_with_and_without_the_version(self):
+        pares = [
+            ("knight", "cavalo"),
+            ("the knight on f3", "o cavalo em f3"),
+            ("rook", "torre"),
+        ]
+        texto = "The knight on f3 and the rook are placed."
+
+        self.assertEqual(
+            find_glossary_suggestions(texto, versioned_rules(pares)),
+            find_glossary_suggestions(texto, list(pares)),
+        )
 
 
 if __name__ == "__main__":

@@ -91,7 +91,12 @@ class HistoryWindow:
         self.win.geometry("980x560")
         self.win.minsize(820, 430)
         self.win.transient(self.editor.win)
-        bring_window_to_front(self.win, self.editor.win, maximize=True)
+        # `maximize=False`, e e a mesma decisao que o docstring da classe explica.
+        # Esta janela e modeless PARA QUE a lista principal continue clicavel
+        # (garantia R3) — e ela abria cobrindo a tela inteira, tapando exatamente
+        # a lista que deveria continuar acessivel. Maximizar anulava na tela o que
+        # o `transient` sem `grab_set` garante no codigo.
+        bring_window_to_front(self.win, self.editor.win, maximize=False)
         self.win.columnconfigure(1, weight=1)
         self.win.rowconfigure(1, weight=1)
 
