@@ -11,20 +11,27 @@ thread de trabalho. Esta janela recebe texto pronto — e por isso ela nao tem
 nenhuma consulta, nenhum `initialize_database` e nenhum caminho de erro de banco.
 """
 
+import csv
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from .editor_common import OK_TEXT_COLOR
+from .editor_widgets import flash_message
 from .window_utils import bring_window_to_front
 
 
 class StatsWindow:
     """Mostra o relatorio de estatisticas e deixa copia-lo ou salva-lo."""
 
-    def __init__(self, app, report):
+    def __init__(self, app, report, tables=()):
         self.app = app
         self.report = report
+        # `[(titulo, cabecalho, linhas)]`, montado por `db_tools.stats_tables`.
+        # Vazio quando quem abre a janela nao tem tabela nenhuma para dar — o
+        # botao de CSV some junto, em vez de salvar um arquivo com nada dentro.
+        self.tables = list(tables)
 
         self.win = ctk.CTkToplevel(app.root)
         self.win.title("Estatisticas do Banco de Dados")
@@ -46,11 +53,24 @@ class StatsWindow:
         self.text.grid(row=0, column=0, sticky="nsew", padx=12, pady=(12, 6))
         self.text.insert("1.0", report)
         self.text.bind("<Key>", self._block_typing)
+        # Os eventos VIRTUAIS, alem das teclas (ROADMAP 22.12). O `<Key>` acima
+        # deixava passar qualquer combinacao com Control, e os bindings de classe
+        # do Tk mapeiam sete delas para EDITAR: Ctrl+V cola, Ctrl+X recorta,
+        # Ctrl+K apaga ate o fim da linha, Ctrl+D apaga o caractere, Ctrl+O abre
+        # linha, Ctrl+T transpoe e Ctrl+H apaga para tras. Um relatorio editavel
+        # vira um numero diferente do que o banco disse, e ninguem distingue os
+        # dois num print de tela.
+        #
+        # Barrar aqui, e nao ampliar a lista de teclas: o Tk faz a edicao pelo
+        # evento virtual, entao e nele que a decisao pertence — uma versao futura
+        # do Tk que mapeie outra tecla para `<<Paste>>` continua barrada.
+        for evento in ("<<Paste>>", "<<Cut>>", "<<Clear>>", "<<Undo>>", "<<Redo>>"):
+            self.text.bind(evento, lambda _event: "break")
 
         actions = ctk.CTkFrame(self.win, fg_color="transparent")
         actions.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
 
-        self.msg_label = ctk.CTkLabel(actions, text="", text_color="#16a34a")
+        self.msg_label = ctk.CTkLabel(actions, text="", text_color=OK_TEXT_COLOR)
         self.msg_label.pack(side=tk.LEFT)
 
         self.btn_close = ctk.CTkButton(
@@ -61,10 +81,28 @@ class StatsWindow:
             actions, text="Salvar .txt", width=110, command=self.save_report
         )
         self.btn_save.pack(side=tk.RIGHT, padx=(6, 0))
+        # O `.txt` e para ler; o CSV e para a planilha (ROADMAP 22.12). As tres
+        # tabelas do relatorio — progresso por obra, palavras por par e
+        # atividade por dia — sao justamente o que um tradutor cola num
+        # orcamento, e do texto corrido elas so saem a mao.
+        self.btn_save_csv = ctk.CTkButton(
+            actions, text="Salvar CSV", width=110, command=self.save_csv
+        )
+        if self.tables:
+            self.btn_save_csv.pack(side=tk.RIGHT, padx=(6, 0))
         self.btn_copy = ctk.CTkButton(
             actions, text="Copiar", width=100, command=self.copy_report
         )
         self.btn_copy.pack(side=tk.RIGHT)
+
+    # As unicas combinacoes com Control que a janela deixa passar: copiar e
+    # selecionar tudo. Era uma lista NEGRA — "qualquer coisa com Control" — e
+    # lista negra e a forma errada de decidir isto: bastava o Tk mapear uma tecla
+    # a mais para a janela "nao editavel" passar a aceitar edicao (ROADMAP 22.12).
+    COPY_KEYS = {"c", "C", "a", "A", "Insert"}
+    NAVIGATION_KEYS = {
+        "Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next",
+    }
 
     def _block_typing(self, event):
         """Deixa passar o que copia e navega; barra o que altera.
@@ -75,10 +113,8 @@ class StatsWindow:
         distinguiria os dois num print de tela.
         """
         if event.state & 0x4:  # Control
-            return None
-        if event.keysym in {
-            "Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next",
-        }:
+            return None if event.keysym in self.COPY_KEYS else "break"
+        if event.keysym in self.NAVIGATION_KEYS:
             return None
         return "break"
 
@@ -105,6 +141,48 @@ class StatsWindow:
             return
         self._flash("Relatorio salvo")
 
+    def save_csv(self):
+        """Grava as tres tabelas num CSV so (ROADMAP 22.12).
+
+        Um arquivo, e nao tres: elas sao lidas juntas ("quanto falta do capitulo
+        7 e quantas palavras isso da"), e tres seletores de arquivo seguidos para
+        um clique so seria pior do que a linha em branco que as separa. Cada
+        bloco comeca por uma linha com o nome da tabela, que e o que permite
+        acha-las depois de colar tudo numa planilha.
+
+        `utf-8-sig` pelo mesmo motivo do `.txt` e do CSV de traducoes: o Excel do
+        Windows le UTF-8 sem BOM como ANSI, e ha acento em nome de arquivo e em
+        rotulo de idioma.
+        """
+        caminho = filedialog.asksaveasfilename(
+            title="Salvar estatisticas em CSV",
+            defaultextension=".csv",
+            filetypes=[("Arquivos CSV", "*.csv"), ("Todos os arquivos", "*.*")],
+        )
+        if not caminho:
+            return None
+        try:
+            with open(caminho, "w", encoding="utf-8-sig", newline="") as arquivo:
+                escritor = csv.writer(arquivo)
+                for indice, (titulo, cabecalho, linhas) in enumerate(self.tables):
+                    if indice:
+                        escritor.writerow([])
+                    escritor.writerow([titulo])
+                    escritor.writerow(cabecalho)
+                    escritor.writerows(linhas)
+        except OSError as exc:
+            messagebox.showerror("Erro", f"Nao foi possivel salvar:\n{exc}")
+            return None
+        self._flash(f"{len(self.tables)} tabela(s) salvas em CSV")
+        return caminho
+
     def _flash(self, texto):
-        self.msg_label.configure(text=texto)
-        self.win.after(2000, lambda: self.msg_label.configure(text=""))
+        """A mesma funcao dos dois editores, e nao um terceiro timer.
+
+        Esta janela tinha a copia do padrao que o ROADMAP 22.6 consertou: o
+        `after` era agendado sem cancelar o anterior, entao clicar "Copiar" e
+        "Salvar .txt" em seguida fazia o timer do primeiro apagar a mensagem do
+        segundo. Uma copia que ninguem lembraria de corrigir junto e exatamente o
+        que o item 3.2 do ROADMAP descreve.
+        """
+        flash_message(self.msg_label, self.win, texto)

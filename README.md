@@ -282,10 +282,18 @@ O que o revisor ganhou para aguentar um livro inteiro:
 - **"Rejeitada" e "Em dúvida", com nota do revisor** — "voltar aqui com o autor" nao
   cabia em pendente/verificada. Os dois sao filtros da lista, e verificar a linha
   limpa o status;
-- **selecao em lote**: marcar a pagina (ou linhas de paginas diferentes), verificar
-  so o que esta marcado ou exportar so isso;
+- **selecao em lote**: marcar a pagina, marcar TUDO o que o filtro mostra (ou
+  linhas de paginas diferentes), verificar so o que esta marcado ou exportar so
+  isso. A confirmacao diz quantas das marcadas estao fora dos filtros atuais;
 - **previa com diff pintado** em "Aplicar todas": as faixas trocadas aparecem
-  destacadas nos dois lados, com a contagem de trechos alterados.
+  destacadas nos dois lados, com a contagem de trechos alterados. O historico da
+  linha usa a mesma pintura, e diz em quantos trechos cada versao mexeu;
+- **`F1` (ou o "?" do rodape) lista os atalhos e os gestos de mouse.** Sao vinte
+  atalhos e tres gestos, e nenhum deles aparece no rotulo de um botao:
+  `Ctrl+Shift+Enter` verifica e ja vai para a proxima, `Ctrl+PageUp/PageDown`
+  viram pagina, `Ctrl+roda` e `Ctrl+±` mudam o tamanho da fonte, duplo clique
+  numa sugestao a aplica, e o rodape "Lido em:" abre a lista de todas as
+  posicoes em que aquele comentario aparece.
 
 ## Contagem de palavras, estatisticas e TMX
 

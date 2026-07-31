@@ -8,6 +8,7 @@ dela, e o que ela precisa do editor esta declarado num lugar so (ROADMAP 3.1).
 
 from contextlib import closing
 import tkinter as tk
+from tkinter import messagebox
 
 import customtkinter as ctk
 
@@ -18,6 +19,7 @@ from .database import (
     update_translation_by_id,
 )
 from .editor_common import (
+    MUTED_TEXT_COLOR,
     ROW_COLOR,
     ROW_HOVER_COLOR,
     ROW_TEXT_COLOR,
@@ -26,6 +28,7 @@ from .editor_common import (
     format_timestamp,
     preview,
 )
+from .editor_text import diff_spans
 from .editor_widgets import render_row_buttons
 from .window_utils import bring_window_to_front
 
@@ -57,6 +60,24 @@ def history_action_label(action):
 
 def history_status_label(value):
     return "verificada" if value == 1 else "pendente"
+
+
+def history_change_summary(previous_translation, new_translation):
+    """"3 trecho(s)" ou "sem mudanca no texto", para o rotulo da linha.
+
+    A lista dizia QUANDO e QUE TIPO de acao, e nunca o TAMANHO da mudanca — e
+    procurar a versao a restaurar entre 100 linhas iguais e justamente escolher
+    pelo tamanho (ROADMAP 22.12). "Verificacao" e "Regras automaticas" produzem
+    entradas com o mesmo rotulo, e uma delas nao mexeu no texto.
+
+    Sai do MESMO `diff_spans` que pinta os dois painis ao lado, e nao de uma
+    segunda conta: dois criterios de "o que mudou" acabariam divergindo, e a
+    lista contradiria a pintura do detalhe.
+    """
+    _antes, depois = diff_spans(previous_translation or "", new_translation or "")
+    if not depois:
+        return "sem mudanca no texto"
+    return f"{len(depois)} trecho(s)"
 
 
 class HistoryWindow:
@@ -107,8 +128,21 @@ class HistoryWindow:
             anchor="w",
         ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 6))
 
-        self.history_list = ctk.CTkScrollableFrame(self.win, width=300)
-        self.history_list.grid(row=1, column=0, sticky="nsw", padx=(10, 6), pady=(0, 10))
+        lista = ctk.CTkFrame(self.win, fg_color="transparent")
+        lista.grid(row=1, column=0, sticky="nsw", padx=(10, 6), pady=(0, 10))
+        lista.rowconfigure(0, weight=1)
+
+        self.history_list = ctk.CTkScrollableFrame(lista, width=300)
+        self.history_list.grid(row=0, column=0, sticky="nsew")
+
+        # O corte em 100 versoes era silencioso: a lista simplesmente terminava,
+        # e uma linha muito trabalhada parecia ter comecado no meio (ROADMAP
+        # 22.12). O rotulo so aparece quando ha corte — dize-lo em toda linha com
+        # tres edicoes seria ruido.
+        self.limit_label = ctk.CTkLabel(
+            lista, text="", anchor="w", text_color=MUTED_TEXT_COLOR
+        )
+        self.limit_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
 
         detail_frame = ctk.CTkFrame(self.win, corner_radius=8)
         detail_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 10), pady=(0, 10))
@@ -134,7 +168,12 @@ class HistoryWindow:
         self.new_text.grid(row=2, column=1, sticky="nsew", padx=(5, 10), pady=(0, 10))
 
         actions = ctk.CTkFrame(detail_frame, fg_color="transparent")
-        actions.grid(row=3, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
+        actions.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
+
+        self.diff_label = ctk.CTkLabel(
+            actions, text="", anchor="w", text_color=MUTED_TEXT_COLOR
+        )
+        self.diff_label.pack(side=tk.LEFT)
 
         self.btn_restore_previous = ctk.CTkButton(
             actions,
@@ -173,6 +212,18 @@ class HistoryWindow:
             self.build_row_button,
             "Nenhuma alteracao registrada.",
         )
+        # `== HISTORY_LIMIT` e o unico sinal que existe de que ha mais: a consulta
+        # devolve no maximo o limite, e contar o total custaria uma segunda
+        # varredura de uma tabela que cresce com cada edicao do acervo. Uma linha
+        # com exatamente 100 versoes vera o aviso sem ter sido cortada — e o erro
+        # barato: ele diz o que a lista mostra, e nao afirma nada sobre o resto.
+        self.limit_label.configure(
+            text=(
+                f"Mostrando as {HISTORY_LIMIT} mais recentes."
+                if len(self.rows) >= HISTORY_LIMIT
+                else ""
+            )
+        )
 
         if not self.rows:
             self.clear_detail()
@@ -180,14 +231,15 @@ class HistoryWindow:
         self.select(0)
 
     def build_row_button(self, parent, index, row):
-        _id, action, _prev, _new, previous_verified, new_verified, created_at = row
+        _id, action, prev, new, previous_verified, new_verified, created_at = row
         return ctk.CTkButton(
             parent,
             text=(
                 f"{format_timestamp(created_at)}\n"
                 f"{history_action_label(action)} | "
                 f"{history_status_label(previous_verified)} -> "
-                f"{history_status_label(new_verified)}"
+                f"{history_status_label(new_verified)}\n"
+                f"{history_change_summary(prev, new)}"
             ),
             anchor="w",
             fg_color=ROW_COLOR,
@@ -236,16 +288,37 @@ class HistoryWindow:
                 f"{history_status_label(new_verified)}"
             )
         )
-        self.set_text(self.previous_text, previous_translation)
-        self.set_text(self.new_text, new_translation)
+        # As faixas trocadas, pintadas nos dois lados — as mesmas cores e o mesmo
+        # `diff_spans` da previa do 19.5 (ROADMAP 22.12). Dois blocos de texto
+        # lado a lado nao dizem o que mudou entre eles, e aqui o texto e um
+        # comentario de livro inteiro: achar a palavra trocada a olho nu e o que
+        # fazia a janela de historico ser aberta e fechada sem resposta.
+        faixas_antes, faixas_depois = diff_spans(
+            previous_translation or "", new_translation or ""
+        )
+        self.set_text(self.previous_text, previous_translation, faixas_antes, "removed")
+        self.set_text(self.new_text, new_translation, faixas_depois, "added")
+        self.diff_label.configure(
+            text=history_change_summary(previous_translation, new_translation)
+        )
         self.set_restore_buttons(True)
 
     # ---------------------------------------------------------------- detalhe
 
-    def set_text(self, widget, value):
+    def set_text(self, widget, value, faixas=(), tipo="added"):
         widget.configure(state="normal")
         widget.delete("1.0", tk.END)
         widget.insert("1.0", value or "")
+        # Pintar ANTES de desabilitar: um `CTkTextbox` desabilitado nao aceita
+        # `tag_add` — a mesma ordem que a previa de "Aplicar todas" segue.
+        cor = (
+            self.editor.diff_removed_bg
+            if tipo == "removed"
+            else self.editor.diff_added_bg
+        )
+        widget.tag_config("diff", background=cor)
+        for inicio, fim in faixas:
+            widget.tag_add("diff", f"1.0+{inicio}c", f"1.0+{fim}c")
         widget.configure(state="disabled")
 
     def set_restore_buttons(self, enabled):
@@ -257,6 +330,7 @@ class HistoryWindow:
         self.metadata_label.configure(text="")
         self.set_text(self.previous_text, "")
         self.set_text(self.new_text, "")
+        self.diff_label.configure(text="")
         self.set_restore_buttons(False)
 
     # ------------------------------------------------------------ restauracao
@@ -271,6 +345,20 @@ class HistoryWindow:
     def restore(self, text):
         if text is None:
             text = ""
+
+        # **Pergunta antes** (ROADMAP 22.12). Era a unica restauracao do programa
+        # sem confirmacao: restaurar o banco pergunta, o backup do glossario
+        # pergunta, excluir UMA regra do glossario pergunta — e aqui os dois
+        # botoes de restaurar ficam colados no "Fechar", sobrescrevendo a
+        # traducao atual num clique. O texto do dialogo mostra o que vai entrar,
+        # porque e ele que distingue os dois botoes.
+        if not messagebox.askyesno(
+            "Restaurar versao",
+            f"Substituir a tradução atual da linha {self.comment_id} por esta "
+            f"versão?\n\n{preview(text, 200) or '(vazia)'}",
+            parent=self.win,
+        ):
+            return
 
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()

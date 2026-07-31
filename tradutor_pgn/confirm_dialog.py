@@ -21,7 +21,16 @@ import customtkinter as ctk
 from .window_utils import bring_window_to_front
 
 
-CONFIRMATION_WORD = "delete"
+# A palavra e "apagar", e nao "delete" (ROADMAP 22.12). O dialogo e todo em
+# portugues, o botao dele se chama "Apagar", e quem digitava "apagar" — a leitura
+# mais natural do que esta na tela — era RECUSADO sem explicacao. Uma barreira
+# que existe para transformar clique em decisao nao pode falhar por vocabulario.
+CONFIRMATION_WORD = "apagar"
+
+# "delete" continua aceito por uma versao. Quem usa o programa ha meses tem a
+# palavra antiga na memoria dos dedos, e recusa-la de repente e a mesma
+# frustracao pelo lado oposto. Sai na proxima que mexer neste arquivo.
+LEGACY_CONFIRMATION_WORDS = ("delete",)
 
 # O botao de apagar tem duas caras, e a diferenca precisa ser visivel de longe.
 # O `state="disabled"` do CustomTkinter escurece o fundo padrao, mas sobre um
@@ -39,12 +48,20 @@ def confirmation_accepted(text, word=CONFIRMATION_WORD):
     Funcao pura, e separada do dialogo de proposito: e a regra que decide, e
     querer testa-la nao pode exigir abrir uma janela.
 
-    Aceita espaco nas pontas e qualquer caixa. Exigir `delete` exatamente
-    minusculo e sem espaco nao acrescenta seguranca nenhuma — quem digitou
-    "DELETE " decidiu tanto quanto quem digitou "delete" —, e so produz um
+    Aceita espaco nas pontas e qualquer caixa. Exigir a palavra exatamente
+    minuscula e sem espaco nao acrescenta seguranca nenhuma — quem digitou
+    "APAGAR " decidiu tanto quanto quem digitou "apagar" —, e so produz um
     dialogo que recusa sem dizer por que.
+
+    A palavra ANTIGA tambem passa, e so quando o dialogo esta pedindo a padrao:
+    um chamador que peca outra palavra qualquer nao ganha `delete` de brinde.
     """
-    return (text or "").strip().casefold() == word.strip().casefold()
+    digitado = (text or "").strip().casefold()
+    if digitado == word.strip().casefold():
+        return True
+    if word == CONFIRMATION_WORD:
+        return digitado in {antiga.casefold() for antiga in LEGACY_CONFIRMATION_WORDS}
+    return False
 
 
 def ask_typed_confirmation(parent, title, message, word=CONFIRMATION_WORD):

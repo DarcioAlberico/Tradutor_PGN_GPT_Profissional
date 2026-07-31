@@ -14,10 +14,73 @@ import re
 ROW_COLOR = ("#f8fafc", "#1f2937")
 ROW_TEXT_COLOR = ("#111827", "#e5e7eb")
 ROW_HOVER_COLOR = ("#e2e8f0", "#374151")
-SELECTED_ROW_COLOR = ("#3b82f6", "#1f6aa5")
+# O azul claro era `#3b82f6`, e o branco sobre ele dava 3,7:1 — reprovado para os
+# 11 px do rotulo da linha (ROADMAP 22.9). `#1d4ed8` da 6,7:1; o escuro ja
+# passava com 5,7:1 e ficou como estava.
+SELECTED_ROW_COLOR = ("#1d4ed8", "#1f6aa5")
 SELECTED_ROW_TEXT_COLOR = "#ffffff"
 
+# As quatro cores semanticas dos rotulos, em pares `(claro, escuro)` — ROADMAP
+# 22.9. Cada uma era UM hex para os dois temas, e um hex so nao serve a dois
+# fundos: as quatro reprovavam o minimo de 4,5:1 do texto de 13 px em pelo menos
+# um tema, e o ambar dos avisos dava **1,55:1** no claro — o pior par da janela,
+# e justamente o texto que avisa que algo esta errado.
+#
+# Medido pela formula de luminancia relativa da WCAG, contra os dois fundos de
+# rotulo do programa (`LABEL_BACKGROUNDS`), e conferido em teste:
+#
+#   |          | antes (claro/escuro) | depois        |
+#   |----------|----------------------|---------------|
+#   | verde    | 2,38 / 4,30          | 5,15 / 8,13   |
+#   | ambar    | **1,55** / 6,59      | 5,12 / 6,59   |
+#   | vermelho | 3,49 / 2,93          | 6,00 / 5,12   |
+#   | cinza    | 3,44 / 2,98          | 5,47 / 5,52   |
+#
+# Elas vivem aqui, e nao em cada janela, porque as tres janelas que dao recado
+# usam as mesmas quatro — e um hex copiado e um lugar a mais para esquecer de
+# corrigir (a licao do item 3.2).
+OK_TEXT_COLOR = ("#166534", "#4ade80")
+WARNING_TEXT_COLOR = ("#92400e", "#f59e0b")
+ERROR_TEXT_COLOR = ("#991b1b", "#f87171")
+MUTED_TEXT_COLOR = ("#475569", "#94a3b8")
+
+# Os dois fundos contra os quais as cores acima foram medidas. O claro nao e
+# chute: foi amostrado dos pixels de uma captura real da janela; o escuro e o do
+# codigo (`pane_bg`). Ficam aqui para o teste medir contra os mesmos.
+LABEL_BACKGROUNDS = ("#dbdbdb", "#2b2b2b")
+
 GEOMETRY_RE = re.compile(r"^(\d+)x(\d+)([+-])(-?\d+)([+-])(-?\d+)$")
+
+# Quanto tempo uma mensagem de status fica na tela (ROADMAP 22.6). Eram 1,5 s
+# fixos para qualquer texto, e a conta abaixo e o que o piso nao dava: a
+# mensagem mais longa que a janela produz — "Tradução salva e verificada; N
+# outro(s) original(is) também verificado(s)", 74 caracteres — cabia no mesmo
+# tempo que "Salvo".
+#
+# O numero por caractere sai de uma convencao de leitura, e nao de uma medicao
+# nesta maquina: ~200 palavras por minuto, palavra media de ~6,3 caracteres com
+# o espaco, dao ~21 caracteres por segundo — ~47 ms cada. 45 ms arredonda para
+# baixo, que e o lado seguro (mensagem de menos, e nao rotulo parado na tela).
+FLASH_MINIMUM_MS = 1500
+FLASH_MS_PER_CHARACTER = 45
+FLASH_MAXIMUM_MS = 6000
+
+
+def flash_duration_ms(text):
+    """Quanto tempo `text` fica na tela, em milissegundos.
+
+    Pura, e por isso mora aqui: o tempo de leitura de uma frase nao depende de
+    widget nenhum, e assim ele pode ser conferido sem abrir janela.
+
+    O piso e o que o programa sempre usou — abaixo dele o texto e curto o
+    bastante para ser lido de relance — e o teto existe porque um rotulo parado
+    na tela deixa de ser noticia e vira parte do fundo.
+    """
+    caracteres = len(text or "")
+    return max(
+        FLASH_MINIMUM_MS,
+        min(FLASH_MAXIMUM_MS, caracteres * FLASH_MS_PER_CHARACTER),
+    )
 
 
 def preview(text, limit=120):

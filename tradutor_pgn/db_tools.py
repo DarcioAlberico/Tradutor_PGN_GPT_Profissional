@@ -40,9 +40,14 @@ from .background_task import TaskCanceled, run_with_progress
 from .confirm_dialog import ask_typed_confirmation
 from .database import AutomaticRulesCanceled
 from .glossario import (
+    GLOSSARY_RULE_AUTOMATIC,
+    GLOSSARY_RULE_CLEANUP,
+    GLOSSARY_RULE_SUGGESTION,
     apply_automatic_substitutions,
     create_glossary_backup,
     load_automatic_substitutions,
+    load_glossary_entry_details,
+    load_interactive_substitutions,
     save_glossary_entries,
 )
 from .review_quality import QUALITY_HEURISTICS_VERSION, summarize_quality_warnings
@@ -1272,10 +1277,68 @@ def format_database_stats(stats):
     return "\n".join(linhas)
 
 
+def stats_tables(stats):
+    """As tres tabelas do relatorio, prontas para virar CSV (ROADMAP 22.12).
+
+    `[(titulo, cabecalho, linhas)]`, e nao um CSV: montar o arquivo e da janela,
+    que e quem sabe onde ele vai. Aqui fica so o RECORTE — quais das estruturas
+    que `collect_database_stats` devolve valem uma planilha.
+
+    Sao as tres que respondem a perguntas de orcamento e de prazo: quanto falta
+    de cada obra, quantas palavras por par de idiomas, e quanto se revisou por
+    dia. O resto do relatorio e total e texto corrido, e o `.txt` ja o entrega.
+
+    Pura: nao abre banco, nao abre janela.
+    """
+    por_arquivo = [
+        (arquivo, posicoes, comentarios, verificadas, pendentes, avisos)
+        for arquivo, posicoes, comentarios, verificadas, pendentes, avisos
+        in stats.get("per_file") or []
+    ]
+    palavras = [
+        (
+            language_label(origem),
+            destino,
+            contagens.get("original", 0),
+            contagens.get("translated", 0),
+            contagens.get("verified", 0),
+            contagens.get("pending", 0),
+        )
+        for (origem, destino), contagens in sorted(
+            (stats.get("words_by_pair") or {}).items(),
+            key=lambda item: (item[0][0] or "", item[0][1] or ""),
+        )
+    ]
+    diario = [(dia, edicoes, palavras_dia) for dia, edicoes, palavras_dia in stats.get("daily") or []]
+
+    return [
+        (
+            "progresso-por-obra",
+            ["arquivo", "posicoes", "comentarios", "verificadas", "pendentes", "avisos"],
+            por_arquivo,
+        ),
+        (
+            "palavras-por-par",
+            [
+                "origem",
+                "destino",
+                "palavras_original",
+                "palavras_traducao",
+                "palavras_verificadas",
+                "palavras_pendentes",
+            ],
+            palavras,
+        ),
+        ("atividade-por-dia", ["dia", "edicoes", "palavras"], diario),
+    ]
+
+
 def show_db_stats(app):
     """Abre a janela de estatisticas, computando o conteudo em segundo plano."""
     def pronto(stats):
-        StatsWindow(app, format_database_stats(stats))
+        # As tabelas vao junto do texto (ROADMAP 22.12): o `.txt` corrido serve
+        # para ler e colar num recado, e o CSV para a planilha de orcamento.
+        StatsWindow(app, format_database_stats(stats), tables=stats_tables(stats))
 
     def falhou(erro):
         messagebox.showerror(
@@ -1719,6 +1782,48 @@ def reset_translations(app, on_finish=None):
     )
 
 
+GLOSSARY_TYPE_NAMES = (
+    (GLOSSARY_RULE_SUGGESTION, "sugestão", "sugestões"),
+    (GLOSSARY_RULE_AUTOMATIC, "automática", "automáticas"),
+    (GLOSSARY_RULE_CLEANUP, "limpeza", "limpezas"),
+)
+
+
+def count_glossary_entries_by_type(path=None):
+    """`(total, {tipo: quantas})` do ARQUIVO de glossario (ROADMAP 22.12).
+
+    `deduplicate=False` de proposito: e a mesma fonte do "Total" que o editor de
+    glossario mostra, e o numero anunciado por um dialogo que apaga tem de ser o
+    numero que ele apaga. Deduplicar aqui daria um terceiro numero, diferente dos
+    outros dois — que era exatamente a doenca.
+    """
+    entradas = load_glossary_entry_details(path, deduplicate=False)
+    por_tipo = {}
+    for entrada in entradas:
+        tipo = entrada[2] if len(entrada) > 2 else GLOSSARY_RULE_SUGGESTION
+        por_tipo[tipo] = por_tipo.get(tipo, 0) + 1
+    return len(entradas), por_tipo
+
+
+def describe_glossary_types(por_tipo):
+    """"5.674 sugestões, 186 automáticas e 50 limpezas".
+
+    So os tipos que EXISTEM aparecem: "0 limpezas" num glossario que nunca teve
+    uma e ruido num dialogo que ja e longo. Pura, e por isso conferivel sem
+    abrir janela.
+    """
+    partes = []
+    for tipo, singular, plural in GLOSSARY_TYPE_NAMES:
+        quantas = por_tipo.get(tipo, 0)
+        if quantas:
+            partes.append(f"{quantas} {singular if quantas == 1 else plural}")
+    if not partes:
+        return "nenhuma regra"
+    if len(partes) == 1:
+        return partes[0]
+    return ", ".join(partes[:-1]) + f" e {partes[-1]}"
+
+
 def reset_glossary(app, on_finish=None):
     """Zera o glossario: `Substituicoes.txt` vazio e `glossario.db` reconstruido.
 
@@ -1731,7 +1836,13 @@ def reset_glossary(app, on_finish=None):
     (garantia S8) — nao ha um caminho especial aqui, e e melhor assim: zerar usa
     exatamente a mesma escrita atomica que salvar uma regra usa.
     """
-    total = len(app.glossary_substitutions or [])
+    # **O que vai ser apagado, e nao o que esta em uso** (ROADMAP 22.12).
+    # `len(app.glossary_substitutions)` conta a lista APLICAVEL, que e outra
+    # coisa: ela expande `@casa@` (uma linha vira 64 regras), soma as 232 da
+    # semente — que zerar NAO apaga, porque a semente vem com o programa — e
+    # exclui as de limpeza, que zerar apaga. Medido no glossario real: o arquivo
+    # tinha 5.910 entradas e o dialogo anunciava 7.325.
+    total, por_tipo = count_glossary_entries_by_type()
 
     backup_path = None
     try:
@@ -1746,8 +1857,10 @@ def reset_glossary(app, on_finish=None):
         app.root,
         "Zerar Glossário",
         (
-            f"Isto apaga as {total} regras do glossário: substituições, limpezas "
-            "e automáticas.\n\n"
+            f"Isto apaga as {total} regras do arquivo de glossário "
+            f"({describe_glossary_types(por_tipo)}).\n\n"
+            "As regras de fábrica que vêm com o programa continuam valendo: "
+            "elas não estão no arquivo.\n\n"
             "O banco de traduções não é afetado.\n\n"
             + (
                 f"Um backup acabou de ser criado em:\n{backup_path}\n\n"
@@ -1777,21 +1890,35 @@ def reset_glossary(app, on_finish=None):
             on_finish(None)
         return
 
-    app.glossary_substitutions = []
+    # **Recarrega, e nao esvazia** (ROADMAP 22.12). `app.glossary_substitutions = []`
+    # deixava a sessao sem sugestao nenhuma e a proxima abertura com 232 — a
+    # semente, que toda carga de regras mescla (garantia S15). Na pratica o
+    # programa "recuperava" sozinho um glossario que o usuario acabou de zerar,
+    # e so no dia seguinte. Recarregar do disco e o que `update_app_glossary` do
+    # editor ja fazia; o que sai daqui e o estado de verdade.
+    app.glossary_substitutions = load_interactive_substitutions()
+    restantes = len(app.glossary_substitutions)
     # As janelas abertas recarregam sozinhas: o editor de traducoes ainda mostra
     # as sugestoes das regras que acabaram de deixar de existir, e a lista do
     # editor de glossario ainda mostra as regras.
     for callback in list(getattr(app, "glossary_change_callbacks", [])):
         try:
-            callback([])
+            callback(app.glossary_substitutions)
         except Exception:  # pragma: no cover - defensivo
             pass
 
-    app.log_message(f"Glossario zerado: {total} regra(s) removidas. Backup em: {backup_path}")
+    app.log_message(
+        f"Glossario zerado: {total} regra(s) do arquivo removidas "
+        f"({describe_glossary_types(por_tipo)}). "
+        f"Restam {restantes} regra(s) de fabrica. Backup em: {backup_path}"
+    )
     messagebox.showinfo(
         "Zerar Glossário",
         (
-            f"Glossário zerado ({total} regra(s) removidas).\n\n"
+            f"Glossário zerado: {total} regra(s) removidas "
+            f"({describe_glossary_types(por_tipo)}).\n\n"
+            f"Continuam valendo {restantes} regra(s) de fábrica, que vêm com o "
+            "programa e não estão no arquivo.\n\n"
             f"O backup anterior está em:\n{backup_path}"
         ),
     )

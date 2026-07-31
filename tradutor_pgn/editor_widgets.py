@@ -16,18 +16,62 @@ import tkinter as tk
 
 import customtkinter as ctk
 
-from .editor_common import clamped_sash_position
+from .editor_common import clamped_sash_position, flash_duration_ms
 from .settings import update_settings
 
 
-def flash_message(label, window, text, milliseconds=1500, **configure):
+def flash_message(label, window, text, milliseconds=None, **configure):
     """Escreve no rotulo de status e apaga sozinho depois de um tempo.
 
     `configure` passa adiante o que cada editor precisar — o de glossario usa
     cor para distinguir aviso de confirmacao, o de traducoes nao usa.
+
+    **Cancela o apagamento pendente antes de agendar o seu** (ROADMAP 22.6). Sem
+    isso o timer de uma mensagem antiga apagava a mensagem NOVA: A em t=0 e B em
+    t=1,0 s davam a B meio segundo de tela, porque o `after` de A chegava em
+    t=1,5 s e limpava o rotulo sem olhar o que havia nele. O editor encadeia
+    mensagens nesse ritmo em fluxos comuns — "Rascunho restaurado" seguido de
+    "Aviso QA: ...".
+
+    Sem `milliseconds`, o tempo vem de `flash_duration_ms`: ele cresce com o
+    texto, porque 1,5 s fixos serviam a "Salvo" e nao a uma frase de 74
+    caracteres.
+
+    O id fica no proprio rotulo, e nao num atributo de quem chama: sao varias
+    janelas e cada uma tem o seu, e a unica coisa que as tres compartilham e este
+    modulo.
     """
+    cancel_flash(label, window)
     label.configure(text=text, **configure)
-    window.after(milliseconds, lambda: label.configure(text=""))
+
+    if milliseconds is None:
+        milliseconds = flash_duration_ms(text)
+
+    def limpar():
+        label._flash_after = None
+        try:
+            label.configure(text="")
+        except tk.TclError:  # pragma: no cover - janela fechada antes do tempo
+            pass
+
+    label._flash_after = window.after(milliseconds, limpar)
+    return label._flash_after
+
+
+def cancel_flash(label, window):
+    """Cancela o apagamento pendente deste rotulo, se houver.
+
+    Tolera o `after` ja ter disparado ou a janela ter morrido: cancelar um id
+    que nao existe mais nao e erro nenhum aqui — a intencao ja esta cumprida.
+    """
+    pendente = getattr(label, "_flash_after", None)
+    if pendente is None:
+        return
+    label._flash_after = None
+    try:
+        window.after_cancel(pendente)
+    except (tk.TclError, ValueError):
+        pass
 
 
 def collect_sash_positions(sashes):

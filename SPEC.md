@@ -583,10 +583,24 @@ principal; o log usa fila + polling.
 **Garantia C2 — cancelamento preserva o trabalho feito.** Ao cancelar, o que
 ja foi traduzido esta gravado no banco.
 
-O `cancel_flag` e conferido em cinco pontos: entre arquivos, entre lotes, entre
-comentarios de um lote, entre requisicoes do caminho individual e **durante a
-gravacao do PGN** (D2, o unico que faltava). O da gravacao nao grava arquivo
-nenhum quando dispara — meio PGN traduzido em disco seria pior do que nenhum.
+O `cancel_flag` e conferido em sete pontos: entre arquivos, entre lotes, entre
+comentarios de um lote, entre requisicoes do caminho individual, **durante a
+gravacao do PGN** (D2) e — desde 22.13 — **antes de cada tentativa e antes de
+cada espera do retry** (C4). O da gravacao nao grava arquivo nenhum quando
+dispara: meio PGN traduzido em disco seria pior do que nenhum.
+
+**Garantia C4 — "Cancelar" alcanca o laco de tentativas.** `translate_text_chunk`
+nem recebia o flag: o laco de tres tentativas dormia em `time.sleep` sem olhar
+cancelamento, e a conferencia entre chunks nao cobre nada num comentario de um
+chunk so — que e a maioria. Com o timeout de 30 s por tentativa, o clique ficava
+ate ~93 s sem efeito contra um endpoint que pendura a conexao, que e o cenario em
+que mais se clica Cancelar.
+
+Os dois pontos sao necessarios: sem o de antes da tentativa, cancelar durante a
+espera ainda dispara a requisicao seguinte; sem o de antes da espera, espera-se
+1,5 s para depois desistir. **A requisicao EM VOO continua inevitavel** — quem a
+interromperia e o timeout do `requests`. Cancelado devolve `None`, que os
+chamadores ja tratam: para eles, cancelado e falha sao o mesmo caminho.
 
 **Garantia C3 — o worker nao segura o banco.** O worker e o editor de traducoes
 usam o **mesmo** `traducoes.db`, cada um com sua conexao. Duas conexoes nunca
@@ -669,11 +683,19 @@ entre a confirmacao e a copia apaga tudo sem rede. O pior caso desta ordem e uma
 copia a mais em `backups/` para quem desistiu, e a retencao (S8) cuida dela.
 
 **Garantia Z2 — a confirmacao e digitada, nao clicada.** O usuario escreve
-`delete`; ate entao o botao de apagar fica inerte **e parece inerte**. As demais
+`apagar`; ate entao o botao de apagar fica inerte **e parece inerte**. As demais
 confirmacoes do programa sao `Sim/Nao` e bastam para o que e reversivel; aqui um
 "Sim" fica a um pixel do "Nao", e o que se perde sao 201 mil traducoes ou 7 mil
-regras. Aceita-se qualquer caixa e espaco nas pontas: quem digitou `DELETE `
-decidiu tanto quanto quem digitou `delete`.
+regras. Aceita-se qualquer caixa e espaco nas pontas: quem digitou `APAGAR `
+decidiu tanto quanto quem digitou `apagar`.
+
+A palavra era `delete` ate 2026-08-01 (ROADMAP 22.12), num dialogo todo em
+portugues cujo botao se chama "Apagar" — e digitar "apagar", a leitura mais
+natural do que esta na tela, era **recusado sem explicacao**. Uma barreira que
+existe para transformar clique em decisao nao pode falhar por vocabulario.
+`delete` continua sendo aceito por uma versao, porque quem usa o programa ha
+meses tem a palavra antiga na memoria dos dedos; a tolerancia vale so quando o
+dialogo esta pedindo a palavra padrao.
 
 Fechar a janela, apertar `Esc` ou clicar em "Cancelar" e **nao**. Nao ha caminho
 em que sumir com o dialogo signifique seguir adiante, e o proprio comando do
@@ -791,6 +813,41 @@ palpite. E a mesma razao pela qual a correcao de lances (P3) nao roda ali.
 Duas regras com escopos que **nunca se cruzam nao conflitam** (S9/S12): uma para
 `'pt'` e outra para `'it'` sao carregadas em execucoes diferentes, e acusa-las de
 disputa seria descrever uma briga que nao acontece. Escopo vazio cruza com todos.
+
+**Garantia S16 — o dialogo de zerar conta o que apaga.** Ele contava
+`len(app.glossary_substitutions)`, que e a lista APLICAVEL — outra coisa por tres
+razoes somadas: ela expande `@casa@` (uma linha do arquivo vira 64 regras), soma
+as da semente (que zerar nao apaga, porque a semente vem com o programa) e exclui
+as de limpeza (que zerar apaga). Medido no glossario real: 5.910 entradas no
+arquivo, 7.325 anunciadas. A contagem sai de `load_glossary_entry_details(deduplicate=False)`, que e a mesma fonte do
+"Total" do editor de glossario, e o dialogo diz o numero por tipo.
+
+**Depois de zerar, a sessao fica com as regras de fabrica** — nao com nenhuma. O
+codigo esvaziava a lista em memoria, e a proxima abertura recarregava a semente
+(S15): na pratica o programa "recuperava" sozinho, no dia seguinte, um glossario
+que o usuario acabou de zerar. Recarregar do disco na hora e o que faz a tela
+dizer a verdade, e a mensagem final diz quantas continuam valendo.
+
+**Garantia S17 — o "Teste rápido" usa a conversao do pipeline.** Ele trabalhava
+com os pares crus e divergia da aplicacao em quatro pontos: prioridade descartada
+(com uma regra promovida por "Priorizar esta", a previa dava um resultado e o
+pipeline outro — contradizendo o banner de conflito exibido ao lado, S9), escopo
+ignorado, `@casa@` inerte e apenas a PRIMEIRA ocorrencia trocada. As regras da
+previa saem de `interactive_rules_from_entries`, a MESMA funcao que
+`load_interactive_substitutions` usa: e a licao de S9 escrita noutro lugar — o
+anuncio nao IMITA o criterio da aplicacao, ele USA o criterio.
+
+O escopo e avaliado com o par escolhido na janela principal, que e onde o par de
+uma traducao e escolhido. A semente fica de fora de proposito: a previa responde
+"o que as MINHAS regras fazem com este texto", e explicar um resultado por uma
+regra que nao esta em lugar nenhum da tela seria pior do que a omissao.
+
+**Garantia S18 — o editor de glossario anda pelo teclado.** `Ctrl+L` para o campo
+de busca, `Alt+←/→` pela lista FILTRADA e `Ctrl+PageUp/PageDown` para virar
+pagina. Pela lista filtrada, e nao pela do arquivo: com "Duplicadas" ativo, `+1`
+sobre o indice do arquivo pousaria numa regra que a tela nao mostra — o erro que
+R10 nomeou no outro editor. Nas bordas ele para, em vez de dar a volta: dar a
+volta faria `Alt+→` no fim da lista parecer que nada aconteceu.
 
 **Garantia S15 — o dicionario-semente nunca sobrepoe uma regra do usuario.** O
 programa vem com terminologia enxadristica propria
@@ -1106,16 +1163,50 @@ uma pagina, trocar de filtro, de arquivo ou de par, e o F7. Navegar para a linha
 vizinha nao empilha nada — um "voltar" que andasse linha por linha nao devolveria
 nada a quem revisa um livro.
 
-O que a pilha guarda e um **retrato** (linha aberta, busca, status, origem, arquivo
-e pagina), e nao um id: usar a busca como concordancia troca a lista, e voltar para
-um id que a busca nova nao contem nao e voltar. A pilha guarda 50 retratos, e um
-retrato que nao da para repor — a linha foi apagada por outra janela — nao a trava:
-o proximo assume.
+O que a pilha guarda e um **retrato** (linha aberta, busca, modo de busca, status,
+origem, destino, arquivo e pagina), e nao um id: usar a busca como concordancia
+troca a lista, e voltar para um id que a busca nova nao contem nao e voltar. A
+pilha guarda 50 retratos, e um retrato que nao da para repor — a linha foi apagada
+por outra janela — nao a trava: o proximo assume.
+
+**Garantia F13 — o retrato e o da consulta que estava em vigor.** Os filtros do
+retrato saem do que a ultima consulta da lista USOU, e nao dos seletores: o
+comando de um seletor roda com o widget ja no valor novo, entao ler o widget
+gravava para onde o usuario estava indo. Media na janela real, o retrato de quem
+trocava "Todas" por "Verificadas" guardava "Verificadas" — e "voltar" nao repunha
+filtro nenhum. Vale para os seis campos; a busca era o unico certo, por nao vir de
+um widget.
+
+Disso saem tres regras que o codigo segue:
+
+- **o destino sai de `self.lang`**, e nao do menu, porque `lang` so muda quando a
+  troca de par entra em vigor;
+- **o retrato e tirado antes do `save_changes`** nos caminhos que trocam um
+  seletor, porque a gravacao pode recarregar a lista sozinha (filtro "Avisos QA" +
+  aviso corrigido) e esse recarregamento ja usaria o filtro de destino;
+- **repor o par repoe tambem o recorte do glossario** (S11) e o titulo, e nao so o
+  seletor — senao a lista volta para o par certo com as sugestoes do par que se
+  deixou.
+
+Quando NENHUM retrato da pilha pode ser reposto, a janela volta para onde estava:
+repor mexe nos seletores antes de saber se a linha existe, e sem isso "Nada para
+voltar" deixava a tela com os filtros do ultimo retrato que falhou.
 
 **Garantia F7 — a selecao em lote e por id.** Uma marca por linha; "Verificar" e
 "Exportar" valem para o que esta marcado, e a selecao sobrevive a trocar de pagina
 (juntar 30 linhas de tres paginas e o caso real de quem prepara uma entrega). Ela
 morre na troca de par, porque um id do par anterior nao esta na lista nova.
+
+Ela **sobrevive** as trocas de arquivo, de status e de busca, e essa e uma decisao
+tomada em 22.11 e nao um descuido: dali da para voltar, os ids continuam validos, e
+juntar linhas de tres capitulos e o que a barra existe para servir. O que a
+sobrevivencia custa esta pago na confirmacao, que diz quantas das marcadas estao
+FORA dos filtros atuais (F21) — a mesma preocupacao que mata a selecao na troca de
+par, respondida com informacao em vez de com perda de trabalho.
+
+"Marcar tudo" marca o filtro INTEIRO, e nao a pagina, e pergunta quando passa de
+uma pagina: com 100 linhas o revisor ve o que marcou, com 3.000 ele so ve o
+contador. O numero aparece na pergunta porque nao cabe no rotulo do botao (F20).
 
 Verificar em lote passa pelo mesmo caminho de uma linha so, entao cada linha ganha
 carimbo e historico (R2), e **nao propaga para traducoes iguais**: a propagacao tem
@@ -1209,6 +1300,237 @@ apagado, como o CSV: sem `</body>` ele nao abre em lugar nenhum.
 revisao e a nota no fim. E a unica coluna que identifica a linha sem depender do
 texto, e e o que torna o round-trip pela planilha conferivel.
 
+**Garantia F19 — o que a tela diz, ela diz de forma legivel.** Duas partes, e as
+duas eram sobre informacao que so existia como cor.
+
+As **quatro cores semanticas** dos rotulos — verde, ambar, vermelho e cinza —
+sao pares `(claro, escuro)` e passam o minimo de 4,5:1 da WCAG nos dois temas.
+Cada uma era um hex unico para os dois fundos, e um hex so nao serve a dois
+fundos: as quatro reprovavam em pelo menos um tema, e o ambar dos avisos dava
+1,55:1 no claro — o pior par da janela, e justamente o texto que avisa que algo
+esta errado. Elas vivem num lugar so; as quatro janelas que dao recado importam
+de la.
+
+Os dois destaques com texto branco foram por caminhos diferentes, e a diferenca e
+a regra: **na linha selecionada muda o FUNDO** (o branco e o texto de todas as
+linhas da lista), e **na ocorrencia atual da busca muda o TEXTO** (o fundo
+laranja e o que a distingue das outras ocorrencias, e escurece-lo apagaria essa
+distincao).
+
+O **status de revisao da linha aberta aparece em palavras** — "Rejeitada" / "Em
+dúvida" ao lado do campo de nota —, e nao so como a cor de uma borda: para um
+protanope as duas cores viram tons de oliva com 2,8:1 entre si, e a mensagem de
+confirmacao some em segundos. A linha pendente nao ganha rotulo: o padrao nao
+precisa de nome, e escreve-lo em toda linha faria o normal virar ruido.
+
+**Garantia F18 — o que a janela sabe fazer aparece na janela.** Quatro coisas
+eram invisiveis, e a correcao de cada uma tem uma regra propria:
+
+- **Os atalhos tem uma lista**, aberta por `F1` ou pelo botao "?" do
+  rodape — os dois, porque um atalho para descobrir atalhos so serve a quem ja
+  os descobriu. Eram treze quando a garantia nasceu; sao vinte desde 22.11. A
+  lista e uma tabela com a sequencia do Tk ao lado do rotulo, e dois testes a
+  comparam com os binds reais **nos dois sentidos**: um atalho ligado e nao
+  listado falha tanto quanto um listado e nao ligado. E o que impede a lista de
+  virar documentacao errada. O `Ctrl+B` era o unico recurso do programa sem
+  caminho de descoberta nenhum: nao tem botao (o "B" da barra faz outra coisa) e
+  nao estava no README.
+- **Os gestos de MOUSE tem tabela propria** (`MOUSE_GESTURES`), na mesma janela.
+  A separacao e o que mantem a conferencia acima possivel: o lado "todo bind
+  aparece na lista" so consegue distinguir atalho de evento de ciclo de vida
+  porque o Tk poe `Key` em toda sequencia de tecla, e um `<Double-Button-1>` na
+  mesma tupla ficaria listado e nunca verificado.
+- **O foco do teclado pinta a borda** dos dois campos de texto. Quem recebe o
+  foco e o `tk.Text` e quem desenha a borda e o quadro em volta dele. Os campos
+  de uma linha ficaram de fora: a borda deles ja diz o status de revisao (F10), e
+  dois significados na mesma borda apagam um ao outro.
+- **O estado ligado do botao "B" difere do desligado nos DOIS temas**, e por
+  duas vias — cor de outra familia e borda. O par anterior era a mesma cor no
+  tema escuro, byte a byte: clicar nao mudava nada na tela. O desligado e lido
+  do tema, e nao de hexes copiados.
+- **Trocar o tema do sistema com a janela aberta repinta o Tk puro.** Os widgets
+  do CustomTkinter recebem pares e se viram sozinhos; os `PanedWindow`, os dois
+  textos e as tags deles recebem uma cor so, e ficavam com a do tema anterior.
+  O gancho e o registrador da propria biblioteca, protegido por `try/except`:
+  sem ele o comportamento e o de antes, e a janela abre do mesmo jeito.
+
+**Garantia F20 — o rotulo carrega o objeto, e a faixa cabe.** Duas familias que
+sao a mesma coisa vista de dois lados: a janela afirmando o que nao entrega.
+
+Tres botoes escritos "Limpar" faziam tres coisas diferentes (a busca, a selecao
+em lote e o status de revisao, que GRAVA no banco), e "Página" era quatro. Hoje
+sao "Limpar busca", "Desmarcar", "Limpar status" e "Marcar página". Sobra uma
+repeticao, deliberada: os dois "Ir" da barra de salto, cujo objeto esta no rotulo
+do campo colado a eles.
+
+**A largura minima da janela e a SOMA dos minimos dos paineis** — 320 da lista,
+520 do editor, 308 das sugestoes, dois divisores de 8 e 20 de `padx` — e nao um
+numero declarado a parte: hoje sao 1184. Eram 1120 contra 1176 de soma (com as
+sugestoes ainda declarando 300), e a diferenca saia sempre do mesmo painel:
+**medido na janela real, o de sugestoes ficava com 109 px dos 300 que
+declarava**, com os seis botoes mostrando 40 dos 140 de que precisam — e os 300
+tambem estavam curtos, porque as duas colunas de botoes com os `padx` pedem 308.
+
+Tres regras saem disso, e valem para qualquer janela nova:
+
+- **O `minsize` de um painel tem de ser o que o CONTEUDO dele precisa.** O painel
+  de baixo declarava 620 e continha 836 (editor + divisor + sugestoes), e a
+  diferenca saia do ultimo painel. O Tk honra o `minsize` dos vizinhos tambem ao
+  POSICIONAR um divisor, e nao so ao arrasta-lo: com a soma certa declarada,
+  quem recua e a lista e nenhum calculo a mais e necessario — uma posicao
+  gravada numa tela larga volta ao minimo numa janela estreita sozinha.
+- **`pack` nao encolhe filho nenhum**; `grid` reparte a falta entre todas as
+  colunas. Medido: quatro botoes de 120 px num quadro de 300 ficam com 71 px cada
+  em `grid` e com 120, 120, 48 e 1 em `pack` — o quarto existe, tem o tamanho
+  pedido e esta fora da faixa. Onde faltar espaco, e a escolha entre "todos
+  menores" e "os ultimos somem".
+- **A ordem de empacotamento e a de importancia, e nao a da leitura.** No rodape:
+  primeiro o aviso de "Alterações não salvas" (o unico rotulo cuja ausencia custa
+  trabalho), depois as duas contagens estaveis ancoradas a direita, e por ultimo
+  a mensagem transitoria e o estado do rascunho — os dois que se repoem sozinhos.
+  O pior caso medido pedia 1.167 px numa faixa de 1.080 (e 1.525 numa de 1.144,
+  com as duas contagens de revisao no maximo), entao alguem cede sempre; a
+  decisao e sobre QUEM.
+
+**Garantia F21 — o que se repete o dia inteiro tem atalho.** `Ctrl+Shift+Enter`
+verifica e avanca (o `Ctrl+Enter` continua verificando e ficando, porque promove-lo
+trocaria o significado de um habito ja formado), `Ctrl+PageUp/PageDown` viram
+pagina, `Ctrl+roda` e `Ctrl+±` mudam a fonte, duplo clique aplica uma sugestao e
+o rodape "Lido em:" abre as outras posicoes do comentario.
+
+Duas correcoes desta garantia sao sobre gravacao, e nao sobre gesto:
+
+- **A nota do revisor e gravada como o texto e.** Ela so saia por
+  "Rejeitar"/"Em dúvida"/"Limpar status"; editar a nota e navegar a descartava em
+  silencio. Ela e gravada **antes** da traducao dentro do `save_changes`, porque
+  `set_review_status_by_id` mantem `verified` em lockstep com o status (F10) e
+  chama-la depois de um `mark_verified` desfaria a verificacao pedida. E ela
+  atravessa a saida antecipada de `auto_only`: digitar uma nota e acao do
+  usuario, e R1 fala de gravacao sem acao dele.
+- **"Verificar" em lote volta para a linha que estava aberta**, pelo id. Era o
+  unico recarregamento pos-acao que caia no topo da pagina.
+
+**Garantia F22 — o X da janela principal tem handler.** Com traducao ativa ele
+CANCELA e mantem o programa aberto, em vez de fechar: fechar depois de pedir o
+cancelamento mataria a thread do mesmo jeito, e o worker precisa de tempo para
+terminar o arquivo que esta escrevendo (a lista T4 so e gravada no fim). Sem
+traducao, ele grava a geometria da janela e repassa o fechamento as filhas — e o
+`close_editor` de cada uma que grava a edicao aberta.
+
+Uma excecao dentro do fechamento de uma filha **nao** volta pelo `tk.call`: o Tk
+a entrega ao relator de callbacks (C3), que a transforma em log e dialogo. As
+outras filhas e o fechamento continuam.
+
+A janela principal tambem passou a lembrar tamanho e posicao, como os dois
+editores ja faziam. Sem geometria gravada ela maximiza, que e o que sempre fez e
+o certo para a primeira abertura.
+
+**Garantia F23 — o log so rola sozinho se o fim ja estava visivel.** O `see(END)`
+era incondicional: reler um `[AVISO]` durante uma execucao era ser puxado de volta
+a cada tick de 100 ms. A pergunta e feita ANTES de inserir — depois da insercao o
+fim ja e outro, e a resposta seria sempre "nao". Um log que ainda nao foi
+desenhado responde "sim", que e o comportamento de quem nunca rolou nada.
+
+**Garantia F24 — a janela de estatisticas nao aceita edicao.** O filtro deixava
+passar QUALQUER tecla com Control, e os bindings de classe do Tk mapeiam sete
+delas para editar (Ctrl+V/X/K/D/O/T/H). A defesa tem duas camadas porque sao duas
+portas: uma lista BRANCA de teclas (c/a/Insert e navegacao) para o que o usuario
+digita, e `break` nos eventos virtuais `<<Paste>>`, `<<Cut>>`, `<<Clear>>`,
+`<<Undo>>` e `<<Redo>>` — que e por onde o Tk edita, e por isso uma versao futura
+que mapeie outra tecla para `<<Paste>>` continua barrada.
+
+Ela tambem exporta as tres tabelas do relatorio em CSV (progresso por obra,
+palavras por par, atividade por dia), num arquivo so com um bloco por tabela:
+elas sao lidas juntas, e tres seletores de arquivo para um clique seriam piores
+que a linha em branco que as separa.
+
+**Garantia F25 — restaurar do historico pergunta, e a janela diz o que mudou.**
+Era a unica restauracao do programa sem confirmacao — restaurar o banco pergunta,
+o backup do glossario pergunta, ate excluir UMA regra pergunta — com os dois
+botoes de restaurar colados ao "Fechar". A pergunta mostra o texto que vai entrar,
+porque e ele que distingue "Restaurar anterior" de "Restaurar nova".
+
+Os dois textos ganharam o diff pintado do 19.5, e a linha da lista diz em quantos
+trechos aquela versao mexeu — entre 100 entradas com o mesmo rotulo ("Verificacao",
+"Regras automaticas"), o tamanho da mudanca e o que distingue a procurada, e
+algumas delas nao mexeram no texto. O resumo sai do MESMO `diff_spans` que pinta o
+detalhe: dois criterios de "o que mudou" acabariam divergindo. E o corte em 100
+versoes, que terminava a lista em silencio, e anunciado.
+
+**Garantia F17 — nenhum campo depende do placeholder para ser identificado.**
+Nenhum placeholder do programa aparece: o CustomTkinter decide mostra-lo
+comparando o OBJETO `StringVar` com `""`, e essa comparacao e falsa sempre. Dos
+sete campos com placeholder, cinco tem um rotulo ou um botao ao lado que os
+nomeia — para eles o placeholder era uma dica a mais, e nao a identidade. Os dois
+do buscar-e-substituir nao tinham nada, e ganharam rotulo: **"Buscar:"** e
+**"Trocar por:"**, com a palavra do botao que aplica cada um.
+
+O rotulo e melhor que o placeholder ali mesmo com a biblioteca corrigida:
+placeholder some na primeira tecla, e e com texto dentro que dois campos iguais
+lado a lado ficam impossiveis de distinguir.
+
+**O escopo da busca da lista continua sem aparecer.** "Buscar no original ou
+tradução" e o placeholder que informa mais e o unico que faz falta; um rotulo
+permanente com essa frase custaria ~230 px numa coluna cujo minimo e 320.
+
+**Garantia F16 — a mensagem de status espera o tempo do texto, e nao e engolida
+pela anterior.** Cada mensagem cancela o apagamento pendente antes de agendar o
+seu: sem isso o timer de uma mensagem antiga limpava o rotulo sem olhar o que
+havia nele, e a mensagem nova durava o que sobrava do relogio da outra.
+
+O tempo cresce com o texto — piso de 1,5 s, teto de 6 s, ~45 ms por caractere,
+derivados de uma velocidade de leitura de ~200 palavras por minuto e nao de uma
+medicao. A frase mais longa da janela ("Tradução salva e verificada; N outro(s)
+original(is) também verificado(s)", 73 caracteres) passou de 1,5 s para 3,3 s.
+
+**As mensagens nao ficam na tela ate serem substituidas**, e a decisao tem
+razao: as que relatam efeito em OUTRAS linhas sao recibos de uma acao que o
+usuario confirmou num dialogo — o da propagacao lista os originais um a um antes
+de agir (V1). Um rotulo permanente repetiria, envelhecendo em silencio, o que o
+dialogo ja disse com mais detalhe.
+
+As tres janelas que dao recado — os dois editores e a de estatisticas — passam
+pela mesma funcao. A de estatisticas tinha uma copia do padrao, com o mesmo
+defeito.
+
+**Garantia F14 — reescrever a linha aberta nao apaga o desfazer.** "Copiar
+original", "Aplicar selecionada", "Aplicar todas", o "Todos" da busca-e-troca e
+o "Restaurar" reescrevem o texto inteiro de uma vez — sao as acoes que mais
+pedem um Ctrl+Z, e eram as unicas que o desligavam. "Trocar", que edita o widget
+sem passar pelo caminho de carga, sempre teve desfazer: a diferenca era efeito
+colateral, e nao decisao.
+
+A reescrita inteira e **um** passo de desfazer, e nao dois. Os separadores
+automaticos sao desligados durante ela de proposito: sem isso o primeiro Ctrl+Z
+desfaz so a insercao e deixa o editor vazio — a traducao sumindo onde o revisor
+esperava ve-la voltar. Vale igual para as 80 substituicoes de um "Aplicar
+todas".
+
+**Trocar de linha continua apagando a pilha**, e este e o padrao do caminho:
+um Ctrl+Z que atravessasse a troca traria o texto da linha ANTERIOR para dentro
+desta, e a gravacao ao navegar o levaria para o banco. E o unico dos dois lados
+em que o erro corrompe dado, entao e o que um chamador novo recebe sem pedir.
+
+**Garantia F12 — toda troca de lista grava a edicao aberta antes de
+recarregar.** Trocar de pagina, de filtro, de arquivo, de par, buscar, limpar a
+busca, ir para um id, voltar, e marcar a linha como rejeitada ou em duvida: os
+onze caminhos gravam primeiro. Nao e zelo — a troca RECARREGA a linha, e o
+recarregamento sobrescreve o widget e cancela o rascunho ainda agendado, entao o
+que nao for gravado ali nao sobra em lugar nenhum.
+
+Tres nao gravavam (o filtro de status, o "Limpar" da busca e os botoes de status
+de revisao), e o "Limpar" da busca ficava ao lado do "Buscar", que sempre
+gravou. **A excecao e o clique que nao troca lista nenhuma**: "Limpar" sem busca
+ativa nao grava, porque uma gravacao ali seria efeito colateral de um botao que
+nao fez nada — carimbo e historico numa linha que ninguem mandou salvar,
+contra R1.
+
+**E o status vai para a linha que estava na tela.** Rejeitar le o id e a nota
+ANTES da gravacao do texto: `save_changes` pode recarregar a lista — com o
+filtro "Avisos QA" ativo, corrigir o aviso tira a propria linha (R7) — e depois
+disso a janela ja mostra outra, com a nota dela no campo. Lidos depois, o status
+e a nota iriam para essa outra, e as duas na tela pareceriam certas.
+
 **Garantia R1 — gravacao e sempre intencional.** Apenas uma acao deliberada do
 usuario altera o banco. Navegar pela lista nao reescreve traducoes.
 
@@ -1223,6 +1545,26 @@ deixava de ser resolvida so no indice e voltava a tocar a tabela — medido no
 banco real, 34,9 ms sem filtro de origem contra 78,7 ms com ele. Seria uma
 regressao de R5 introduzida justamente pelo filtro que R9 veio dar. Com o indice
 sao 34,5 ms e 35,9 ms; um par sem nenhuma linha responde em 0,0 ms.
+
+**Garantia R11 — o resumo por status e resolvido so pelo indice.** Os numeros do
+paragrafo acima chegaram a nao valer: o item 19.12 pos `review_status` na mesma
+agregada e os dois indices de cobertura nao tinham a coluna, entao o plano voltou
+a tocar a tabela (`EXPLAIN QUERY PLAN`: `SEARCH comments USING INDEX idx_comments_counts`, **sem** `COVERING`). Medido em 204 mil linhas
+sinteticas, mediana de 20 execucoes: 118,8 ms por recarga com filtro de origem e
+138,3 ms sem, contra 60,8 ms e 58,2 ms com os indices estendidos. E a mesma
+regressao que o paragrafo acima registra, reintroduzida pelo recurso seguinte —
+por isso o invariante virou garantia com nome, e nao so um numero num paragrafo.
+
+A correcao e a migracao de schema **9**, que DERRUBA os dois indices antes de
+recria-los com `review_status` no fim. O `DROP` nao e detalhe: `CREATE INDEX IF NOT EXISTS` sobre um indice que ja existe com o mesmo nome e colunas diferentes
+nao faz nada e nao reclama, e sem ele a correcao valeria so para instalacoes
+novas — que sao exatamente as que nao tem o problema.
+
+O teste le o PLANO, e nao o cronometro: em 20 linhas nenhum tempo distingue nada,
+e a palavra `COVERING` e a afirmacao que se quer proteger. Para que ele pergunte
+pelo SQL de verdade, a consulta mora em `review_status_counts_query` — escrita
+dentro da funcao que a executa, o teste teria de transcreve-la e passaria a medir
+a propria transcricao.
 
 **Garantia R8 — navegar custa O(pagina) tambem com busca ativa.** A busca do
 editor tem dois modos, e o usuario escolhe qual vale:
@@ -1321,6 +1663,23 @@ par, pela mesma razao que a semente: o termo procurado esta em ingles, e um padr
 ingles nao casa texto portugues por acaso — o proprio padrao ja e a guarda de
 origem, e escopar por par deixaria de fora as linhas legadas.
 
+**Garantia Q3 — a avaliacao da tela usa o par de idiomas da LINHA.** O rotulo
+"QA:" do texto aberto e o anuncio do F7 dao a mesma resposta que a coluna
+materializada daria para a mesma linha. A heuristica de terminologia so roda com
+o par, entao avaliar sem ele produzia o pior desfecho possivel: "QA: sem avisos"
+em verde numa linha que a lista marcava com "⚠ QA" e que o filtro "Avisos QA"
+mostrava — R6 violada entre dois pontos da mesma janela.
+
+O par sai de um acessor unico (`current_row_languages`), que e de onde a linha
+remontada em memoria tambem o le. Ele **nao** e o par do filtro
+(`scoped_languages`): ali "Todos" vira `""` porque uma regra de glossario com
+escopo nao vale para uma lista que mistura origens, e aqui a pergunta e de que
+lingua veio este texto.
+
+**Sem linha aberta nao ha veredito.** O texto de um editor vazio produz "traducao
+vazia" — um aviso verdadeiro sobre coisa nenhuma —, e ele aparecia ao abrir um
+banco sem linhas.
+
 **Garantia Q2 — as heuristicas tem versao, e muda-las reavalia o banco.**
 `quality_warning` e materializada e o backfill so preenche `NULL` — correto para a
 coluna nova, insuficiente para heuristica nova: com uma regra a mais, as linhas
@@ -1377,6 +1736,18 @@ mesmo. A linha a carregar e identificada pelo **id** capturado antes da
 gravacao, nunca pela posicao — que a essa altura ja aponta para outra coisa.
 Vale igualmente para "proxima" depois de verificar: se a linha atual saiu da
 lista, quem ocupou o lugar dela e a proxima, e nao a seguinte.
+
+**Garantia F15 — e essa regra vale nos TRES caminhos que avancam.** Ela morava
+dentro de "Marcar como verificada", que era o unico a aplica-la; "Próxima >" e
+"Próximo aviso QA" (F7) somavam uma casa a posicao lida DEPOIS da gravacao, e
+pulavam a linha que tinha acabado de ocupar o lugar. No F7 isso e o defeito mais
+caro que a janela podia ter: a fila de avisos existe para nao deixar nenhuma
+linha para tras, e o botao que a percorre era o que saltava.
+
+Hoje os tres leem a mesma funcao, e o id e a posicao sao capturados antes de
+gravar. **Para tras a conta nao muda** — a linha que vinha antes continua uma
+casa antes da posicao vaga —, e quando a linha permanece na lista o avanco e o
+normal.
 
 **Garantia R4 — rascunhos sobrevivem.** O rascunho nao salvo e persistido e
 recuperado. Janelas concorrentes nao apagam os rascunhos uma da outra, e a
@@ -1504,6 +1875,23 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | F9 | A requebra muda so espaco em branco, e nunca dentro de `[%...]` | Risco: requebrar tocando a chave de cache, ou partindo uma anotacao que X1 protegeu |
 | F10 | `verified` e `review_status` andam em lockstep, nos quatro caminhos que os escrevem | Bug: linha verificada E em duvida ao mesmo tempo, que nenhum filtro mostra direito |
 | F11 | A previa de "Aplicar todas" marca as faixas trocadas nos dois lados | Risco: conferir 80 substituicoes comparando dois blocos de texto a olho nu |
+| F12 | Toda troca de lista grava a edicao aberta antes de recarregar, e o status vai para a linha que estava na tela | Bug: o filtro de status, o "Limpar" da busca e o "Rejeitar" descartavam o texto digitado — nem no widget, nem no banco, nem no rascunho |
+| F13 | O retrato do "voltar" e o da consulta que estava em vigor, e repoe os seis filtros — busca, modo, status, origem, destino e arquivo | Bug: o retrato lia os seletores, que ja estavam no valor novo; "voltar" repunha o filtro que o usuario acabou de escolher |
+| F14 | Reescrever a linha aberta preserva o desfazer, e a reescrita inteira e UM passo; trocar de linha apaga a pilha | Bug: as cinco acoes que reescrevem o texto em bloco eram as unicas sem Ctrl+Z; e uma pilha que atravessasse a troca de linha gravaria a traducao de uma linha noutra |
+| F15 | Gravar e avancar nao pula a linha que ocupou o lugar da que saiu do filtro | Bug: com "Avisos QA" ativo, corrigir o aviso e clicar "Próxima >" (ou F7) saltava a linha seguinte da fila, sem nada na tela |
+| F16 | Uma mensagem de status nao e apagada pelo timer da anterior, e o tempo de tela cresce com o texto | Bug: duas mensagens em menos de 1,5 s davam meio segundo a segunda; e a frase de 73 caracteres tinha o tempo de "Salvo" |
+| F17 | Nenhum campo depende do placeholder para ser identificado | Bug: o CustomTkinter nao mostra placeholder em campo com `textvariable`, e o buscar-e-substituir eram dois campos anonimos lado a lado |
+| F18 | Os atalhos aparecem na janela, o foco tem borda, o "B" ligado se ve nos dois temas e a troca de tema repinta o Tk puro | Bug: treze atalhos so no fonte (um deles sem nenhum caminho de descoberta), foco invisivel, "B" ligado igual ao desligado no escuro, e meia janela no tema antigo |
+| F19 | As cores de rotulo passam 4,5:1 nos dois temas, e o status de revisao aparece em palavras | Bug: as quatro cores semanticas reprovavam (o ambar dos avisos a 1,55:1), e rejeitada/em-duvida era so a cor de uma borda |
+| F20 | Cada rotulo de acao carrega o objeto dela, a largura minima da janela e a SOMA dos minimos dos paineis, e nada e desenhado fora da faixa em que vive | Bug: tres botoes "Limpar" e quatro "Página"; e a 1120 px o painel de sugestoes ficava com 109 dos 300 que declara, dois botoes do lote saiam da barra e o campo de pagina media 11 px |
+| F21 | Toda acao repetida do fluxo tem atalho, a nota do revisor e gravada como o texto, e o clique numa linha poe o foco onde se vai digitar | Custo: em "Todas" eram dois acordes por linha; a nota digitada era descartada em silencio ao navegar; e "Verificar" em lote voltava ao topo da pagina |
+| F22 | O X da janela principal cancela em vez de matar uma traducao, e repassa o fechamento as janelas filhas | Bug: nao havia handler nenhum — o PGN da vez ficava truncado, a lista T4 nao era gravada e a edicao aberta do editor perdia ate 2,5 s |
+| F23 | O log so rola sozinho quando o fim dele ja estava visivel | Incomodo: reler um `[AVISO]` durante uma execucao era ser puxado de volta a cada 100 ms |
+| F24 | A janela de estatisticas nao aceita edicao, nem por evento virtual, e exporta as tabelas em CSV | Bug: Ctrl+V/X/K/D/O/T/H editavam um relatorio que o docstring declara imutavel; e as tabelas de orcamento so saiam em texto corrido |
+| F25 | Restaurar uma versao do historico pergunta antes, e a janela diz o que mudou entre as duas | Risco: a unica restauracao do programa sem confirmacao, com os dois botoes colados no "Fechar" e nenhum diff pintado |
+| S16 | O dialogo de zerar o glossario conta o que apaga, por tipo, e a semente nao "volta" depois | Bug: anunciava 7.325 regras e apagava 5.910; e zerar deixava a sessao sem sugestao nenhuma e a abertura seguinte com 232 |
+| S17 | O "Teste rápido" do glossario usa a conversao do pipeline, e nao os pares crus | Bug: prioridade descartada, escopo ignorado, `@casa@` inerte e so a primeira ocorrencia trocada — a previa contradizia o banner S9 ao lado dela |
+| S18 | O editor de glossario anda pelo teclado: achar, andar pela lista filtrada e virar pagina | Custo: dois atalhos contra os treze do outro editor, numa janela que existe para varrer 7 mil linhas |
 | P3 | As letras dos lances vem do original, numa passagem so | Bug: `Rd1` (Torre) traduzido como `Rd1` (Rei) |
 | P4 | A correcao alcanca tambem o que ja estava gravado | Limite: P3 so valia para traducao nova, e 4.144 linhas ficariam erradas |
 | S1 | Matches disjuntos | Bug: `"de de de"` -> `"dede"` |
@@ -1523,10 +1911,12 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | S15 | A semente nunca sobrepoe uma regra do usuario | Risco: o programa passar a vir com terminologia e ela vencer a de quem usa |
 | R1 | Gravacao so por acao do usuario | Bug: navegar reescreve o banco |
 | R5 | Navegar custa O(pagina) | Perf: paginacao anulada por varredura |
+| R11 | O resumo por status e respondido so pelo indice, sem tocar a tabela | Perf: o item 19.12 poe `review_status` no WHERE e nao nos indices de cobertura; o plano perdeu a palavra `COVERING` e a consulta de toda recarga passou a ler 200 mil linhas |
 | R8 | Navegar custa O(pagina) tambem com busca ativa | Perf: `LIKE '%x%'` varre a tabela a cada interacao |
 | R6 | Cache de avisos nao diverge | Risco da coluna materializada |
 | Q1 | Lance perdido e anotacao rompida geram aviso | Medicao: 401 erros de terminologia contra 11 linhas marcadas, intersecao zero |
 | Q2 | As heuristicas de QA tem versao, e muda-las reavalia o banco | Risco: a melhoria violar R6 nas 200 mil linhas ja avaliadas |
+| Q3 | A avaliacao de QA na tela usa o par de idiomas da LINHA, e sem linha aberta nao ha veredito | Bug: "QA: sem avisos" em verde numa linha que a lista marcava com "⚠ QA"; e "traducao vazia" anunciado com o editor vazio |
 | R7 | A lista carrega o item clicado | Bug: clicar em B carregava C |
 | R9 | O editor mostra um par de idiomas de cada vez | Queixa de uso: revisar em espanhol achando que era italiano |
 | R10 | "Ir para ID" e "Proximo aviso" respeitam o filtro de origem | Bug: com "Origem: Espanhol", um ID ingles selecionava uma linha espanhola arbitraria |
@@ -1537,6 +1927,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | N1 | So as cinco tags mudam; lances, variantes e comentarios saem identicos | Risco: a lista de tags vivia em dois lugares |
 | C1 | Trabalho pesado roda fora da thread do Tk, e a resposta volta nela | Bug: "Aplicar automaticas" segurava a janela por 38 s |
 | C3 | Nenhuma transacao de escrita atravessa uma chamada de rede, e um lock vira mensagem | Bug: worker travava o "Salvar" do editor por um lote inteiro |
+| C4 | "Cancelar" e conferido dentro do laco de tentativas, antes de cada uma e antes de cada espera | Bug: `translate_text_chunk` nem recebia o flag; contra um endpoint que pendura a conexao, o clique ficava ate ~93 s sem efeito |
 | M1 | A janela principal reabre no que foi escolhido | Risco: "Detectar" volta sozinho e desliga a correcao de lances sem avisar |
 | M2 | Um BOM no arquivo de configuracoes nao apaga nada | Bug: um caractere invisivel zerava rascunhos, lista de falhas e preferencias |
 | X1 | Anotacoes `[%...]` atravessam a traducao byte a byte, ou o comentario conta como falha | Bug: `[%cal Ra1h8]` virava `[%cal Ta1h8]`; `[%eval +0.35]` quebrado antes da API |
@@ -1663,6 +2054,11 @@ X3). O que resta declarado como limite:
 **Rede**
 
 - Depende de um endpoint nao oficial, sujeito a bloqueio por volume.
+- **"Cancelar" nao alcanca o retry em andamento**: o laco de tres tentativas
+  nao olha o `cancel_flag`, e contra um endpoint que pendura a conexao o clique
+  pode esperar ~93 s por chunk (3 x 30 s de timeout + as esperas). Reproduzido
+  com sessao falsa: cancelado na primeira tentativa, as tres rodaram.
+  (ROADMAP 22.13)
 
 **Idioma de origem**
 
@@ -1756,6 +2152,13 @@ X3). O que resta declarado como limite:
   marcada como verificada que gera aviso continua gerando: o aviso e sobre o
   texto, e "verificada" e sobre quem olhou. O editor mostra os dois, e o
   relatorio de QA separa por status.
+- **Nenhuma entrada do `Termos-suspeitos.txt` tem escopo de PAR.** Sao 24, todas
+  por destino (14 `pt`, 2 para cada uma das outras cinco linguas), entao com o
+  arquivo que vem no programa o idioma de ORIGEM nunca muda o resultado da
+  terminologia. Ele e passado a avaliacao mesmo assim, porque a coluna
+  materializada o passa e as duas tem de receber os mesmos argumentos (Q3) — mas
+  a simetria nao esta testada, e so estara quando existir uma entrada `en>pt`.
+  (ROADMAP 22.2)
 - **A reavaliacao nao acontece quando so o `Termos-suspeitos.txt` e editado a
   mao.** A versao das heuristicas e uma constante no codigo (Q2), e nao um hash do
   arquivo: quem editar a lista tem de subir a constante ou clicar em "Reavaliar
@@ -1812,6 +2215,52 @@ X3). O que resta declarado como limite:
   uma palavra, e um orcamento feito sobre um PGN muito anotado inclui esses tokens.
   E deliberado — e a mesma unidade que o cliente usa para pagar —, mas quem orca
   precisa saber.
+
+**Interface (o que a revisao de 2026-07-31 encontrou; ROADMAP 22)**
+
+Cada item e comportamento ATUAL, confirmado como o ROADMAP 22 descreve —
+em janela real, headless ou por leitura de codigo, dito la item a item.
+
+- **Os placeholders que sobraram continuam sem aparecer**, nos cinco campos que
+  tem rotulo ou botao proprio (F17). Eles voltariam sozinhos se o CustomTkinter
+  corrigir a comparacao; ate la, a dica que cada um daria — o escopo da busca, o
+  que escrever na nota — nao chega a ninguem. (22.7)
+- **O rotulo dos botoes nao diz o atalho deles.** A lista de F18 alcanca os
+  vinte, mas quem esta com a mao no mouse so descobre que "Salvar" tem `Ctrl+S`
+  se abrir a lista. Pendurar o atalho no rotulo esbarra na largura: as duas
+  fileiras do rodape pedem 831 e 932 px dos ~1080 da largura minima — medido de
+  novo em 22.10, e os dois numeros continuam valendo. (22.8)
+- **O contraste foi medido na camada de rotulos, e nao em toda a janela.** F19
+  cobre as cores semanticas, a linha selecionada e o destaque da busca; os
+  fundos dos proprios widgets do CustomTkinter e os botoes ficaram como o tema
+  os entrega. Os textos grandes ja passavam com folga, de 6,8:1 a 17:1. (22.9)
+- **Nao ha historico das mensagens de status.** Elas somem depois do tempo de
+  leitura (F16) e nao ficam em lugar nenhum. As que relatam efeito em outras
+  linhas sao recibos de uma acao confirmada em dialogo, entao a informacao nao
+  se perde — mas quem olhar para o lado na hora errada perde o recibo. (22.6)
+- **A selecao em lote sobrevive a trocar de arquivo, de status e de busca** — so
+  a troca de PAR a apaga. E deliberado: juntar linhas de tres capitulos e o caso
+  que a barra existe para servir (F7). O preco esta pago pela confirmacao, que
+  diz quantas das marcadas estao fora dos filtros atuais (F21); o que nao existe
+  e um jeito de VER quais sao. (22.11)
+- **O editor de glossario nao tem selecao em lote.** Com os filtros
+  "Duplicadas"/"Conflitos", excluir oito duplicatas continua sendo oito ciclos
+  de clique + "Excluir" + "Sim". A paridade transplantada em S18 e a do teclado;
+  uma exclusao em massa e acao destrutiva nova, e pede confirmacao e backup
+  proprios em vez de herdar os da exclusao de uma regra. (22.12)
+- **A selecao de entrada aceita UM arquivo ou uma pasta.** Nao ha selecao
+  multipla (`askopenfilename` no singular) nem arrastar-e-soltar. O worker ja
+  aceita lista explicita (`only_files`), entao multiplos e troca de funcao; DnD
+  exigiria dependencia nova (`tkinterdnd2`), e a decisao registrada e nao
+  acrescenta-la por isto. (22.12)
+- **A previa do glossario nao mostra a semente.** Ela responde "o que as MINHAS
+  regras fazem com este texto" (S17), e as de fabrica nao estao na lista que o
+  editor mostra — explicar um resultado por uma regra que nao esta em lugar
+  nenhum da tela seria pior do que a omissao. (22.12)
+- **A mensagem de status do editor e cortada em 52 caracteres.** As duas de
+  propagacao passam disso e ficam com reticencias. E o que cabe na faixa do
+  rodape na largura minima, medido (F20); elas sao recibo de uma acao ja
+  confirmada em dialogo (V1), e a contagem que fica mostra o resultado. (22.10)
 
 **Procedencia (de onde cada traducao veio)**
 
@@ -1870,9 +2319,30 @@ Declaradas aqui para que a secao 9 continue sendo apenas o que os testes ja
 protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
-**Nenhuma pendente.** As garantias das revisoes de 2026-07-29 e 2026-07-30 — X1-X3
-e S11-S15 (secoes 13 a 15), Q1-Q2 (secao 16), R10, T5 e V1 (secao 17), O1-O4 (secao
-18), F1-F11 (secao 19) e D1-D7 (secao 20) — estao todas na secao 9.
+**Nenhuma pendente.** As nove garantias da revisao de 2026-07-31 — **F12**
+(22.1), **Q3** (22.2), **F13** (22.3), **F14** (22.4), **F15** (22.5), **F16**
+(22.6), **F17** (22.7), **F18** (22.8) e **F19** (22.9) — migraram para a secao
+9 no mesmo dia, com 5, 6, 8, 6, 5, 11, 5, 13 e 10 testes e nove rodadas de
+mutacao sem sobrevivente. As onze da segunda metade dela — **F20** (22.10),
+**F21** (22.11), **F22**, **F23**, **F24**, **F25**, **S16**, **S17** e **S18**
+(22.12), **R11** e **C4** (22.13) — migraram em 2026-08-01, pelo mesmo caminho:
+121 testes e 42 mutacoes, seis sobreviventes na primeira passada e nenhuma no
+fim. Cinco delas viraram teste novo e **uma virou codigo a menos** — o teto do
+divisor de 22.10, que era uma segunda tranca e ainda por cima calculava de uma
+largura que podia nao ser a final.
+
+**Duas delas foram declaradas com o enunciado errado aqui, e a implementacao
+corrigiu.** F12 falava so em gravar antes de recarregar, e faltava dizer que o
+status precisa ir para a linha que estava na tela (o `save_changes` pode trocar
+a linha aberta antes de o status ser gravado). F13 falava em acrescentar dois
+campos ao retrato, e o problema maior era outro: os campos que ja existiam
+guardavam o valor de DEPOIS da mudanca. As duas medicoes que mostraram isso
+estao nos itens do ROADMAP; o que fica aqui e a regra que as duas confirmam —
+**uma garantia planejada e uma hipotese ate alguem tentar implementa-la.**
+
+As demais garantias — X1-X3 e S11-S15 (secoes 13 a 15), Q1-Q2 (secao 16), R10,
+T5 e V1 (secao 17), O1-O4 (secao 18), F1-F11 (secao 19) e D1-D7 (secao 20) —
+estao todas na secao 9.
 
 **A secao 20 acabou declarando garantia nova, ao contrario do que estava previsto
 aqui.** A previsao era que ela nao declararia nada: sendo custo e nao

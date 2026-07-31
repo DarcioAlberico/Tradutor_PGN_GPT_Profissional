@@ -26,6 +26,8 @@ from tradutor_pgn import (
     edit_window,
     glossario,
     glossary_editor,
+    history_window,
+    stats_window,
     translation_worker,
 )
 
@@ -42,11 +44,21 @@ def _display_available():
 DISPLAY = _display_available()
 
 # Todo modulo capaz de abrir um dialogo durante os testes.
+#
+# `stats_window` e `history_window` entraram em 2026-08-01, e a falta deles nao
+# era teorica: a janela de estatisticas chama `filedialog.asksaveasfilename` para
+# salvar o relatorio, e um teste que a exercitasse abriria o seletor NATIVO do
+# Windows e travaria a suite esperando alguem clicar — foi o que aconteceu ao
+# escrever os testes de 22.12. A lista precisa cobrir todo modulo que abra
+# dialogo, e nao so os que ja tinham teste: e a armadilha que o item 3.2 do
+# ROADMAP descreve, na sua forma mais silenciosa.
 DIALOG_MODULES = (
     edit_window,
     glossary_editor,
     db_tools,
     app_actions,
+    history_window,
+    stats_window,
     translation_worker,
 )
 

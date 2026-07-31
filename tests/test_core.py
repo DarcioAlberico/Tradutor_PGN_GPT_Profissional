@@ -17,7 +17,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import tradutor_pgn
-from tradutor_pgn import app_paths, database, first_run, glossario, settings
+from tradutor_pgn import (
+    app_actions,
+    app_paths,
+    database,
+    db_tools,
+    first_run,
+    glossario,
+    history_window,
+    settings,
+    translation_api,
+)
 from tradutor_pgn.app_config import (
     DATABASE_BACKUP_KEEP_COUNT,
     LANGUAGES,
@@ -234,6 +244,7 @@ from tradutor_pgn.editor_common import (
     row_index_for_id,
 )
 from tradutor_pgn.editor_text import find_text_ranges, replace_all_text, replace_text_range
+from tradutor_pgn import edit_window
 from tradutor_pgn.edit_window import format_propagation_confirmation, safe_geometry
 from tradutor_pgn.glossary_editor import safe_geometry as glossary_safe_geometry
 from tradutor_pgn.glossary_editor import (
@@ -732,6 +743,369 @@ class TranslationApiTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 1)
         self.assertEqual(session.calls[0][1]["q"], "Hello")
         self.assertEqual(session.calls[0][2], 30)
+
+
+class CancelReachesTheRetryLoopTests(unittest.TestCase):
+    """Garantia C4: "Cancelar" alcanca o laco de tentativas (ROADMAP 22.13).
+
+    `translate_text_chunk` nem RECEBIA o `cancel_flag`: o laco de tres tentativas
+    dormia em `time.sleep` sem olhar cancelamento, e `translate_text` so conferia
+    entre chunks — o que nao cobre nada num comentario de um chunk so, que e a
+    maioria. Com o timeout real de 30 s por tentativa, a janela sem efeito chega
+    a ~93 s por chunk.
+    """
+
+    class SessaoQueFalha:
+        """Devolve sempre um status que pede nova tentativa, sem dormir de verdade."""
+
+        def __init__(self, status=503, ligar_flag=None):
+            self.chamadas = 0
+            self.status = status
+            self.ligar_flag = ligar_flag
+
+        def get(self, _url, params=None, timeout=None):
+            self.chamadas += 1
+            if self.ligar_flag is not None:
+                self.ligar_flag.set()
+
+            class Resposta:
+                status_code = self.status
+
+                def json(self_inner):  # pragma: no cover - nao chega a ser lido
+                    return [[["", ""]]]
+
+            return Resposta()
+
+    def setUp(self):
+        # As esperas do retry sao reais (1,5 s + 3 s). O teste substitui o
+        # `sleep` porque o assunto dele e QUANTAS tentativas acontecem, e nao
+        # quanto elas esperam — e uma suite que dorme 4,5 s por caso deixa de ser
+        # rodada. As esperas tem teste proprio em `retry_delay_seconds`.
+        self.dormidas = []
+        self.sleep_original = translation_api.time.sleep
+        translation_api.time.sleep = self.dormidas.append
+        self.addCleanup(setattr, translation_api.time, "sleep", self.sleep_original)
+
+    def test_without_the_flag_it_still_tries_three_times(self):
+        """A ancora: sem cancelamento, o retry continua sendo o de sempre."""
+        sessao = self.SessaoQueFalha()
+
+        resultado = translation_api.translate_text_chunk("Hello", "pt", session=sessao)
+
+        self.assertIsNone(resultado)
+        self.assertEqual(sessao.chamadas, translation_api.MAX_ATTEMPTS)
+
+    def test_cancelling_during_the_first_attempt_stops_the_others(self):
+        """Era o defeito medido: as tres rodavam com o flag ja ligado."""
+        flag = threading.Event()
+        sessao = self.SessaoQueFalha(ligar_flag=flag)
+
+        resultado = translation_api.translate_text_chunk(
+            "Hello", "pt", session=sessao, cancel_flag=flag
+        )
+
+        self.assertIsNone(resultado)
+        self.assertEqual(sessao.chamadas, 1)
+
+    def test_it_does_not_wait_before_giving_up(self):
+        """Conferido antes da espera: desistir depois de dormir 1,5 s e desistir tarde."""
+        flag = threading.Event()
+        sessao = self.SessaoQueFalha(ligar_flag=flag)
+
+        translation_api.translate_text_chunk(
+            "Hello", "pt", session=sessao, cancel_flag=flag
+        )
+
+        self.assertEqual(self.dormidas, [])
+
+    def test_cancelling_DURING_the_wait_stops_the_next_attempt(self):
+        """A segunda conferencia, e a que cobre a janela de tempo que importa.
+
+        As duas esperas somam 4,5 s e a requisicao pode levar 30 — e ali, parado,
+        que o usuario clica em Cancelar. Uma mutacao mostrou que sem este caso a
+        conferencia do topo do laco podia ser removida sem nada ficar vermelho: a
+        de antes da espera ja pegava o cenario em que o flag e ligado DURANTE a
+        requisicao.
+        """
+        flag = threading.Event()
+        sessao = self.SessaoQueFalha()
+        # O cancelamento acontece enquanto o programa dorme entre as tentativas.
+        translation_api.time.sleep = lambda _s: flag.set()
+
+        resultado = translation_api.translate_text_chunk(
+            "Hello", "pt", session=sessao, cancel_flag=flag
+        )
+
+        self.assertIsNone(resultado)
+        self.assertEqual(sessao.chamadas, 1)
+
+    def test_a_flag_already_set_does_not_call_the_api_at_all(self):
+        flag = threading.Event()
+        flag.set()
+        sessao = self.SessaoQueFalha()
+
+        resultado = translation_api.translate_text_chunk(
+            "Hello", "pt", session=sessao, cancel_flag=flag
+        )
+
+        self.assertIsNone(resultado)
+        self.assertEqual(sessao.chamadas, 0)
+
+    def test_the_flag_crosses_from_translate_text(self):
+        """Um comentario de um chunk so nao tinha conferencia nenhuma."""
+        flag = threading.Event()
+        sessao = self.SessaoQueFalha(ligar_flag=flag)
+
+        resultado = translation_api.translate_text(
+            "Hello", "pt", cancel_flag=flag, session=sessao
+        )
+
+        self.assertIsNone(resultado)
+        self.assertEqual(sessao.chamadas, 1)
+
+
+class CoveringIndexTests(unittest.TestCase):
+    """Garantia R11: o resumo por status nao toca a tabela (ROADMAP 22.13).
+
+    O item 19.12 acrescentou `review_status` a agregada de
+    `get_review_status_counts` e nao a acrescentou aos dois indices de cobertura
+    criados para ela. A cobertura se perdeu em silencio — nada quebra, a consulta
+    so passa a ler a tabela linha a linha, na thread do Tk, a cada recarga da
+    lista.
+
+    O teste le o PLANO, e nao o tempo: cronometrar em 20 linhas nao distingue
+    nada, e a palavra `COVERING` no `EXPLAIN QUERY PLAN` e exatamente a afirmacao
+    que se quer proteger.
+    """
+
+    def plano(self, cursor, **kwargs):
+        sql, params = database.review_status_counts_query(**kwargs)
+        return " ".join(
+            linha[3]
+            for linha in cursor.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+        )
+
+    def test_the_summary_by_target_only_reads_the_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = initialize_database(str(Path(tmp) / "c.db"))
+            cur = conn.cursor()
+            save_translation(cur, "orig", "trans", "pt", "en")
+            conn.commit()
+
+            plano = self.plano(cur, target_language="pt")
+            self.assertIn("idx_comments_counts", plano)
+            self.assertIn("COVERING", plano.upper(), plano)
+            conn.close()
+
+    def test_the_summary_with_a_source_filter_reads_the_other_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = initialize_database(str(Path(tmp) / "c.db"))
+            cur = conn.cursor()
+            save_translation(cur, "orig", "trans", "pt", "en")
+            conn.commit()
+
+            plano = self.plano(cur, target_language="pt", source_language="en")
+            self.assertIn("idx_comments_pair_counts", plano)
+            self.assertIn("COVERING", plano.upper(), plano)
+            conn.close()
+
+    def test_review_status_is_in_both_indexes(self):
+        """A coluna que 19.12 acrescentou ao WHERE e nao acrescentou aqui."""
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = initialize_database(str(Path(tmp) / "c.db"))
+            for indice in ("idx_comments_counts", "idx_comments_pair_counts"):
+                colunas = [
+                    linha[2]
+                    for linha in conn.execute(f"PRAGMA index_info({indice})").fetchall()
+                ]
+                self.assertIn("review_status", colunas, indice)
+            conn.close()
+
+    def test_an_old_database_gets_the_index_rebuilt(self):
+        """`CREATE INDEX IF NOT EXISTS` nao troca as colunas de um indice que existe.
+
+        Sem o `DROP` da migracao 9, o banco de quem ja usava o programa ficaria
+        com o indice velho para sempre — e a correcao valeria so para instalacoes
+        novas, que sao exatamente as que nao tem o problema.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            caminho = str(Path(tmp) / "c.db")
+            conn = initialize_database(caminho)
+            conn.close()
+
+            # Volta ao estado anterior: indice sem `review_status` e versao 8.
+            conn = sqlite3.connect(caminho)
+            conn.execute("DROP INDEX idx_comments_counts")
+            conn.execute(
+                "CREATE INDEX idx_comments_counts "
+                "ON comments(target_language, verified, quality_warning)"
+            )
+            conn.execute("PRAGMA user_version = 8")
+            conn.commit()
+            conn.close()
+
+            conn = initialize_database(caminho)
+            colunas = [
+                linha[2]
+                for linha in conn.execute(
+                    "PRAGMA index_info(idx_comments_counts)"
+                ).fetchall()
+            ]
+            self.assertIn("review_status", colunas)
+            conn.close()
+
+
+class GlossaryResetCountsTests(unittest.TestCase):
+    """Garantia S16: o dialogo de zerar conta o que apaga (ROADMAP 22.12).
+
+    `len(app.glossary_substitutions)` conta a lista APLICAVEL, que e outra coisa:
+    expande `@casa@` (uma linha vira 64 regras), soma as da semente — que zerar
+    nao apaga — e exclui as de limpeza, que zerar apaga. Medido no glossario
+    real: 5.910 entradas no arquivo, 7.325 anunciadas.
+    """
+
+    def test_the_description_names_each_type(self):
+        self.assertEqual(
+            db_tools.describe_glossary_types(
+                {"suggestion": 5674, "automatic": 186, "cleanup": 50}
+            ),
+            "5674 sugestões, 186 automáticas e 50 limpezas",
+        )
+
+    def test_a_type_that_does_not_exist_is_not_mentioned(self):
+        """"0 limpezas" num glossario que nunca teve uma e ruido."""
+        self.assertEqual(
+            db_tools.describe_glossary_types({"suggestion": 2}), "2 sugestões"
+        )
+
+    def test_the_singular_is_the_singular(self):
+        self.assertEqual(
+            db_tools.describe_glossary_types({"cleanup": 1}), "1 limpeza"
+        )
+
+    def test_an_empty_glossary_says_so(self):
+        self.assertEqual(db_tools.describe_glossary_types({}), "nenhuma regra")
+
+    def test_the_count_is_of_the_file_and_not_of_the_applicable_rules(self):
+        """A linha com `@casa@` vale 64 regras na aplicacao e UMA no arquivo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            caminho = Path(tmp) / "Substituicoes.txt"
+            save_glossary_entries(
+                [
+                    ("@casa@-torre", "torre de @casa@", "suggestion"),
+                    ("  x  ", "y", "cleanup"),
+                ],
+                str(caminho),
+                create_backup=False,
+            )
+
+            total, por_tipo = db_tools.count_glossary_entries_by_type(str(caminho))
+
+            self.assertEqual(total, 2)
+            self.assertEqual(por_tipo, {"suggestion": 1, "cleanup": 1})
+            # A ancora: a lista aplicavel da 64 + 0 (limpeza nao e interativa).
+            aplicaveis = load_interactive_substitutions(str(caminho))
+            self.assertEqual(len(aplicaveis), 64)
+
+
+class StatsTablesTests(unittest.TestCase):
+    """Garantia F24 (CSV): as tabelas do relatorio saem em planilha (22.12).
+
+    A janela exportava so `.txt` corrido, e as tres tabelas — progresso por obra,
+    palavras por par e atividade por dia — sao o que se cola num orcamento.
+    """
+
+    ESTATISTICAS = {
+        "per_file": [("cap01.pgn", 120, 100, 40, 60, 3)],
+        "words_by_pair": {
+            ("en", "pt"): {
+                "original": 1000,
+                "translated": 1100,
+                "verified": 400,
+                "pending": 700,
+            }
+        },
+        "daily": [("2026-07-31", 12, 340)],
+    }
+
+    def test_the_three_tables_come_out(self):
+        titulos = [titulo for titulo, _cab, _linhas in db_tools.stats_tables(self.ESTATISTICAS)]
+        self.assertEqual(
+            titulos, ["progresso-por-obra", "palavras-por-par", "atividade-por-dia"]
+        )
+
+    def test_every_header_matches_its_rows(self):
+        """Um cabecalho com uma coluna a mais desalinha a planilha inteira."""
+        for titulo, cabecalho, linhas in db_tools.stats_tables(self.ESTATISTICAS):
+            for linha in linhas:
+                self.assertEqual(len(linha), len(cabecalho), titulo)
+
+    def test_the_language_pair_comes_out_readable(self):
+        _titulo, _cab, linhas = db_tools.stats_tables(self.ESTATISTICAS)[1]
+        self.assertEqual(linhas[0][0], app_config.language_label("en"))
+        self.assertEqual(linhas[0][1], "pt")
+
+    def test_empty_stats_produce_empty_tables_and_not_an_error(self):
+        tabelas = db_tools.stats_tables({})
+        self.assertEqual([linhas for _t, _c, linhas in tabelas], [[], [], []])
+
+
+class HistoryChangeSummaryTests(unittest.TestCase):
+    """O resumo por linha do historico (ROADMAP 22.12), sem Tk.
+
+    A lista dizia QUANDO e QUE TIPO, e nunca o TAMANHO da mudanca — e entre 100
+    linhas com o mesmo rotulo, o tamanho e o que distingue a versao procurada.
+    """
+
+    def test_it_counts_the_changed_stretches(self):
+        self.assertEqual(
+            history_window.history_change_summary("a torre e o bispo", "a TORRE e o BISPO"),
+            "2 trecho(s)",
+        )
+
+    def test_an_action_that_did_not_touch_the_text_says_so(self):
+        """"Verificacao" e "Regras automaticas" produzem entradas identicas."""
+        self.assertEqual(
+            history_window.history_change_summary("a torre", "a torre"),
+            "sem mudanca no texto",
+        )
+
+    def test_the_first_fill_counts_as_a_change(self):
+        self.assertEqual(
+            history_window.history_change_summary(None, "a torre"), "1 trecho(s)"
+        )
+
+
+class LogAutoscrollTests(unittest.TestCase):
+    """Garantia F23 (log): o log so rola quando o fim ja estava visivel (22.12).
+
+    O `see(END)` era incondicional: reler um `[AVISO]` durante uma execucao era
+    ser puxado de volta a cada mensagem nova.
+    """
+
+    class FakeLog:
+        def __init__(self, fim):
+            self.fim = fim
+
+        def yview(self):
+            return (0.0, self.fim)
+
+    def test_the_end_visible_means_follow(self):
+        self.assertTrue(app_actions.log_is_at_the_end(self.FakeLog(1.0)))
+
+    def test_scrolled_up_means_stay(self):
+        self.assertFalse(app_actions.log_is_at_the_end(self.FakeLog(0.42)))
+
+    def test_a_partially_visible_last_line_still_counts(self):
+        """A fracao e calculada em pixels: 0,999... e "esta no fim"."""
+        self.assertTrue(app_actions.log_is_at_the_end(self.FakeLog(0.9995)))
+
+    def test_a_log_that_cannot_answer_keeps_the_old_behaviour(self):
+        class SemYview:
+            def yview(self):
+                raise RuntimeError("ainda nao desenhado")
+
+        self.assertTrue(app_actions.log_is_at_the_end(SemYview()))
 
 
 class EditorTextTests(unittest.TestCase):
@@ -2709,11 +3083,19 @@ class EditorCommonTests(unittest.TestCase):
         self.assertLessEqual(len(preview("x" * 500, 54)), 54)
 
     def test_both_editors_share_the_same_geometry_logic(self):
-        # As duas janelas so devem divergir no tamanho minimo.
+        # As duas janelas so devem divergir no tamanho minimo. O do editor de
+        # traducoes sai das constantes dos paineis desde 22.10 — escrever 1176
+        # aqui a mao recriaria a segunda fonte que aquele item eliminou.
         janela = FakeWindow(1920, 1080)
         self.assertEqual(
             safe_geometry(janela, "300x200+10+10"),
-            clamp_geometry("300x200+10+10", 1920, 1080, 1120, 680),
+            clamp_geometry(
+                "300x200+10+10",
+                1920,
+                1080,
+                edit_window.MIN_WIDTH,
+                edit_window.MIN_HEIGHT,
+            ),
         )
         self.assertEqual(
             glossary_safe_geometry(janela, "300x200+10+10"),
@@ -6399,7 +6781,7 @@ class TranslateTextTests(unittest.TestCase):
         """Garantia T3: nao se monta uma traducao pela metade."""
         chamadas = []
 
-        def fake(chunk, _lang, _log=None, session=None, pacer=None, source_language=""):
+        def fake(chunk, _lang, _log=None, session=None, pacer=None, source_language="", cancel_flag=None):
             chamadas.append(chunk)
             return None if len(chamadas) == 2 else "ok"
 
@@ -6413,7 +6795,7 @@ class TranslateTextTests(unittest.TestCase):
         chamadas = []
         flag = threading.Event()
 
-        def fake(chunk, _lang, _log=None, session=None, pacer=None, source_language=""):
+        def fake(chunk, _lang, _log=None, session=None, pacer=None, source_language="", cancel_flag=None):
             chamadas.append(chunk)
             flag.set()
             return "ok"
@@ -8866,14 +9248,35 @@ class TypedConfirmationTests(unittest.TestCase):
     def test_the_word_releases_the_action(self):
         self.assertTrue(confirmation_accepted(CONFIRMATION_WORD))
 
+    def test_the_word_is_in_the_language_of_the_dialog(self):
+        """O dialogo e todo em portugues e o botao dele se chama "Apagar".
+
+        A palavra era `delete`, e quem digitava "apagar" — a leitura mais natural
+        do que esta na tela — era RECUSADO sem explicacao (ROADMAP 22.12). Uma
+        barreira que existe para transformar clique em decisao nao pode falhar
+        por vocabulario.
+        """
+        self.assertEqual(CONFIRMATION_WORD, "apagar")
+
     def test_case_and_surrounding_space_do_not_matter(self):
-        """Quem digitou DELETE decidiu tanto quanto quem digitou delete."""
-        for texto in ["DELETE", " delete ", "Delete", "\tdelete\n"]:
+        """Quem digitou APAGAR decidiu tanto quanto quem digitou apagar."""
+        for texto in ["APAGAR", " apagar ", "Apagar", "\tapagar\n"]:
             with self.subTest(texto=texto):
                 self.assertTrue(confirmation_accepted(texto))
 
+    def test_the_old_word_still_passes_for_one_version(self):
+        """Quem usa o programa ha meses tem `delete` na memoria dos dedos."""
+        for texto in ["delete", "DELETE", " delete "]:
+            with self.subTest(texto=texto):
+                self.assertTrue(confirmation_accepted(texto))
+
+    def test_the_old_word_does_not_leak_into_another_word(self):
+        """Um chamador que peca outra palavra nao ganha `delete` de brinde."""
+        self.assertFalse(confirmation_accepted("delete", word="zerar"))
+        self.assertTrue(confirmation_accepted("zerar", word="zerar"))
+
     def test_anything_else_does_not(self):
-        for texto in ["", None, "del", "deletes", "apagar", "sim", "s"]:
+        for texto in ["", None, "apag", "apagars", "del", "sim", "s"]:
             with self.subTest(texto=texto):
                 self.assertFalse(confirmation_accepted(texto))
 
@@ -9317,6 +9720,86 @@ class ResetGlossaryTests(ResetToolsTestCase):
         db_tools.reset_glossary(app)
 
         self.assertEqual(avisos, [[]])
+
+    # ------------------------------------------------------- ROADMAP 22.12
+
+    def test_the_question_counts_the_file_and_not_the_applicable_rules(self):
+        """Garantia S16. Anunciava 7.325 e apagava 5.910 no glossario real.
+
+        Aqui a mesma divergencia cabe em duas linhas: a de `@casa@` vale 64
+        regras na aplicacao e UMA no arquivo, e a de limpeza nao entra na lista
+        aplicavel mas e apagada do mesmo jeito.
+        """
+        self.glossario_com(
+            [
+                ("@casa@-torre", "torre de @casa@", "suggestion"),
+                ("  x  ", "y", "cleanup"),
+            ]
+        )
+        app = self.app_falso(self.base / "traducoes.db")
+        # O estado que o dialogo lia antes: a lista APLICAVEL, com 64 regras.
+        app.glossary_substitutions = load_interactive_substitutions()
+        self.assertEqual(len(app.glossary_substitutions), 64)
+        self.resposta = False
+
+        db_tools.reset_glossary(app)
+
+        self.assertIn("2 regras", self.perguntas[0][1])
+        self.assertNotIn("64 regras", self.perguntas[0][1])
+
+    def test_the_question_says_the_number_by_type(self):
+        self.glossario_com([("rook", "torre", "suggestion"), ("  x  ", "y", "cleanup")])
+        app = self.app_falso(self.base / "traducoes.db")
+        self.resposta = False
+
+        db_tools.reset_glossary(app)
+
+        self.assertIn("1 sugestão e 1 limpeza", self.perguntas[0][1])
+
+    def test_the_factory_rules_do_not_come_back_from_nowhere(self):
+        """Zerar deixava a sessao sem regra nenhuma e a abertura seguinte com 232.
+
+        A semente e mesclada em toda carga (S15) e o zerar nao a apaga — ela vem
+        com o programa. Esvaziar a lista em memoria fazia o programa "recuperar"
+        sozinho, no dia seguinte, um glossario que o usuario acabou de zerar.
+        """
+        caminho = self.glossario_com([("rook", "torre")])
+        semente = self.base / "semente.txt"
+        semente.write_text(
+            "substituicoes = [('bishop', 'bispo', 'suggestion', 0, 'pt')]",
+            encoding="utf-8",
+        )
+        original = glossario._default_seed_path
+        glossario._default_seed_path = lambda: str(semente)
+        self.addCleanup(setattr, glossario, "_default_seed_path", original)
+
+        app = self.app_falso(self.base / "traducoes.db")
+
+        db_tools.reset_glossary(app)
+
+        self.assertEqual(load_glossary_entries(str(caminho), prefer_db=False), [])
+        self.assertEqual(
+            [tuple(regra[:2]) for regra in app.glossary_substitutions],
+            [("bishop", "bispo")],
+        )
+
+    def test_the_result_says_what_is_left(self):
+        """Sem isso, "glossario zerado" com sugestoes ainda aparecendo confunde."""
+        self.glossario_com([("rook", "torre")])
+        semente = self.base / "semente.txt"
+        semente.write_text(
+            "substituicoes = [('bishop', 'bispo', 'suggestion', 0, 'pt')]",
+            encoding="utf-8",
+        )
+        original = glossario._default_seed_path
+        glossario._default_seed_path = lambda: str(semente)
+        self.addCleanup(setattr, glossario, "_default_seed_path", original)
+
+        db_tools.reset_glossary(self.app_falso(self.base / "traducoes.db"))
+
+        infos = [m for tipo, _t, m in self.dialogos if tipo == "info"]
+        self.assertTrue(infos, self.dialogos)
+        self.assertIn("1 regra(s) de fábrica", infos[0])
 
 # ===========================================================================
 # Letras das pecas: correcao ancorada no comentario original
@@ -10363,8 +10846,24 @@ class MainWindowSettingsTests(unittest.TestCase):
                 "target_language": "es",
                 "process_subdirs": False,
                 "source_path": "C:/partidas",
+                # Ausente no que foi gravado: a janela principal so passou a
+                # lembrar tamanho e posicao em 22.12, e um arquivo de antes disso
+                # tem de abrir maximizada como sempre abriu.
+                "geometry": "",
             },
         )
+
+    def test_the_saved_geometry_comes_back(self):
+        """A janela principal era a unica que nunca lembrava onde estava."""
+        guardado = {MAIN_WINDOW_KEY: {"geometry": "1200x800+40+20"}}
+        self.assertEqual(
+            read_main_window_settings(guardado, self.IDIOMAS)["geometry"],
+            "1200x800+40+20",
+        )
+
+    def test_a_geometry_that_is_not_text_falls_back_to_maximizing(self):
+        guardado = {MAIN_WINDOW_KEY: {"geometry": 1200}}
+        self.assertEqual(read_main_window_settings(guardado, self.IDIOMAS)["geometry"], "")
 
     def test_detect_survives_next_to_a_non_default_target(self):
         """A string vazia e "Detectar", uma escolha legitima.

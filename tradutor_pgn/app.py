@@ -4,6 +4,7 @@ import tkinter as tk
 
 from . import __version__, app_actions, app_paths, first_run
 from .app_config import LANGUAGE_NAMES
+from .editor_common import window_safe_geometry
 from .glossario import set_glossary_error_handler
 from .main_window import setup_main_ui
 from .settings import (
@@ -11,7 +12,13 @@ from .settings import (
     read_main_window_settings,
     write_main_window_settings,
 )
-from .window_utils import bring_window_to_front, install_callback_error_reporter
+from .window_utils import install_callback_error_reporter, restore_or_maximize
+
+
+# O minimo da janela principal. Estava escrito duas vezes em numeros crus
+# (`geometry` e `minsize`), que e a mesma duplicacao que o 22.10 tirou do editor.
+MAIN_MIN_WIDTH = 900
+MAIN_MIN_HEIGHT = 600
 
 
 class PGNTranslatorApp:
@@ -21,9 +28,8 @@ class PGNTranslatorApp:
         # esta rodando?" e a primeira pergunta de qualquer suporte, e a barra de
         # titulo e o unico lugar que o usuario ve sem procurar (ROADMAP 21.6).
         self.root.title(f"PGN Tradutor Pro {__version__}")
-        self.root.geometry("900x650")
-        self.root.minsize(900, 600)
-        bring_window_to_front(self.root, maximize=True)
+        self.root.geometry(f"{MAIN_MIN_WIDTH}x650")
+        self.root.minsize(MAIN_MIN_WIDTH, MAIN_MIN_HEIGHT)
 
         # Variáveis principais, restauradas do que a sessao anterior escolheu.
         #
@@ -34,6 +40,20 @@ class PGNTranslatorApp:
         # esquecer um clique custa uma execucao inteira traduzida no escuro, e o
         # programa nao teria como avisar depois: o resultado parece pronto.
         escolhas = read_main_window_settings(load_settings(), LANGUAGE_NAMES)
+        # Tamanho e posicao, como os dois editores ja faziam (ROADMAP 22.12).
+        # Esta era a unica janela do programa que abria maximizada sempre, e num
+        # monitor grande isso e uma janela de 900 px de conteudo esticada por
+        # 2.560. `restore_or_maximize` decide entre uma coisa e outra num lugar
+        # so, porque sao alternativas — pedir as duas faz a restauracao perder.
+        restore_or_maximize(
+            self.root,
+            None,
+            window_safe_geometry(
+                self.root, escolhas["geometry"], MAIN_MIN_WIDTH, MAIN_MIN_HEIGHT
+            )
+            if escolhas["geometry"]
+            else "",
+        )
         self.source_path = tk.StringVar(value=escolhas["source_path"])
         self.target_language = tk.StringVar(value=escolhas["target_language"])
         self.source_language = tk.StringVar(value=escolhas["source_language"])
@@ -86,6 +106,11 @@ class PGNTranslatorApp:
 
         # Configuração da interface
         self.setup_ui()
+
+        # O X da janela principal passa por `close_main_window` (ROADMAP 22.12):
+        # sem handler, ele matava uma traducao em andamento e as janelas filhas
+        # sem passar pelos fechamentos delas.
+        self.root.protocol("WM_DELETE_WINDOW", self.close_main_window)
 
         # Atualização do log
         self.update_log()
@@ -185,6 +210,9 @@ class PGNTranslatorApp:
 
     def cancel_translation(self):
         app_actions.cancel_translation(self)
+
+    def close_main_window(self):
+        return app_actions.close_main_window(self)
 
     def _reset_buttons(self):
         app_actions.reset_buttons(self)
