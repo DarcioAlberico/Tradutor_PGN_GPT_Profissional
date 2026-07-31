@@ -5910,5 +5910,5 @@ substituicoes = [
     ('O preto fica', 'As pretas ficam', 'automatic'),
     ('a mudança', 'o lance'),
     ('assemelha a um Dragão Acelerado', 'assemelha a uma Dragão Acelerada', 'automatic'),
-    ('a marca duvidosa', 'a marca de  duvidoso'),
+    ('a marca duvidosa', 'a marca de duvidoso'),
 ]
