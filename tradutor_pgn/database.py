@@ -2118,9 +2118,36 @@ def record_comment_history(
     return cursor.lastrowid
 
 
-def fetch_comment_history(cursor, comment_id, limit=50):
+# O historico so tem uma pergunta a responder — "para qual texto eu volto?" —, e
+# uma entrada que nao mexeu no texto nao e uma resposta possivel. Medido no banco
+# de dev (6.500 linhas): das 889 entradas gravadas, **607 nao mudam o texto**, e
+# 355 dos 629 comentarios com historico tem SO entradas desse tipo. Abrir o
+# historico neles mostrava uma lista com o mesmo texto dos dois lados — o
+# "so aparece a traducao atual" que o usuario relatou (ROADMAP 23.1).
+#
+# `verify` e o grosso: marcar como verificada grava previous == new. E informacao
+# real (quando a linha foi conferida), mas nao e uma versao.
+HISTORY_TEXT_CHANGED = (
+    "COALESCE(previous_translation, '') <> COALESCE(new_translation, '')"
+)
+
+
+def fetch_comment_history(cursor, comment_id, limit=50, only_text_changes=True):
+    """As versoes desta linha, da mais recente para tras.
+
+    `only_text_changes=True` e o padrao porque e o que a janela pergunta. O filtro
+    e em SQL, e nao em Python depois, por causa do `LIMIT`: com 100 verificacoes
+    gravadas, filtrar depois traria 100 linhas inuteis e ZERO alteracoes — o
+    limite se gastaria inteiro no que vai ser descartado.
+
+    `only_text_changes=False` devolve tudo, que e como se conta quantas ficaram
+    de fora (`count_comment_history`).
+    """
+    where = "comment_id = ?"
+    if only_text_changes:
+        where += f" AND {HISTORY_TEXT_CHANGED}"
     return cursor.execute(
-        """
+        f"""
         SELECT
             id,
             action,
@@ -2130,12 +2157,70 @@ def fetch_comment_history(cursor, comment_id, limit=50):
             new_verified,
             created_at
         FROM comment_history
-        WHERE comment_id = ?
+        WHERE {where}
         ORDER BY id DESC
         LIMIT ?
         """,
         (comment_id, limit),
     ).fetchall()
+
+
+def count_comment_history(cursor, comment_id):
+    """`(com_mudanca, sem_mudanca)` do historico desta linha.
+
+    Duas contagens numa passada so: a janela precisa das duas — uma para saber se
+    o limite cortou a lista, outra para dizer quantas verificacoes ficaram fora
+    dela.
+    """
+    com, sem = cursor.execute(
+        f"""
+        SELECT
+            COALESCE(SUM(CASE WHEN {HISTORY_TEXT_CHANGED} THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {HISTORY_TEXT_CHANGED} THEN 0 ELSE 1 END), 0)
+        FROM comment_history
+        WHERE comment_id = ?
+        """,
+        (comment_id,),
+    ).fetchone()
+    return com, sem
+
+
+def machine_translation_for(cursor, comment_id):
+    """O texto que a traducao automatica produziu para esta linha.
+
+    **Derivado, e nao gravado** (ROADMAP 23.1). O `INSERT` do pipeline e o unico
+    caminho que escreve `translated_comment` sem registrar historico; todos os
+    outros — editar, importar CSV, aplicar automaticas, corrigir lances,
+    preencher linha vazia — registram. Entao andar para tras a partir do texto
+    atual chega exatamente no que a maquina produziu:
+
+    - com historico, e o `previous_translation` da entrada MAIS ANTIGA;
+    - sem historico nenhum, e o proprio texto atual — ninguem mexeu nele ainda.
+
+    Gravar uma entrada de linha-base no `INSERT` daria a mesma resposta e custaria
+    o acervo inteiro duplicado em disco: o texto iria no `new_translation` de cada
+    uma das 200 mil linhas. A derivacao custa uma consulta indexada por
+    `comment_id`.
+
+    Devolve `None` quando a linha nao existe.
+    """
+    primeira = cursor.execute(
+        """
+        SELECT previous_translation
+        FROM comment_history
+        WHERE comment_id = ?
+        ORDER BY id
+        LIMIT 1
+        """,
+        (comment_id,),
+    ).fetchone()
+    if primeira is not None:
+        return primeira[0] or ""
+
+    atual = cursor.execute(
+        "SELECT translated_comment FROM comments WHERE id = ?", (comment_id,)
+    ).fetchone()
+    return None if atual is None else (atual[0] or "")
 
 
 def update_translation_by_id(

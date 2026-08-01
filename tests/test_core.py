@@ -65,7 +65,9 @@ from tradutor_pgn.database import (
     count_review_rows,
     count_words_by_pair,
     escape_like_pattern,
+    count_comment_history,
     fetch_comment_history,
+    machine_translation_for,
     fetch_comment_occurrences,
     fetch_exact_translation_match_candidates,
     fetch_export_rows,
@@ -1076,6 +1078,159 @@ class HistoryChangeSummaryTests(unittest.TestCase):
         )
 
 
+class HistoryIsAListOfChangesTests(unittest.TestCase):
+    """Garantia F26: o historico lista ALTERACOES, e a versao inicial e
+    recuperavel (ROADMAP 23.1).
+
+    Medido no banco de dev de 6.500 linhas: **5.871 (90%) nao tinham nenhuma
+    linha de historico** e abriam a janela em "Nenhuma alteracao registrada"; das
+    889 entradas gravadas, **607 nao mudam o texto** (600 sao `verify`), e em 355
+    dos 629 comentarios com historico ERA SO ISSO — os dois painels mostravam o
+    mesmo texto, que e o "so aparece a traducao atual" que o usuario relatou.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.conn = initialize_database(str(Path(self.tmp.name) / "c.db"))
+        self.addCleanup(self.conn.close)
+        self.cur = self.conn.cursor()
+
+    def linha(self, original="the rook", traducao="a torre"):
+        save_translation(self.cur, original, traducao, "pt", "en")
+        self.conn.commit()
+        return self.cur.execute(
+            "SELECT id FROM comments WHERE original_comment = ?", (original,)
+        ).fetchone()[0]
+
+    # ------------------------------------------- a versao da maquina
+
+    def test_without_any_history_the_machine_version_is_the_current_text(self):
+        """O `INSERT` do pipeline e o unico caminho que nao registra historico."""
+        cid = self.linha()
+
+        self.assertEqual(machine_translation_for(self.cur, cid), "a torre")
+
+    def test_after_an_edit_the_machine_version_is_what_came_before_it(self):
+        cid = self.linha()
+        update_translation_by_id(self.cur, cid, "a TORRE de dama")
+        self.conn.commit()
+
+        self.assertEqual(machine_translation_for(self.cur, cid), "a torre")
+        self.assertEqual(
+            self.cur.execute(
+                "SELECT translated_comment FROM comments WHERE id = ?", (cid,)
+            ).fetchone()[0],
+            "a TORRE de dama",
+        )
+
+    def test_it_walks_back_past_several_edits(self):
+        """E a entrada MAIS ANTIGA que guarda o texto da maquina, e nao a ultima."""
+        cid = self.linha()
+        for texto in ("primeira edicao", "segunda edicao", "terceira edicao"):
+            update_translation_by_id(self.cur, cid, texto)
+        self.conn.commit()
+
+        self.assertEqual(machine_translation_for(self.cur, cid), "a torre")
+
+    def test_a_verification_in_the_middle_does_not_move_the_starting_point(self):
+        """`verify` grava entrada sem mudar texto: ela nao pode virar a origem."""
+        cid = self.linha()
+        set_translation_verified_by_id(self.cur, cid)
+        update_translation_by_id(self.cur, cid, "editada depois de verificar")
+        self.conn.commit()
+
+        self.assertEqual(machine_translation_for(self.cur, cid), "a torre")
+
+    def test_a_line_that_does_not_exist_answers_None(self):
+        self.assertIsNone(machine_translation_for(self.cur, 99999))
+
+    # ------------------------------------------------- a lista filtrada
+
+    def test_entries_that_do_not_change_the_text_stay_out_of_the_list(self):
+        cid = self.linha()
+        set_translation_verified_by_id(self.cur, cid)
+        self.conn.commit()
+
+        self.assertEqual(fetch_comment_history(self.cur, cid), [])
+        self.assertEqual(
+            len(fetch_comment_history(self.cur, cid, only_text_changes=False)), 1
+        )
+
+    def test_the_edits_stay(self):
+        """A ancora: o filtro nao pode levar embora o que se quer restaurar."""
+        cid = self.linha()
+        set_translation_verified_by_id(self.cur, cid)
+        update_translation_by_id(self.cur, cid, "editada")
+        self.conn.commit()
+
+        alteracoes = fetch_comment_history(self.cur, cid)
+        self.assertEqual(len(alteracoes), 1)
+        self.assertEqual(alteracoes[0][3], "editada")
+
+    def test_the_limit_is_spent_on_changes_and_not_on_verifications(self):
+        """O filtro e em SQL por causa disto.
+
+        Filtrando depois de buscar, 3 verificacoes gastariam um limite de 3 e a
+        alteracao — a unica coisa que interessa — ficaria de fora.
+        """
+        cid = self.linha()
+        for _ in range(3):
+            set_translation_verified_by_id(self.cur, cid)
+            self.cur.execute(
+                "UPDATE comments SET verified = 0 WHERE id = ?", (cid,)
+            )
+        update_translation_by_id(self.cur, cid, "a unica alteracao")
+        self.conn.commit()
+
+        pagina = fetch_comment_history(self.cur, cid, limit=3)
+
+        self.assertEqual([linha[3] for linha in pagina], ["a unica alteracao"])
+
+    def test_the_counts_say_what_was_left_out(self):
+        cid = self.linha()
+        set_translation_verified_by_id(self.cur, cid)
+        update_translation_by_id(self.cur, cid, "editada")
+        self.conn.commit()
+
+        com, sem = count_comment_history(self.cur, cid)
+
+        self.assertEqual((com, sem), (1, 1))
+
+    def test_an_untouched_line_has_nothing_to_leave_out(self):
+        self.assertEqual(count_comment_history(self.cur, self.linha()), (0, 0))
+
+
+class HiddenHistoryLabelTests(unittest.TestCase):
+    """A linha que diz o que a lista NAO esta mostrando (ROADMAP 23.1)."""
+
+    def test_showing_everything_says_nothing(self):
+        self.assertEqual(history_window.describe_hidden_history(3, 0), "")
+
+    def test_it_counts_the_verifications_left_out(self):
+        self.assertIn(
+            "7 verificações", history_window.describe_hidden_history(2, 7)
+        )
+
+    def test_one_verification_is_singular(self):
+        texto = history_window.describe_hidden_history(2, 1)
+        self.assertIn("1 verificação ", texto)
+        self.assertNotIn("verificações", texto)
+
+    def test_the_cut_at_the_limit_is_still_announced(self):
+        texto = history_window.describe_hidden_history(
+            history_window.HISTORY_LIMIT, 0
+        )
+        self.assertIn(str(history_window.HISTORY_LIMIT), texto)
+
+    def test_both_omissions_fit_in_the_same_line(self):
+        texto = history_window.describe_hidden_history(
+            history_window.HISTORY_LIMIT, 4
+        )
+        self.assertIn(str(history_window.HISTORY_LIMIT), texto)
+        self.assertIn("4 verificações", texto)
+
+
 class LogAutoscrollTests(unittest.TestCase):
     """Garantia F23 (log): o log so rola quando o fim ja estava visivel (22.12).
 
@@ -1403,7 +1558,7 @@ class DatabaseTests(unittest.TestCase):
                         """
                     ).fetchall()
                 }
-                history = fetch_comment_history(cursor=conn.cursor(), comment_id=verified_id)
+                history = fetch_comment_history(cursor=conn.cursor(), comment_id=verified_id, only_text_changes=False)
             finally:
                 conn.close()
 
@@ -1493,7 +1648,7 @@ class DatabaseTests(unittest.TestCase):
                 0,
             )
             conn.commit()
-            self.assertEqual(len(fetch_comment_history(cursor, comment_id)), 1)
+            self.assertEqual(len(fetch_comment_history(cursor, comment_id, only_text_changes=False)), 1)
 
             self.assertEqual(set_translation_verified_by_id(cursor, comment_id, False), 1)
             conn.commit()
@@ -1501,7 +1656,7 @@ class DatabaseTests(unittest.TestCase):
             pending = fetch_review_rows_page(cursor, "pt", limit=1, offset=0)[0]
             self.assertEqual(pending[3], 0)
             self.assertIsNone(pending[6])
-            history = fetch_comment_history(cursor, comment_id)
+            history = fetch_comment_history(cursor, comment_id, only_text_changes=False)
             self.assertEqual(len(history), 2)
             self.assertEqual(history[0][1], "mark_pending")
             self.assertEqual(history[0][4], 1)
@@ -1520,11 +1675,20 @@ class DatabaseTests(unittest.TestCase):
 
             detail = fetch_translation_by_id(cursor, comment_id)
             self.assertEqual(detail[1], "trans")
-            history = fetch_comment_history(cursor, comment_id)
+            # O historico INTEIRO: este teste e sobre o que a gravacao registra,
+            # e duas das tres entradas daqui (`mark_pending` e a verificacao) nao
+            # mudam o texto — a lista da janela as deixa de fora de proposito
+            # (ROADMAP 23.1), e perguntar por elas aqui e pedir outra coisa.
+            history = fetch_comment_history(cursor, comment_id, only_text_changes=False)
             self.assertEqual(len(history), 3)
             self.assertEqual(history[0][1], "restore")
             self.assertEqual(history[0][2], "trans revisada")
             self.assertEqual(history[0][3], "trans")
+            # Fechada DENTRO do `with`: o Windows nao apaga arquivo aberto, e a
+            # limpeza do diretorio temporario acontece na saida do bloco. Sem
+            # isto o teste depende de o coletor de lixo ter passado antes — e
+            # passou, por anos, ate um teste novo em outra classe mudar o ritmo
+            # das alocacoes e a limpeza estourar `PermissionError`.
             conn.close()
 
     def test_exact_translation_matches_can_be_verified_together(self):
@@ -1573,7 +1737,7 @@ class DatabaseTests(unittest.TestCase):
                 "SELECT id FROM comments WHERE original_comment = ?",
                 ("orig 2",),
             ).fetchone()[0]
-            history = fetch_comment_history(cursor, propagated_id)
+            history = fetch_comment_history(cursor, propagated_id, only_text_changes=False)
             self.assertEqual(len(history), 1)
             self.assertEqual(history[0][1], "verify_exact_match")
             self.assertEqual(history[0][4], 0)

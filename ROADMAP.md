@@ -6913,3 +6913,98 @@ conferida marca por marca.
   janela `withdraw`n, na geometria padrao (1280 px de janela, 596 px de faixa) e na
   minima declarada. Sem screenshot de proposito: a captura anterior pegou a janela
   atras de outro programa e mostrou a tela errada.
+
+---
+
+## 23. O historico nao respondia a pergunta que se faz a ele — CONCLUIDO (2026-08-01)
+
+Relato do usuario, no dia seguinte a secao 22: "o historico so esta aparecendo a
+traducao atual; acredito que deveria ser uma lista das ultimas alteracoes, assim
+em caso de engano posso escolher qual restaurar".
+
+### 23.1 A lista mostra ALTERACOES, e a versao inicial e recuperavel
+
+**Medido no banco de dev (6.500 linhas) antes de mexer em qualquer coisa:**
+
+| | |
+| ------------------------------------------------------- | ------------- |
+| comentarios no banco                                     | 6.500         |
+| **sem nenhuma linha de historico**                       | **5.871 (90%)** |
+| com historico                                            | 629 (no maximo 3 entradas) |
+| entradas de historico que **nao mudam o texto**          | **607 de 889** |
+| comentarios cujo historico inteiro nao muda texto        | 355 de 629    |
+
+Sao duas causas somadas, e as duas produzem a mesma tela:
+
+1. **A traducao que veio do pipeline nunca foi registrada.** O `INSERT` de
+   `save_translation` e o UNICO caminho que escreve `translated_comment` sem
+   gravar historico — conferido um a um: editar, importar CSV, aplicar
+   automaticas, corrigir lances e preencher linha vazia registram todos. Em 90%
+   das linhas a janela abria em "Nenhuma alteracao registrada".
+2. **`verify` grava uma entrada com `previous == new`.** Marcar como verificada
+   nao muda texto, e os dois painels mostravam a MESMA coisa — que e literalmente
+   "so aparece a traducao atual". Exemplo real, id 1: `anterior` e `nova`
+   identicos, os dois com o texto que esta na linha hoje.
+
+**A correcao nao grava nada, e essa foi a decisao que mudou o plano.** A ideia
+aprovada era gravar uma linha-base no `INSERT` e migrar o acervo existente.
+Medindo o que isso custaria, a derivacao apareceu como estritamente melhor:
+
+- **a versao da maquina e derivavel e exata.** Como todo caminho que muda texto
+  registra, andar para tras chega nela sem ambiguidade: e o
+  `previous_translation` da entrada MAIS ANTIGA, ou o texto atual quando nao ha
+  historico. `machine_translation_for` faz isso numa consulta indexada por
+  `comment_id`;
+- **gravar custaria o acervo duplicado em disco.** A linha-base leva o texto
+  inteiro no `new_translation`; numa execucao de 200 mil linhas, a
+  `comment_history` (hoje com 889 linhas) passaria a ter o tamanho do corpus;
+- **e a migracao poderia errar onde a derivacao nao tem como.** Ela calcularia
+  exatamente a mesma coisa, uma vez, com risco de escrita em massa.
+
+O filtro das entradas sem mudanca e em **SQL**, e nao em Python depois, por causa
+do `LIMIT`: com 100 verificacoes gravadas, filtrar depois traria 100 linhas
+inuteis e ZERO alteracoes — o limite se gastaria inteiro no que ia ser
+descartado. Ha teste para exatamente isso.
+
+**O que a janela mostra agora**, medido nas tres formas de linha do banco real:
+
+| linha                | antes                        | depois                                    |
+| -------------------- | ---------------------------- | ----------------------------------------- |
+| sem historico (90%)   | "Nenhuma alteracao registrada" | 1 versao: a da traducao automatica        |
+| so verificacao        | 1 entrada, dois painels iguais | 1 versao: a da maquina, + o aviso do que ficou fora |
+| editada (id 107)      | 3 entradas, uma delas inutil   | 2 alteracoes + a versao da maquina        |
+
+Na id 107 a diferenca aparece: a versao da maquina era
+`"O jogo esta comecando a tomar forma nos moldes de um frances cla..."` e a atual
+e `"A partida esta comecando a tomar forma nos moldes de um Francesa..."` — o
+texto para o qual "em caso de engano" nao havia como voltar.
+
+**Duas decisoes menores, ditas porque sao escolhas e nao consequencias:**
+
+- **A linha da maquina nao tem carimbo nem transicao de status.** Ela nao
+  aconteceu num instante que alguem registrou e nao mudou status nenhum;
+  escrever "- | pendente -> pendente" seria inventar tres fatos para preencher um
+  formato.
+- **O que fica fora da lista e anunciado**, na mesma linha que ja avisava do
+  corte em 100 versoes. Sumir com 607 de 889 entradas sem dizer nada trocaria uma
+  lista confusa por uma lista incompleta.
+
+**O filtro derrubou dois testes antigos, e eles estavam certos em falhar.**
+`test_review_history_timestamps_are_recorded` e
+`test_exact_translation_matches_can_be_verified_together` afirmam sobre entradas
+`verify`, `mark_pending` e `verify_exact_match` — exatamente as que a lista deixa
+de trazer. Eles testam a GRAVACAO, e nao o que a janela mostra, entao passaram a
+pedir o historico inteiro (`only_text_changes=False`); o padrao continua sendo o
+que a janela precisa.
+
+Os dois apareceram primeiro como `PermissionError` ao limpar o diretorio
+temporario — a conexao SQLite continuava aberta porque a excecao real acontecia
+antes do fim do teste, e no Windows o arquivo em uso nao e apagado. **A mascara
+custou mais tempo que o defeito**: a mensagem que aparece descreve a limpeza, e
+a que interessa esta tres blocos acima, atras de dois "During handling of the
+above exception". Os dois testes ganharam `conn.close()` no fim, que e o que
+impede a proxima falha deles de chegar disfarcada.
+
+**A garantia F26 esta na secao 9 da SPEC**, com 15 testes headless
+(`HistoryIsAListOfChangesTests` e `HiddenHistoryLabelTests`) e 5 de janela.
+**Oito mutacoes, oito mortas.**

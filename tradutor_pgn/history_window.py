@@ -13,9 +13,11 @@ from tkinter import messagebox
 import customtkinter as ctk
 
 from .database import (
+    count_comment_history,
     fetch_comment_history,
     fetch_translation_by_id,
     initialize_database,
+    machine_translation_for,
     update_translation_by_id,
 )
 from .editor_common import (
@@ -33,7 +35,13 @@ from .editor_widgets import render_row_buttons
 from .window_utils import bring_window_to_front
 
 
+# A acao da entrada DERIVADA, que nao existe no banco (ROADMAP 23.1). Ela e a
+# unica da lista que nao veio de `comment_history`: e a traducao que a maquina
+# produziu, reconstruida a partir do que veio depois.
+MACHINE_ACTION = "machine"
+
 ACTION_LABELS = {
+    MACHINE_ACTION: "Tradução automática",
     "edit": "Edicao",
     "edit_verify": "Edicao + verificacao",
     "verify": "Verificacao",
@@ -60,6 +68,29 @@ def history_action_label(action):
 
 def history_status_label(value):
     return "verificada" if value == 1 else "pendente"
+
+
+def describe_hidden_history(mostradas, sem_mudanca):
+    """O que a lista NAO esta mostrando, em uma linha. Vazio quando mostra tudo.
+
+    Duas omissoes diferentes, e as duas precisam ser ditas (ROADMAP 23.1):
+
+    - o corte em `HISTORY_LIMIT`, que ja era silencioso antes;
+    - as entradas que nao mudaram o texto, que agora ficam fora da lista. Sao a
+      MAIORIA no banco de dev — 607 de 889 —, e some-las sem dizer nada seria
+      trocar uma lista confusa por uma lista incompleta.
+
+    Pura, para ser conferida sem abrir janela.
+    """
+    partes = []
+    if mostradas >= HISTORY_LIMIT:
+        partes.append(f"Mostrando as {HISTORY_LIMIT} mais recentes.")
+    if sem_mudanca:
+        plural = "verificação" if sem_mudanca == 1 else "verificações"
+        partes.append(
+            f"{sem_mudanca} {plural} sem mudança de texto fora da lista."
+        )
+    return " ".join(partes)
 
 
 def history_change_summary(previous_translation, new_translation):
@@ -196,6 +227,20 @@ class HistoryWindow:
 
     # ------------------------------------------------------------------ lista
 
+    def machine_row(self, texto):
+        """A entrada derivada, no formato das outras.
+
+        Mesma tupla de sete campos que `fetch_comment_history` devolve, para que
+        `build_row_button`, `select` e `restore_selected` nao precisem saber que
+        ela e diferente — o unico campo estranho e o id, que e `None` porque ela
+        nao esta no banco.
+
+        `previous` e `new` sao o MESMO texto: nao houve nada antes dela. E o que
+        faz o resumo dizer "sem mudanca no texto", que aqui e a verdade — ela e o
+        ponto de partida, e nao uma alteracao.
+        """
+        return (None, MACHINE_ACTION, texto, texto, 0, 0, None)
+
     def refresh(self):
         self.buttons.clear()
         self.selected = None
@@ -205,6 +250,18 @@ class HistoryWindow:
             self.rows = list(
                 fetch_comment_history(cur, self.comment_id, limit=HISTORY_LIMIT)
             )
+            _com_mudanca, self.sem_mudanca = count_comment_history(
+                cur, self.comment_id
+            )
+            # A versao da maquina fecha a lista por baixo, e por isso ela e
+            # buscada mesmo quando nao ha alteracao nenhuma: e justamente ai que
+            # ela e a unica coisa a mostrar. Em 5.871 das 6.500 linhas do banco
+            # de dev o historico e vazio, e a janela abria dizendo "nenhuma
+            # alteracao registrada" — verdade que nao ajudava ninguem.
+            texto_maquina = machine_translation_for(cur, self.comment_id)
+
+        if texto_maquina is not None and len(self.rows) < HISTORY_LIMIT:
+            self.rows.append(self.machine_row(texto_maquina))
 
         self.buttons = render_row_buttons(
             self.history_list,
@@ -212,33 +269,39 @@ class HistoryWindow:
             self.build_row_button,
             "Nenhuma alteracao registrada.",
         )
-        # `== HISTORY_LIMIT` e o unico sinal que existe de que ha mais: a consulta
-        # devolve no maximo o limite, e contar o total custaria uma segunda
-        # varredura de uma tabela que cresce com cada edicao do acervo. Uma linha
-        # com exatamente 100 versoes vera o aviso sem ter sido cortada — e o erro
-        # barato: ele diz o que a lista mostra, e nao afirma nada sobre o resto.
-        self.limit_label.configure(
-            text=(
-                f"Mostrando as {HISTORY_LIMIT} mais recentes."
-                if len(self.rows) >= HISTORY_LIMIT
-                else ""
-            )
-        )
+        self.limit_label.configure(text=describe_hidden_history(
+            len(self.rows), self.sem_mudanca
+        ))
 
         if not self.rows:
             self.clear_detail()
             return
         self.select(0)
 
+    def describe_row(self, row, separador):
+        """As duas primeiras linhas do rotulo de uma versao.
+
+        A da MAQUINA nao tem carimbo nem transicao de status: ela nao aconteceu
+        num instante que alguem registrou, e nao mudou status nenhum. Escrever
+        "- | pendente -> pendente" nela seria inventar tres fatos para preencher
+        um formato (ROADMAP 23.1).
+        """
+        _id, action, _prev, _new, previous_verified, new_verified, created_at = row
+        if action == MACHINE_ACTION:
+            return f"{history_action_label(action)}{separador}o ponto de partida"
+        return (
+            f"{format_timestamp(created_at)}{separador}"
+            f"{history_action_label(action)} | "
+            f"{history_status_label(previous_verified)} -> "
+            f"{history_status_label(new_verified)}"
+        )
+
     def build_row_button(self, parent, index, row):
-        _id, action, prev, new, previous_verified, new_verified, created_at = row
+        _id, _action, prev, new, _previous_verified, _new_verified, _created_at = row
         return ctk.CTkButton(
             parent,
             text=(
-                f"{format_timestamp(created_at)}\n"
-                f"{history_action_label(action)} | "
-                f"{history_status_label(previous_verified)} -> "
-                f"{history_status_label(new_verified)}\n"
+                f"{self.describe_row(row, chr(10))}\n"
                 f"{history_change_summary(prev, new)}"
             ),
             anchor="w",
@@ -273,21 +336,14 @@ class HistoryWindow:
 
         (
             _id,
-            action,
+            _action,
             previous_translation,
             new_translation,
-            previous_verified,
-            new_verified,
-            created_at,
+            _previous_verified,
+            _new_verified,
+            _created_at,
         ) = row
-        self.metadata_label.configure(
-            text=(
-                f"{format_timestamp(created_at)} | "
-                f"{history_action_label(action)} | "
-                f"{history_status_label(previous_verified)} -> "
-                f"{history_status_label(new_verified)}"
-            )
-        )
+        self.metadata_label.configure(text=self.describe_row(row, " | "))
         # As faixas trocadas, pintadas nos dois lados — as mesmas cores e o mesmo
         # `diff_spans` da previa do 19.5 (ROADMAP 22.12). Dois blocos de texto
         # lado a lado nao dizem o que mudou entre eles, e aqui o texto e um

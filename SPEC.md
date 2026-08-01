@@ -1457,6 +1457,30 @@ algumas delas nao mexeram no texto. O resumo sai do MESMO `diff_spans` que pinta
 detalhe: dois criterios de "o que mudou" acabariam divergindo. E o corte em 100
 versoes, que terminava a lista em silencio, e anunciado.
 
+**Garantia F26 — o historico lista alteracoes, e o ponto de partida e sempre
+recuperavel.** A lista mostra so as entradas que MUDARAM o texto, e fecha com uma
+versao derivada: a que a traducao automatica produziu.
+
+Duas coisas a tornavam inutil, e as duas foram medidas no banco de 6.500 linhas:
+**5.871 comentarios (90%) nao tinham nenhuma linha de historico** — o `INSERT` do
+pipeline e o unico caminho que escreve traducao sem registrar — e **607 das 889
+entradas gravadas nao mudam o texto** (`verify` grava `previous == new`), o que
+punha o mesmo texto nos dois painels. Em 355 dos 629 comentarios com historico
+era so isso.
+
+**A versao da maquina e derivada, e nao gravada.** Como todo caminho que muda
+texto registra — editar, importar CSV, aplicar automaticas, corrigir lances,
+preencher linha vazia —, andar para tras chega nela sem ambiguidade: e o
+`previous_translation` da entrada mais antiga, ou o texto atual quando nao ha
+historico. Grava-la no `INSERT` daria a mesma resposta e duplicaria o acervo em
+disco, porque o texto iria no `new_translation` de cada uma das 200 mil linhas.
+
+O filtro e em SQL pelo mesmo motivo que o `LIMIT` existe: filtrando depois de
+buscar, 100 verificacoes gastariam a pagina inteira e nenhuma alteracao apareceria.
+E o que sai da lista e anunciado embaixo dela, junto com o corte em 100 versoes —
+esconder 607 de 889 entradas em silencio trocaria uma lista confusa por uma
+incompleta.
+
 **Garantia F17 — nenhum campo depende do placeholder para ser identificado.**
 Nenhum placeholder do programa aparece: o CustomTkinter decide mostra-lo
 comparando o OBJETO `StringVar` com `""`, e essa comparacao e falsa sempre. Dos
@@ -1889,6 +1913,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | F23 | O log so rola sozinho quando o fim dele ja estava visivel | Incomodo: reler um `[AVISO]` durante uma execucao era ser puxado de volta a cada 100 ms |
 | F24 | A janela de estatisticas nao aceita edicao, nem por evento virtual, e exporta as tabelas em CSV | Bug: Ctrl+V/X/K/D/O/T/H editavam um relatorio que o docstring declara imutavel; e as tabelas de orcamento so saiam em texto corrido |
 | F25 | Restaurar uma versao do historico pergunta antes, e a janela diz o que mudou entre as duas | Risco: a unica restauracao do programa sem confirmacao, com os dois botoes colados no "Fechar" e nenhum diff pintado |
+| F26 | O historico lista as ALTERACOES, e a versao da traducao automatica e sempre recuperavel | Bug: 90% das linhas abriam em "nenhuma alteracao registrada" e 607 das 889 entradas mostravam o mesmo texto dos dois lados — nao havia como voltar ao que a maquina produziu |
 | S16 | O dialogo de zerar o glossario conta o que apaga, por tipo, e a semente nao "volta" depois | Bug: anunciava 7.325 regras e apagava 5.910; e zerar deixava a sessao sem sugestao nenhuma e a abertura seguinte com 232 |
 | S17 | O "Teste rápido" do glossario usa a conversao do pipeline, e nao os pares crus | Bug: prioridade descartada, escopo ignorado, `@casa@` inerte e so a primeira ocorrencia trocada — a previa contradizia o banner S9 ao lado dela |
 | S18 | O editor de glossario anda pelo teclado: achar, andar pela lista filtrada e virar pagina | Custo: dois atalhos contra os treze do outro editor, numa janela que existe para varrer 7 mil linhas |
@@ -2323,7 +2348,8 @@ estiver pronto e tiver teste que falhe sem a correcao.
 (22.1), **Q3** (22.2), **F13** (22.3), **F14** (22.4), **F15** (22.5), **F16**
 (22.6), **F17** (22.7), **F18** (22.8) e **F19** (22.9) — migraram para a secao
 9 no mesmo dia, com 5, 6, 8, 6, 5, 11, 5, 13 e 10 testes e nove rodadas de
-mutacao sem sobrevivente. As onze da segunda metade dela — **F20** (22.10),
+mutacao sem sobrevivente. **F26** (23.1) veio de um relato de uso no dia
+seguinte, e pelo mesmo caminho. As onze da segunda metade dela — **F20** (22.10),
 **F21** (22.11), **F22**, **F23**, **F24**, **F25**, **S16**, **S17** e **S18**
 (22.12), **R11** e **C4** (22.13) — migraram em 2026-08-01, pelo mesmo caminho:
 121 testes e 42 mutacoes, seis sobreviventes na primeira passada e nenhuma no

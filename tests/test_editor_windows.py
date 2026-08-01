@@ -1250,14 +1250,24 @@ class HistoryWindowTests(EditorWindowTestCase):
             "o texto na tela, que e de outro item, nao podia ter mudado",
         )
 
-    def test_an_item_without_history_shows_the_empty_state(self):
+    def test_an_item_without_history_still_shows_where_it_started(self):
+        """Sem edicao nenhuma, a lista tem UMA versao: a da maquina.
+
+        O estado vazio ("Nenhuma alteracao registrada") era o que 90% das linhas
+        do banco real mostravam, e ele nao respondia a pergunta que se faz ao
+        abrir o historico — "para qual texto eu volto?". A versao da traducao
+        automatica e derivada, e nesta linha ela e o proprio texto atual: ninguem
+        mexeu nele ainda (ROADMAP 23.1).
+        """
         self.editor.select_index(1)
         janela = self.editor.open_history_window()
         self.pump()
         self.addCleanup(janela.win.destroy)
 
-        self.assertEqual(janela.rows, [])
-        self.assertEqual(janela.btn_restore_previous.cget("state"), "disabled")
+        self.assertEqual(len(janela.rows), 1)
+        self.assertEqual(janela.rows[0][1], history_window.MACHINE_ACTION)
+        self.assertEqual(janela.rows[0][3], "Traducao dois")
+        self.assertEqual(janela.btn_restore_previous.cget("state"), "normal")
 
 
 class SharedEditorWidgetTkTests(EditorWindowTestCase):
@@ -5870,6 +5880,71 @@ class HistoryWindowSaysWhatChangedTests(EditorWindowTestCase):
         janela = self.abrir()
 
         self.assertEqual(janela.limit_label.cget("text"), "")
+
+    # ------------------------------------------------------- ROADMAP 23.1
+
+    def test_the_machine_version_closes_the_list(self):
+        """A ultima da lista e de onde tudo partiu, e da para voltar para ela."""
+        janela = self.abrir()
+
+        self.assertEqual(janela.rows[-1][1], history_window.MACHINE_ACTION)
+        self.assertEqual(janela.rows[-1][3], "a torre")
+
+    def test_restoring_the_machine_version_brings_the_first_text_back(self):
+        """O "em caso de engano" do usuario: voltar ao que a maquina produziu."""
+        janela = self.abrir()
+        janela.select(len(janela.rows) - 1)
+        self.pump()
+        self.dialogs.askyesno_result = True
+
+        janela.restore_selected(3)
+        self.pump()
+
+        self.assertEqual(self.traducao(), "a torre")
+
+    def test_a_verification_does_not_show_up_as_a_version(self):
+        """Ela grava previous == new: os dois painels mostravam o MESMO texto.
+
+        E o defeito relatado — "o historico so mostra a traducao atual". Medido
+        no banco real: 607 das 889 entradas sao assim.
+        """
+        self.editor.select_index(0)
+        self.pump()
+        self.editor.save_changes(False, mark_verified=True)
+        self.pump()
+
+        janela = self.abrir()
+
+        acoes = [linha[1] for linha in janela.rows]
+        self.assertNotIn("verify", acoes, acoes)
+        # E ela nao some em silencio: a linha embaixo da lista diz que ficou fora.
+        self.assertIn("verificação", janela.limit_label.cget("text"))
+
+    def test_the_machine_row_does_not_invent_a_timestamp(self):
+        """Ela nao aconteceu num instante que alguem registrou."""
+        janela = self.abrir()
+        janela.select(len(janela.rows) - 1)
+        self.pump()
+
+        texto = janela.metadata_label.cget("text")
+        self.assertIn("Tradução automática", texto)
+        self.assertNotIn("pendente", texto)
+        self.assertNotIn("-  |", texto)
+
+    def test_an_edited_line_offers_both_the_machine_and_the_edit(self):
+        """A lista vira o que o usuario pediu: as versoes entre as quais escolher."""
+        self.editor.select_index(0)
+        self.pump()
+        self.editor.set_translation_text("terceira versao", mark_dirty=True)
+        self.editor.save_changes(False)
+        self.pump()
+
+        janela = self.abrir()
+
+        textos = [linha[3] for linha in janela.rows]
+        self.assertEqual(textos[-1], "a torre")
+        self.assertIn("a TORRE de dama", textos)
+        self.assertIn("terceira versao", textos)
 
 
 class GlossaryPreviewUsesTheRealPipelineTests(EditorWindowTestCase):
