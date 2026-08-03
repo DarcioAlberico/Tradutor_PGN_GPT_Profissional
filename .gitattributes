@@ -17,3 +17,10 @@ glossario.db binary
 # foi medido, e o `.dic` de 4,6 MB ainda geraria diff de 307 mil linhas.
 dicionarios/*.dic binary
 dicionarios/*.aff binary
+
+# O icone e o PNG dele. O git costuma detectar os dois como binarios sozinho
+# (ambos comecam com bytes nulos), mas a deteccao e por heuristica e a regra
+# aqui e explicita — um `.ico` convertido nao abre, e ninguem descobre isso
+# antes de o build sair com o icone quebrado.
+recursos/*.ico binary
+recursos/*.png binary

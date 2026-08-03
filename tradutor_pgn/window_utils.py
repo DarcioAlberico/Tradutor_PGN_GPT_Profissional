@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import time
 import traceback
@@ -114,6 +115,36 @@ def install_callback_error_reporter(
 
     alvo.report_callback_exception = handler
     return handler
+
+
+# O icone do programa, ao lado do MODULO — dado de programa, como o
+# `spelling.ssp` e os dicionarios, e nao dado do usuario (ROADMAP 27).
+ICON_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "recursos",
+    "PGN_Tradutor_Pro.ico",
+)
+
+
+def apply_window_icon(window, path=ICON_PATH):
+    """Poe o icone do programa na janela. Silencioso quando nao da.
+
+    Vale para a janela **raiz**; os `Toplevel` herdam dela sozinhos, entao a
+    chamada acontece uma vez e nao em cada janela.
+
+    Nunca levanta, e a razao e a mesma do resto do modulo: um icone e enfeite, e
+    um enfeite nao pode impedir o programa de abrir. Falta o arquivo (checkout
+    sem `recursos/`, build sem o dado empacotado), o Tk desta plataforma nao
+    aceita `.ico`, a janela ja morreu — em todos os casos a janela abre com o
+    icone padrao, que e o que ela tinha antes deste recurso existir.
+    """
+    try:
+        if os.path.exists(path):
+            window.iconbitmap(path)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def bring_window_to_front(window, parent=None, maximize=False):

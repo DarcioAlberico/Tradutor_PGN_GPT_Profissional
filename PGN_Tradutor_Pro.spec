@@ -169,6 +169,22 @@ else:
         "de prosa (a janela avisa; nada mais deixa de funcionar)."
     )
 
+# O icone. Vai em DOIS lugares, e os dois sao necessarios: como recurso do
+# `.exe` (`icon=` la embaixo), que e o que o Explorer e a barra de tarefas
+# mostram, e como arquivo dentro do pacote, que e de onde `apply_window_icon` o
+# le para por na janela. Um so nao serve — o recurso do `.exe` nao e um caminho
+# que o Tk consiga abrir (ROADMAP 27).
+ICONE = os.path.join("recursos", "PGN_Tradutor_Pro.ico")
+if os.path.exists(ICONE):
+    datas += [(ICONE, "recursos")]
+else:
+    ICONE = None
+    print(
+        "AVISO: recursos/PGN_Tradutor_Pro.ico nao encontrado. O executavel sai "
+        "com o icone padrao do PyInstaller e a janela com o do Tk. "
+        "`python recursos/gerar_icone.py` o refaz."
+    )
+
 SPELLING = os.path.join("spelling_ssp", "spelling.ssp")
 if os.path.exists(SPELLING):
     datas += [(SPELLING, "spelling_ssp")]
@@ -243,6 +259,9 @@ exe = EXE(
     # O recurso de versao gerado acima. Sem ele o `.exe` sai sem versao nenhuma
     # nas propriedades, e o instalador nao teria de onde ler a dele.
     version=VERSION_INFO,
+    # `None` quando o arquivo nao existe: o PyInstaller aceita e usa o icone
+    # padrao dele, que e o que o aviso la em cima anuncia.
+    icon=ICONE,
 )
 
 coll = COLLECT(

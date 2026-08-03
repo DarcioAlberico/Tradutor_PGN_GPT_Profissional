@@ -17703,6 +17703,90 @@ class DataDirRuleTests(unittest.TestCase):
 
         self.assertEqual(app_paths.data_dir(), app_paths.program_dir())
 
+    def _fingir_exe(self, pasta):
+        """Faz `program_dir()` apontar para `pasta`, como um `.exe` faria.
+
+        `program_dir` sai de `sys.argv[0]`, entao e ele que muda — inventar um
+        dublê para a funcao mediria o dublê, e nao a regra.
+        """
+        original = sys.argv[0]
+        sys.argv[0] = os.path.join(pasta, "PGN_Tradutor_Pro.exe")
+        self.addCleanup(lambda: sys.argv.__setitem__(0, original))
+
+    def test_the_portable_marker_puts_the_data_inside_the_program_folder(self):
+        """O modo portatil (ROADMAP 27): o mesmo `.exe`, com um arquivo ao lado.
+
+        E o que separa a versao instalavel da portatil. Sem isto, as duas
+        precisariam de builds diferentes — duas coisas para testar e manter em
+        dia por causa de uma linha de diferenca.
+        """
+        os.environ.pop(app_paths.DATA_DIR_ENV, None)
+        sys.frozen = True
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fingir_exe(tmp)
+            os.environ["APPDATA"] = tmp  # para o contraste abaixo ser justo
+
+            self.assertFalse(app_paths.running_portable())
+            instalado = app_paths.data_dir()
+
+            Path(app_paths.portable_marker_path()).write_text("", encoding="utf-8")
+
+            self.assertTrue(app_paths.running_portable())
+            self.assertEqual(
+                app_paths.data_dir(),
+                os.path.join(tmp, app_paths.PORTABLE_DATA_FOLDER),
+            )
+            self.assertNotEqual(app_paths.data_dir(), instalado)
+
+    def test_the_portable_marker_does_nothing_when_running_from_source(self):
+        """Um `portatil.txt` esquecido no checkout nao pode mudar a suite.
+
+        Do fonte os dados JA ficam ao lado do script, entao o marcador nao teria
+        o que alterar — e um arquivo solto no repositorio nao pode ter efeito
+        sobre onde os testes gravam.
+        """
+        os.environ.pop(app_paths.DATA_DIR_ENV, None)
+        if hasattr(sys, "frozen"):
+            del sys.frozen
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fingir_exe(tmp)
+            Path(app_paths.portable_marker_path()).write_text("", encoding="utf-8")
+
+            self.assertFalse(app_paths.running_portable())
+            self.assertEqual(app_paths.data_dir(), app_paths.program_dir())
+
+    def test_the_variable_still_wins_over_the_portable_marker(self):
+        """Apontar um `.exe` de pendrive para um acervo do disco e o caso que a
+        variavel existe para atender."""
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as alvo:
+            sys.frozen = True
+            self._fingir_exe(tmp)
+            Path(app_paths.portable_marker_path()).write_text("", encoding="utf-8")
+            os.environ[app_paths.DATA_DIR_ENV] = alvo
+
+            self.assertTrue(app_paths.running_portable())
+            self.assertEqual(app_paths.data_dir(), os.path.abspath(alvo))
+
+    def test_the_announced_line_names_the_mode_and_not_only_the_folder(self):
+        """Duas situacoes diferentes podem dar a MESMA pasta, e saber qual esta
+        valendo e o que explica o que a proxima atualizacao fara com o acervo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ.pop(app_paths.DATA_DIR_ENV, None)
+            if hasattr(sys, "frozen"):
+                del sys.frozen
+            self.assertIn("do fonte", first_run.describe_data_dir())
+
+            sys.frozen = True
+            self._fingir_exe(tmp)
+            os.environ["APPDATA"] = tmp
+            self.assertIn("instalado", first_run.describe_data_dir())
+
+            Path(app_paths.portable_marker_path()).write_text("", encoding="utf-8")
+            self.assertIn("portatil", first_run.describe_data_dir())
+
+            os.environ[app_paths.DATA_DIR_ENV] = tmp
+            self.assertIn(app_paths.DATA_DIR_ENV, first_run.describe_data_dir())
+
     def test_appdata_missing_still_does_not_fall_back_to_the_program_folder(self):
         """Sem `%APPDATA%` — servico, conta de sistema, ambiente de build."""
         os.environ.pop(app_paths.DATA_DIR_ENV, None)

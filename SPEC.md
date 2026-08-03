@@ -31,9 +31,14 @@ e como o programa foi iniciado** (ROADMAP 21):
 
 | inicio | pasta de dados do usuario |
 |---|---|
+| `PGN_TRADUTOR_DATA=<pasta>` | vence todos os outros |
+| empacotado **com `portatil.txt` ao lado do `.exe`** | `<pasta do programa>\dados\` |
 | empacotado (`sys.frozen`) | `%APPDATA%\PGN Tradutor Pro\` |
 | do fonte (`python PGN_Tradutor_Pro.py`) | ao lado do script |
-| `PGN_TRADUTOR_DATA=<pasta>` | vence os dois |
+
+O marcador portatil so vale **empacotado** (ROADMAP 27): do fonte os dados ja
+ficam ao lado do script, e um `portatil.txt` esquecido no checkout nao pode
+mudar onde a suite grava.
 
 E o que permite atualizar o programa sem tocar no trabalho de quem usa: a
 instalacao troca a pasta do programa inteira, e a de dados nem e vista. E e o que
@@ -2021,6 +2026,8 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | I3 | Dados de uma instalacao anterior sao COPIADOS, e o original fica onde estava | Risco: mover impede voltar para a versao anterior |
 | I4 | Desinstalar preserva a pasta de dados, a menos que o usuario peca o contrario | Risco: desinstalar para reinstalar apagaria o acervo (protegida por `instalador\verificar-ciclo.ps1`) |
 | I5 | A versao tem uma fonte so, e instalar uma mais velha por cima nao acontece em silencio | Bug: tres numeros que nao se falavam (0.2.1 no `pyproject`, 1.0 no TMX, 1.0.0 no instalador) e nenhuma protecao contra voltar no tempo |
+| I6 | A entrega portatil e a instalavel sao o MESMO executavel, e o que as separa e um arquivo ao lado dele | Risco: dois builds seriam duas coisas para testar, e a que ninguem roda quebra primeiro. O marcador nunca entra em `dist\` — o `.iss` empacota a pasta inteira, e ele faria a versao INSTALADA gravar dentro de `Program Files` |
+| I7 | O log nomeia o MODO, e nao so a pasta de dados | Risco: um `.exe` portatil e um instalado apontado por `PGN_TRADUTOR_DATA` podem gravar na mesma pasta por motivos diferentes, e so o modo explica o que a proxima atualizacao fara com o acervo |
 
 ---
 

@@ -41,6 +41,18 @@ DATA_DIR_ENV = "PGN_TRADUTOR_DATA"
 # nome que o usuario ve no Explorer, e nao um identificador.
 APP_DATA_FOLDER = "PGN Tradutor Pro"
 
+# O marcador do modo portatil, ao lado do `.exe`. **Um arquivo, e nao um build
+# separado**: a versao instalavel e a portatil sao o MESMO executavel, e o que
+# muda entre elas e a presenca deste arquivo. Dois builds seriam duas coisas
+# para assinar, testar e manter em dia, e a diferenca entre eles caberia numa
+# linha (ROADMAP 27).
+PORTABLE_MARKER = "portatil.txt"
+
+# A pasta de dados no modo portatil, DENTRO da pasta do programa. Uma subpasta,
+# e nao a raiz: assim "copiar a pasta para o pendrive" leva programa e acervo
+# juntos, e ainda da para olhar a pasta e ver o que e seu e o que e do programa.
+PORTABLE_DATA_FOLDER = "dados"
+
 
 def running_frozen():
     """O programa esta rodando empacotado (PyInstaller)?
@@ -76,18 +88,41 @@ def program_dir():
     return os.path.dirname(os.path.abspath(sys.argv[0]))
 
 
+def portable_marker_path():
+    """Onde o marcador do modo portatil e procurado: ao lado do `.exe`."""
+    return os.path.join(program_dir(), PORTABLE_MARKER)
+
+
+def running_portable():
+    """O programa esta rodando no modo portatil?
+
+    So faz sentido **empacotado**: rodando do fonte os dados ja ficam ao lado do
+    script, entao um marcador ali nao teria o que mudar — e um `portatil.txt`
+    esquecido no checkout nao pode alterar o comportamento dos testes.
+    """
+    return running_frozen() and os.path.exists(portable_marker_path())
+
+
 def data_dir():
     """A pasta dos dados do usuario. Nao cria nada — ver `ensure_data_dir`.
 
-    Ordem: a variavel de ambiente, depois o modo (empacotado ou fonte). Um valor
-    vazio na variavel e tratado como ausente, e nao como "a pasta atual": um
-    `set PGN_TRADUTOR_DATA=` sem valor e o jeito natural de desligar a variavel,
-    e interpreta-lo como caminho gravaria o acervo no diretorio de trabalho de
-    quem chamou.
+    Ordem: a variavel de ambiente, depois o marcador portatil, depois o modo
+    (empacotado ou fonte). Um valor vazio na variavel e tratado como ausente, e
+    nao como "a pasta atual": um `set PGN_TRADUTOR_DATA=` sem valor e o jeito
+    natural de desligar a variavel, e interpreta-lo como caminho gravaria o
+    acervo no diretorio de trabalho de quem chamou.
+
+    **A variavel vence o marcador**, e nao o contrario: ela e a saida explicita
+    de quem sabe o que quer, e precisa funcionar inclusive sobre uma instalacao
+    portatil — apontar um `.exe` de pendrive para um acervo do disco e
+    exatamente o caso que ela existe para atender.
     """
     escolhida = os.environ.get(DATA_DIR_ENV, "").strip()
     if escolhida:
         return os.path.abspath(os.path.expanduser(escolhida))
+
+    if running_portable():
+        return os.path.join(program_dir(), PORTABLE_DATA_FOLDER)
 
     if running_frozen():
         return os.path.join(_roaming_dir(), APP_DATA_FOLDER)

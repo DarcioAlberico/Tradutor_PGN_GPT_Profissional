@@ -86,6 +86,12 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#AppExe}
+; O icone do proprio `.exe` do instalador (ROADMAP 27). O
+; `UninstallDisplayIcon` acima ja sai certo sozinho, porque le do executavel do
+; programa — mas o assistente de instalacao e um `.exe` separado, e sem esta
+; linha ele e o unico arquivo da entrega com o icone generico do Inno Setup,
+; justamente o primeiro que o usuario ve.
+SetupIconFile=..\recursos\PGN_Tradutor_Pro.ico
 
 [Languages]
 Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
