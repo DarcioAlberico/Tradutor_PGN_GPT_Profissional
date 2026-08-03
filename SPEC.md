@@ -526,10 +526,26 @@ rodava.
 
 **Garantia G1 — o original nunca e modificado.**
 
-**Garantia G2 — a saida preserva os acentos.** A gravacao usa a codificacao
-detectada na origem; se algum caractere nao couber nela, cai para UTF-8 e
+**Garantia G2 — a saida preserva os acentos, tambem na leitura seguinte.** A
+gravacao usa a codificacao detectada na origem **quando ela e Unicode**; quando
+nao e — cp1252, latin-1 e afins —, a saida sai em UTF-8, e a troca aparece no
+log. Se algum caractere nao couber na codificacao escolhida, cai para UTF-8 e
 registra isso no log. Em nenhuma hipotese um caractere e substituido por
 `U+FFFD` no arquivo gerado.
+
+Herdar a codificacao de byte unico da origem gravava sem erro e quebrava no
+leitor. Um PGN em ingles com dois nomes de jogador acentuados e detectado como
+cp1252 (E3); a traducao para portugues enche o arquivo de acento; o cp1252
+representa todos eles sem reclamar, entao o fallback do `UnicodeEncodeError`
+nunca dispara; e quem le esperando UTF-8 — o ChessBase 26, por exemplo — trata
+cada byte alto como UTF-8 invalido e o descarta. O resultado e letra que some,
+e nao mojibake: `Dragao` no lugar de `Dragão`, `posio` no lugar de `posição`.
+Medido no livro do Hansen: origem com 23 bytes altos, saida com 14.793.
+
+UTF-16 e UTF-32 nao entram na promocao: carregam BOM, se anunciam ao leitor e
+nao perdem caractere. A opcao `utf8_bom` continua valendo **depois** dela, de
+modo que a saida promovida sai sem BOM por padrao e com BOM para quem le no
+ChessBase antigo, que trata UTF-8 sem BOM como ANSI.
 
 **Garantia X2 — comentario esvaziado pela limpeza sai do arquivo sem deixar
 `{}`.** O span inteiro e removido, com um espaco vizinho junto — nunca uma

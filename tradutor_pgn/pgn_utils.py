@@ -704,19 +704,51 @@ def wrap_pgn_comment(text: str, width: int, first_line_room: int) -> str:
     return "\n".join(linhas)
 
 
-def _output_encoding(preferred_encoding: str, use_bom: bool) -> str:
-    """A codificacao de gravacao, honrando a opcao de BOM.
+def _normalized_encoding_name(encoding: str) -> str:
+    return (encoding or "").lower().replace("-", "").replace("_", "")
 
-    A opcao existe por causa do consumidor: um PGN ASCII de entrada sai UTF-8
-    quando a traducao introduz acentos, e UTF-8 **sem BOM** o ChessBase do
-    Windows le como ANSI — mojibake (ROADMAP 13.6). So mexe em UTF-8: um BOM
-    nao significa nada em cp1252, e `utf-8-sig` ja o escreve sozinho.
+
+def _is_unicode_encoding(encoding: str) -> bool:
+    """A codificacao representa qualquer caractere E se anuncia ao leitor."""
+    return _normalized_encoding_name(encoding).startswith("utf")
+
+
+def _output_encoding(preferred_encoding: str, use_bom: bool) -> str:
+    """A codificacao de gravacao: UTF-8 quando a de entrada nao for Unicode.
+
+    A saida herdava a codificacao do PGN de entrada, e isso quebra em silencio
+    quando ela e de byte unico. Um PGN em ingles com dois nomes de jogador
+    acentuados e detectado como cp1252; a traducao para portugues enche o
+    arquivo de acento; e o arquivo sai com quinze mil bytes altos em cp1252.
+    Leitor que espera UTF-8 — o ChessBase 26, por exemplo — trata esses bytes
+    como UTF-8 invalido e os DESCARTA: "Dragao" no lugar de "Dragão", "posio"
+    no lugar de "posição". Nao e mojibake, e letra que some, e nada no programa
+    acusava.
+
+    O fallback de `write_pgn_pieces` nao alcanca este caso: ele so dispara no
+    `UnicodeEncodeError`, e cp1252 representa todo acento do portugues sem
+    reclamar. O acento nao se perde na GRAVACAO, se perde na leitura seguinte.
+
+    So promove o que nao e Unicode. UTF-16 e UTF-32 ficam onde estao: carregam
+    BOM, se anunciam ao leitor e nao perdem caractere nenhum. E promover uma
+    saida que so tem ASCII nao muda byte algum — nesse caso as duas gravacoes
+    dao o mesmo arquivo.
+
+    `use_bom` continua valendo depois da promocao, e por isso ela pode sair sem
+    BOM: um BOM que ninguem pediu incomoda (git, diff, parsers estritos), e
+    quem le no ChessBase antigo — que trata UTF-8 sem BOM como ANSI e mostra
+    mojibake — liga a opcao no `pgn_tradutor_pro_settings.json` (ROADMAP 13.6).
+    So mexe em UTF-8: um BOM nao significa nada em cp1252, e `utf-8-sig` ja o
+    escreve sozinho.
     """
+    encoding = preferred_encoding
+    if not _is_unicode_encoding(encoding):
+        encoding = "utf-8"
     if not use_bom:
-        return preferred_encoding
-    if preferred_encoding.lower().replace("-", "").replace("_", "") == "utf8":
+        return encoding
+    if _normalized_encoding_name(encoding) == "utf8":
         return "utf-8-sig"
-    return preferred_encoding
+    return encoding
 
 
 def write_pgn_pieces(
@@ -744,6 +776,14 @@ def write_pgn_pieces(
     """
     try:
         enc = _output_encoding(preferred_encoding, use_bom)
+        if log_message and not _is_unicode_encoding(preferred_encoding):
+            # Visivel no log porque e o programa mudando a codificacao por conta
+            # propria: quem comparar a entrada com a saida byte a byte tem de
+            # achar aqui o motivo de elas nao baterem.
+            log_message(
+                f"  - Codificacao de saida alterada de {preferred_encoding} "
+                f"para {enc}, para o acento sobreviver a leitura: {output_file}"
+            )
         with open(output_file, 'w', encoding=enc, newline='') as f:
             for pedaco in pieces_factory():
                 f.write(pedaco)

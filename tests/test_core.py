@@ -16612,18 +16612,23 @@ class GenerationIsLinearTests(unittest.TestCase):
                 self.assertTrue(cru.startswith(marca), nome)
                 self.assertEqual(cru.count(marca), 1, f"{nome}: {cru[:30]!r}")
 
-    def test_a_translation_the_input_encoding_cannot_hold_falls_back_to_utf8(self):
-        """O fallback de codificacao, agora que a gravacao e por pedacos.
+    def test_a_single_byte_input_encoding_does_not_become_the_output_encoding(self):
+        """A saida de um PGN cp1252 sai em UTF-8, inteira e com o log dizendo.
 
-        O erro de codificacao acontece NO MEIO da gravacao — o `w` da segunda
-        tentativa e o que trunca o arquivo pela metade que a primeira deixou. Sem
-        isso, o PGN de saida ficaria cortado no primeiro caractere que o cp1252
-        nao aceita, e o log diria que deu tudo certo.
+        Antes a saida herdava a codificacao da entrada. Um caractere que o
+        cp1252 nao representa cortava o arquivo no meio da gravacao, e so o
+        fallback do `UnicodeEncodeError` o salvava; um caractere que ele
+        representa — todo acento do portugues — nao acionava fallback nenhum e
+        saia em byte unico, para o leitor seguinte descartar.
+
+        As duas metades ficam aqui juntas de proposito: o arquivo tem de sair
+        INTEIRO (a checagem do truncamento, que era o ponto do teste antigo) e
+        tem de sair em UTF-8.
         """
         with tempfile.TemporaryDirectory() as tmp:
             pgn = Path(tmp) / "game.pgn"
             # Com acento: um PGN so de ASCII e detectado como UTF-8 (nunca como
-            # 'ascii'), e o fallback que este teste exercita nao aconteceria.
+            # 'ascii'), e a promocao que este teste exercita nao aconteceria.
             movetext = " ".join(
                 f"{i + 1}. e4 {{comentário {i} com ação}}" for i in range(400)
             )
@@ -16642,15 +16647,82 @@ class GenerationIsLinearTests(unittest.TestCase):
             )
 
             self.assertTrue(ok)
+            self.assertEqual(detect_encoding(saida), "utf-8")
             texto = Path(saida).read_text(encoding="utf-8")
             self.assertIn("posicao ganha 中", texto)
+            self.assertIn("comentário 0 com ação", texto)
             self.assertTrue(texto.rstrip().endswith("*"), "o arquivo saiu truncado")
             self.assertEqual(texto.count("{"), 400)
 
         self.assertTrue(
-            any("UTF-8" in linha for linha in logs),
+            any("cp1252" in linha and "utf-8" in linha for linha in logs),
             f"a troca de codificacao tem de aparecer no log: {logs}",
         )
+
+    def test_an_accented_translation_of_an_ascii_book_survives_the_next_reader(self):
+        """O caso real: livro em ingles, traducao para portugues, acento sumido.
+
+        Um PGN em ingles com dois nomes de jogador acentuados e detectado como
+        cp1252. A traducao para portugues enche o arquivo de acento, o cp1252 o
+        representa sem reclamar — nenhum `UnicodeEncodeError` —, e a saida
+        ficava com milhares de bytes altos de byte unico. Quem le esperando
+        UTF-8, como o ChessBase 26, descarta cada um deles: "Dragao" no lugar
+        de "Dragão", "posio" no lugar de "posição".
+
+        A prova aqui e a do leitor, e nao a do gravador: o arquivo e decodificado
+        como UTF-8 estrito. Antes da correcao esta linha levanta
+        `UnicodeDecodeError`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = Path(tmp) / "livro.pgn"
+            pgn.write_text(
+                '[Event "Torneio"]\n[White "Jimenez, José"]\n\n'
+                "1. e4 {A sharp line in the Dragon} 1-0\n",
+                encoding="cp1252",
+            )
+            self.assertEqual(detect_encoding(str(pgn)), "cp1252")
+
+            info = extract_comments_from_file(str(pgn))
+            traducao = "Uma linha aguda na Dragão, com posição de ataque"
+            saida = Path(tmp) / "livro-BR.pgn"
+
+            self.assertTrue(
+                generate_translated_pgn(
+                    str(pgn),
+                    str(saida),
+                    {info["comments"][0]: traducao},
+                    info["positions"],
+                )
+            )
+
+            texto = saida.read_bytes().decode("utf-8")  # estrito de proposito
+            self.assertIn(traducao, texto)
+            self.assertIn("Jimenez, José", texto)
+
+    def test_the_output_encoding_promotes_only_what_is_not_unicode(self):
+        """A tabela da promocao, sem passar por disco.
+
+        UTF-16 e UTF-32 nao entram: carregam BOM, se anunciam ao leitor e nao
+        perdem caractere. E a opcao de BOM continua valendo DEPOIS da promocao.
+        """
+        casos = [
+            # (codificacao de entrada, use_bom, codificacao de gravacao)
+            ("cp1252", False, "utf-8"),
+            ("cp1252", True, "utf-8-sig"),
+            ("latin-1", False, "utf-8"),
+            ("iso-8859-1", False, "utf-8"),
+            ("utf-8", False, "utf-8"),
+            ("utf-8", True, "utf-8-sig"),
+            ("utf-8-sig", False, "utf-8-sig"),
+            ("utf-16", False, "utf-16"),
+            ("utf-16", True, "utf-16"),
+            ("utf-32", False, "utf-32"),
+        ]
+        for entrada, bom, esperada in casos:
+            with self.subTest(entrada=entrada, use_bom=bom):
+                self.assertEqual(
+                    pgn_utils._output_encoding(entrada, bom), esperada
+                )
 
     def test_cancelling_stops_the_generation_before_writing_anything(self):
         """A fase nao tinha checagem de `cancel_flag` nenhuma (ROADMAP 20.1)."""

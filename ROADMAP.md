@@ -5,10 +5,10 @@ Registro das melhorias do programa. Cada item traz o motivo, o impacto medido
 verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
-**Pendentes: a secao 22 menos os itens 22.1 a 22.7** (revisao de UI de
-2026-07-31; os sete foram feitos no mesmo dia) **e o item 19.11** (corretor
-ortografico de prosa). As secoes 18 a 20 — que ficaram registradas
-aqui como pendentes — foram concluidas em 2026-07-30, junto com a 21
+**Pendente: o item 19.11** (corretor ortografico de prosa), unico item nao
+entregue do registro inteiro. A secao 22 (revisao de UI) foi concluida nos itens
+22.1 a 22.14, em 2026-07-31 e 2026-08-01. As secoes 18 a 20 — que ficaram
+registradas aqui como pendentes — foram concluidas em 2026-07-30, junto com a 21
 (instalador). As garantias que os testes ja protegem estao na
 [SPEC.md](SPEC.md), secao 9 — inclusive as nove da secao 22, que nasceram e
 migraram para la no mesmo dia: **F12** (22.1), **Q3** (22.2), **F13** (22.3),
@@ -7008,3 +7008,141 @@ impede a proxima falha deles de chegar disfarcada.
 **A garantia F26 esta na secao 9 da SPEC**, com 15 testes headless
 (`HistoryIsAListOfChangesTests` e `HiddenHistoryLabelTests`) e 5 de janela.
 **Oito mutacoes, oito mortas.**
+
+## 24. O acento sobrevivia a gravacao e morria na leitura — CONCLUIDO (2026-08-03)
+
+Relato do usuario, depois de abrir no ChessBase o PGN traduzido: "conferi e as
+letras com acento foram omitidas. também foram omitidas palavras com ç~, etc".
+
+### 24.1 Nao era a traducao, era a codificacao de saida
+
+A primeira suspeita — traducao gravada sem acento — foi medida e **descartada**
+antes de mexer em qualquer coisa:
+
+| | |
+| ---------------------------------------------------- | ------ |
+| caracteres acentuados no `traducoes.db`              | 14.432 |
+| sequencias de mojibake (`Ã§`, `Ã£`)                  | 0      |
+| palavras que perderam acento em relacao ao backup    | 0      |
+| palavras tipo `posicao`, `nao`, `tambem`, `acao`     | 0      |
+
+O banco estava inteiro. O defeito estava no arquivo gerado, e medi-lo mostra o
+mecanismo inteiro:
+
+| | |
+| --------------------------------- | ---------------------------------- |
+| PGN de origem (ingles)            | 842.680 bytes, **23** bytes altos  |
+| codificacao detectada na origem   | **cp1252**                         |
+| PGN gerado                        | 887.208 bytes, **14.793** bytes altos |
+| acentos no arquivo gerado         | 14.733, **todos presentes**        |
+| decodifica como UTF-8             | **nao**                            |
+
+`detect_encoding` devolve a codificacao da ENTRADA e a gravacao a reusava. Vinte
+e tres nomes de jogador acentuados bastam para o livro em ingles inteiro ser
+classificado cp1252 (garantia E3); a traducao para portugues enche o arquivo de
+acento; e a saida sai com quinze mil bytes altos de byte unico. Quem le
+esperando UTF-8 — o ChessBase 26, por exemplo — trata cada um deles como UTF-8
+invalido e o **descarta**:
+
+| gravado (cp1252)      | lido como UTF-8      |
+| --------------------- | -------------------- |
+| `Deixe-me levá-lo`    | `Deixe-me lev-lo`    |
+| `o Dragão Acelerado`  | `o Drago Acelerado`  |
+| `uma linha específica`| `uma linha especfica`|
+
+E letra que some, e nao mojibake — por isso o relato fala em "omitidas". Nada no
+programa acusava.
+
+**O fallback que ja existia nao alcanca este caso.** `write_pgn_pieces` cai para
+UTF-8 no `UnicodeEncodeError`, e o cp1252 representa todo acento do portugues sem
+levantar nada. O acento nao se perdia na gravacao; se perdia na leitura seguinte,
+que e onde nenhum teste olhava.
+
+**A opcao `utf8_bom` tambem nao alcancava.** `_output_encoding` so trocava
+`utf-8` por `utf-8-sig`; com origem cp1252 ela devolvia cp1252 inalterado. Nao
+havia ajuste nenhum, em lugar nenhum, que produzisse saida UTF-8 a partir de uma
+origem de byte unico.
+
+### 24.2 A correcao: promover o que nao e Unicode
+
+`_output_encoding` grava em UTF-8 sempre que a codificacao de entrada nao for
+Unicode. O criterio e o do LEITOR, e nao o do gravador: uma codificacao serve se
+representa qualquer caractere **e se anuncia** a quem le depois.
+
+| entrada                       | `use_bom`  | gravacao      |
+| ----------------------------- | ---------- | ------------- |
+| cp1252, latin-1, iso-8859-\*  | falso      | `utf-8`       |
+| cp1252, latin-1, iso-8859-\*  | verdadeiro | `utf-8-sig`   |
+| utf-8                         | falso      | `utf-8`       |
+| utf-8                         | verdadeiro | `utf-8-sig`   |
+| utf-16, utf-32                | qualquer   | inalterada    |
+
+**UTF-16 e UTF-32 ficam fora de proposito**: carregam BOM, se anunciam ao leitor
+e nao perdem caractere — promove-las trocaria uma codificacao correta por outra
+sem ganho nenhum. E promover uma saida que so tem ASCII nao muda byte algum,
+entao a regra nao precisa de excecao para esse caso.
+
+**A opcao de BOM continua valendo DEPOIS da promocao**, e por isso a saida
+promovida sai sem BOM por padrao. As duas alternativas foram consideradas e
+descartadas: forcar o BOM tiraria do usuario uma opcao que ja existe e que
+incomoda quem versiona o PGN (git, diff, parsers estritos); nao promover deixaria
+o defeito de pe. A evidencia do proprio caso decide entre elas — o ChessBase 26
+le UTF-8 sem BOM **como UTF-8**, e foi assim que ele descartou os bytes cp1252.
+
+**A troca vai para o log**, na linha do arquivo gerado. E o programa mudando a
+codificacao por conta propria; quem comparar entrada e saida byte a byte tem de
+achar o motivo registrado em algum lugar.
+
+### 24.3 Verificado no arquivo de verdade, e nao so em fixture
+
+Reexportado pelo caminho do programa (`run_translation`, o mesmo do botao), com
+`translate_text` neutralizado para garantir que nenhuma chamada de API
+acontecesse sem ninguem ter pedido:
+
+| | |
+| ------------------------------- | ----------------------------- |
+| comentarios no PGN              | 7.487                         |
+| reaproveitados do cache         | 6.500 (todos os distintos)    |
+| chamadas de API                 | **0**                         |
+| comentarios que falharam        | 0                             |
+| posicoes registradas            | 7.487/7.487                   |
+| saida                           | 902.033 bytes, **utf-8**      |
+| decodifica UTF-8 **estrito**    | sim                           |
+| acentos                         | 14.733                        |
+| `U+FFFD`                        | 0                             |
+
+A prova e a do leitor: o arquivo e decodificado com `bytes.decode("utf-8")` sem
+`errors`. Antes da correcao essa linha levanta `UnicodeDecodeError`.
+
+### 24.4 O teste antigo passou a testar um caminho que deixou de existir
+
+`test_a_translation_the_input_encoding_cannot_hold_falls_back_to_utf8` montava um
+PGN cp1252 e punha um caractere chines numa traducao para forcar o
+`UnicodeEncodeError`. Com a promocao, esse PGN nunca mais e gravado em cp1252, e
+o teste continuaria **verde testando outra coisa** — a familia que a secao 5
+descreve: passa com a producao certa E com a errada.
+
+Ele virou `test_a_single_byte_input_encoding_does_not_become_the_output_encoding`,
+com as duas metades juntas: o arquivo tem de sair INTEIRO (a checagem de
+truncamento, que era o ponto do teste antigo) e tem de sair em UTF-8. O fallback
+do `UnicodeEncodeError` fica onde estava — hoje so alcancavel por UTF-16/32 com
+surrogate solto —, porque e ele que trunca o arquivo pela metade que a primeira
+tentativa deixou.
+
+**A garantia G2 da SPEC foi reescrita.** Ela dizia "a gravacao usa a codificacao
+detectada na origem" — exatamente o comportamento que causava o defeito.
+
+**Tres testes novos, seis mutacoes, seis mortas:**
+
+| mutacao                                              | testes que falham |
+| ---------------------------------------------------- | ----------------- |
+| promocao removida                                    | 3 de 4            |
+| condicao invertida                                   | 4 de 4            |
+| prefixo `utf8` no lugar de `utf` (promove UTF-16/32) | 2 de 4            |
+| promove sempre com BOM, ignorando a opcao            | 2 de 4            |
+| promocao depois da opcao de BOM                      | 3 de 4            |
+| log da troca removido                                | 1 de 4            |
+
+Conferido tambem ao contrario: com a versao anterior de `_output_encoding`
+restaurada, os tres testes novos falham (5 falhas e 1 erro, contando os
+subtestes da tabela de promocao).
