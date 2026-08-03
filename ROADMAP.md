@@ -7146,3 +7146,84 @@ detectada na origem" — exatamente o comportamento que causava o defeito.
 Conferido tambem ao contrario: com a versao anterior de `_output_encoding`
 restaurada, os tres testes novos falham (5 falhas e 1 erro, contando os
 subtestes da tabela de promocao).
+
+## 25. As familias de casa voltaram a ser escritas a mao — CONCLUIDO (2026-08-03)
+
+O `Substituicoes.txt` da arvore de trabalho tinha 621 linhas a mais que o ultimo
+commit, e elas desfaziam duas decisoes registradas aqui. Nao foi leitura: os
+dois testes que existem exatamente para isso estavam vermelhos, e foi assim que
+o item apareceu.
+
+### 25.1 O que as 621 linhas fizeram
+
+|                                | HEAD  | antes | depois |
+| ------------------------------ | ----- | ----- | ------ |
+| linhas do arquivo              | 5.922 | 6.514 | 6.077  |
+| entradas                       | 5.916 | 6.508 | 6.067  |
+| regras com casa literal        | 20    | **466** | 18   |
+| regras com `@casa@`            | 20    | 20    | 27     |
+| entradas sem escopo (`'*'`)    | 19    | **310** | 19   |
+
+**As familias voltaram a ser enumeradas casa a casa.** Sete delas — `torre-`,
+`dama-`, `rei-`, `cavalo-`, `bispo-`, `casa-` e `A troca no ` — escritas as 64
+casas na mao, 446 linhas. E a mesma enumeracao que o item 14.7 colapsou, e
+aquele item ja tinha dito como se faz isto hoje: "quem quiser a familia inteira
+automatica agora troca uma linha, e nao 64".
+
+O censo por familia mostra a marca da passagem manual, a mesma que 14.7
+descreve: `bispo-` estava **partida em duas**, 36 casas com escopo `'*'` e 28
+com o escopo do arquivo; `cavalo-` em 63 mais 1. Nao e criterio, e onde a
+digitacao parou.
+
+**Cinco das sete tinham escopo `'*'`, e isso nao e cosmetico.** Medido com a
+conversao do proprio programa — `filter_glossary_entries_by_type`, que filtra
+por par de idiomas e expande o `@casa@` —, e nao contando linhas do arquivo:
+
+| regras `automatic` que alcancam o par | HEAD | antes | depois |
+| ------------------------------------- | ---- | ----- | ------ |
+| en, es, fr, de, it, ru (cada um)      | 3    | **294** | 3    |
+| pt                                    | 294  | 899   | 899    |
+
+**291 regras portuguesas passaram a valer para os outros seis idiomas de
+destino.** `bispo-d4` -> `bispo de d4` aplicado, sem revisao, a uma traducao
+para o italiano — onde bispo e `alfiere` e a preposicao e `di`. E o defeito que
+a secao 15 conserta e que a garantia S11 nomeia, de volta pela porta dos dados
+em vez da do codigo.
+
+### 25.2 O conserto: sete linhas no lugar de 446
+
+As sete familias viraram sete regras com `@casa@`, `automatic`, **sem escopo
+declarado** — que e como se herda o `escopo = 'pt'` do topo do arquivo. As duas
+familias partidas se juntaram no caminho.
+
+**As 20 regras literais do HEAD ficam onde estao**: as 14 automaticas de
+`@casa@-peão` e as quatro da Siciliana sao a excecao deliberada de 14.7, que
+existe para nao mudar o tipo de 91 padroes. Duas das 20 sumiram — a casa unica
+de `bispo-` e a de `cavalo-`, que eram membros das familias colapsadas e agora
+saem da expansao.
+
+**O comportamento em portugues nao mudou, e isso foi medido e nao suposto.** O
+conjunto de regras aplicado (padrao, substituicao) e **identico** antes e depois
+nos tres tipos:
+
+| conjunto      | antes | depois | identico |
+| ------------- | ----- | ------ | -------- |
+| pt/automatic  | 899   | 899    | sim      |
+| pt/suggestion | 6.819 | 6.819  | sim      |
+| pt/cleanup    | 50    | 50     | sim      |
+
+A unica diferenca no arquivo inteiro, em qualquer par de idiomas, e a saida das
+291 regras dos seis idiomas que nunca deveriam te-las visto. **Nenhuma regra foi
+acrescentada e nenhuma casa se perdeu** — a expansao cobre as 64 por
+construcao.
+
+O `glossario.db` foi reconstruido junto (`rebuild_glossary_database`): ele e
+indice derivado e se refaz sozinho por hash de conteudo, mas e versionado, e um
+par arquivo/indice inconsistente no commit seria um defeito novo (3.7). O
+`Substituicoes.txt` anterior ficou em `backups/`, pela funcao do proprio
+programa, com a retencao dela.
+
+**Os dois testes voltaram ao verde sem que nenhum limite fosse afrouxado**:
+`test_the_real_glossary_declares_the_portuguese_scope` (310 -> 19 globais,
+limite 25) e `test_the_real_glossary_uses_the_placeholder` (466 -> 18 literais,
+limite 40). Suite inteira: **934 passam, nenhum falha**.
