@@ -142,15 +142,20 @@ else:
 # copiar o par `.dic`/`.aff` para `dicionarios/`, e nao lembrar de dois lugares.
 DICIONARIOS = "dicionarios"
 if os.path.isdir(DICIONARIOS):
-    PARES = sorted(
+    # `.txt` e `.md` entram junto com os dicionarios, e o motivo nao e
+    # arrumacao: o `pt_BR` e LGPL 2.1, e a licenca exige que o texto dela
+    # acompanhe a redistribuicao. Empacotar por extensao, e nao por nome, e o
+    # que impede a licenca de ficar para tras quando outro idioma entrar.
+    ARQUIVOS_DIC = sorted(
         os.path.join(DICIONARIOS, nome)
         for nome in os.listdir(DICIONARIOS)
-        if nome.lower().endswith((".dic", ".aff"))
+        if nome.lower().endswith((".dic", ".aff", ".txt", ".md"))
     )
+    PARES = [c for c in ARQUIVOS_DIC if c.lower().endswith((".dic", ".aff"))]
     if PARES:
-        datas += [(caminho, DICIONARIOS) for caminho in PARES]
+        datas += [(caminho, DICIONARIOS) for caminho in ARQUIVOS_DIC]
         print("Dicionarios de prosa embutidos: " + ", ".join(
-            os.path.basename(c) for c in PARES
+            os.path.basename(c) for c in ARQUIVOS_DIC
         ))
     else:
         print(

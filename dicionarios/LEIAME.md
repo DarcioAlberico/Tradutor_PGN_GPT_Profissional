@@ -21,12 +21,13 @@ O aviso de copyright e a declaracao de licenca estao no cabecalho do proprio
 `pt_BR.aff`, e viajam com o arquivo.
 
 **Licenca: GNU Lesser General Public License (LGPL) versao 2.1**, como declarado
-pelos autores no `pt_BR.aff`.
+pelos autores no `pt_BR.aff`. O texto integral esta em **`LGPL-2.1.txt`**, neste
+diretorio — a licenca exige que ele acompanhe a redistribuicao, e um repositorio
+publico ja e redistribuicao.
 
-> **Pendente antes de distribuir o instalador:** o texto integral da LGPL 2.1
-> nao esta neste repositorio. A licenca exige que ele acompanhe a
-> redistribuicao. Acrescentar `LGPL-2.1.txt` aqui, e cita-lo no instalador,
-> fecha isso.
+O `.spec` empacota os `.txt` e `.md` daqui junto com os dicionarios, entao o
+executavel e o instalador levam a licenca pelo mesmo caminho que os dados. Nao e
+detalhe de arrumacao: e a condicao para distribui-los.
 
 ## Acrescentar um idioma
 
