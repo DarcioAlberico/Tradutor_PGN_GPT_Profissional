@@ -12,7 +12,11 @@ from .settings import (
     read_main_window_settings,
     write_main_window_settings,
 )
-from .window_utils import install_callback_error_reporter, restore_or_maximize
+from .window_utils import (
+    apply_window_icon,
+    install_callback_error_reporter,
+    restore_or_maximize,
+)
 
 
 # O minimo da janela principal. Estava escrito duas vezes em numeros crus
@@ -28,6 +32,7 @@ class PGNTranslatorApp:
         # esta rodando?" e a primeira pergunta de qualquer suporte, e a barra de
         # titulo e o unico lugar que o usuario ve sem procurar (ROADMAP 21.6).
         self.root.title(f"PGN Tradutor Pro {__version__}")
+        apply_window_icon(self.root)
         self.root.geometry(f"{MAIN_MIN_WIDTH}x650")
         self.root.minsize(MAIN_MIN_WIDTH, MAIN_MIN_HEIGHT)
 

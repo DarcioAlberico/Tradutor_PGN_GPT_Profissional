@@ -79,15 +79,43 @@ executavel sai sem corretor — a janela de edicao avisa, e nada mais deixa de
 funcionar. Ver `dicionarios/LEIAME.md` para a procedencia, a licenca e como
 acrescentar um idioma.
 
+O icone sai de `recursos\PGN_Tradutor_Pro.ico`, que e **gerado por codigo**
+(`python recursos\gerar_icone.py`). Sem ele o build avisa e segue, com o icone
+padrao do PyInstaller.
+
+### As duas entregas
+
+O mesmo executavel vira duas coisas. **A diferenca entre elas e um arquivo
+vazio** — o `portatil.txt` ao lado do `.exe`:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" .\instalador\PGN_Tradutor_Pro.iss
+python .\instalador\empacotar-portatil.py
+```
+
+| entrega | onde grava os dados | para quem |
+|---|---|---|
+| `PGN-Tradutor-Pro-<versao>-instalador.exe` | `%APPDATA%\PGN Tradutor Pro\` | quem instala na propria maquina |
+| `PGN-Tradutor-Pro-<versao>-portatil.zip` | `dados\`, na propria pasta | pendrive, disco externo, maquina de terceiro |
+
+As duas saem em `instalador\saida\`. O zip leva um `LEIA-ME-PORTATIL.txt` que
+explica onde os dados ficam e como atualizar sem perder o acervo.
+
+> **Nunca ponha um `portatil.txt` dentro de `dist\`.** O instalador empacota
+> aquela pasta inteira, e o marcador faria a versao instalada gravar dentro de
+> `Program Files`. O `empacotar-portatil.py` escreve o marcador direto no zip e
+> se recusa a rodar se achar um solto ali.
+
 ### Onde ficam os seus dados
 
 **Nao e mais ao lado do `.exe`.** Quem decide e como o programa foi iniciado:
 
 | inicio | pasta de dados |
 |---|---|
+| com `PGN_TRADUTOR_DATA=<pasta>` | a pasta que voce disser — vence todas |
+| o `.exe` **portatil** (com `portatil.txt` ao lado) | `dados\`, dentro da propria pasta |
 | o `.exe` instalado | `%APPDATA%\PGN Tradutor Pro\` |
 | `python PGN_Tradutor_Pro.py` | ao lado do script |
-| com `PGN_TRADUTOR_DATA=<pasta>` | a pasta que voce disser |
 
 Glossario, banco, configuracoes, `backups\` e `logs\` seguem essa pasta. E o que
 faz uma atualizacao poder trocar o programa inteiro sem tocar no seu trabalho — e

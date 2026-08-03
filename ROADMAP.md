@@ -7430,3 +7430,141 @@ passavam — a forma mais facil de um erro virar paisagem. Os **17 testes** que
 ele traz passam todos; nunca tinham rodado por aqui.
 
 Suite inteira, com o runner documentado: **1.385 testes, OK**.
+
+## 27. Duas entregas e uma cara — CONCLUIDO (2026-08-03)
+
+Pedido do usuario: "cria o executavel instalavel e um que roda da propria pasta,
+cria um icone que alude a xadrez e idiomas".
+
+### 27.1 O portatil e o instalavel sao o MESMO executavel
+
+A diferenca inteira entre as duas entregas e **um arquivo vazio ao lado do
+`.exe`**: o `portatil.txt` que `app_paths.running_portable()` procura. Com ele,
+os dados vao para `dados\` dentro da pasta do programa; sem ele, para
+`%APPDATA%\PGN Tradutor Pro\`, como a secao 21 estabeleceu.
+
+Dois builds separados seriam duas coisas para construir, testar e manter em dia
+por causa de **uma linha de comportamento** — e a versao que ninguem roda e a
+que quebra primeiro.
+
+A ordem de precedencia ganhou um degrau no meio:
+
+| o que decide                | pasta de dados                        |
+| --------------------------- | ------------------------------------- |
+| `PGN_TRADUTOR_DATA`         | o que a variavel disser               |
+| `portatil.txt` ao lado do exe | `<pasta do programa>\dados\`        |
+| empacotado                  | `%APPDATA%\PGN Tradutor Pro\`         |
+| do fonte                    | ao lado do script                     |
+
+**A variavel continua vencendo o marcador**, e nao o contrario: apontar um
+`.exe` de pendrive para o acervo do disco e exatamente o caso que ela existe
+para atender.
+
+**O marcador so vale empacotado.** Do fonte os dados ja ficam ao lado do script,
+entao ele nao teria o que mudar — e um `portatil.txt` esquecido no checkout nao
+pode alterar onde a suite grava. Ha teste para isso.
+
+**Uma subpasta `dados\`, e nao a raiz da pasta do programa.** Copiar a pasta
+para o pendrive leva programa e acervo juntos, e ainda da para olhar e ver o que
+e do usuario e o que e do programa.
+
+**O marcador nunca entra em `dist\`**, e isso e o ponto delicado: o `.iss`
+empacota `dist\*` inteiro com `recursesubdirs`, entao um `portatil.txt`
+esquecido la viajaria para dentro do INSTALADOR e faria a versao instalada
+gravar dentro de `Program Files` — o defeito que a secao 21 consertou, de volta
+pela porta do empacotamento. `empacotar-portatil.py` escreve o marcador **direto
+no zip**, o disco nunca o ve, e ele **recusa** rodar se encontrar um solto em
+`dist\`.
+
+**A linha do log passou a nomear o modo**, e nao so a pasta: `Pasta de dados
+(portatil): ...`. Sao quatro situacoes e o caminho sozinho nao distingue duas
+delas — um `.exe` portatil e um instalado apontado por `PGN_TRADUTOR_DATA` podem
+gravar na MESMA pasta por motivos diferentes, e saber qual esta valendo e o que
+explica o que a proxima atualizacao vai fazer com aquele acervo.
+
+**Verificado com o `.exe` de verdade**, e nao so por teste: o zip foi extraido
+num diretorio temporario e o programa aberto. Ele criou `dados\` ao lado de si
+com `Substituicoes.txt`, `glossario.db` e `traducoes.db` — e o
+`%APPDATA%\PGN Tradutor Pro\` continuou com os arquivos de 2026-07-30, sem um
+byte tocado.
+
+### 27.2 O icone
+
+Um peao partido ao meio: metade clara, metade escura — as duas cores do
+tabuleiro, que sao as duas linguas. No peito, `N` e `C`: o cavalo em ingles e o
+cavalo em portugues, que e a troca que o programa faz o dia inteiro. Embaixo,
+quatro casas fecham a base.
+
+**Bandeira nao entrou de proposito**, que e a saida obvia para "idiomas": ela
+nomeia PAIS, e o programa traduz para sete linguas — a de Portugal e a do Brasil
+seriam duas bandeiras para o mesmo `pt`.
+
+**Desenhado por codigo** (`recursos/gerar_icone.py`), e nao guardado so como
+binario: o `.ico` tem seis tamanhos, e refaze-los a mao a cada ajuste e onde um
+icone envelhece. Cada tamanho e desenhado NO PROPRIO TAMANHO — reduzir o de 256
+borra os tracos finos que dao a forma.
+
+Tres rodadas de ajuste, todas olhando uma folha de contato com os seis tamanhos
+lado a lado e as ampliacoes de 16 e 32 px. O que cada uma mostrou esta no
+docstring do gerador, porque e o que evita refazer a conta no proximo ajuste: o
+peao estava pequeno demais no quadro; as letras transbordavam a silhueta e
+pousavam no fundo; e a faixa do tabuleiro flutuava separada da base.
+
+A regra que ficou: **o que nao sobrevive a 32x32 nao entra** — por isso as
+letras so aparecem a partir de 48 px. Em 16 px o icone e o peao bicolor sobre a
+faixa, que e a leitura que resiste.
+
+Ele vai a **tres** lugares, e os tres sao necessarios: recurso do `.exe` do
+programa (o que o Explorer mostra), recurso do `.exe` do instalador
+(`SetupIconFile` — sem ele o assistente e o unico arquivo da entrega com o icone
+generico do Inno Setup, justamente o primeiro que o usuario ve) e arquivo dentro
+do pacote, de onde `apply_window_icon` o le para por na janela. O recurso do
+`.exe` nao e um caminho que o Tk consiga abrir.
+
+`apply_window_icon` **nunca levanta**: icone e enfeite, e enfeite nao pode
+impedir o programa de abrir. Sem o arquivo, a janela abre com o icone do Tk,
+como antes deste item.
+
+### 27.3 As duas entregas
+
+    python -m PyInstaller PGN_Tradutor_Pro.spec        # o executavel
+    ISCC.exe instalador\PGN_Tradutor_Pro.iss           # o instalador
+    python instalador\empacotar-portatil.py            # o portatil
+
+| entrega                                    | tamanho |
+| ------------------------------------------ | ------- |
+| `PGN-Tradutor-Pro-0.3.0-instalador.exe`    | 25,6 MB |
+| `PGN-Tradutor-Pro-0.3.0-portatil.zip`      | 33,3 MB |
+
+O zip leva um `LEIA-ME-PORTATIL.txt` gerado junto, que diz onde os dados ficam,
+o que acontece ao apagar o marcador, como atualizar sem perder o acervo e como
+usar a variavel de ambiente.
+
+O instalador nao ficou maior por causa dos 5,5 MB do dicionario: o `lzma2` do
+Inno Setup comprime melhor um `.dic` de 4,6 MB do que o `deflate` do zip.
+
+**Quatro testes novos** em `DataDirRuleTests`, entre eles a contraprova de que o
+marcador nao faz nada rodando do fonte e a de que a variavel continua vencendo.
+Suite inteira: **1.389 testes, OK**.
+
+### 27.4 Um susto que nao era defeito, e como ele foi descartado
+
+A primeira rodada da suite depois deste item levou **1.048 s** contra os 373 s da
+anterior, e cuspiu **24 tracebacks** de `can't delete Tcl command` no teardown
+das janelas — nenhum deles existia antes. Com uma chamada nova de `iconbitmap`
+em toda abertura de janela, a suspeita era obvia.
+
+**Nao era.** Medido A/B nos testes da janela principal, com e sem a chamada:
+
+| | tempo | erros de Tcl |
+| ----------------- | ------- | --- |
+| com `iconbitmap`  | 76,3 s  | 0   |
+| sem `iconbitmap`  | 72,1 s  | 0   |
+
+O que explicava as duas coisas era a maquina: a rodada aconteceu logo depois de
+extrair os 33 MB do zip portatil e rodar o `.exe` de dentro dele, com o antivirus
+varrendo tudo. Repetida com a maquina quieta, a suite voltou a **514 s e zero
+erros de Tcl**.
+
+Fica registrado porque a conclusao errada era barata de tirar e cara de desfazer:
+o proximo a ver esses 24 tracebacks nao precisa refazer o A/B.

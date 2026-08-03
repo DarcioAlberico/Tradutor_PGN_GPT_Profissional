@@ -23,6 +23,7 @@ arquivo nao diz quem tem razao.
 import os
 import shutil
 
+from . import app_paths
 from .app_paths import data_dir, ensure_data_dir, program_dir
 
 
@@ -109,5 +110,19 @@ def describe_data_dir():
     Existe porque a pasta passou a depender de como o programa foi iniciado, e
     uma pergunta que o usuario nao consegue responder olhando a tela ("onde esta
     meu glossario?") vira chamado de suporte.
+
+    O modo e dito junto com a pasta. Sao tres, e o caminho sozinho nao distingue
+    dois deles: um `.exe` portatil e um `.exe` instalado apontado por
+    `PGN_TRADUTOR_DATA` podem gravar na MESMA pasta por motivos diferentes, e
+    saber qual dos dois esta valendo e o que explica o que uma atualizacao vai
+    fazer com aquele acervo (ROADMAP 27).
     """
-    return f"Pasta de dados: {data_dir()}"
+    if os.environ.get(app_paths.DATA_DIR_ENV, "").strip():
+        modo = f"por {app_paths.DATA_DIR_ENV}"
+    elif app_paths.running_portable():
+        modo = "portatil"
+    elif app_paths.running_frozen():
+        modo = "instalado"
+    else:
+        modo = "do fonte"
+    return f"Pasta de dados ({modo}): {data_dir()}"
