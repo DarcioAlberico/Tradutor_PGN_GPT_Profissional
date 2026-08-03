@@ -35,7 +35,7 @@ from .word_count import add_word_counts, count_words, total_word_counts
 # autor" e a anotacao que hoje vive no caderno de quem revisa. Sao dois `ALTER
 # TABLE` — nenhuma restricao muda, entao a tabela nao e reconstruida e a migracao
 # custa o mesmo em 6.500 ou em 201.607 linhas.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Os estados que uma linha NAO verificada pode ter, alem de "pendente".
 #
@@ -685,20 +685,40 @@ def _migrate_database(conn, from_version=0):
         CREATE INDEX IF NOT EXISTS idx_comments_quality
         ON comments(target_language, quality_warning, id)
     """)
-    # Indice de cobertura para get_review_status_counts: com ele o SQLite le so
-    # o indice (33 ms em 200 mil linhas), sem tocar na tabela (83 ms).
+    # Os dois indices de COBERTURA do `get_review_status_counts`. "Cobertura"
+    # quer dizer que toda coluna que a consulta le esta no indice, e por isso o
+    # SQLite nao toca na tabela — e ela e a parte cara: 200 mil linhas de texto
+    # de livro contra um indice de cinco colunas curtas.
+    #
+    # **`review_status` no fim, e essa e a correcao de 22.13.** O item 19.12
+    # acrescentou a coluna a agregada e nao a acrescentou aqui, e a cobertura se
+    # perdeu em silencio: `EXPLAIN QUERY PLAN` passou a devolver
+    # `SEARCH comments USING INDEX idx_comments_counts` **sem** a palavra
+    # `COVERING` — uma leitura da tabela por linha do par. Medido em copia
+    # sintetica de 204 mil linhas (mediana de 20 execucoes): 118,8 ms -> 60,8 ms
+    # no resumo do par e 138,3 ms -> 58,2 ms no resumo so por destino. A consulta
+    # roda em TODA recarga da lista, na thread do Tk.
+    #
+    # E a mesma classe de regressao que a garantia R5 nomeou quando
+    # `source_language` entrou no WHERE — desta vez introduzida pelo proprio
+    # recurso que a evitou da outra vez. Por isso a migracao 9 DERRUBA os dois
+    # antes de recriar: `CREATE INDEX IF NOT EXISTS` sobre um indice com o mesmo
+    # nome e colunas diferentes nao faz nada, e o banco de quem ja atualizou
+    # ficaria com o indice velho para sempre.
+    if from_version < 9:
+        cursor.execute("DROP INDEX IF EXISTS idx_comments_counts")
+        cursor.execute("DROP INDEX IF EXISTS idx_comments_pair_counts")
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_comments_counts
-        ON comments(target_language, verified, quality_warning)
+        ON comments(target_language, verified, quality_warning, review_status)
     """)
     # O mesmo, para quando ha filtro de origem. Sem ele o indice acima deixa de
     # cobrir a consulta — `source_language` esta no `WHERE` e nao no indice —, e
     # a agregada volta a tocar a tabela: medido no banco real, 34,9 ms sem filtro
-    # de origem contra 78,7 ms com ele. Seria uma regressao da garantia R5
-    # introduzida justamente pelo filtro que este item veio dar.
+    # de origem contra 78,7 ms com ele.
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_comments_pair_counts
-        ON comments(target_language, source_language, verified, quality_warning)
+        ON comments(target_language, source_language, verified, quality_warning, review_status)
     """)
     # O editor filtra por par de idiomas, e sem este indice cada troca de filtro
     # varreria a tabela — que e exatamente o que a garantia R5 existe para
@@ -1298,7 +1318,14 @@ def fetch_comment_occurrences(cursor, comment_id, limit=3, preferred_file=None):
     esta lendo o capitulo 7 com o filtro nele veria no rodape a posicao do mesmo
     comentario no capitulo 1 — informacao verdadeira que responde outra pergunta,
     e que na tela passa por erro.
+
+    `limit=None` traz TODAS. E o que a lista de posicoes do editor pede (ROADMAP
+    22.11): o rodape mostra uma e diz quantas faltam, e quem clica nele quer
+    justamente as que faltam. `-1` e como o SQLite escreve "sem limite" — o
+    `LIMIT` continua na consulta, e nao ha um segundo SQL para manter em dia.
     """
+    if limit is None:
+        limit = -1
     total = cursor.execute(
         f"SELECT COUNT(*) FROM {OCCURRENCES_TABLE} WHERE comment_id = ?",
         (comment_id,),
@@ -1789,14 +1816,22 @@ def count_review_rows(
     """, params).fetchone()[0]
 
 
-def get_review_status_counts(
-    cursor,
+def review_status_counts_query(
     target_language,
     search_text="",
     search_mode=SEARCH_MODE_SUBSTRING,
     source_language=None,
     source_file=None,
+    cursor=None,
 ):
+    """`(sql, params)` do resumo por status.
+
+    Separada da execucao para que o teste do PLANO possa perguntar pelo mesmo
+    SQL que a producao roda (ROADMAP 22.13). Com a consulta escrita dentro da
+    funcao que a executa, o teste de `EXPLAIN QUERY PLAN` teria de transcreve-la
+    — e passaria a medir a propria transcricao, que continuaria coberta enquanto
+    a de verdade deixasse de ser.
+    """
     where_sql, params = _review_where(
         target_language,
         search_text=search_text,
@@ -1806,7 +1841,7 @@ def get_review_status_counts(
         source_language=source_language,
         source_file=source_file,
     )
-    total, pending, verified, warnings, rejected, doubt = cursor.execute(f"""
+    sql = f"""
         SELECT
             COUNT(*),
             COALESCE(SUM(CASE WHEN verified <> 1 THEN 1 ELSE 0 END), 0),
@@ -1822,7 +1857,29 @@ def get_review_status_counts(
             ), 0)
         FROM comments
         WHERE {where_sql}
-    """, params).fetchone()
+    """
+    return sql, params
+
+
+def get_review_status_counts(
+    cursor,
+    target_language,
+    search_text="",
+    search_mode=SEARCH_MODE_SUBSTRING,
+    source_language=None,
+    source_file=None,
+):
+    sql, params = review_status_counts_query(
+        target_language,
+        search_text=search_text,
+        search_mode=search_mode,
+        source_language=source_language,
+        source_file=source_file,
+        cursor=cursor,
+    )
+    total, pending, verified, warnings, rejected, doubt = cursor.execute(
+        sql, params
+    ).fetchone()
     return {
         "total": total,
         "pending": pending,
@@ -1865,6 +1922,46 @@ def count_from_status_counts(status_counts, status_filter=None, only_unverified=
     if key is None:
         return None
     return status_counts.get(key)
+
+
+def fetch_review_row_ids(
+    cursor,
+    target_language,
+    only_unverified=False,
+    search_text="",
+    status_filter=None,
+    search_mode=SEARCH_MODE_SUBSTRING,
+    source_language=None,
+    source_file=None,
+):
+    """So os ids das linhas do filtro — todas, sem paginacao (ROADMAP 22.11).
+
+    Existe para o "Marcar tudo" da selecao em lote. A barra so sabia marcar a
+    PAGINA, e marcar os 3.000 resultados de um capitulo eram 30 idas ao botao
+    mais 29 viradas de pagina — custo de interface, e nao de banco: o mesmo
+    `WHERE` que a lista ja usa devolve os ids em milissegundos.
+
+    **Sem `ORDER BY`.** O resultado alimenta um conjunto de ids marcados, e
+    conjunto nao tem ordem; ordenar seria uma passada a mais em 200 mil linhas
+    para um dado que ninguem le. E a razao de esta funcao nao aceitar `order`,
+    que e o parametro que as outras tres desta familia recebem.
+    """
+    where_sql, params = _review_where(
+        target_language,
+        only_unverified,
+        search_text,
+        status_filter,
+        search_mode=search_mode,
+        cursor=cursor,
+        source_language=source_language,
+        source_file=source_file,
+    )
+    return [
+        linha[0]
+        for linha in cursor.execute(
+            f"SELECT id FROM comments WHERE {where_sql}", params
+        ).fetchall()
+    ]
 
 
 def fetch_review_rows_page(
@@ -2021,9 +2118,36 @@ def record_comment_history(
     return cursor.lastrowid
 
 
-def fetch_comment_history(cursor, comment_id, limit=50):
+# O historico so tem uma pergunta a responder — "para qual texto eu volto?" —, e
+# uma entrada que nao mexeu no texto nao e uma resposta possivel. Medido no banco
+# de dev (6.500 linhas): das 889 entradas gravadas, **607 nao mudam o texto**, e
+# 355 dos 629 comentarios com historico tem SO entradas desse tipo. Abrir o
+# historico neles mostrava uma lista com o mesmo texto dos dois lados — o
+# "so aparece a traducao atual" que o usuario relatou (ROADMAP 23.1).
+#
+# `verify` e o grosso: marcar como verificada grava previous == new. E informacao
+# real (quando a linha foi conferida), mas nao e uma versao.
+HISTORY_TEXT_CHANGED = (
+    "COALESCE(previous_translation, '') <> COALESCE(new_translation, '')"
+)
+
+
+def fetch_comment_history(cursor, comment_id, limit=50, only_text_changes=True):
+    """As versoes desta linha, da mais recente para tras.
+
+    `only_text_changes=True` e o padrao porque e o que a janela pergunta. O filtro
+    e em SQL, e nao em Python depois, por causa do `LIMIT`: com 100 verificacoes
+    gravadas, filtrar depois traria 100 linhas inuteis e ZERO alteracoes — o
+    limite se gastaria inteiro no que vai ser descartado.
+
+    `only_text_changes=False` devolve tudo, que e como se conta quantas ficaram
+    de fora (`count_comment_history`).
+    """
+    where = "comment_id = ?"
+    if only_text_changes:
+        where += f" AND {HISTORY_TEXT_CHANGED}"
     return cursor.execute(
-        """
+        f"""
         SELECT
             id,
             action,
@@ -2033,12 +2157,70 @@ def fetch_comment_history(cursor, comment_id, limit=50):
             new_verified,
             created_at
         FROM comment_history
-        WHERE comment_id = ?
+        WHERE {where}
         ORDER BY id DESC
         LIMIT ?
         """,
         (comment_id, limit),
     ).fetchall()
+
+
+def count_comment_history(cursor, comment_id):
+    """`(com_mudanca, sem_mudanca)` do historico desta linha.
+
+    Duas contagens numa passada so: a janela precisa das duas — uma para saber se
+    o limite cortou a lista, outra para dizer quantas verificacoes ficaram fora
+    dela.
+    """
+    com, sem = cursor.execute(
+        f"""
+        SELECT
+            COALESCE(SUM(CASE WHEN {HISTORY_TEXT_CHANGED} THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN {HISTORY_TEXT_CHANGED} THEN 0 ELSE 1 END), 0)
+        FROM comment_history
+        WHERE comment_id = ?
+        """,
+        (comment_id,),
+    ).fetchone()
+    return com, sem
+
+
+def machine_translation_for(cursor, comment_id):
+    """O texto que a traducao automatica produziu para esta linha.
+
+    **Derivado, e nao gravado** (ROADMAP 23.1). O `INSERT` do pipeline e o unico
+    caminho que escreve `translated_comment` sem registrar historico; todos os
+    outros — editar, importar CSV, aplicar automaticas, corrigir lances,
+    preencher linha vazia — registram. Entao andar para tras a partir do texto
+    atual chega exatamente no que a maquina produziu:
+
+    - com historico, e o `previous_translation` da entrada MAIS ANTIGA;
+    - sem historico nenhum, e o proprio texto atual — ninguem mexeu nele ainda.
+
+    Gravar uma entrada de linha-base no `INSERT` daria a mesma resposta e custaria
+    o acervo inteiro duplicado em disco: o texto iria no `new_translation` de cada
+    uma das 200 mil linhas. A derivacao custa uma consulta indexada por
+    `comment_id`.
+
+    Devolve `None` quando a linha nao existe.
+    """
+    primeira = cursor.execute(
+        """
+        SELECT previous_translation
+        FROM comment_history
+        WHERE comment_id = ?
+        ORDER BY id
+        LIMIT 1
+        """,
+        (comment_id,),
+    ).fetchone()
+    if primeira is not None:
+        return primeira[0] or ""
+
+    atual = cursor.execute(
+        "SELECT translated_comment FROM comments WHERE id = ?", (comment_id,)
+    ).fetchone()
+    return None if atual is None else (atual[0] or "")
 
 
 def update_translation_by_id(

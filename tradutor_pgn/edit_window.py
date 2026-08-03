@@ -24,6 +24,7 @@ from .database import (
     count_review_rows,
     fetch_comment_occurrences,
     fetch_exact_translation_match_candidates,
+    fetch_review_row_ids,
     fetch_review_rows,
     fetch_review_rows_page,
     fetch_review_status_by_id,
@@ -52,11 +53,15 @@ from .glossario import (
     versioned_rules,
 )
 from .editor_common import (
+    ERROR_TEXT_COLOR,
+    MUTED_TEXT_COLOR,
+    OK_TEXT_COLOR,
     ROW_COLOR,
     ROW_HOVER_COLOR,
     ROW_TEXT_COLOR,
     SELECTED_ROW_COLOR,
     SELECTED_ROW_TEXT_COLOR,
+    WARNING_TEXT_COLOR,
     clamp_page,
     format_timestamp,
     local_index_for_offset,
@@ -75,6 +80,7 @@ from .editor_widgets import (
 )
 from .glossary_editor import open_glossary_editor
 from .history_window import HistoryWindow
+from . import prose_spellcheck
 from .review_quality import (
     QUALITY_REPORT_HEADERS,
     build_quality_report_rows,
@@ -83,6 +89,7 @@ from .review_quality import (
     row_has_quality_warning,
     row_language_pair,
     row_quality_flag,
+    row_quality_warnings,
 )
 from .settings import (
     clear_editor_draft,
@@ -103,8 +110,47 @@ SUGGESTION_SELECTED_COLOR = ("#2563eb", "#1d4ed8")
 PAGE_SIZE = 100
 SEARCH_MODE_LABEL_TERMS = "Termos"
 SEARCH_MODE_LABEL_SUBSTRING = "Trecho"
-MIN_WIDTH = 1120
+# A largura minima da janela e a SOMA dos minimos dos tres paineis, e nao um
+# numero escolhido a parte (ROADMAP 22.10). Ela era 1120 contra 1176 de soma, e
+# quem pagava a diferenca era sempre o mesmo painel: medido na janela real em
+# 1120 px, o de sugestoes ficava com **109** dos 300 px que declara, e os seis
+# botoes dele apareciam com 40 px dos 140 de que precisam — seis rotulos
+# ilegiveis. Derivar a constante da soma e o que impede a conta de voltar a
+# divergir quando um dos minimos mudar.
+SASH_WIDTH = 8
+LIST_PANE_MIN = 320
+EDITOR_PANE_MIN = 520
+# 308, e nao os 300 declarados antes: 300 e a largura do painel, e os seis
+# botoes dele pedem 140 px cada em duas colunas — com os `padx` de 10/4 sobram
+# 136, e todos os seis ficavam 4 px curtos. O numero e o `winfo_reqwidth` do
+# painel montado, medido na janela real.
+SUGGESTION_PANE_MIN = 308
+# O painel de baixo contem o editor e as sugestoes: o minimo dele e o dos dois
+# mais o divisor. Declarar 620 aqui (o que havia) autorizava arrastar o divisor
+# da lista ate esmagar as sugestoes, mesmo com a janela larga.
+BOTTOM_PANE_MIN = EDITOR_PANE_MIN + SASH_WIDTH + SUGGESTION_PANE_MIN
+MAIN_PANE_PADX = 20
+MIN_WIDTH = LIST_PANE_MIN + SASH_WIDTH + BOTTOM_PANE_MIN + MAIN_PANE_PADX
 MIN_HEIGHT = 680
+
+# Largura PEDIDA pelo painel da lista na primeira abertura, quando ainda nao ha
+# posicao de divisor gravada. E um pedido e nao uma garantia: numa janela
+# estreita o `minsize` dos outros dois paineis vence, e a lista recua ate os 320
+# dela — foi assim que a largura minima passou a fechar (ROADMAP 22.10).
+LIST_PANE_DEFAULT = 400
+
+# Quanto da mensagem transitoria do rodape cabe na fileira dos rotulos, medido
+# na janela real na largura minima (ROADMAP 22.10). A faixa tem 1.144 px; o caso
+# tipico gasta 700 deles com o "?" (32), o "Salvo" (31), o "Item n/N · par"
+# (~200), as quatro contagens (389) e os `padx`, e o rascunho leva mais ~140 —
+# sobram ~304 px, e a fonte da faixa gasta 5,66 px por caractere (48 caracteres
+# tipicos medem 270 px).
+#
+# As duas mensagens de propagacao do editor passam disso (73 e 56 caracteres) e
+# ficam com reticencias. E o certo: elas sao recibo de uma acao que o usuario
+# acabou de confirmar num dialogo que ja dizia o efeito por extenso (garantia
+# V1), e a contagem que fica — que este mesmo item protegeu — mostra o resultado.
+MESSAGE_PREVIEW_CHARS = 52
 
 # Rotulo do filtro de origem que nao filtra nada. Precisa ser diferente de
 # `UNKNOWN_SOURCE_LABEL`: "Todos" traz a tabela inteira, "Não informado" traz so
@@ -124,6 +170,15 @@ FILE_FILTER_ALL = "Todos os arquivos"
 #
 # "Rejeitadas" e "Em duvida" sao RECORTES das pendentes, e a ordem na tela diz isso:
 # elas vem depois de "Pendentes".
+# O nome do status da linha aberta, em palavras (garantia F19, ROADMAP 22.9). A
+# pendente nao tem rotulo: e o padrao, e escrever "Pendente" em toda linha faria
+# o normal virar ruido e esconderia a excecao — a mesma regra da prioridade no
+# editor de glossario e das contagens do rodape.
+REVIEW_STATUS_LABELS = {
+    REVIEW_STATUS_REJECTED: "Rejeitada",
+    REVIEW_STATUS_DOUBT: "Em dúvida",
+}
+
 STATUS_FILTER_LABELS = {
     "Todas": "all",
     "Pendentes": "pending",
@@ -159,6 +214,109 @@ OCCURRENCE_PREVIEW_LIMIT = 1
 # lista deixa de ser legivel num dialogo e o que fica e a contagem — mas os
 # primeiros ja mostram DO QUE se trata, que e o que a contagem sozinha nao diz.
 PROPAGATION_PREVIEW_LIMIT = 8
+
+
+# Os atalhos da janela, agrupados como o dialogo "Atalhos" os mostra (garantia
+# F18, ROADMAP 22.8). Sao treze, e ate aqui **nenhum aparecia na interface**: nao
+# ha menu, o CustomTkinter nao tem tooltip, e o README documentava tres. O
+# criterio e do proprio projeto — "um atalho que ninguem descobre nao devolve a
+# pagina a ninguem" (item 19.3) —, aplicado ate entao so ao botao "< Voltar".
+#
+# O caso extremo era o `Ctrl+B`: ele nao tem botao (o "B" da barra faz outra
+# coisa), nao estava no README, e portanto nao tinha caminho de descoberta
+# NENHUM — um recurso restaurado no item 4.1 que so quem lesse o fonte acharia.
+#
+# A sequencia do Tk vai junto de proposito: e ela que um teste compara com os
+# binds reais da janela, e e o que impede a lista de envelhecer sozinha. Sem
+# isso, esta tabela seria documentacao — a especie que fica errada em silencio.
+KEYBOARD_SHORTCUTS = (
+    (
+        "Navegar",
+        (
+            ("Alt+←", "<Alt-Left>", "Linha anterior"),
+            ("Alt+→", "<Alt-Right>", "Próxima linha"),
+            ("Ctrl+PageUp", "<Control-Prior>", "Página anterior da lista"),
+            ("Ctrl+PageDown", "<Control-Next>", "Próxima página da lista"),
+            ("Alt+Backspace", "<Alt-BackSpace>", "Voltar ao ponto anterior"),
+            ("F7", "<F7>", "Próximo aviso de qualidade"),
+        ),
+    ),
+    (
+        "Buscar",
+        (
+            ("Ctrl+L", "<Control-l>", "Buscar na lista (troca a página)"),
+            ("Ctrl+F", "<Control-f>", "Buscar dentro da tradução aberta"),
+            ("F3", "<F3>", "Próxima ocorrência no texto"),
+        ),
+    ),
+    (
+        "Editar e gravar",
+        (
+            ("Ctrl+S", "<Control-s>", "Salvar"),
+            ("Ctrl+Enter", "<Control-Return>", "Salvar e marcar como verificada"),
+            (
+                "Ctrl+Shift+Enter",
+                "<Control-Shift-Return>",
+                "Marcar como verificada e ir para a próxima",
+            ),
+            ("Ctrl+Z", "<Control-z>", "Desfazer"),
+            ("Ctrl+Y", "<Control-y>", "Refazer"),
+            ("Ctrl+B", "<Control-b>", "Negrito no trecho selecionado da tradução"),
+        ),
+    ),
+    (
+        "Ver",
+        (
+            ("Ctrl++", "<Control-plus>", "Aumentar a fonte dos dois textos"),
+            ("Ctrl+=", "<Control-equal>", "Aumentar a fonte (teclado sem Shift)"),
+            ("Ctrl+-", "<Control-minus>", "Diminuir a fonte dos dois textos"),
+        ),
+    ),
+    (
+        "Janelas",
+        (
+            ("Ctrl+H", "<Control-h>", "Histórico da tradução aberta"),
+            ("F1", "<F1>", "Esta lista de atalhos"),
+        ),
+    ),
+)
+
+# Os gestos de MOUSE ficam numa tabela propria, e nao no fim da de cima
+# (ROADMAP 22.11). A razao e de teste, e vale registra-la: a parceria entre a
+# lista e a janela e conferida nos dois sentidos, e o lado "todo bind aparece na
+# lista" so consegue separar atalho de evento de ciclo de vida porque o Tk poe
+# `Key` em toda sequencia de TECLA. Um `<Double-Button-1>` na mesma tupla ficaria
+# fora dessa conferencia — listado e nunca verificado, que e a forma de
+# envelhecer que a garantia F18 existe para impedir.
+MOUSE_GESTURES = (
+    ("Ctrl+roda", "Aumentar e diminuir a fonte dos dois textos"),
+    ("Duplo clique numa sugestão", "Aplicar a sugestão na tradução"),
+    ("Clique em \"Lido em:\"", "Todas as posições em que este comentário aparece"),
+)
+
+
+# O estado LIGADO do botao "B" (ROADMAP 22.8). Cores de outra familia que a do
+# botao padrao, e diferentes nos dois temas — o par anterior era identico ao
+# desligado no tema escuro. A borda e a segunda diferenca, e a que funciona para
+# quem nao distingue os dois azuis.
+BOLD_ACTIVE_COLOR = ("#1d4ed8", "#1e40af")
+BOLD_ACTIVE_HOVER_COLOR = ("#1e40af", "#1d4ed8")
+BOLD_ACTIVE_BORDER_COLOR = ("#bfdbfe", "#93c5fd")
+
+
+def theme_button_colors():
+    """`(fg_color, hover_color)` padrao do botao, lidos do TEMA.
+
+    Transcrever os hexes do tema para restaurar um botao — que era o que o "B"
+    fazia — congela a aparencia dele no tema que existia quando alguem copiou.
+    Se a leitura falhar (um tema sem essas chaves), o par de fabrica do
+    CustomTkinter 5.2.2 e melhor do que uma excecao no meio de um clique.
+    """
+    try:
+        tema = ctk.ThemeManager.theme["CTkButton"]
+        return tema["fg_color"], tema["hover_color"]
+    except (AttributeError, KeyError, TypeError):  # pragma: no cover - tema exotico
+        return ("#3B8ED0", "#1F6AA5"), ("#36719F", "#144870")
 
 
 def source_filter_labels():
@@ -262,6 +420,29 @@ def format_occurrence_context(occurrences, total):
         plural = "posição" if restantes == 1 else "posições"
         texto += f" · e mais {restantes} {plural} (a mesma tradução)"
     return texto
+
+
+def format_occurrence_lines(occurrences):
+    """Uma linha por posicao, para a janela que as mostra TODAS (ROADMAP 22.11).
+
+    Diferente de `format_occurrence_context` em tres coisas, e cada uma vem de a
+    janela nao ter o aperto de largura do rodape: o caminho vem INTEIRO (e o que
+    distingue dois capitulos com o mesmo nome de arquivo em pastas diferentes), o
+    lance e o indice do comentario aparecem juntos, e nada e resumido em
+    contagem.
+
+    Pura, para poder ser conferida sem abrir janela.
+    """
+    linhas = []
+    for source_file, game_index, comment_index, move_number in occurrences:
+        pedaco = source_file or "(sem arquivo)"
+        if game_index:
+            pedaco += f" · partida {game_index}"
+        if move_number:
+            pedaco += f" · lance {move_number}"
+        pedaco += f" · comentário {comment_index}"
+        linhas.append(pedaco)
+    return linhas
 
 
 def format_propagation_confirmation(translation, candidates, limit=PROPAGATION_PREVIEW_LIMIT):
@@ -396,6 +577,13 @@ class EditorState:
         # voltar para um id que a busca nova nao contem nao e voltar.
         self.history_stack = []
 
+        # Os filtros que a ULTIMA consulta da lista usou, gravados por
+        # `reload_rows`. E daqui que sai o retrato do "voltar", e nao dos
+        # seletores: cada seletor chama o seu comando com o widget ja no valor
+        # NOVO, entao ler o widget gravava para onde o usuario estava indo
+        # (garantia F13, ROADMAP 22.3).
+        self.applied_view = {}
+
 
 class TranslationEditor:
     """A janela de edicao de traducoes.
@@ -429,8 +617,118 @@ class TranslationEditor:
         self.refresh_file_filter(restore=self.editor_settings.get("file_filter"))
         self.load_first_page()
 
+    def read_theme_colors(self):
+        """As cores que o Tk puro usa, no tema de agora.
+
+        Os widgets do CustomTkinter recebem pares `("claro", "escuro")` e trocam
+        sozinhos quando o tema muda. Estes aqui nao: os tres `PanedWindow`, os
+        dois `tk.Text`, as tags deles e as bordas sao Tk puro, e recebem UMA cor
+        — a escolhida no instante em que sao configurados.
+
+        Por isso elas ficam reunidas num metodo, e nao espalhadas por dois
+        `build_*`: o programa roda em `set_appearance_mode("System")`, o Windows
+        troca de tema sozinho ao anoitecer, e `apply_theme_colors` precisa saber
+        onde estao todas para reaplica-las (garantia F18, ROADMAP 22.8).
+        """
+        escuro = ctk.get_appearance_mode() == "Dark"
+        self.pane_bg = "#2b2b2b" if escuro else "#d1d5db"
+        self.text_bg = "#111827" if escuro else "#f9fafb"
+        self.text_fg = "#e5e7eb" if escuro else "#111827"
+        self.text_border = "#374151" if escuro else "#d1d5db"
+        # A borda de quem tem o foco do teclado. Ela e a unica cor daqui que nao
+        # existia: sem ela, o anel do container tinha a MESMA cor com e sem foco.
+        self.focus_border = "#60a5fa" if escuro else "#1d4ed8"
+        self.highlight_bg = "#7c5800" if escuro else "#fff3bf"
+        self.highlight_fg = "#fef3c7" if escuro else "#111827"
+        self.find_bg = "#334155" if escuro else "#fde68a"
+        self.find_fg = "#f8fafc" if escuro else "#111827"
+        self.current_find_bg = "#ea580c" if escuro else "#fb923c"
+        # Texto ESCURO sobre o laranja, nos dois temas (ROADMAP 22.9). Era branco,
+        # e branco sobre laranja da 2,3:1 no claro e 3,6:1 no escuro — as duas
+        # reprovadas. `#111827` da 7,8:1 e 5,0:1. Quem muda e a cor do TEXTO, e nao
+        # a do fundo: o fundo e o que distingue a ocorrencia atual das outras, e
+        # escurece-lo o bastante para o branco passar apagaria essa diferenca.
+        self.current_find_fg = "#111827"
+        # As duas cores do diff da previa (ROADMAP 19, item 5). Vermelho e verde
+        # apagados, e nao os saturados: o que se le ali e texto, e um fundo forte
+        # atras de uma frase inteira e ilegivel.
+        self.diff_removed_bg = "#7f1d1d" if escuro else "#fecaca"
+        self.diff_added_bg = "#14532d" if escuro else "#bbf7d0"
+        # O sublinhado do corretor de prosa (ROADMAP 26). Sublinhado e nao fundo:
+        # a marca cai sobre uma palavra ISOLADA no meio da revisao, e pintar o
+        # fundo dela competiria com o realce do glossario e o da busca, que sao
+        # dois fundos ja disputando a mesma caixa. A cor tem contraste sobre o
+        # fundo do texto nos dois temas (5,0:1 no escuro, 5,9:1 no claro).
+        self.spell_error_fg = "#fca5a5" if escuro else "#b91c1c"
+
+    def apply_theme_colors(self, _mode=None):
+        """Reaplica as cores do Tk puro. Chamada pelo rastreador de tema do CTk.
+
+        Recebe o modo como argumento porque e assim que o rastreador chama, e o
+        ignora: `read_theme_colors` pergunta ao proprio CustomTkinter, que e a
+        mesma resposta e uma fonte a menos.
+
+        Sai calada se a janela ja morreu — o rastreador guarda o callback numa
+        lista de classe, e uma janela fechada nao pode virar erro na proxima
+        troca de tema.
+        """
+        try:
+            if not self.win.winfo_exists():
+                return
+        except tk.TclError:  # pragma: no cover - interpretador ja sem Tk
+            return
+
+        self.read_theme_colors()
+        for pane in (self.main_pane, self.bottom_pane, self.texts_pane):
+            pane.configure(bg=self.pane_bg)
+
+        for texto in (self.orig_text, self.trans_text):
+            texto.configure(
+                bg=self.text_bg, fg=self.text_fg, insertbackground=self.text_fg
+            )
+            texto.tag_configure(
+                "glossary_hit",
+                background=self.highlight_bg,
+                foreground=self.highlight_fg,
+            )
+            texto.tag_configure(
+                "find_match", background=self.find_bg, foreground=self.find_fg
+            )
+            texto.tag_configure(
+                "find_current",
+                background=self.current_find_bg,
+                foreground=self.current_find_fg,
+            )
+            texto.tag_configure(
+                "spell_error", foreground=self.spell_error_fg, underline=True
+            )
+            self.paint_focus_border(texto, texto is self.focused_text)
+
+        # A borda "neutra" do campo de nota e `text_border`, entao ela tambem
+        # mudou de cor (garantia F10 continua valendo: quem manda na cor e o
+        # status).
+        self.update_review_status_label()
+
+    def paint_focus_border(self, texto, com_foco):
+        """Pinta o anel do container do texto conforme ele tem ou nao o foco.
+
+        Quem recebe o foco do teclado e o `tk.Text`; quem desenha a borda visivel
+        e o `tk.Frame` em volta dele. Por isso o bind fica num e o efeito no
+        outro — e por isso o `highlightcolor` do proprio Text nao resolveria.
+        """
+        cor = self.focus_border if com_foco else self.text_border
+        try:
+            texto.master.configure(highlightbackground=cor, highlightcolor=cor)
+        except tk.TclError:  # pragma: no cover - widget ja destruido
+            pass
+
     def build_state(self):
         """Estado da janela, variaveis de controle e fontes."""
+        # Antes de qualquer widget: os `build_*` leem estas cores.
+        self.read_theme_colors()
+        # Qual dos dois textos tem o foco, para a troca de tema saber qual anel
+        # repintar de qual cor.
+        self.focused_text = None
         # O destino comeca no que a janela principal tem selecionado — que e o
         # que esta janela sempre fez — mas deixa de estar preso a ele: o seletor
         # abaixo permite trocar sem fechar o editor.
@@ -439,7 +737,10 @@ class TranslationEditor:
         self.win = ctk.CTkToplevel(self.app.root)
         self.win.title(f"Editar traduções ({self.lang})")
         self.win.geometry("1280x760")
-        self.win.minsize(1120, 680)
+        # As mesmas constantes que `safe_geometry` usa. Escritos a mao aqui, os
+        # dois numeros eram uma segunda fonte da largura minima — e foi por ela
+        # que a soma dos paineis pode divergir sem ninguem notar.
+        self.win.minsize(MIN_WIDTH, MIN_HEIGHT)
 
         self.settings = load_settings()
         self.editor_settings = self.settings.get("editor", {})
@@ -456,6 +757,9 @@ class TranslationEditor:
 
         self.row_buttons = []
         self.row_checkboxes = []
+        # Quantas posicoes tem a linha aberta. Decide se o rodape da procedencia
+        # e clicavel (ROADMAP 22.11).
+        self.origin_occurrences = 0
         # `{rotulo do menu: caminho no banco}`. Refeito a cada troca de par, e nao
         # a cada consulta: agrupar as ocorrencias por arquivo custa O(ocorrencias),
         # e faze-lo por tecla digitada seria a regressao de R5 que o proprio filtro
@@ -489,6 +793,13 @@ class TranslationEditor:
         # `self.lang` e dos seletores existirem — ver `scoped_languages`.
         self.glossary = self.app.glossary_substitutions
         self.automatic_glossary = []
+        # O corretor de prosa (ROADMAP 26). O cache do dicionario e do PROCESSO e
+        # vive em `prose_spellcheck`; o que a janela guarda e so a trava da
+        # reagendagem, para nao empilhar um `after` por tecla enquanto o
+        # dicionario ainda esta sendo lido.
+        self._prose_retry_scheduled = False
+        self._prose_glossary_key = None
+        self._prose_glossary_vocabulary = frozenset()
         self.current_suggestions = []
         self.suggestion_buttons = []
         self.search_text = tk.StringVar(master=self.win, value="")
@@ -512,19 +823,20 @@ class TranslationEditor:
 
     def build_list_pane(self):
         """Painel esquerdo: paginacao, busca, filtros e a lista."""
-        self.pane_bg = "#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#d1d5db"
         self.main_pane = tk.PanedWindow(
             self.win,
             orient=tk.HORIZONTAL,
-            sashwidth=8,
+            sashwidth=SASH_WIDTH,
             sashrelief=tk.FLAT,
             bd=0,
             bg=self.pane_bg,
         )
         self.main_pane.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 6))
 
-        self.list_frame = ctk.CTkFrame(self.main_pane, corner_radius=8, width=400)
-        self.main_pane.add(self.list_frame, minsize=320)
+        self.list_frame = ctk.CTkFrame(
+            self.main_pane, corner_radius=8, width=LIST_PANE_DEFAULT
+        )
+        self.main_pane.add(self.list_frame, minsize=LIST_PANE_MIN)
         self.list_frame.columnconfigure(0, weight=1)
         # A lista e a unica que cresce. Ela desceu para a linha 7 quando a barra da
         # selecao em lote entrou na 6 (ROADMAP 19, item 9).
@@ -544,12 +856,31 @@ class TranslationEditor:
         self.page_nav.columnconfigure(1, weight=1)
         self.btn_page_prev = ctk.CTkButton(self.page_nav, text="< Página", width=92)
         self.btn_page_prev.grid(row=0, column=0, sticky="w", padx=(0, 6))
+        # O "voltar" fica entre as duas viradas de pagina, e nao na barra de
+        # salto (ROADMAP 22.10). A razao e medida, e nao estetica: na barra de
+        # salto ele era o que fazia a fileira pedir 406 px, e `grid` distribui a
+        # falta entre TODAS as colunas — a sobra caia nos dois campos de digitar,
+        # que ficavam com **11 px** (o da pagina) e 29 px (o do id) com o divisor
+        # no minimo, e com 51 px mesmo na largura padrao do painel. Fora dali, os
+        # mesmos campos medem 54 e 72 px no minimo.
+        #
+        # A decisao do 19.3 — que o "voltar" precisa de botao, e nao so do
+        # `Alt+Backspace` — continua de pe: ele continua visivel, e agora ao lado
+        # das outras duas setas, que e o que ele tambem e.
+        self.btn_go_back = ctk.CTkButton(self.page_nav, text="< Voltar", width=76)
+        self.btn_go_back.grid(row=0, column=1, padx=6)
         self.btn_page_next = ctk.CTkButton(self.page_nav, text="Página >", width=92)
         self.btn_page_next.grid(row=0, column=2, sticky="e", padx=(6, 0))
 
         self.search_bar = ctk.CTkFrame(self.list_frame, fg_color="transparent")
         self.search_bar.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 6))
         self.search_bar.columnconfigure(0, weight=1)
+        # O placeholder fica, e nao vira rotulo: o botao "Buscar" ao lado ja
+        # nomeia o campo, e o que este texto acrescenta e o ESCOPO da busca —
+        # informacao de quem esta comecando, nao de quem usa a janela o dia
+        # inteiro. Ele nao aparece hoje (ver `find_bar`, garantia F17), e voltaria
+        # sozinho se o CustomTkinter corrigir a comparacao. Um rotulo permanente
+        # com esta frase custaria ~230 px numa coluna de 320 px de minimo.
         self.search_entry = ctk.CTkEntry(
             self.search_bar,
             textvariable=self.search_text,
@@ -558,7 +889,14 @@ class TranslationEditor:
         self.search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.btn_search = ctk.CTkButton(self.search_bar, text="Buscar", width=82)
         self.btn_search.grid(row=0, column=1, padx=(0, 6))
-        self.btn_clear_search = ctk.CTkButton(self.search_bar, text="Limpar", width=74)
+        # "Limpar busca", e nao "Limpar": a janela tinha TRES botoes escritos
+        # "Limpar" fazendo tres coisas diferentes — este, o da selecao em lote e
+        # o do status de revisao, que GRAVA no banco (ROADMAP 22.10). Um rotulo
+        # que nao carrega o objeto obriga a deduzi-lo da posicao, e a posicao e
+        # justamente o que muda quando a janela e reorganizada.
+        self.btn_clear_search = ctk.CTkButton(
+            self.search_bar, text="Limpar busca", width=100
+        )
         self.btn_clear_search.grid(row=0, column=2)
 
         # As duas buscas nao sao a mesma coisa e nenhuma serve para tudo, entao a
@@ -591,10 +929,6 @@ class TranslationEditor:
         self.id_entry.grid(row=0, column=4, sticky="ew", padx=(6, 4))
         self.btn_go_id = ctk.CTkButton(self.jump_bar, text="Ir", width=46)
         self.btn_go_id.grid(row=0, column=5)
-        # O "voltar" tem botao alem do `Alt+Backspace` (ROADMAP 19, item 3): um
-        # atalho que ninguem descobre nao devolve a pagina a ninguem.
-        self.btn_go_back = ctk.CTkButton(self.jump_bar, text="< Voltar", width=76)
-        self.btn_go_back.grid(row=0, column=6, padx=(10, 0))
 
         self.status_segment = ctk.CTkSegmentedButton(
             self.list_frame,
@@ -619,27 +953,55 @@ class TranslationEditor:
         marcado NA LISTA, e a lista comeca logo abaixo. No rodape da janela ela
         ficaria junto das acoes da linha ABERTA, e as duas seriam confundidas —
         "Marcar como verificada" e "Marcar selecionadas" fazem coisas diferentes.
+
+        **Duas fileiras e `grid`, e nao uma fileira e `pack`** (ROADMAP 22.10).
+        Medido na janela real com o divisor no minimo da lista (320 px, que da
+        300 uteis): a fileira unica pedia 435 px, o "Verificar" aparecia com 25
+        dos seus 80 e o "Exportar" comecava em x=355 — inteiramente fora da
+        faixa. Nao era o ultimo botao que sumia por acaso: `pack` nao encolhe
+        filho nenhum, entrega a largura pedida a quem chega primeiro e simplesmente
+        nao desenha o que sobrar. `grid` com peso divide a falta entre todos —
+        medido, quatro botoes de 120 px num quadro de 300 ficam com 71 px cada.
+
+        Os rotulos tambem mudaram, e por isso a fileira unica deixou de caber de
+        vez: "Página" (que MARCA) lido a duas linhas dos botoes "< Página" e
+        "Página >" (que NAVEGAM) e "Limpar" (que desmarca) ao lado de outros dois
+        "Limpar" que fazem outras coisas.
         """
         self.batch_bar = ctk.CTkFrame(self.list_frame, fg_color="transparent")
         self.batch_bar.grid(row=6, column=0, sticky="ew", padx=10, pady=(0, 6))
+        self.batch_bar.columnconfigure(0, weight=1)
+
+        marcar = ctk.CTkFrame(self.batch_bar, fg_color="transparent")
+        marcar.grid(row=0, column=0, sticky="ew")
+        for coluna in range(3):
+            marcar.columnconfigure(coluna, weight=1)
+
+        self.btn_batch_page = ctk.CTkButton(marcar, text="Marcar página", width=104)
+        self.btn_batch_page.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        # "Marcar tudo" e o filtro inteiro, e nao a pagina (ROADMAP 22.11):
+        # marcar os 3.000 resultados de um capitulo eram 30 idas ao botao da
+        # pagina mais 29 viradas.
+        self.btn_batch_all = ctk.CTkButton(marcar, text="Marcar tudo", width=92)
+        self.btn_batch_all.grid(row=0, column=1, sticky="ew", padx=(0, 4))
+        self.btn_batch_clear = ctk.CTkButton(marcar, text="Desmarcar", width=86)
+        self.btn_batch_clear.grid(row=0, column=2, sticky="ew")
+
+        acoes = ctk.CTkFrame(self.batch_bar, fg_color="transparent")
+        acoes.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        acoes.columnconfigure(0, weight=1)
 
         self.batch_label = ctk.CTkLabel(
-            self.batch_bar, text="nenhuma selecionada", text_color="#64748b"
+            acoes,
+            text="nenhuma selecionada",
+            text_color=MUTED_TEXT_COLOR,
+            anchor="w",
         )
-        self.batch_label.pack(side=tk.LEFT)
-
-        self.btn_batch_page = ctk.CTkButton(self.batch_bar, text="Página", width=64)
-        self.btn_batch_page.pack(side=tk.LEFT, padx=(10, 4))
-        self.btn_batch_clear = ctk.CTkButton(self.batch_bar, text="Limpar", width=64)
-        self.btn_batch_clear.pack(side=tk.LEFT, padx=(0, 4))
-        self.btn_batch_verify = ctk.CTkButton(
-            self.batch_bar, text="Verificar", width=80
-        )
-        self.btn_batch_verify.pack(side=tk.LEFT, padx=(0, 4))
-        self.btn_batch_export = ctk.CTkButton(
-            self.batch_bar, text="Exportar", width=80
-        )
-        self.btn_batch_export.pack(side=tk.LEFT)
+        self.batch_label.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.btn_batch_verify = ctk.CTkButton(acoes, text="Verificar", width=80)
+        self.btn_batch_verify.grid(row=0, column=1, padx=(0, 4))
+        self.btn_batch_export = ctk.CTkButton(acoes, text="Exportar", width=80)
+        self.btn_batch_export.grid(row=0, column=2)
 
     def build_language_bar(self):
         """Os seletores de idioma e o de arquivo, acima da lista.
@@ -710,32 +1072,18 @@ class TranslationEditor:
         self.bottom_pane = tk.PanedWindow(
             self.main_pane,
             orient=tk.HORIZONTAL,
-            sashwidth=8,
+            sashwidth=SASH_WIDTH,
             sashrelief=tk.FLAT,
             bd=0,
             bg=self.pane_bg,
         )
-        self.main_pane.add(self.bottom_pane, minsize=620)
+        self.main_pane.add(self.bottom_pane, minsize=BOTTOM_PANE_MIN)
 
         self.text_frame = ctk.CTkFrame(self.bottom_pane, corner_radius=8)
-        self.bottom_pane.add(self.text_frame, minsize=520)
+        self.bottom_pane.add(self.text_frame, minsize=EDITOR_PANE_MIN)
         self.text_frame.columnconfigure(0, weight=1)
         # Row 0 e o divisor dos dois textos; as barras que sobram vem depois dele.
         self.text_frame.rowconfigure(0, weight=1, minsize=300)
-
-        self.text_bg = "#111827" if ctk.get_appearance_mode() == "Dark" else "#f9fafb"
-        self.text_fg = "#e5e7eb" if ctk.get_appearance_mode() == "Dark" else "#111827"
-        self.text_border = "#374151" if ctk.get_appearance_mode() == "Dark" else "#d1d5db"
-        self.highlight_bg = "#7c5800" if ctk.get_appearance_mode() == "Dark" else "#fff3bf"
-        self.highlight_fg = "#fef3c7" if ctk.get_appearance_mode() == "Dark" else "#111827"
-        self.find_bg = "#334155" if ctk.get_appearance_mode() == "Dark" else "#fde68a"
-        self.find_fg = "#f8fafc" if ctk.get_appearance_mode() == "Dark" else "#111827"
-        self.current_find_bg = "#ea580c" if ctk.get_appearance_mode() == "Dark" else "#fb923c"
-        # As duas cores do diff da previa (ROADMAP 19, item 5). Vermelho e verde
-        # apagados, e nao os saturados: o que se le ali e texto, e um fundo forte
-        # atras de uma frase inteira e ilegivel.
-        self.diff_removed_bg = "#7f1d1d" if ctk.get_appearance_mode() == "Dark" else "#fecaca"
-        self.diff_added_bg = "#14532d" if ctk.get_appearance_mode() == "Dark" else "#bbf7d0"
 
         # Os dois textos vivem num divisor proprio (ROADMAP 19, item 1). Empilhados,
         # o original tem 6 linhas contra as 12 da traducao, e um comentario longo de
@@ -786,8 +1134,15 @@ class TranslationEditor:
             text="",
             anchor="w",
             justify=tk.LEFT,
-            text_color="#64748b",
+            text_color=MUTED_TEXT_COLOR,
         )
+        # Clicavel quando ha mais de uma posicao (ROADMAP 22.11). O rodape dizia
+        # "e mais N posições (a mesma tradução)" e nenhum gesto mostrava QUAIS —
+        # e antes de editar um texto que serve a doze posicoes, "em que capitulos
+        # isto aparece" e o que decide se a edicao vale para todas. O bind fica
+        # sempre ligado e quem decide e o metodo: ligar e desligar conforme a
+        # linha aberta deixaria o estado do bind e o da tela divergirem.
+        self.origin_label.bind("<Button-1>", self.open_occurrences_window)
         self.orig_text = self.create_text_editor(self.original_block, 1, readonly=True)
         self.translation_header = ctk.CTkFrame(
             self.translation_block, fg_color="transparent"
@@ -818,27 +1173,38 @@ class TranslationEditor:
         )
         self.update_layout_button()
 
+        # Os dois campos tem ROTULO, e nao placeholder (garantia F17, ROADMAP
+        # 22.7). Eram os unicos campos da janela sem nada que os nomeasse: dois
+        # retangulos iguais lado a lado, um que busca e um que substitui. O
+        # placeholder que deveria distingui-los nunca apareceu — o CustomTkinter
+        # 5.2.2 compara o OBJETO `StringVar` com `""` para decidir se o mostra, e
+        # essa comparacao e falsa sempre —, e mesmo se aparecesse ele some na
+        # primeira tecla, que e justamente quando os dois campos ficam parecidos.
         self.find_bar = ctk.CTkFrame(self.text_frame, fg_color="transparent")
         self.find_bar.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 4))
-        self.find_bar.columnconfigure(0, weight=1)
         self.find_bar.columnconfigure(1, weight=1)
+        self.find_bar.columnconfigure(3, weight=1)
 
+        ctk.CTkLabel(self.find_bar, text="Buscar:").grid(row=0, column=0, sticky="w")
         self.editor_find_entry = ctk.CTkEntry(
             self.find_bar,
             textvariable=self.editor_find_text,
-            placeholder_text="Buscar",
             width=120,
         )
-        self.editor_find_entry.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.editor_find_entry.grid(row=0, column=1, sticky="ew", padx=(6, 10))
+        # "Trocar por:" e nao "Substituir:": o botao que aplica este campo se
+        # chama "Trocar", e o rotulo tem de usar a palavra do botao.
+        ctk.CTkLabel(self.find_bar, text="Trocar por:").grid(
+            row=0, column=2, sticky="w"
+        )
         self.editor_replace_entry = ctk.CTkEntry(
             self.find_bar,
             textvariable=self.editor_replace_text,
-            placeholder_text="Substituir",
             width=120,
         )
-        self.editor_replace_entry.grid(row=0, column=1, sticky="ew", padx=4)
+        self.editor_replace_entry.grid(row=0, column=3, sticky="ew", padx=(6, 0))
         self.find_buttons = ctk.CTkFrame(self.find_bar, fg_color="transparent")
-        self.find_buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.find_buttons.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self.btn_find_next = ctk.CTkButton(self.find_buttons, text="Prox.", width=58)
         self.btn_find_next.pack(side=tk.LEFT, padx=(0, 4))
         self.btn_replace_current = ctk.CTkButton(self.find_buttons, text="Trocar", width=68)
@@ -867,21 +1233,32 @@ class TranslationEditor:
             placeholder_text="Por que esta linha volta (rejeitada ou em dúvida)",
         )
         self.note_entry.grid(row=0, column=1, sticky="ew", padx=(6, 6))
-        self.btn_reject = ctk.CTkButton(self.note_bar, text="Rejeitar", width=90)
-        self.btn_reject.grid(row=0, column=2, padx=(0, 4))
-        self.btn_doubt = ctk.CTkButton(self.note_bar, text="Em dúvida", width=96)
-        self.btn_doubt.grid(row=0, column=3, padx=(0, 4))
-        self.btn_clear_status = ctk.CTkButton(
-            self.note_bar, text="Limpar", width=76
+        # O status EM PALAVRAS (garantia F19, ROADMAP 22.9). Ele era comunicado so
+        # pela cor da borda do campo, e cor sozinha nao e informacao: para um
+        # protanope as duas viram tons de oliva com 2,8:1 entre si, e a mensagem
+        # "Marcada como rejeitada" some em segundos. Sai do grid quando a linha
+        # esta pendente — o padrao nao precisa de rotulo —, como o rodape da
+        # procedencia faz.
+        self.review_status_label = ctk.CTkLabel(
+            self.note_bar, text="", anchor="w", font=ctk.CTkFont(weight="bold")
         )
-        self.btn_clear_status.grid(row=0, column=4)
+        self.btn_reject = ctk.CTkButton(self.note_bar, text="Rejeitar", width=90)
+        self.btn_reject.grid(row=0, column=3, padx=(0, 4))
+        self.btn_doubt = ctk.CTkButton(self.note_bar, text="Em dúvida", width=96)
+        self.btn_doubt.grid(row=0, column=4, padx=(0, 4))
+        # "Limpar status" (ROADMAP 22.10). Era o mais perigoso dos tres "Limpar"
+        # da janela: os outros dois mexem so na tela, e este GRAVA no banco.
+        self.btn_clear_status = ctk.CTkButton(
+            self.note_bar, text="Limpar status", width=102
+        )
+        self.btn_clear_status.grid(row=0, column=5)
 
         self.qa_label = ctk.CTkLabel(
             self.text_frame,
             text="",
             anchor="w",
             justify=tk.LEFT,
-            text_color="#16a34a",
+            text_color=OK_TEXT_COLOR,
         )
         self.qa_label.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 2))
         self.history_label = ctk.CTkLabel(
@@ -939,17 +1316,38 @@ class TranslationEditor:
         text.tag_configure(
             "find_current",
             background=self.current_find_bg,
-            foreground="#ffffff",
+            foreground=self.current_find_fg,
         )
+        text.tag_configure(
+            "spell_error", foreground=self.spell_error_fg, underline=True
+        )
+
+        # O foco do teclado passa a ter sinal (garantia F18, ROADMAP 22.8). Numa
+        # janela com ~30 botoes e 6 campos, o unico sinal de onde o Tab parou era
+        # o cursor piscando dentro de um texto — e nenhum widget do CustomTkinter
+        # desenha indicador de foco (o unico que reage a `<FocusIn>` e o
+        # `CTkEntry`, e so para trocar o placeholder, que nem aparece — F17).
+        text.bind("<FocusIn>", lambda _event, t=text: self.on_text_focus(t, True))
+        text.bind("<FocusOut>", lambda _event, t=text: self.on_text_focus(t, False))
+
         if readonly:
             text.configure(state=tk.DISABLED)
         return text
+
+    def on_text_focus(self, texto, ganhou):
+        """Guarda quem tem o foco e pinta o anel dele.
+
+        O estado e guardado, e nao so pintado, porque a troca de tema repinta os
+        dois aneis e precisa saber qual deles e o do campo em foco.
+        """
+        self.focused_text = texto if ganhou else None
+        self.paint_focus_border(texto, ganhou)
 
 
     def build_suggestion_pane(self):
         """Painel direito: sugestoes do glossario."""
         self.sugg_frame = ctk.CTkFrame(self.bottom_pane, corner_radius=8)
-        self.bottom_pane.add(self.sugg_frame, minsize=300)
+        self.bottom_pane.add(self.sugg_frame, minsize=SUGGESTION_PANE_MIN)
         self.sugg_frame.columnconfigure(0, weight=1)
         self.sugg_frame.columnconfigure(1, weight=1)
         self.sugg_frame.rowconfigure(1, weight=1)
@@ -992,23 +1390,46 @@ class TranslationEditor:
         self.status_info = ctk.CTkFrame(self.status_frame, fg_color="transparent")
         self.status_info.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 2))
 
-        self.msg_label = ctk.CTkLabel(self.status_info, text="", text_color="#16a34a")
-        self.msg_label.pack(side=tk.LEFT)
+        # **A ORDEM DE EMPACOTAMENTO decide quem some quando falta espaco**, e nao
+        # a ordem na tela (ROADMAP 22.10). `pack` atende quem chega primeiro e
+        # simplesmente nao desenha o que sobrar. Os cinco rotulos eram todos
+        # `side=LEFT` na ordem em que se leem, e o pior caso medido pedia 1.167 px
+        # numa faixa de 1.080: quem sumia era o ULTIMO empacotado, o
+        # `counts_label` — a contagem que FICA, empurrada por uma mensagem que ia
+        # embora sozinha em 1,5 s.
+        #
+        # A ordem abaixo e a de importancia, e nao a da leitura. As tres decisoes,
+        # da mais protegida para a menos:
+        #
+        #   1. o aviso de que ha texto nao salvo, que e o unico rotulo da faixa
+        #      cuja ausencia custa trabalho ao usuario;
+        #   2. as duas contagens estaveis, que respondem "onde estou" e "quanto
+        #      falta" e ficam ancoradas a direita;
+        #   3. a mensagem transitoria, cortada por `preview` (ver `show_message`),
+        #      e o estado do rascunho — os dois que se repoem sozinhos.
+        #
+        # A posicao na tela continua saindo do `side`: os dois `RIGHT` vao para a
+        # direita mesmo tendo sido empacotados no meio.
+        self.btn_shortcuts = ctk.CTkButton(self.status_info, text="?", width=32)
+        self.btn_shortcuts.pack(side=tk.RIGHT)
 
-        self.dirty_label = ctk.CTkLabel(self.status_info, text="Salvo", text_color="#16a34a")
-        self.dirty_label.pack(side=tk.LEFT, padx=(12, 0))
-
-        self.draft_label = ctk.CTkLabel(self.status_info, text="", text_color="#64748b")
-        self.draft_label.pack(side=tk.LEFT, padx=(12, 0))
-
-        self.selection_label = ctk.CTkLabel(self.status_info, text="Item 0/0")
-        self.selection_label.pack(side=tk.LEFT, padx=(12, 0))
+        self.dirty_label = ctk.CTkLabel(self.status_info, text="Salvo", text_color=OK_TEXT_COLOR)
+        self.dirty_label.pack(side=tk.LEFT, padx=(0, 12))
 
         self.counts_label = ctk.CTkLabel(
             self.status_info,
             text="Todas: 0 · Pendentes: 0 · Verificadas: 0 · QA: 0",
         )
-        self.counts_label.pack(side=tk.LEFT, padx=(12, 0))
+        self.counts_label.pack(side=tk.RIGHT, padx=(12, 12))
+
+        self.selection_label = ctk.CTkLabel(self.status_info, text="Item 0/0")
+        self.selection_label.pack(side=tk.RIGHT, padx=(12, 0))
+
+        self.msg_label = ctk.CTkLabel(self.status_info, text="", text_color=OK_TEXT_COLOR)
+        self.msg_label.pack(side=tk.LEFT)
+
+        self.draft_label = ctk.CTkLabel(self.status_info, text="", text_color=MUTED_TEXT_COLOR)
+        self.draft_label.pack(side=tk.LEFT, padx=(12, 0))
 
         self.primary_actions = ctk.CTkFrame(self.status_frame, fg_color="transparent")
         self.primary_actions.grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 4))
@@ -1102,6 +1523,7 @@ class TranslationEditor:
         self.btn_go_id.configure(command=self.go_to_id)
         self.btn_go_back.configure(command=self.go_back)
         self.btn_batch_page.configure(command=self.select_page_rows)
+        self.btn_batch_all.configure(command=self.select_all_filtered_rows)
         self.btn_batch_clear.configure(command=self.clear_row_selection)
         self.btn_batch_verify.configure(command=self.verify_selected_rows)
         self.btn_batch_export.configure(command=self.export_selected_rows)
@@ -1145,6 +1567,10 @@ class TranslationEditor:
             "write",
             lambda *_args: self.refresh_find_matches(keep_current=False),
         )
+        # A nota do revisor fecha o ciclo do teclado (ROADMAP 22.11): digitar e
+        # navegar a descartava em silencio, e `Enter` no campo nao fazia nada.
+        self.reviewer_note_text.trace_add("write", lambda *_args: self.on_note_edited())
+        self.note_entry.bind("<Return>", self.save_note_shortcut)
         self.search_entry.bind("<Return>", lambda _event: self.apply_search())
         self.editor_find_entry.bind("<Return>", self.find_next_in_translation)
         self.editor_replace_entry.bind("<Return>", self.replace_current_in_translation)
@@ -1169,6 +1595,27 @@ class TranslationEditor:
         self.win.bind("<Control-s>", self.save_shortcut)
         self.win.bind("<Control-S>", self.save_shortcut)
         self.win.bind("<Control-Return>", self.verify_shortcut)
+        # Verificar-e-avancar, que era a unica acao do fluxo alcancavel so pelo
+        # botao (ROADMAP 22.11). `Ctrl+Enter` verifica e FICA na linha: so no
+        # filtro "Pendentes" a linha sai da lista e a proxima entra de brinde —
+        # em "Todas", que e o contexto que o 19.4 defende para quem revisa, eram
+        # dois acordes por linha. `mark_and_next` faz a coisa certa nos dois
+        # filtros, e ganha o acorde vizinho do que ja existia em vez de tomar o
+        # lugar dele: quem tem o Ctrl+Enter na memoria dos dedos continua com ele.
+        self.win.bind("<Control-Shift-Return>", self.mark_and_next_shortcut)
+        # As viradas de pagina existiam so nos botoes. O `Control` e o que impede
+        # de roubar a rolagem nativa do texto — `PageDown` dentro de um
+        # comentario longo tem de continuar rolando o comentario.
+        self.win.bind("<Control-Prior>", lambda _event: (self.change_page(-1), "break")[1])
+        self.win.bind("<Control-Next>", lambda _event: (self.change_page(1), "break")[1])
+        # Zoom pelo teclado e pela roda. Ir de 12 a 18 pt eram seis cliques num
+        # botao de 42 px. As tres teclas sao a mesma acao em teclados diferentes:
+        # onde o "+" exige Shift, o Tk entrega `<Control-plus>`; onde nao, chega
+        # `<Control-equal>`.
+        self.win.bind("<Control-plus>", lambda _event: (self.adjust_font(1), "break")[1])
+        self.win.bind("<Control-equal>", lambda _event: (self.adjust_font(1), "break")[1])
+        self.win.bind("<Control-minus>", lambda _event: (self.adjust_font(-1), "break")[1])
+        self.win.bind("<Control-MouseWheel>", self.zoom_with_wheel)
         self.win.bind("<Control-z>", lambda _event: (self.undo_translation(), "break")[1])
         self.win.bind("<Control-Z>", lambda _event: (self.undo_translation(), "break")[1])
         self.win.bind("<Control-y>", lambda _event: (self.redo_translation(), "break")[1])
@@ -1177,12 +1624,27 @@ class TranslationEditor:
         self.win.bind("<Alt-Right>", self.next_shortcut)
         self.win.bind("<F3>", self.find_next_in_translation)
         self.win.bind("<F7>", self.next_quality_warning_shortcut)
+        # F1 e o "?" do rodape: os dois unicos caminhos de descoberta dos treze
+        # atalhos (garantia F18, ROADMAP 22.8).
+        self.win.bind("<F1>", self.open_shortcuts_window)
+        self.btn_shortcuts.configure(command=self.open_shortcuts_window)
         self.win.bind(
             "<Destroy>",
             lambda event: self.unregister_glossary_callback() if event.widget is self.win else None,
         )
         self.win.protocol("WM_DELETE_WINDOW", self.close_editor)
 
+        # O tema do sistema pode trocar com a janela aberta — o programa roda em
+        # `set_appearance_mode("System")` e o CustomTkinter re-detecta o tema do
+        # Windows a cada 30 ms. Os widgets CTk se atualizam sozinhos; o Tk puro
+        # daqui, nao (garantia F18, ROADMAP 22.8). O registrador e interno da
+        # biblioteca, entao a falta dele nao pode impedir a janela de abrir: o
+        # preco de nao ter o gancho e a janela ficar com as cores do tema
+        # anterior ate ser reaberta, que e exatamente o que acontecia antes.
+        try:
+            ctk.AppearanceModeTracker.add(self.apply_theme_colors, self.win)
+        except Exception:  # pragma: no cover - versao sem o registrador
+            pass
 
         self.app.glossary_change_callbacks.append(self.on_glossary_editor_change)
 
@@ -1197,7 +1659,17 @@ class TranslationEditor:
         self.win.after(100, self.restore_pane_positions)
 
     def show_message(self, text):
-        flash_message(self.msg_label, self.win, text)
+        """Escreve no rodape — cortando o texto que nao cabe na faixa.
+
+        O corte e aqui e nao em quem chama porque a razao dele e a LARGURA do
+        rodape, e nao o conteudo da mensagem (ROADMAP 22.10). Cortar com
+        reticencias e diferente de deixar o Tk cortar: o `pack` corta sem sinal
+        nenhum, e uma frase que termina no meio parece uma frase que acabou.
+
+        `flash_message` recebe o texto JA cortado, e e o certo — o tempo de tela
+        de F16 e o tempo de ler o que esta na tela.
+        """
+        flash_message(self.msg_label, self.win, preview(text, MESSAGE_PREVIEW_CHARS))
 
     def save_editor_settings(self):
         save_window_section(
@@ -1241,11 +1713,32 @@ class TranslationEditor:
         )
 
     def restore_pane_positions(self):
+        """Recoloca os divisores nas posicoes gravadas.
+
+        **Quem impede o terceiro painel de pagar a conta e o `minsize`, e nao um
+        teto calculado aqui.** Isto foi medido (ROADMAP 22.10): o `PanedWindow`
+        do Tk honra o `minsize` dos vizinhos ao POSICIONAR um divisor, e nao so
+        ao arrasta-lo — com `BOTTOM_PANE_MIN` declarado, uma posicao gravada de
+        900 px numa tela larga e recolocada em 320 numa janela estreita, sozinha.
+
+        A primeira versao deste metodo calculava um teto do que a janela tinha
+        naquele instante, e uma mutacao mostrou que ele era uma segunda tranca —
+        removida, nada mudava. Pior: `restore_pane_positions` roda agendado, a
+        largura ainda pode nao ser a final, e o teto tirado de uma largura velha
+        ENCOLHIA a lista abaixo do que o usuario tinha escolhido (442 px medidos
+        onde ele pediu 900).
+
+        Os maximos tambem sairam. O antigo prendia a lista em 520 px: quem
+        arrumasse um painel de 700 numa tela grande o perdia a cada abertura, e o
+        que protegia a janela nunca foi esse numero.
+        """
         restore_sash(
-            self.main_pane, self.editor_settings.get("main_sash_y"), 360, 520
+            self.main_pane, self.editor_settings.get("main_sash_y"), LIST_PANE_MIN
         )
         restore_sash(
-            self.bottom_pane, self.editor_settings.get("bottom_sash_x"), 520
+            self.bottom_pane,
+            self.editor_settings.get("bottom_sash_x"),
+            EDITOR_PANE_MIN,
         )
         self.restore_texts_sash()
 
@@ -1282,10 +1775,10 @@ class TranslationEditor:
             except OSError:
                 self.draft_label.configure(
                     text="Falha ao limpar rascunho",
-                    text_color="#dc2626",
+                    text_color=ERROR_TEXT_COLOR,
                 )
                 return
-        self.draft_label.configure(text="", text_color="#64748b")
+        self.draft_label.configure(text="", text_color=MUTED_TEXT_COLOR)
 
     def persist_current_draft(self):
         """Grava o rascunho da linha aberta — o disco, fora da thread do Tk.
@@ -1348,12 +1841,12 @@ class TranslationEditor:
             if ok:
                 self.draft_label.configure(
                     text=f"Rascunho salvo {datetime.now().strftime('%H:%M:%S')}",
-                    text_color="#64748b",
+                    text_color=MUTED_TEXT_COLOR,
                 )
             else:
                 self.draft_label.configure(
                     text="Falha ao salvar rascunho",
-                    text_color="#dc2626",
+                    text_color=ERROR_TEXT_COLOR,
                 )
 
         try:
@@ -1365,7 +1858,7 @@ class TranslationEditor:
         if self.state.loading or not self.current["id"]:
             return
         self.cancel_draft_save()
-        self.draft_label.configure(text="Salvando rascunho...", text_color="#64748b")
+        self.draft_label.configure(text="Salvando rascunho...", text_color=MUTED_TEXT_COLOR)
         self.state.draft_save_after = self.win.after(
             DRAFT_SAVE_DELAY_MS, self.persist_current_draft
         )
@@ -1373,12 +1866,12 @@ class TranslationEditor:
     def set_dirty(self, value, autosave_draft=True):
         self.state.dirty = value
         if value:
-            self.dirty_label.configure(text="Alterações não salvas", text_color="#f59e0b")
+            self.dirty_label.configure(text="Alterações não salvas", text_color=WARNING_TEXT_COLOR)
             if autosave_draft:
                 self.schedule_draft_save()
         else:
             self.cancel_draft_save()
-            self.dirty_label.configure(text="Salvo", text_color="#16a34a")
+            self.dirty_label.configure(text="Salvo", text_color=OK_TEXT_COLOR)
 
     def update_counts_label(self):
         contagens = self.state.status_counts
@@ -1412,7 +1905,7 @@ class TranslationEditor:
             text=f"Item {absolute_index}/{self.state.total_rows} · {self.current_pair()}"
         )
 
-    def set_origin_text(self, texto):
+    def set_origin_text(self, texto, total=0):
         """Poe (ou tira) a linha de procedencia do original.
 
         Sem procedencia ela **sai do grid**, e nao fica como rotulo vazio: as
@@ -1420,12 +1913,92 @@ class TranslationEditor:
         faixa em branco acima do texto em todas elas seria altura roubada do
         comentario para nao dizer nada. E o mesmo padrao do aviso de conflito do
         editor de glossario.
+
+        `total` e quantas posicoes existem ao todo, e nao quantas cabem no
+        rotulo. Com mais de uma, o rotulo vira um alvo de clique — e o cursor de
+        mao e o unico sinal disso, porque um "(ver todas)" no texto gastaria a
+        largura que o item 18.4 mediu como escassa justamente aqui.
         """
+        self.origin_occurrences = total
         self.origin_label.configure(text=texto)
+        try:
+            self.origin_label.configure(cursor="hand2" if total > 1 else "")
+        except tk.TclError:  # pragma: no cover - cursor sem suporte
+            pass
         if texto:
             self.origin_label.grid(row=1, column=0, sticky="ew", pady=(2, 0))
         else:
             self.origin_label.grid_remove()
+
+    def open_occurrences_window(self, _event=None):
+        """A lista de TODAS as posicoes deste comentario (ROADMAP 22.11).
+
+        Modeless e copiavel, como a janela de estatisticas e a de historico: o
+        revisor confere os capitulos com a traducao a vista, e cola a lista num
+        recado se precisar. So abre com mais de uma posicao — com uma so, o
+        rodape ja e a lista inteira, e uma janela para repetir o que esta na tela
+        seria um clique acidental com janela de premio.
+
+        A consulta e a mesma do rodape, sem limite. Ela ja e paga a cada troca de
+        linha; esta e a segunda vez, e so quando alguem pede.
+        """
+        if not self.current["id"] or getattr(self, "origin_occurrences", 0) <= 1:
+            return None
+
+        janela = getattr(self, "occurrences_win", None)
+        if janela is not None and janela.winfo_exists():
+            janela.destroy()
+
+        with closing(initialize_database(self.app.output_db)) as conn:
+            posicoes, total = fetch_comment_occurrences(
+                conn.cursor(),
+                self.current["id"],
+                limit=None,
+                preferred_file=self.selected_source_file(),
+            )
+
+        janela = ctk.CTkToplevel(self.win)
+        self.occurrences_win = janela
+        janela.title(f"Posições deste comentário ({total})")
+        janela.geometry("560x360")
+        janela.minsize(360, 220)
+        janela.transient(self.win)
+        bring_window_to_front(janela, self.win, maximize=False)
+        janela.columnconfigure(0, weight=1)
+        janela.rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            janela,
+            text=f"A mesma tradução serve a {total} posição(oes):",
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
+
+        texto = tk.Text(
+            janela,
+            wrap=tk.NONE,
+            relief=tk.FLAT,
+            borderwidth=0,
+            font=self.body_font,
+            bg=self.text_bg,
+            fg=self.text_fg,
+            insertbackground=self.text_fg,
+            padx=8,
+            pady=6,
+        )
+        barra = tk.Scrollbar(janela, orient=tk.VERTICAL, command=texto.yview)
+        texto.configure(yscrollcommand=barra.set)
+        texto.grid(row=1, column=0, sticky="nsew", padx=(12, 0), pady=(0, 8))
+        barra.grid(row=1, column=1, sticky="ns", pady=(0, 8), padx=(0, 12))
+        texto.insert("1.0", "\n".join(format_occurrence_lines(posicoes)))
+        # `disabled` e o mesmo estado do texto do original: no Tk ele impede
+        # digitar e continua permitindo selecionar e copiar, que e metade do
+        # motivo desta janela existir.
+        texto.configure(state=tk.DISABLED)
+
+        ctk.CTkButton(janela, text="Fechar", width=100, command=janela.destroy).grid(
+            row=2, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 12)
+        )
+        return janela
 
     def current_pair(self):
         """O par de idiomas da linha carregada, como `Inglês -> pt`.
@@ -1437,20 +2010,72 @@ class TranslationEditor:
         origem = self.current.get("source_language") or ""
         return f"{language_label(origem)} -> {self.lang}"
 
+    def current_row_languages(self):
+        """`(origem, destino)` da LINHA aberta — o par com que a QA a avalia.
+
+        Nao confundir com `scoped_languages`, que e o par do FILTRO: la "Todos"
+        vira `""` de proposito, porque uma regra de glossario com escopo nao pode
+        valer para uma lista que mistura origens. Aqui a pergunta e outra — de
+        que lingua veio ESTE texto —, e quem responde e a linha que o `load_item`
+        carregou.
+
+        Existe para que a avaliacao da TELA e a da COLUNA materializada leiam o
+        par do mesmo lugar. As duas divergindo e a garantia R6 quebrada por
+        dentro da janela (garantia Q3, ROADMAP 22.2).
+        """
+        return (
+            self.current.get("source_language") or "",
+            self.current.get("target_language") or self.lang,
+        )
+
     def update_quality_warnings(self):
+        """Os avisos do texto que esta NA TELA, avaliado com o par da linha.
+
+        **O par nao e detalhe.** A heuristica de terminologia (garantia Q1) so
+        roda com ele, e a coluna materializada — que e quem decide o marcador da
+        lista e o filtro "Avisos QA" — sempre o passou. Sem o par aqui, uma linha
+        cujo unico problema fosse terminologia dizia "QA: sem avisos" em verde
+        enquanto a lista a marcava com "⚠ QA" e o filtro a mostrava: R6 violada
+        entre dois pontos da MESMA janela (garantia Q3, ROADMAP 22.2).
+
+        O texto avaliado e o do WIDGET, e nao o do banco — e ele que o revisor
+        esta vendo, e o aviso tem de acompanhar o que ele acabou de digitar.
+
+        **Sem linha aberta nao ha o que avaliar**, e a saida vem antes de tudo. O
+        codigo anterior avaliava assim mesmo: com o editor vazio, "traducao
+        vazia" e um aviso VERDADEIRO sobre coisa nenhuma, e ele aparecia em ambar
+        na abertura de um banco sem linhas. O ramo que existia para esse caso
+        nunca era alcancado, porque o aviso chegava antes dele.
+        """
+        if not self.current["id"]:
+            self.qa_label.configure(text="", text_color=OK_TEXT_COLOR)
+            self.highlight_spelling()
+            return
+
+        origem, destino = self.current_row_languages()
         warnings = evaluate_translation_quality(
             self.current["orig"],
             self.trans_text.get("1.0", tk.END),
+            origem,
+            destino,
         )
+        # O corretor de prosa e o unico recurso da janela que pode estar AUSENTE
+        # por idioma, e um sublinhado que nunca aparece nao distingue "sem erro"
+        # de "sem dicionario". A frase entra na mesma linha do QA porque e a
+        # mesma pergunta ("o que esta errado nesta linha?"), e sai sozinha
+        # quando nao ha aviso nenhum (ROADMAP 26).
+        sem_dicionario = prose_spellcheck.unsupported_language_notice(destino)
         if warnings:
             self.qa_label.configure(
                 text="QA: " + " | ".join(warnings),
-                text_color="#f59e0b",
+                text_color=WARNING_TEXT_COLOR,
             )
-        elif self.current["id"]:
-            self.qa_label.configure(text="QA: sem avisos", text_color="#16a34a")
+        elif sem_dicionario:
+            self.qa_label.configure(text=sem_dicionario, text_color=OK_TEXT_COLOR)
         else:
-            self.qa_label.configure(text="", text_color="#16a34a")
+            self.qa_label.configure(text="QA: sem avisos", text_color=OK_TEXT_COLOR)
+
+        self.highlight_spelling()
 
     def update_history_label(self):
         if not self.current["id"]:
@@ -1621,7 +2246,7 @@ class TranslationEditor:
             self.show_message("Nenhuma ocorrencia para substituir")
             return
 
-        self.set_translation_text(new_text, mark_dirty=True)
+        self.set_translation_text(new_text, mark_dirty=True, keep_undo=True)
         self.refresh_find_matches(keep_current=False)
         self.show_message(f"{count} ocorrencia(s) substituida(s)")
 
@@ -1631,15 +2256,52 @@ class TranslationEditor:
         autosave_draft=True,
         insert_offset=None,
         focus_editor=False,
+        keep_undo=False,
     ):
+        """Poe `text` no editor da traducao.
+
+        `keep_undo` decide se a pilha de desfazer do Tk sobrevive, e a pergunta
+        que responde e uma so: **a linha aberta mudou?**
+
+        **Trocando de linha, a pilha tem de morrer.** Um Ctrl+Z que atravessasse
+        a troca traria o texto da linha ANTERIOR para dentro desta — e a gravacao
+        ao navegar o levaria para o banco, escrevendo numa linha a traducao de
+        outra. Por isso o padrao e apagar: um chamador novo que esqueca o
+        argumento erra para o lado seguro.
+
+        **Reescrevendo a MESMA linha, ela tem de sobreviver** (garantia F14,
+        ROADMAP 22.4). "Copiar original", "Aplicar selecionada", "Aplicar todas"
+        e o "Todos" da busca-e-troca reescrevem o texto inteiro de uma vez — sao
+        as acoes que mais pedem um Ctrl+Z — e eram justamente as que o
+        desligavam. "Trocar", que edita o widget com `delete`/`insert` sem passar
+        por aqui, sempre teve desfazer: a diferenca era efeito colateral do
+        caminho de carga, e nao decisao.
+
+        A substituicao inteira entra como **um** passo de desfazer. Os
+        separadores automaticos sao desligados no meio dela de proposito: sem
+        isso o `delete` e o `insert` viram dois Ctrl+Z para uma acao so, e o
+        primeiro deles deixa o editor vazio.
+        """
         self.state.loading = True
-        self.trans_text.delete("1.0", tk.END)
-        self.trans_text.insert("1.0", text or "")
         try:
-            self.trans_text.edit_reset()
+            if keep_undo:
+                self.trans_text.configure(autoseparators=False)
+                self.trans_text.edit_separator()
+            self.trans_text.delete("1.0", tk.END)
+            self.trans_text.insert("1.0", text or "")
+            if keep_undo:
+                self.trans_text.edit_separator()
+            else:
+                self.trans_text.edit_reset()
             self.trans_text.edit_modified(False)
         except tk.TclError:
             pass
+        finally:
+            if keep_undo:
+                try:
+                    self.trans_text.configure(autoseparators=True)
+                except tk.TclError:  # pragma: no cover - widget ja destruido
+                    pass
         self.state.loading = False
         self.set_dirty(mark_dirty, autosave_draft=autosave_draft)
         self.refresh_suggestions()
@@ -1724,13 +2386,36 @@ class TranslationEditor:
         self.save_editor_settings()
 
     def toggle_bold_view(self):
+        """Liga e desliga o negrito de LEITURA do editor inteiro.
+
+        O estado ligado tem de se ver nos DOIS temas (garantia F18, ROADMAP
+        22.8). Ele era `("#3b82f6", "#1f6aa5")` contra `("#3B8ED0", "#1F6AA5")`
+        do desligado: no escuro, `#1f6aa5` e `#1F6AA5` sao a MESMA cor, byte a
+        byte — clicar o botao no tema escuro nao mudava nada na tela. No claro a
+        diferenca era (0, -12, +38) em RGB, sutil demais para um estado.
+
+        Hoje a cor ligada e de outra familia e vem com borda: duas diferencas, e
+        a borda funciona mesmo para quem nao distingue os dois azuis.
+
+        E o desligado volta ao par do TEMA, e nao a um par copiado a mao: os
+        hexes que estavam aqui eram os do tema padrao transcritos, e nao
+        acompanhariam uma troca de tema do CustomTkinter.
+        """
         self.state.bold_view = not self.state.bold_view
         if self.state.bold_view:
             self.trans_text.configure(font=self.body_bold_font)
-            self.btn_bold.configure(fg_color=("#3b82f6", "#1f6aa5"), hover_color=("#2563eb", "#1d4ed8"))
+            self.btn_bold.configure(
+                fg_color=BOLD_ACTIVE_COLOR,
+                hover_color=BOLD_ACTIVE_HOVER_COLOR,
+                border_width=2,
+                border_color=BOLD_ACTIVE_BORDER_COLOR,
+            )
         else:
             self.trans_text.configure(font=self.body_font)
-            self.btn_bold.configure(fg_color=("#3B8ED0", "#1F6AA5"), hover_color=("#36719F", "#144870"))
+            fg_color, hover_color = theme_button_colors()
+            self.btn_bold.configure(
+                fg_color=fg_color, hover_color=hover_color, border_width=0
+            )
 
     def toggle_bold_selection(self, _event=None):
         """Marca (ou desmarca) em negrito o trecho selecionado da traducao.
@@ -1758,6 +2443,91 @@ class TranslationEditor:
         else:
             self.trans_text.tag_add("bold", inicio, fim)
         return "break"
+
+    def prose_dictionary(self):
+        """O dicionario do idioma da linha, ou `None` enquanto ele nao chegou.
+
+        A carga custa ~2,3 s e le 4,6 MB — na thread da interface isso e a janela
+        congelada na abertura, que e exatamente o que 2.11 tirou de todo o resto
+        do programa. Ela vai para uma thread, e **a janela pergunta** em vez de
+        ser chamada de volta: um retorno vindo da thread de carga precisaria de
+        `after` para voltar ao Tk, e `after` fora da thread principal levanta
+        `RuntimeError` (ROADMAP 26.5). Aqui o unico `after` e este, e ele roda
+        onde deve.
+
+        Ate a resposta chegar o texto fica sem marca — o mesmo que ele mostrava
+        antes deste recurso existir.
+        """
+        _origem, destino = self.current_row_languages()
+        dicionario = prose_spellcheck.request_dictionary(destino)
+        if dicionario is not None:
+            self._prose_retry_scheduled = False
+            return dicionario
+
+        # Uma reagendagem por vez: `highlight_spelling` roda a cada tecla, e sem
+        # a trava cada uma delas poria mais um `after` na fila enquanto o
+        # dicionario ainda estivesse sendo lido.
+        if prose_spellcheck.is_loading(destino) and not self._prose_retry_scheduled:
+            self._prose_retry_scheduled = True
+
+            def tentar():
+                self._prose_retry_scheduled = False
+                self.highlight_spelling()
+
+            try:
+                self.win.after(250, tentar)
+            except tk.TclError:  # pragma: no cover - janela ja fechada
+                self._prose_retry_scheduled = False
+        return None
+
+    def glossary_vocabulary(self):
+        """A terminologia do glossario DESTA janela, para o corretor nao marca-la.
+
+        Calculada uma vez por carga do glossario e nao por tecla: sao ~2.000
+        palavras varridas de ~6.000 regras, e refaze-las a cada caractere e o
+        mesmo desperdicio que `highlight_glossary_hits` ja tinha corrigido lendo
+        o texto uma vez em vez de por regra.
+
+        O cache e invalidado comparando a IDENTIDADE das listas, e nao o
+        conteudo: `reload_glossary` troca os objetos, entao `is` responde a
+        pergunta sem varrer nada.
+        """
+        atual = (id(self.glossary), id(self.automatic_glossary))
+        if self._prose_glossary_key != atual:
+            self._prose_glossary_key = atual
+            self._prose_glossary_vocabulary = (
+                prose_spellcheck.glossary_vocabulary(self.glossary)
+                | prose_spellcheck.glossary_vocabulary(self.automatic_glossary)
+            )
+        return self._prose_glossary_vocabulary
+
+    def highlight_spelling(self):
+        """Sublinha o que o dicionario do idioma de destino nao conhece.
+
+        O filtro do ruido e o texto de ORIGEM da propria linha: o nome do
+        jogador, do torneio e da cidade chegaram a traducao vindos de la, e
+        compara-los com ele tira 3.347 marcas das 3.442 sem lista nova para
+        manter (ROADMAP 26).
+        """
+        self.trans_text.tag_remove("spell_error", "1.0", tk.END)
+        if not self.current["id"]:
+            return
+
+        dicionario = self.prose_dictionary()
+        if dicionario is None:
+            return
+
+        texto = self.trans_text.get("1.0", tk.END)
+        conhecidas = prose_spellcheck.source_vocabulary(self.current["orig"])
+        conhecidas |= self.glossary_vocabulary()
+        for inicio, fim, _palavra in prose_spellcheck.misspelled_spans(
+            texto, dicionario, conhecidas
+        ):
+            self.trans_text.tag_add(
+                "spell_error",
+                self.text_index_for_offset(inicio),
+                self.text_index_for_offset(fim),
+            )
 
     def highlight_glossary_hits(self):
         self.trans_text.tag_remove("glossary_hit", "1.0", tk.END)
@@ -1892,15 +2662,25 @@ class TranslationEditor:
         concordancia — "como traduzi *outpost* ate aqui?" — troca a lista, e o id
         de antes pode nao estar no resultado novo. Voltar so e voltar se os filtros
         voltarem com ele.
+
+        **O retrato tem de guardar tudo que decide QUAL lista aparece**, e nao so
+        o que se ve nos filtros mais obvios. Dois campos faltavam (garantia F13,
+        ROADMAP 22.3):
+
+        - o MODO da busca, porque `bisp` em "Trecho" e `bisp` em "Termos" sao
+          duas listas diferentes com o mesmo texto no campo;
+        - o DESTINO, porque trocar de par e um dos saltos que F3 promete desfazer
+          — e sem ele o retrato era reposto contra o par novo, onde nenhum id do
+          antigo existe.
+
+        **E os campos que ja existiam guardavam o valor errado.** O retrato lia os
+        SELETORES, e o comando de um seletor roda com o widget ja no valor novo:
+        trocar de "Todas" para "Verificadas" empilhava "Verificadas", e "voltar"
+        nao repunha filtro nenhum. Hoje os filtros saem de `state.applied_view` —
+        o que a ultima consulta da lista usou —, e so a linha aberta e lida na
+        hora, porque ela nao passa por seletor nenhum.
         """
-        return {
-            "id": self.current["id"],
-            "search": self.state.active_search,
-            "status": self.status_segment.get(),
-            "source": self.source_menu.get(),
-            "file": self.file_menu.get(),
-            "page": self.state.page_index,
-        }
+        return dict(self.state.applied_view, id=self.current["id"])
 
     def remember_position(self):
         """Empilha o retrato atual, antes de um salto.
@@ -1914,6 +2694,14 @@ class TranslationEditor:
         Nao empilha sem linha aberta (nao ha para onde voltar) nem o mesmo retrato
         duas vezes seguidas — dois cliques em "Buscar" com o mesmo texto sao um
         salto, nao dois.
+
+        **Nos caminhos que trocam um SELETOR, esta chamada vem antes do
+        `save_changes`** (garantia F13). A gravacao pode recarregar a lista por
+        conta propria — com o filtro "Avisos QA" ativo, corrigir o aviso tira a
+        linha (R7) —, e esse recarregamento atualizaria `applied_view` ja com o
+        seletor que o usuario acabou de mexer. O retrato tem de ser tirado antes de
+        qualquer coisa acontecer: ele e o "de onde", e tudo o que vem depois e o
+        "para onde".
         """
         if not self.current["id"]:
             return
@@ -1927,17 +2715,59 @@ class TranslationEditor:
         if len(self.state.history_stack) > HISTORY_STACK_LIMIT:
             del self.state.history_stack[0]
 
+    def apply_language_selection(self):
+        """Poe em vigor o par que esta nos seletores: idioma, titulo e glossario.
+
+        Sao os efeitos da troca de par que NAO sao o proprio seletor. Viviam
+        dentro de `change_language_filter`, e por isso o "voltar" repunha o
+        seletor e nada mais: a lista voltava para o par certo e as sugestoes
+        continuavam sendo as do par que se deixou (garantias S11 e F13).
+
+        Nao inclui `refresh_file_filter`: quem chama decide se o menu de arquivos
+        e reconstruido antes ou depois de escolher o arquivo do retrato.
+        """
+        novo_destino = target_language_code(self.target_menu.get())
+        if novo_destino and novo_destino != self.lang:
+            self.lang = novo_destino
+            self.win.title(f"Editar traduções ({self.lang})")
+
+        # O par decide QUAIS regras do glossario existem (garantia S11), entao
+        # trocar de par troca as sugestoes oferecidas. Sem isto, a janela
+        # continuaria propondo a terminologia do par anterior.
+        self.glossary = self.load_scoped_interactive_glossary()
+        self.automatic_glossary = self.load_scoped_automatic_glossary()
+
     def restore_view(self, retrato):
         """Repoe os filtros do retrato e seleciona a linha dele.
 
         Devolve `True` se a linha foi encontrada. Os seletores sao repostos ANTES
         da consulta porque e deles que `list_filters` le — e o `refresh_file_filter`
         entra no meio porque trocar de par muda quais arquivos existem.
+
+        A ordem nao e arbitraria: o par entra antes do menu de arquivos porque e
+        `self.lang` que decide quais obras existem, e o menu de arquivos entra
+        antes do `jump_to_id` porque o arquivo escolhido decide a ORDEM da lista,
+        e a ordem decide a posicao do id (garantia R10).
         """
         self.search_text.set(retrato["search"])
         self.state.active_search = retrato["search"]
+        self.search_mode_segment.set(retrato["mode"])
         self.status_segment.set(retrato["status"])
         self.source_menu.set(retrato["source"])
+
+        # O retrato guarda o CODIGO do destino (`self.lang`), e o menu mostra o
+        # nome: a conversao e aqui, como na abertura da janela.
+        destino_anterior = self.lang
+        self.target_menu.set(
+            LANGUAGE_NAMES.get(retrato["target"], LANGUAGES[0][0])
+        )
+        self.apply_language_selection()
+        if self.lang != destino_anterior:
+            # Mesma razao de `change_language_filter`: a selecao em lote e por id,
+            # e um id do par que se deixou nao esta na lista nova (ROADMAP 19,
+            # item 9).
+            self.state.selected_ids.clear()
+
         self.refresh_file_filter()
         if retrato["file"] in self.file_menu.cget("values"):
             self.file_menu.set(retrato["file"])
@@ -1945,9 +2775,21 @@ class TranslationEditor:
         return self.jump_to_id(retrato["id"])
 
     def go_back(self):
-        """Volta ao ultimo retrato empilhado (`Alt+Backspace`)."""
+        """Volta ao ultimo retrato empilhado (`Alt+Backspace`).
+
+        Repor um retrato mexe nos seletores ANTES de saber se a linha dele ainda
+        existe, entao um retrato que falha deixa a janela no meio do caminho.
+        Enquanto ha proximo isso nao aparece — ele repoe tudo de novo —, mas
+        quando nenhum serve a janela ficava com os filtros do ultimo que falhou, e
+        desde que o par entrou no retrato (F13) ate em outro idioma de destino.
+        Por isso o ponto de partida e guardado e reposto: "Nada para voltar" passa
+        a querer dizer que nada mudou.
+        """
         self.save_changes()
+        partida = self.current_view()
+        tentou = False
         while self.state.history_stack:
+            tentou = True
             retrato = self.state.history_stack.pop()
             if self.restore_view(retrato):
                 self.show_message("Voltou para o ponto anterior")
@@ -1955,6 +2797,8 @@ class TranslationEditor:
             # A linha pode ter deixado de existir — o "Zerar Traducoes" de outra
             # janela, ou uma importacao. Um retrato que nao da para repor nao pode
             # travar a pilha: o proximo assume.
+        if tentou:
+            self.restore_view(partida)
         self.show_message("Nada para voltar")
         return False
 
@@ -1993,10 +2837,10 @@ class TranslationEditor:
         lista e refeita quando o PAR muda, que e quando ela pode de fato ter outro
         conteudo.
         """
+        self.remember_position()
         if self.current["id"]:
             self.save_changes()
 
-        self.remember_position()
         self.state.page_index = 0
         self.clear_current()
         self.reload_rows()
@@ -2016,22 +2860,16 @@ class TranslationEditor:
         dizer nada no novo: o filtro pode ter 3 linhas, e `clamp_page` deixaria o
         usuario numa lista vazia sem explicar por que.
         """
+        self.remember_position()
         if self.current["id"]:
             self.save_changes()
 
-        self.remember_position()
-        novo_destino = target_language_code(self.target_menu.get())
-        if novo_destino and novo_destino != self.lang:
-            self.lang = novo_destino
-            self.win.title(f"Editar traduções ({self.lang})")
+        # Idioma, titulo e o recorte do glossario (garantia S11). O mesmo bloco
+        # que o "voltar" usa — eram estas linhas, aqui dentro, que faltavam la
+        # (garantia F13).
+        self.apply_language_selection()
 
-        # O par tambem decide QUAIS regras do glossario existem (garantia S11),
-        # entao trocar de filtro troca as sugestoes oferecidas. Sem isto, a
-        # janela continuaria propondo a terminologia do par anterior.
-        self.glossary = self.load_scoped_interactive_glossary()
-        self.automatic_glossary = self.load_scoped_automatic_glossary()
-
-        # E decide quais ARQUIVOS existem: um par sem execucao nenhuma nao tem
+        # O par decide quais ARQUIVOS existem: um par sem execucao nenhuma nao tem
         # obra, e manter no menu os arquivos do par anterior daria um filtro que
         # devolve zero linhas sempre. A escolha atual e reposta quando o arquivo
         # existe nos dois pares — um mesmo PGN traduzido para dois idiomas.
@@ -2142,13 +2980,31 @@ class TranslationEditor:
             text_color=row_text_color(row),
             hover_color=ROW_HOVER_COLOR,
             font=self.row_font,
-            command=lambda i=index: self.select_index(i, save_previous=True),
+            command=lambda i=index: self.select_row_from_click(i),
         )
         botao.grid(row=0, column=1, sticky="ew")
 
         self.row_buttons.append(botao)
         self.row_checkboxes.append(marca)
         return quadro
+
+    def select_row_from_click(self, index):
+        """Carrega a linha clicada E poe o foco na traducao (ROADMAP 22.11).
+
+        So no caminho do CLIQUE. Depois de escolher uma linha na lista o gesto
+        seguinte e sempre digitar, e o segundo clique — dentro do texto — era
+        obrigatorio: sem ele a digitacao ia para o botao da lista. E a mesma
+        razao pela qual `apply_one` ja pedia `focus_editor=True`.
+
+        Os recarregamentos programaticos ficam de fora de proposito: eles rodam
+        depois de gravar, de filtrar e de buscar, e roubar o foco do campo de
+        busca no meio de uma busca seria trocar um incomodo por outro pior.
+        """
+        self.select_index(index, save_previous=True)
+        try:
+            self.trans_text.focus_set()
+        except tk.TclError:  # pragma: no cover - janela fechando
+            pass
 
     def toggle_row_selection(self, index):
         """Marca ou desmarca a linha `index`, pelo ID.
@@ -2172,6 +3028,48 @@ class TranslationEditor:
             self.state.selected_ids.add(row[0])
         self.sync_row_checkboxes()
         self.update_selection_controls()
+
+    def select_all_filtered_rows(self):
+        """Marca TODAS as linhas do filtro, e nao so as da pagina (22.11).
+
+        Confirma quando passa de uma pagina porque e ai que o gesto deixa de ser
+        verificavel na tela: com 100 linhas o revisor ve o que marcou, com 3.000
+        ele so ve o contador. O dialogo diz o numero ANTES — e o unico ponto em
+        que ele aparece, e por isso ele existe: um "Marcar tudo (N)" com o N no
+        rotulo nao cabe na faixa de 300 px medida em 22.10.
+
+        Devolve quantas ficaram marcadas, ou `None` se o usuario desistiu.
+        """
+        # Com o `status_filter` junto, e nao so os filtros de lista: o que a
+        # lista mostra e o que "tudo" tem de querer dizer. Sem ele, "Marcar tudo"
+        # sob o filtro "Avisos QA" marcaria tambem as linhas limpas.
+        with closing(initialize_database(self.app.output_db)) as conn:
+            cur = conn.cursor()
+            ids = fetch_review_row_ids(
+                cur,
+                self.lang,
+                status_filter=self.selected_status_filter(),
+                **self.list_filters(),
+            )
+
+        if not ids:
+            self.show_message("Nenhuma linha no filtro atual")
+            return 0
+
+        if len(ids) > PAGE_SIZE and not messagebox.askyesno(
+            "Marcar tudo",
+            f"Marcar as {len(ids)} traduções do filtro atual?\n\n"
+            "São mais do que cabe numa página: o que estiver marcado fora da "
+            "tela também entra em \"Verificar\" e \"Exportar\".",
+            parent=self.win,
+        ):
+            return None
+
+        self.state.selected_ids.update(ids)
+        self.sync_row_checkboxes()
+        self.update_selection_controls()
+        self.show_message(f"{len(ids)} linha(s) marcada(s)")
+        return len(self.state.selected_ids)
 
     def clear_row_selection(self):
         self.state.selected_ids.clear()
@@ -2242,6 +3140,25 @@ class TranslationEditor:
                     **consulta,
                 )
             )
+
+        # O retrato do "voltar" sai DAQUI (garantia F13). Estes sao os filtros que
+        # esta consulta usou — o que a janela esta mostrando agora —, e o proximo
+        # salto empilha exatamente isto. Lidos dos seletores no momento do salto,
+        # eles ja seriam os do destino: o comando de um seletor roda com o widget
+        # no valor novo, e "voltar" repunha o filtro que o usuario acabou de
+        # escolher em vez do que ele deixou.
+        #
+        # O destino sai de `self.lang`, e nao do menu, pela mesma razao: `lang` so
+        # muda quando a troca de par entra em vigor, e o menu muda no clique.
+        self.state.applied_view = {
+            "search": self.state.active_search,
+            "mode": self.search_mode_segment.get(),
+            "status": self.status_segment.get(),
+            "source": self.source_menu.get(),
+            "target": self.lang,
+            "file": self.file_menu.get(),
+            "page": self.state.page_index,
+        }
         self.render_rows()
 
     def get_index(self):
@@ -2316,7 +3233,8 @@ class TranslationEditor:
         self.update_review_status_label()
 
         self.set_origin_text(
-            format_occurrence_context(ocorrencias, total_ocorrencias)
+            format_occurrence_context(ocorrencias, total_ocorrencias),
+            total_ocorrencias,
         )
 
         orig, trans = row[0], row[1]
@@ -2367,7 +3285,7 @@ class TranslationEditor:
             )
             self.draft_label.configure(
                 text=f"Rascunho restaurado {format_timestamp(draft['updated_at'])}",
-                text_color="#64748b",
+                text_color=MUTED_TEXT_COLOR,
             )
             self.show_message("Rascunho restaurado")
 
@@ -2396,6 +3314,11 @@ class TranslationEditor:
         # antigo faria o marcador da lista ficar mostrando o veredito de antes da
         # edicao — a linha corrigida continuaria marcada, e a que passou a ter aviso
         # nao apareceria.
+        #
+        # O par sai de `current_row_languages`, que e de onde o rotulo "QA:" da
+        # tela tambem o le: a linha reconstruida aqui e a avaliacao exibida tem de
+        # concordar, e para isso o par tem de vir de um lugar so (garantia Q3).
+        origem, destino = self.current_row_languages()
         self.state.rows[index] = (
             self.current["id"],
             self.current["orig"],
@@ -2404,13 +3327,10 @@ class TranslationEditor:
             self.current["created_at"],
             self.current["updated_at"],
             self.current["verified_at"],
-            self.current["source_language"],
-            self.current["target_language"],
+            origem,
+            destino,
             quality_warning_flag(
-                self.current["orig"],
-                self.current["trans"],
-                self.current["source_language"],
-                self.current["target_language"],
+                self.current["orig"], self.current["trans"], origem, destino
             ),
         )
         self.row_buttons[index].configure(text=row_label(self.state.rows[index]))
@@ -2461,12 +3381,23 @@ class TranslationEditor:
         if not self.current["id"]:
             return
 
+        nova_nota = self.reviewer_note_text.get().strip()
+        # Os dois lados aparados: a nota vem do banco como esta la, e comparar
+        # uma ponta aparada com uma nao aparada faria toda navegacao numa linha
+        # com espaco sobrando gravar de novo — o oposto de R1.
+        nota_mudou = nova_nota != (self.current.get("reviewer_note") or "").strip()
+
         # Gravacao silenciosa e a que acontece ao navegar pela lista. Se a unica
         # diferenca veio das regras automaticas, o usuario nao pediu nada: rolar
         # 50 linhas nao pode reescrever 50 traducoes e gerar 50 registros de
         # historico (garantia R1 da SPEC.md). Salvar explicitamente ou marcar
         # como verificada continua funcionando normalmente.
-        if silent and not mark_verified and self.current["auto_only"]:
+        #
+        # Uma nota digitada e acao do usuario, e por isso ela atravessa esta
+        # saida: sem a excecao, anotar numa linha que so as regras automaticas
+        # tocaram e navegar perderia a nota — que e justamente o caminho que este
+        # item veio fechar (ROADMAP 22.11).
+        if silent and not mark_verified and self.current["auto_only"] and not nota_mudou:
             return
 
         new_trans = self.trans_text.get("1.0", tk.END).rstrip("\n")
@@ -2475,6 +3406,23 @@ class TranslationEditor:
         propagation_candidates = []
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
+            # A nota do revisor vai junto (ROADMAP 22.11). Ela so era gravada por
+            # "Rejeitar", "Em dúvida" e "Limpar status": escrever a nota e navegar
+            # a descartava em silencio, e e o caso comum — anotar "conferir com o
+            # autor" numa linha que continua pendente.
+            #
+            # ANTES da traducao, e nao depois: `set_review_status_by_id` mantem o
+            # `verified` em lockstep com o status (garantia F10), e chama-la
+            # depois de um `mark_verified` desfaria a verificacao que o usuario
+            # acabou de pedir. Com o status ATUAL, que e o que a linha ja tem —
+            # esta gravacao e da nota, e nao do status.
+            if nota_mudou:
+                set_review_status_by_id(
+                    cur,
+                    self.current["id"],
+                    self.current.get("review_status") or REVIEW_STATUS_PENDING,
+                    note=nova_nota,
+                )
             update_translation_by_id(cur, self.current["id"], new_trans, mark_verified)
             if mark_verified:
                 propagation_candidates = fetch_exact_translation_match_candidates(
@@ -2492,6 +3440,7 @@ class TranslationEditor:
 
         self.current["trans"] = new_trans
         self.current["saved_trans"] = new_trans
+        self.current["reviewer_note"] = nova_nota
         self.current["auto_only"] = False
         self.clear_current_draft()
         if updated_row is not None:
@@ -2562,13 +3511,51 @@ class TranslationEditor:
             else:
                 self.show_message("Tradução salva")
 
+    def index_after_save(self, comment_id, previous_index, delta=1):
+        """Para onde ir depois de uma gravacao que pode ter encolhido a lista.
+
+        `save_changes` pode tirar a linha aberta do filtro ativo — com "Avisos
+        QA", corrigir o aviso faz exatamente isso — e ja selecionar quem ocupou o
+        lugar dela (garantia R7). **Quem esta naquela posicao JA e a proxima**, e
+        somar mais uma casa pula uma traducao sem nada na tela dizendo que ela
+        existiu (garantia F15, ROADMAP 22.5).
+
+        Para TRAS a conta nao muda: a linha que vinha antes continua uma casa
+        antes da posicao vaga.
+
+        A regra vivia dentro de `mark_and_next`, que era o unico dos tres
+        caminhos a aplica-la. Aqui ela e uma so — e por isso o `navigate` e o F7
+        deixaram de ser duas copias que ninguem escreveu.
+
+        Devolve `None` quando nao ha lista para onde ir.
+        """
+        position = row_index_for_id(
+            self.state.rows, comment_id, fallback=previous_index or 0
+        )
+        if position is None:
+            return None
+        saiu_da_lista = self.state.rows[position][0] != comment_id
+        if saiu_da_lista and delta > 0:
+            return position
+        return position + delta
+
     def navigate(self, delta):
-        self.save_changes()
+        """Anda uma linha na lista, gravando o que estava aberto.
+
+        O id e a posicao sao capturados ANTES da gravacao: depois dela, a posicao
+        lida pode ja ser a de quem ainda nao foi visto. Ver `index_after_save`.
+        """
+        current_id = self.current["id"]
         index = self.get_index()
+        self.save_changes()
         if index is None:
             index = 0
 
-        new_index = index + delta
+        new_index = self.index_after_save(current_id, index, delta)
+        if new_index is None:
+            self.show_message("Fim da lista")
+            return
+
         if 0 <= new_index < len(self.state.rows):
             self.select_index(new_index)
         elif new_index < 0 and self.state.page_index > 0:
@@ -2729,6 +3716,11 @@ class TranslationEditor:
         return None
 
     def go_to_next_quality_warning(self):
+        # Capturados antes da gravacao, como em `navigate`: e aqui que pular uma
+        # linha mais doi, porque a fila de avisos existe justamente para nao
+        # deixar nenhuma para tras (garantia F15, ROADMAP 22.5).
+        current_id = self.current["id"]
+        previous_index = self.get_index()
         self.save_changes()
         total = self.state.total_rows
         if total == 0:
@@ -2738,9 +3730,9 @@ class TranslationEditor:
         # F7 tambem e um salto: ele pode atravessar a obra inteira e dar a volta.
         self.remember_position()
 
-        index = self.get_index()
         base_offset = page_offset(self.state.page_index, PAGE_SIZE)
-        start_offset = base_offset if index is None else base_offset + index + 1
+        local_index = self.index_after_save(current_id, previous_index, 1)
+        start_offset = base_offset + (local_index or 0)
 
         if start_offset >= total:
             start_offset = 0
@@ -2757,10 +3749,14 @@ class TranslationEditor:
             local_index = local_index_for_offset(target_offset, PAGE_SIZE, len(self.state.rows))
             if local_index is not None:
                 self.select_index(local_index)
-                warnings = evaluate_translation_quality(
-                    self.state.rows[local_index][1],
-                    self.state.rows[local_index][2],
-                )
+                # `row_quality_warnings`, e nao `evaluate_translation_quality`: a
+                # primeira le o par das proprias posicoes 7 e 8 da linha. Sem o
+                # par, uma linha marcada SO por terminologia devolvia lista vazia
+                # aqui — o F7 parava nela (ela esta na lista pela coluna) e ficava
+                # mudo sobre o motivo. E o ramo sem filtro, logo abaixo, sempre
+                # acertou: ele passa por `find_first_quality_warning`, que usa a
+                # mesma funcao (garantia Q3, ROADMAP 22.2).
+                warnings = row_quality_warnings(self.state.rows[local_index])
                 if warnings:
                     self.show_message("Aviso QA: " + warnings[0])
             return
@@ -2838,17 +3834,13 @@ class TranslationEditor:
                 self.show_message("Marcada como verificada" if self.current["id"] else "Sem traduções pendentes")
             return
 
-        position = row_index_for_id(self.state.rows, current_id, fallback=index or 0)
-        if position is None:
+        # A regra de "se a linha saiu da lista, quem ocupou o lugar dela ja E a
+        # proxima" nasceu aqui e agora vive em `index_after_save`, que e onde o
+        # `navigate` e o F7 tambem a leem (garantia F15).
+        new_index = self.index_after_save(current_id, index, 1)
+        if new_index is None:
             self.show_message("Fim da lista")
             return
-
-        # Se a linha saiu da lista, quem ocupou o lugar dela ja E a proxima —
-        # avancar mais uma casa pularia uma traducao.
-        if self.state.rows[position][0] == current_id:
-            new_index = position + 1
-        else:
-            new_index = position
 
         if 0 <= new_index < len(self.state.rows):
             self.select_index(new_index)
@@ -2917,10 +3909,13 @@ class TranslationEditor:
             return
         self.save_changes()
         alvos = sorted(self.state.selected_ids)
+        aberto = self.current["id"]
+        indice_antes = self.get_index()
 
         if not messagebox.askyesno(
             "Verificar selecionadas",
             f"Marcar {len(alvos)} tradução(oes) selecionada(s) como verificada(s)?\n\n"
+            f"{self.describe_selection_outside_filters(alvos)}"
             "Traduções iguais em outras linhas NÃO são afetadas.",
             parent=self.win,
         ):
@@ -2936,9 +3931,55 @@ class TranslationEditor:
         self.clear_row_selection()
         self.reload_rows()
         if self.state.rows:
-            self.select_index(0)
+            # A linha ABERTA de volta, e nao a primeira da pagina (ROADMAP
+            # 22.11). Era o unico recarregamento pos-acao que nao reencontrava a
+            # linha pelo id: quem verificava um lote no meio de um capitulo de
+            # 3.000 linhas voltava ao comeco da pagina e tinha de se achar de
+            # novo. Os outros dois caminhos ja usavam `row_index_for_id`.
+            self.select_index(
+                row_index_for_id(self.state.rows, aberto, fallback=indice_antes or 0)
+                or 0
+            )
         self.show_message(f"{marcadas} tradução(oes) verificada(s)")
         return marcadas
+
+    def describe_selection_outside_filters(self, alvos):
+        """"N das marcadas estao fora do que a lista mostra", ou "".
+
+        A selecao e por id e **sobrevive** a trocar de arquivo, de status e de
+        busca — so a troca de PAR a apaga. Isso e util de proposito: juntar
+        linhas de tres capitulos e o caso que a barra existe para servir
+        (garantia F7).
+
+        Mas a razao registrada para mata-la na troca de par — "um id do par
+        anterior nao esta na lista nova, e Verificar marcaria linhas que o revisor
+        nao ve" — vale letra por letra para os outros tres, e a diferenca e que
+        deles da para voltar: os ids continuam validos. **Entao a sobrevivencia
+        fica, e quem passa a dizer a verdade e a confirmacao** (ROADMAP 22.11);
+        matar a selecao a cada troca de filtro trocaria um risco silencioso por
+        uma perda de trabalho garantida.
+
+        A consulta e a mesma lista de ids do "Marcar tudo", e custa o que ela
+        custa: 3,03 ms no banco de dev. Uma vez por lote, contra uma confirmacao
+        que hoje afirma menos do que sabe.
+        """
+        with closing(initialize_database(self.app.output_db)) as conn:
+            visiveis = set(
+                fetch_review_row_ids(
+                    conn.cursor(),
+                    self.lang,
+                    status_filter=self.selected_status_filter(),
+                    **self.list_filters(),
+                )
+            )
+        fora = [alvo for alvo in alvos if alvo not in visiveis]
+        if not fora:
+            return ""
+        return (
+            f"{len(fora)} dela(s) está(ão) fora dos filtros atuais — "
+            "marcada(s) antes de você trocar de arquivo, de status ou de busca, "
+            "e não aparece(m) nesta lista.\n\n"
+        )
 
     def export_selected_rows(self):
         """Exporta so as linhas selecionadas para CSV (ROADMAP 19, item 9)."""
@@ -2974,20 +4015,37 @@ class TranslationEditor:
         A nota vai junto com o status na mesma gravacao porque na tela e um gesto so:
         quem rejeita escreve por que. Uma linha rejeitada ou em duvida deixa de estar
         verificada — dizer que a verificacao estava errada e o proposito do botao.
+
+        **A edicao aberta e gravada antes** (garantia F12, ROADMAP 22.1): rejeitar
+        e anotar por que e justamente o gesto de quem estava mexendo no texto e
+        desistiu, e o recarregamento que vem depois descartava o que ele digitou.
         """
         if not self.current["id"]:
             return 0
 
+        # Lidos ANTES de gravar, e nao depois: `save_changes` pode recarregar a
+        # lista — com o filtro "Avisos QA" ativo, corrigir o aviso tira a propria
+        # linha (garantia R7) — e ai `current` ja aponta para outra, cuja nota o
+        # `load_item` acabou de por no campo. O status iria para a linha errada,
+        # com a nota errada, e as duas na tela pareceriam certas.
         comment_id = self.current["id"]
         nota = self.reviewer_note_text.get().strip()
+        self.save_changes()
+
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
             mudou = set_review_status_by_id(cur, comment_id, status, note=nota)
             conn.commit()
 
-        self.current["review_status"] = status
-        self.current["reviewer_note"] = nota
-        self.update_review_status_label()
+        # So anuncia na tela se a tela ainda for desta linha. Depois de um
+        # recarregamento a janela pode estar mostrando outra, e pintar nela o
+        # status que foi para esta e a mesma classe de erro que a garantia R3
+        # evita na janela de historico. A linha certa reaparece logo abaixo, pelo
+        # id — e `load_item` rele status e nota do banco.
+        if self.current["id"] == comment_id:
+            self.current["review_status"] = status
+            self.current["reviewer_note"] = nota
+            self.update_review_status_label()
 
         if status:
             self.show_message(
@@ -3014,21 +4072,98 @@ class TranslationEditor:
         return mudou
 
     def update_review_status_label(self):
-        """Pinta o campo de nota conforme o status, e diz qual e no rodape.
+        """Diz o status da linha aberta EM PALAVRAS, e pinta o campo de nota.
 
-        A cor esta no CAMPO, e nao num rotulo separado, porque e ali que o olho vai
-        quando a pergunta e "esta linha volta para alguem?". Sem status, o campo fica
-        neutro: a nota de uma linha pendente e um lembrete, nao um alarme.
+        A cor continua no campo, porque e ali que o olho vai quando a pergunta e
+        "esta linha volta para alguem?" — mas ela deixou de ser a unica forma de
+        saber (garantia F19, ROADMAP 22.9).
+
+        **A docstring que estava aqui dizia "e diz qual e no rodape", e o metodo
+        nao escrevia rodape nenhum.** Nenhum outro ponto da janela dizia o nome do
+        status: o rodape mostra contagens do filtro inteiro, e a linha da lista
+        rotula a rejeitada de "PEND", igual a uma pendente comum. Quem perdesse a
+        mensagem de confirmacao ficava com uma borda colorida — que para um
+        protanope e a mesma cor nos dois casos.
+
+        Sem status, o rotulo sai do grid e o campo volta ao neutro: a nota de uma
+        linha pendente e um lembrete, e nao um alarme.
         """
         status = self.current.get("review_status") or REVIEW_STATUS_PENDING
         cor = {
-            REVIEW_STATUS_REJECTED: "#dc2626",
-            REVIEW_STATUS_DOUBT: "#f59e0b",
+            REVIEW_STATUS_REJECTED: ERROR_TEXT_COLOR,
+            REVIEW_STATUS_DOUBT: WARNING_TEXT_COLOR,
         }.get(status, self.text_border)
         try:
             self.note_entry.configure(border_color=cor)
         except tk.TclError:  # pragma: no cover - tema sem essa propriedade
             pass
+
+        texto = REVIEW_STATUS_LABELS.get(status, "")
+        self.review_status_label.configure(text=texto, text_color=cor)
+        if texto:
+            self.review_status_label.grid(row=0, column=2, sticky="w", padx=(0, 8))
+        else:
+            self.review_status_label.grid_remove()
+
+    def open_shortcuts_window(self, _event=None):
+        """A lista de atalhos, em janela propria (garantia F18, ROADMAP 22.8).
+
+        E o unico lugar possivel para os tres que nao tem botao — `Ctrl+F`,
+        `Ctrl+L` e `Ctrl+B` —, e por isso a correcao foi esta e nao pendurar o
+        atalho no rotulo dos botoes: os rotulos alcancam dez dos treze, e as duas
+        fileiras do rodape ja estao apertadas (ROADMAP 22.10).
+
+        **Modeless, e de proposito**: ela existe para ser consultada enquanto se
+        experimenta o atalho. Um modal obrigaria a fechar para usar o que se
+        acabou de ler. Reabrir traz a que ja esta aberta para a frente, em vez de
+        empilhar copias.
+        """
+        janela = getattr(self, "shortcuts_win", None)
+        if janela is not None and janela.winfo_exists():
+            bring_window_to_front(janela, self.win, maximize=False)
+            return janela
+
+        janela = ctk.CTkToplevel(self.win)
+        self.shortcuts_win = janela
+        janela.title("Atalhos do editor")
+        janela.geometry("460x520")
+        janela.minsize(380, 360)
+        janela.transient(self.win)
+        bring_window_to_front(janela, self.win, maximize=False)
+        janela.columnconfigure(0, weight=1)
+
+        linha = 0
+
+        def escrever(titulo, itens):
+            nonlocal linha
+            ctk.CTkLabel(
+                janela, text=titulo, font=ctk.CTkFont(weight="bold"), anchor="w"
+            ).grid(row=linha, column=0, sticky="ew", padx=16, pady=(14, 2))
+            linha += 1
+            for rotulo, descricao in itens:
+                item = ctk.CTkFrame(janela, fg_color="transparent")
+                item.grid(row=linha, column=0, sticky="ew", padx=16)
+                item.columnconfigure(1, weight=1)
+                ctk.CTkLabel(
+                    item, text=rotulo, width=140, anchor="w",
+                    font=ctk.CTkFont(weight="bold"),
+                ).grid(row=0, column=0, sticky="w")
+                ctk.CTkLabel(item, text=descricao, anchor="w", justify=tk.LEFT).grid(
+                    row=0, column=1, sticky="ew"
+                )
+                linha += 1
+
+        for titulo, atalhos in KEYBOARD_SHORTCUTS:
+            escrever(titulo, [(rotulo, descricao) for rotulo, _seq, descricao in atalhos])
+        # Os gestos de mouse entram na MESMA janela (ROADMAP 22.11): sao tao
+        # invisiveis quanto os atalhos, e quem procura "como faco isto mais
+        # rapido" abre um lugar so.
+        escrever("Mouse", MOUSE_GESTURES)
+
+        ctk.CTkButton(janela, text="Fechar", width=100, command=janela.destroy).grid(
+            row=linha, column=0, sticky="e", padx=16, pady=16
+        )
+        return janela
 
     def open_history_window(self):
         if not self.current["id"]:
@@ -3064,9 +4199,19 @@ class TranslationEditor:
         self.refresh_find_matches()
 
     def restore_saved_translation(self):
+        """"Restaurar": devolve a linha ao texto que esta no banco.
+
+        `keep_undo` tambem aqui, e este vai alem dos quatro que o ROADMAP 22.4
+        nomeia — pela mesma regra, que e a linha nao ter mudado. E o caso em que
+        o desfazer vale mais: "Restaurar" era o unico caminho de volta das outras
+        quatro acoes e descartava TUDO, inclusive o que o revisor queria manter.
+        Com a pilha de pe, ele deixa de ser um penhasco.
+        """
         if not self.current["id"]:
             return
-        self.set_translation_text(self.current["saved_trans"], mark_dirty=False)
+        self.set_translation_text(
+            self.current["saved_trans"], mark_dirty=False, keep_undo=True
+        )
         self.current["trans"] = self.current["saved_trans"]
         self.clear_current_draft()
         self.show_message("Tradução restaurada")
@@ -3074,11 +4219,23 @@ class TranslationEditor:
     def copy_original_to_translation(self):
         if not self.current["id"]:
             return
-        self.set_translation_text(self.current["orig"], mark_dirty=True)
+        self.set_translation_text(
+            self.current["orig"], mark_dirty=True, keep_undo=True
+        )
         self.show_message("Original copiado para tradução")
 
     def toggle_filter(self):
+        """Troca o filtro de status: grava o que estava aberto e recomeca.
+
+        A gravacao vem primeiro porque a troca RECARREGA a lista, e o
+        recarregamento passa por `set_translation_text` — que sobrescreve o
+        widget e, pior, chama `set_dirty(False)`, que cancela o rascunho ainda
+        agendado. Sem ela, o que o revisor digitou desde a ultima pausa de 2,5 s
+        nao estava no widget, nem no banco, nem no rascunho (garantia F12,
+        ROADMAP 22.1).
+        """
         self.remember_position()
+        self.save_changes()
         self.state.page_index = 0
         self.save_editor_settings()
         self.reload_rows()
@@ -3088,10 +4245,11 @@ class TranslationEditor:
             self.clear_current()
 
     def apply_search(self):
-        self.save_changes()
-        # Antes de trocar a lista: e este o salto que o item 3 existe para desfazer
-        # — usar a busca como concordancia descartava a pagina em que se estava.
+        # Antes de tudo: e este o salto que o item 3 existe para desfazer — usar a
+        # busca como concordancia descartava a pagina em que se estava. Antes do
+        # `save_changes` tambem, pelo motivo que `remember_position` explica.
         self.remember_position()
+        self.save_changes()
         self.state.active_search = self.search_text.get().strip()
         self.state.page_index = 0
         self.reload_rows()
@@ -3101,9 +4259,20 @@ class TranslationEditor:
             self.clear_current()
 
     def clear_search(self):
+        """Limpa a busca da lista: grava o que estava aberto e recomeca.
+
+        `apply_search` sempre gravou e este, o botao ao lado dela na mesma
+        barra, nao gravava — dois gestos vizinhos com desfechos opostos para a
+        edicao aberta (garantia F12, ROADMAP 22.1).
+
+        A gravacao fica DEPOIS da saida antecipada: sem busca ativa o clique nao
+        troca lista nenhuma, e gravar ali seria um efeito colateral de um botao
+        que nao fez nada.
+        """
         if not self.state.active_search and not self.search_text.get():
             return
         self.remember_position()
+        self.save_changes()
         self.search_text.set("")
         self.state.active_search = ""
         self.state.page_index = 0
@@ -3214,7 +4383,22 @@ class TranslationEditor:
                 "<Button-3>",
                 lambda event, o=orig, n=new: self.show_suggestion_context_menu(event, o, n),
             )
+            # Aplicar uma sugestao custava dois cliques com deslocamento — marcar
+            # na lista e ir ate "Aplicar selecionada", no canto oposto do painel
+            # (ROADMAP 22.11). O clique simples continua so selecionando: quem
+            # quer ler a regra antes de aplicar nao pode ser obrigado a aplicar
+            # para le-la.
+            btn.bind(
+                "<Double-Button-1>",
+                lambda _event, i=index: self.apply_suggestion_at(i),
+            )
             self.suggestion_buttons.append(btn)
+
+    def apply_suggestion_at(self, index):
+        """Seleciona a sugestao e a aplica — o duplo clique (ROADMAP 22.11)."""
+        self.select_suggestion(index)
+        self.apply_one()
+        return "break"
 
     def apply_glossary_pair_with_cursor(self, text, orig, new, count=0):
         matches = find_glossary_matches(text, orig)
@@ -3268,6 +4452,7 @@ class TranslationEditor:
             mark_dirty=True,
             insert_offset=insert_offset,
             focus_editor=True,
+            keep_undo=True,
         )
 
     def apply_all(self):
@@ -3320,7 +4505,7 @@ class TranslationEditor:
         ctk.CTkLabel(
             actions,
             text=f"{len(faixas_depois)} trecho(s) alterado(s)",
-            text_color="#64748b",
+            text_color=MUTED_TEXT_COLOR,
         ).pack(side=tk.LEFT, padx=(0, 12))
 
         def confirm():
@@ -3329,6 +4514,7 @@ class TranslationEditor:
                 mark_dirty=True,
                 insert_offset=preview_offset,
                 focus_editor=True,
+                keep_undo=True,
             )
             pop.destroy()
 
@@ -3517,6 +4703,44 @@ class TranslationEditor:
         self.save_changes(False, mark_verified=True)
         return "break"
 
+    def mark_and_next_shortcut(self, _event=None):
+        self.mark_and_next()
+        return "break"
+
+    def on_note_edited(self):
+        """Nota diferente da carregada e sujeira — e o rodape passa a dize-lo.
+
+        `autosave_draft=False` porque o rascunho e do TEXTO da traducao: agendar
+        uma gravacao dele porque alguem digitou na nota gravaria o mesmo texto de
+        sempre num arquivo de rascunho, a cada tecla.
+
+        A comparacao e com `current["reviewer_note"]`, que `load_item` acerta
+        ANTES de povoar o campo — e o que impede a propria carga da linha de
+        marcar a janela como suja.
+        """
+        if self.state.loading or not self.current["id"]:
+            return
+        mudou = self.reviewer_note_text.get().strip() != (
+            self.current.get("reviewer_note") or ""
+        ).strip()
+        if mudou and not self.state.dirty:
+            self.set_dirty(True, autosave_draft=False)
+
+    def save_note_shortcut(self, _event=None):
+        self.save_changes(False)
+        return "break"
+
+    def zoom_with_wheel(self, event):
+        """Ctrl+roda muda o tamanho da fonte dos dois textos (ROADMAP 22.11).
+
+        O sinal de `event.delta` e o que diz a direcao; o valor absoluto (120 por
+        entalhe no Windows) nao entra na conta, porque um entalhe da roda tem de
+        valer um ponto — o mesmo que um clique em "A+". Multiplicar pelos 120
+        levaria a fonte de 12 a 24 pt num giro.
+        """
+        self.adjust_font(1 if getattr(event, "delta", 0) > 0 else -1)
+        return "break"
+
     def previous_shortcut(self, _event=None):
         self.navigate(-1)
         return "break"
@@ -3533,6 +4757,13 @@ class TranslationEditor:
         self.save_changes()
         self.save_editor_settings()
         self.unregister_glossary_callback()
+        # O rastreador guarda os callbacks numa lista de CLASSE: sem tirar o
+        # desta janela, cada abrir-e-fechar deixaria mais um la, e todos seriam
+        # chamados na proxima troca de tema (garantia F18).
+        try:
+            ctk.AppearanceModeTracker.remove(self.apply_theme_colors)
+        except Exception:  # pragma: no cover - versao sem o registrador
+            pass
         self.win.destroy()
 
 

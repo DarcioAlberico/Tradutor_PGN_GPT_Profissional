@@ -259,6 +259,11 @@ MAIN_WINDOW_DEFAULTS = {
     "target_language": "pt",
     "process_subdirs": True,
     "source_path": "",
+    # Tamanho e posicao (ROADMAP 22.12). Vazio quer dizer "nunca foi gravado", e
+    # ai a janela maximiza — que e o que ela sempre fez, e o certo para a
+    # primeira abertura. Os dois editores ja lembravam a geometria deles; a
+    # principal era a unica que nao.
+    "geometry": "",
 }
 
 
@@ -302,6 +307,13 @@ def read_main_window_settings(settings, known_languages):
         # ainda nao foi plugado, e apaga-lo por isso seria pior do que
         # oferece-lo. Quem valida e o "Iniciar Traducao", que ja o fazia.
         valores["source_path"] = caminho
+
+    geometria = guardado.get("geometry")
+    # Sem validar o FORMATO aqui: quem sabe o que e uma geometria valida (e o que
+    # fazer com uma salva num monitor que nao existe mais) e `clamp_geometry`, e
+    # duplicar a regra daria duas respostas para a mesma pergunta.
+    if isinstance(geometria, str):
+        valores["geometry"] = geometria
 
     return valores
 

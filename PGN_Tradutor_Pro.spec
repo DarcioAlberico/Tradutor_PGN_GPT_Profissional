@@ -137,6 +137,38 @@ else:
         "embutida e sem a lista de termos suspeitos."
     )
 
+# Os dicionarios de prosa (ROADMAP 26), por VARREDURA e nao por lista — a mesma
+# licao do `Termos-suspeitos.txt` logo acima: acrescentar um idioma passa a ser
+# copiar o par `.dic`/`.aff` para `dicionarios/`, e nao lembrar de dois lugares.
+DICIONARIOS = "dicionarios"
+if os.path.isdir(DICIONARIOS):
+    # `.txt` e `.md` entram junto com os dicionarios, e o motivo nao e
+    # arrumacao: o `pt_BR` e LGPL 2.1, e a licenca exige que o texto dela
+    # acompanhe a redistribuicao. Empacotar por extensao, e nao por nome, e o
+    # que impede a licenca de ficar para tras quando outro idioma entrar.
+    ARQUIVOS_DIC = sorted(
+        os.path.join(DICIONARIOS, nome)
+        for nome in os.listdir(DICIONARIOS)
+        if nome.lower().endswith((".dic", ".aff", ".txt", ".md"))
+    )
+    PARES = [c for c in ARQUIVOS_DIC if c.lower().endswith((".dic", ".aff"))]
+    if PARES:
+        datas += [(caminho, DICIONARIOS) for caminho in ARQUIVOS_DIC]
+        print("Dicionarios de prosa embutidos: " + ", ".join(
+            os.path.basename(c) for c in ARQUIVOS_DIC
+        ))
+    else:
+        print(
+            f"AVISO: {DICIONARIOS}/ existe mas esta sem par .dic/.aff. O "
+            "executavel sai sem corretor de prosa, e a janela de edicao vai "
+            "dizer que nao ha dicionario para o idioma."
+        )
+else:
+    print(
+        f"AVISO: {DICIONARIOS}/ nao encontrado. O executavel sai sem corretor "
+        "de prosa (a janela avisa; nada mais deixa de funcionar)."
+    )
+
 SPELLING = os.path.join("spelling_ssp", "spelling.ssp")
 if os.path.exists(SPELLING):
     datas += [(SPELLING, "spelling_ssp")]

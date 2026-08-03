@@ -998,10 +998,17 @@ class TypedConfirmationDialogTests(MainWindowTestCase):
         self.assertEqual(estados["cor"], confirm_dialog.CONFIRM_ENABLED_COLOR)
 
     def test_a_wrong_word_leaves_it_inert(self):
+        """A palavra errada e "apagando", e nao "apagar".
+
+        Era "apagar" ate 2026-08-01, quando essa passou a ser a palavra CERTA
+        (ROADMAP 22.12) — o dialogo e todo em portugues e o botao dele se chama
+        "Apagar". A palavra escolhida agora e uma que ninguem digitaria por
+        engano e que nao e nem a nova nem a antiga.
+        """
         estados = {}
 
         def roteiro(janela):
-            self.campo(janela).insert(0, "apagar")
+            self.campo(janela).insert(0, "apagando")
             self.pump()
             estados["state"] = self.botao(janela, "Apagar").cget("state")
 
@@ -1568,6 +1575,176 @@ class QualityReevaluationToolTests(MainWindowTestCase):
         self.esperar(lambda: False, limite=0.6)
 
         self.assertEqual(self.dialogs.calls, [])
+
+
+class ClosingTheMainWindowTests(MainWindowTestCase):
+    """Garantia F22: o X da janela principal tem handler (ROADMAP 22.12).
+
+    Nao havia nenhum. O X e o botao mais perto do cursor de quem acha que
+    terminou, e ele matava o processo inteiro — com a traducao em andamento no
+    meio de um PGN, e com as janelas filhas sem passar pelos fechamentos delas.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Fechar de verdade destruiria a raiz que o `GuiTestCase` gerencia e o
+        # `tearDown` cairia. O que interessa aqui e a DECISAO — fechar, cancelar
+        # ou nao fazer nada —, e ela e observavel sem executar o `destroy`.
+        self.destruida = []
+        self.app.root.destroy = lambda: self.destruida.append(True)
+
+    def test_the_x_is_wired(self):
+        self.assertTrue(self.app.root.protocol("WM_DELETE_WINDOW"))
+
+    def test_with_nothing_running_it_just_closes(self):
+        self.assertTrue(self.app.close_main_window())
+        self.assertEqual(len(self.destruida), 1)
+        self.assertEqual(self.dialogs.calls, [])
+
+    def test_a_running_translation_is_not_killed_without_asking(self):
+        self.app.is_processing = True
+        self.dialogs.askyesno_result = False
+
+        self.assertFalse(self.app.close_main_window())
+
+        self.assertEqual(self.destruida, [])
+        self.assertFalse(self.app.cancel_flag.is_set())
+        self.assertTrue(self.dialogs.messages("askyesno"), "nao perguntou nada")
+
+    def test_saying_yes_cancels_instead_of_closing(self):
+        """Fechar depois de pedir o cancelamento mataria a thread do mesmo jeito.
+
+        O worker precisa de tempo para fechar o arquivo que esta escrevendo, e a
+        lista de falhas (T4) so e gravada quando ele chega ao fim.
+        """
+        self.app.is_processing = True
+        self.dialogs.askyesno_result = True
+
+        self.assertFalse(self.app.close_main_window())
+
+        self.assertTrue(self.app.cancel_flag.is_set())
+        self.assertEqual(self.destruida, [])
+
+    def test_the_children_close_through_their_own_handler(self):
+        """E o `close_editor` que grava a edicao aberta e a posicao da janela."""
+        chamou = []
+        filha = tk.Toplevel(self.app.root)
+        filha.protocol("WM_DELETE_WINDOW", lambda: chamou.append(True))
+        self.addCleanup(filha.destroy)
+        self.pump()
+
+        self.app.close_main_window()
+
+        self.assertEqual(chamou, [True])
+
+    def test_a_child_that_explodes_does_not_trap_the_program(self):
+        """O X ja foi clicado: travar ali deixaria a janela sem saida.
+
+        O relator de callbacks e substituido porque a excecao de um fechamento
+        de filha NAO volta pelo `tk.call` — o Tk a entrega ao relator, que a
+        transforma em dialogo (garantia C3). Sem esta troca, este teste abre um
+        `messagebox` de verdade e a suite inteira para esperando um clique: o
+        relator monta o dialogo com o `messagebox` do `tkinter`, e nao com o do
+        modulo, entao o silenciador do harness nao o alcanca.
+        """
+        relatados = []
+        self.addCleanup(
+            setattr,
+            self.app.root,
+            "report_callback_exception",
+            self.app.root.report_callback_exception,
+        )
+        self.app.root.report_callback_exception = lambda *args: relatados.append(args)
+
+        filha = tk.Toplevel(self.app.root)
+
+        def explode():
+            raise RuntimeError("fechamento com defeito")
+
+        filha.protocol("WM_DELETE_WINDOW", explode)
+        self.addCleanup(filha.destroy)
+        self.pump()
+
+        self.assertTrue(self.app.close_main_window())
+        self.assertEqual(len(self.destruida), 1)
+        # E o erro nao some: ele vira log e dialogo pelo caminho de sempre.
+        self.assertEqual(len(relatados), 1, relatados)
+
+    def test_the_size_and_position_are_remembered(self):
+        """Era a unica janela do programa que nunca lembrava onde estava.
+
+        A afirmacao e "o que foi gravado e a geometria DESTA janela", e nao um
+        `1000x700` escrito no teste: a raiz da suite esta retirada da tela, e uma
+        janela retirada nao aceita mudanca de tamanho — o teste estaria medindo
+        essa limitacao, e nao a gravacao.
+        """
+        self.app.root.geometry("+30+40")
+        self.pump()
+        esperada = self.app.root.geometry()
+
+        self.app.close_main_window()
+
+        guardado = settings.load_settings().get(settings.MAIN_WINDOW_KEY, {})
+        self.assertEqual(guardado.get("geometry"), esperada)
+        self.assertRegex(esperada, r"^\d+x\d+[+-]-?\d+[+-]-?\d+$")
+
+    def test_a_saved_geometry_is_restored_on_the_next_opening(self):
+        """A ancora do teste acima: gravar sem ler de volta nao serve de nada."""
+        settings.write_main_window_settings({"geometry": "1010x710+22+33"})
+
+        outro = app_module.PGNTranslatorApp(tk.Toplevel(self.root))
+        self.addCleanup(outro.root.destroy)
+        self.pump()
+
+        self.assertTrue(outro.root.geometry().startswith("1010x710"), outro.root.geometry())
+
+
+class LogDoesNotYankTheReaderBackTests(MainWindowTestCase):
+    """Garantia F23: o log so rola sozinho se o fim ja estava visivel (22.12).
+
+    O `see(END)` era incondicional: reler um `[AVISO]` durante uma execucao era
+    ser puxado de volta a cada tick de 100 ms.
+    """
+
+    def encher(self, quantas):
+        for numero in range(quantas):
+            self.app.log_message(f"linha {numero}")
+        app_actions.update_log(self.app)
+        self.pump()
+
+    def test_following_the_end_keeps_following(self):
+        self.encher(80)
+        # Levado ao fim de proposito: a janela abre com varias mensagens de
+        # inicializacao ja no log, entao "recem-aberta" nao e o mesmo que "no fim".
+        self.app.log_text.see(tk.END)
+        self.pump()
+        self.assertTrue(app_actions.log_is_at_the_end(self.app.log_text))
+
+        self.app.log_message("recem-chegada")
+        app_actions.update_log(self.app)
+        self.pump()
+
+        self.assertIn("recem-chegada", self.app.log_text.get("end-3l", "end"))
+        self.assertTrue(app_actions.log_is_at_the_end(self.app.log_text))
+
+    def test_reading_the_middle_is_not_interrupted(self):
+        """A afirmacao e "nao pulou para o fim", e nao "a fracao ficou igual".
+
+        Ela muda por definicao: uma linha nova cresce o total, e a mesma posicao
+        em pixels vira outra fracao. Exigir igualdade seria exigir que o log
+        parasse de crescer.
+        """
+        self.encher(200)
+        self.app.log_text.yview_moveto(0.1)
+        self.pump()
+        antes = self.app.log_text.yview()[0]
+
+        self.app.log_message("chegou enquanto se lia o meio")
+        app_actions.update_log(self.app)
+        self.pump()
+
+        self.assertFalse(app_actions.log_is_at_the_end(self.app.log_text))
+        self.assertAlmostEqual(self.app.log_text.yview()[0], antes, places=2)
 
 
 if __name__ == "__main__":

@@ -2246,6 +2246,31 @@ def _rules_from_entries(
     return regras
 
 
+def interactive_rules_from_entries(
+    entries, source_language=None, target_language=None
+):
+    """As regras que o pipeline aplicaria a estas entradas (ROADMAP 22.12).
+
+    Existe para a previa do editor de glossario, e e a MESMA conversao que
+    `load_interactive_substitutions` usa — nao uma imitacao dela. E a licao da
+    garantia S9, escrita em outro lugar: o anuncio nao IMITA o criterio da
+    aplicacao, ele USA o criterio. A previa trabalhava com os pares crus e por
+    isso descartava a prioridade, ignorava o escopo e deixava o `@casa@` inerte —
+    tres formas de a janela dizer uma coisa e o programa fazer outra.
+
+    Sem a semente, e a diferenca e proposital: a previa responde "o que as MINHAS
+    regras fazem com este texto", e as de fabrica nao estao na lista que o editor
+    mostra. Misturar as duas explicaria um resultado por uma regra que nao esta
+    em lugar nenhum da tela.
+    """
+    return _rules_from_entries(
+        entries,
+        {GLOSSARY_RULE_SUGGESTION, GLOSSARY_RULE_AUTOMATIC},
+        source_language=source_language,
+        target_language=target_language,
+    )
+
+
 def filter_glossary_entries_by_type(
     entries,
     rule_type,

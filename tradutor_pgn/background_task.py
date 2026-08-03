@@ -16,6 +16,8 @@ import tkinter as tk
 
 import customtkinter as ctk
 
+from .editor_common import MUTED_TEXT_COLOR
+
 from .window_utils import bring_window_to_front
 
 
@@ -86,7 +88,7 @@ def run_with_progress(
     bar.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
     bar.start()
 
-    detail = ctk.CTkLabel(win, text="", anchor="w", text_color="#64748b")
+    detail = ctk.CTkLabel(win, text="", anchor="w", text_color=MUTED_TEXT_COLOR)
     detail.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
 
     botao = ctk.CTkButton(win, text="Cancelar", width=110)

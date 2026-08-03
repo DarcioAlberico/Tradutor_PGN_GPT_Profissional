@@ -1,4 +1,5 @@
 import csv
+import importlib
 import io
 import json
 import xml.etree.ElementTree as ET
@@ -17,7 +18,18 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import tradutor_pgn
-from tradutor_pgn import app_paths, database, first_run, glossario, settings
+from tradutor_pgn import (
+    app_actions,
+    app_paths,
+    database,
+    db_tools,
+    first_run,
+    glossario,
+    history_window,
+    prose_spellcheck,
+    settings,
+    translation_api,
+)
 from tradutor_pgn.app_config import (
     DATABASE_BACKUP_KEEP_COUNT,
     LANGUAGES,
@@ -55,7 +67,9 @@ from tradutor_pgn.database import (
     count_review_rows,
     count_words_by_pair,
     escape_like_pattern,
+    count_comment_history,
     fetch_comment_history,
+    machine_translation_for,
     fetch_comment_occurrences,
     fetch_exact_translation_match_candidates,
     fetch_export_rows,
@@ -234,6 +248,7 @@ from tradutor_pgn.editor_common import (
     row_index_for_id,
 )
 from tradutor_pgn.editor_text import find_text_ranges, replace_all_text, replace_text_range
+from tradutor_pgn import edit_window
 from tradutor_pgn.edit_window import format_propagation_confirmation, safe_geometry
 from tradutor_pgn.glossary_editor import safe_geometry as glossary_safe_geometry
 from tradutor_pgn.glossary_editor import (
@@ -734,6 +749,522 @@ class TranslationApiTests(unittest.TestCase):
         self.assertEqual(session.calls[0][2], 30)
 
 
+class CancelReachesTheRetryLoopTests(unittest.TestCase):
+    """Garantia C4: "Cancelar" alcanca o laco de tentativas (ROADMAP 22.13).
+
+    `translate_text_chunk` nem RECEBIA o `cancel_flag`: o laco de tres tentativas
+    dormia em `time.sleep` sem olhar cancelamento, e `translate_text` so conferia
+    entre chunks — o que nao cobre nada num comentario de um chunk so, que e a
+    maioria. Com o timeout real de 30 s por tentativa, a janela sem efeito chega
+    a ~93 s por chunk.
+    """
+
+    class SessaoQueFalha:
+        """Devolve sempre um status que pede nova tentativa, sem dormir de verdade."""
+
+        def __init__(self, status=503, ligar_flag=None):
+            self.chamadas = 0
+            self.status = status
+            self.ligar_flag = ligar_flag
+
+        def get(self, _url, params=None, timeout=None):
+            self.chamadas += 1
+            if self.ligar_flag is not None:
+                self.ligar_flag.set()
+
+            class Resposta:
+                status_code = self.status
+
+                def json(self_inner):  # pragma: no cover - nao chega a ser lido
+                    return [[["", ""]]]
+
+            return Resposta()
+
+    def setUp(self):
+        # As esperas do retry sao reais (1,5 s + 3 s). O teste substitui o
+        # `sleep` porque o assunto dele e QUANTAS tentativas acontecem, e nao
+        # quanto elas esperam — e uma suite que dorme 4,5 s por caso deixa de ser
+        # rodada. As esperas tem teste proprio em `retry_delay_seconds`.
+        self.dormidas = []
+        self.sleep_original = translation_api.time.sleep
+        translation_api.time.sleep = self.dormidas.append
+        self.addCleanup(setattr, translation_api.time, "sleep", self.sleep_original)
+
+    def test_without_the_flag_it_still_tries_three_times(self):
+        """A ancora: sem cancelamento, o retry continua sendo o de sempre."""
+        sessao = self.SessaoQueFalha()
+
+        resultado = translation_api.translate_text_chunk("Hello", "pt", session=sessao)
+
+        self.assertIsNone(resultado)
+        self.assertEqual(sessao.chamadas, translation_api.MAX_ATTEMPTS)
+
+    def test_cancelling_during_the_first_attempt_stops_the_others(self):
+        """Era o defeito medido: as tres rodavam com o flag ja ligado."""
+        flag = threading.Event()
+        sessao = self.SessaoQueFalha(ligar_flag=flag)
+
+        resultado = translation_api.translate_text_chunk(
+            "Hello", "pt", session=sessao, cancel_flag=flag
+        )
+
+        self.assertIsNone(resultado)
+        self.assertEqual(sessao.chamadas, 1)
+
+    def test_it_does_not_wait_before_giving_up(self):
+        """Conferido antes da espera: desistir depois de dormir 1,5 s e desistir tarde."""
+        flag = threading.Event()
+        sessao = self.SessaoQueFalha(ligar_flag=flag)
+
+        translation_api.translate_text_chunk(
+            "Hello", "pt", session=sessao, cancel_flag=flag
+        )
+
+        self.assertEqual(self.dormidas, [])
+
+    def test_cancelling_DURING_the_wait_stops_the_next_attempt(self):
+        """A segunda conferencia, e a que cobre a janela de tempo que importa.
+
+        As duas esperas somam 4,5 s e a requisicao pode levar 30 — e ali, parado,
+        que o usuario clica em Cancelar. Uma mutacao mostrou que sem este caso a
+        conferencia do topo do laco podia ser removida sem nada ficar vermelho: a
+        de antes da espera ja pegava o cenario em que o flag e ligado DURANTE a
+        requisicao.
+        """
+        flag = threading.Event()
+        sessao = self.SessaoQueFalha()
+        # O cancelamento acontece enquanto o programa dorme entre as tentativas.
+        translation_api.time.sleep = lambda _s: flag.set()
+
+        resultado = translation_api.translate_text_chunk(
+            "Hello", "pt", session=sessao, cancel_flag=flag
+        )
+
+        self.assertIsNone(resultado)
+        self.assertEqual(sessao.chamadas, 1)
+
+    def test_a_flag_already_set_does_not_call_the_api_at_all(self):
+        flag = threading.Event()
+        flag.set()
+        sessao = self.SessaoQueFalha()
+
+        resultado = translation_api.translate_text_chunk(
+            "Hello", "pt", session=sessao, cancel_flag=flag
+        )
+
+        self.assertIsNone(resultado)
+        self.assertEqual(sessao.chamadas, 0)
+
+    def test_the_flag_crosses_from_translate_text(self):
+        """Um comentario de um chunk so nao tinha conferencia nenhuma."""
+        flag = threading.Event()
+        sessao = self.SessaoQueFalha(ligar_flag=flag)
+
+        resultado = translation_api.translate_text(
+            "Hello", "pt", cancel_flag=flag, session=sessao
+        )
+
+        self.assertIsNone(resultado)
+        self.assertEqual(sessao.chamadas, 1)
+
+
+class CoveringIndexTests(unittest.TestCase):
+    """Garantia R11: o resumo por status nao toca a tabela (ROADMAP 22.13).
+
+    O item 19.12 acrescentou `review_status` a agregada de
+    `get_review_status_counts` e nao a acrescentou aos dois indices de cobertura
+    criados para ela. A cobertura se perdeu em silencio — nada quebra, a consulta
+    so passa a ler a tabela linha a linha, na thread do Tk, a cada recarga da
+    lista.
+
+    O teste le o PLANO, e nao o tempo: cronometrar em 20 linhas nao distingue
+    nada, e a palavra `COVERING` no `EXPLAIN QUERY PLAN` e exatamente a afirmacao
+    que se quer proteger.
+    """
+
+    def plano(self, cursor, **kwargs):
+        sql, params = database.review_status_counts_query(**kwargs)
+        return " ".join(
+            linha[3]
+            for linha in cursor.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+        )
+
+    def test_the_summary_by_target_only_reads_the_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = initialize_database(str(Path(tmp) / "c.db"))
+            cur = conn.cursor()
+            save_translation(cur, "orig", "trans", "pt", "en")
+            conn.commit()
+
+            plano = self.plano(cur, target_language="pt")
+            self.assertIn("idx_comments_counts", plano)
+            self.assertIn("COVERING", plano.upper(), plano)
+            conn.close()
+
+    def test_the_summary_with_a_source_filter_reads_the_other_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = initialize_database(str(Path(tmp) / "c.db"))
+            cur = conn.cursor()
+            save_translation(cur, "orig", "trans", "pt", "en")
+            conn.commit()
+
+            plano = self.plano(cur, target_language="pt", source_language="en")
+            self.assertIn("idx_comments_pair_counts", plano)
+            self.assertIn("COVERING", plano.upper(), plano)
+            conn.close()
+
+    def test_review_status_is_in_both_indexes(self):
+        """A coluna que 19.12 acrescentou ao WHERE e nao acrescentou aqui."""
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = initialize_database(str(Path(tmp) / "c.db"))
+            for indice in ("idx_comments_counts", "idx_comments_pair_counts"):
+                colunas = [
+                    linha[2]
+                    for linha in conn.execute(f"PRAGMA index_info({indice})").fetchall()
+                ]
+                self.assertIn("review_status", colunas, indice)
+            conn.close()
+
+    def test_an_old_database_gets_the_index_rebuilt(self):
+        """`CREATE INDEX IF NOT EXISTS` nao troca as colunas de um indice que existe.
+
+        Sem o `DROP` da migracao 9, o banco de quem ja usava o programa ficaria
+        com o indice velho para sempre — e a correcao valeria so para instalacoes
+        novas, que sao exatamente as que nao tem o problema.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            caminho = str(Path(tmp) / "c.db")
+            conn = initialize_database(caminho)
+            conn.close()
+
+            # Volta ao estado anterior: indice sem `review_status` e versao 8.
+            conn = sqlite3.connect(caminho)
+            conn.execute("DROP INDEX idx_comments_counts")
+            conn.execute(
+                "CREATE INDEX idx_comments_counts "
+                "ON comments(target_language, verified, quality_warning)"
+            )
+            conn.execute("PRAGMA user_version = 8")
+            conn.commit()
+            conn.close()
+
+            conn = initialize_database(caminho)
+            colunas = [
+                linha[2]
+                for linha in conn.execute(
+                    "PRAGMA index_info(idx_comments_counts)"
+                ).fetchall()
+            ]
+            self.assertIn("review_status", colunas)
+            conn.close()
+
+
+class GlossaryResetCountsTests(unittest.TestCase):
+    """Garantia S16: o dialogo de zerar conta o que apaga (ROADMAP 22.12).
+
+    `len(app.glossary_substitutions)` conta a lista APLICAVEL, que e outra coisa:
+    expande `@casa@` (uma linha vira 64 regras), soma as da semente — que zerar
+    nao apaga — e exclui as de limpeza, que zerar apaga. Medido no glossario
+    real: 5.910 entradas no arquivo, 7.325 anunciadas.
+    """
+
+    def test_the_description_names_each_type(self):
+        self.assertEqual(
+            db_tools.describe_glossary_types(
+                {"suggestion": 5674, "automatic": 186, "cleanup": 50}
+            ),
+            "5674 sugestões, 186 automáticas e 50 limpezas",
+        )
+
+    def test_a_type_that_does_not_exist_is_not_mentioned(self):
+        """"0 limpezas" num glossario que nunca teve uma e ruido."""
+        self.assertEqual(
+            db_tools.describe_glossary_types({"suggestion": 2}), "2 sugestões"
+        )
+
+    def test_the_singular_is_the_singular(self):
+        self.assertEqual(
+            db_tools.describe_glossary_types({"cleanup": 1}), "1 limpeza"
+        )
+
+    def test_an_empty_glossary_says_so(self):
+        self.assertEqual(db_tools.describe_glossary_types({}), "nenhuma regra")
+
+    def test_the_count_is_of_the_file_and_not_of_the_applicable_rules(self):
+        """A linha com `@casa@` vale 64 regras na aplicacao e UMA no arquivo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            caminho = Path(tmp) / "Substituicoes.txt"
+            save_glossary_entries(
+                [
+                    ("@casa@-torre", "torre de @casa@", "suggestion"),
+                    ("  x  ", "y", "cleanup"),
+                ],
+                str(caminho),
+                create_backup=False,
+            )
+
+            total, por_tipo = db_tools.count_glossary_entries_by_type(str(caminho))
+
+            self.assertEqual(total, 2)
+            self.assertEqual(por_tipo, {"suggestion": 1, "cleanup": 1})
+            # A ancora: a lista aplicavel da 64 + 0 (limpeza nao e interativa).
+            aplicaveis = load_interactive_substitutions(str(caminho))
+            self.assertEqual(len(aplicaveis), 64)
+
+
+class StatsTablesTests(unittest.TestCase):
+    """Garantia F24 (CSV): as tabelas do relatorio saem em planilha (22.12).
+
+    A janela exportava so `.txt` corrido, e as tres tabelas — progresso por obra,
+    palavras por par e atividade por dia — sao o que se cola num orcamento.
+    """
+
+    ESTATISTICAS = {
+        "per_file": [("cap01.pgn", 120, 100, 40, 60, 3)],
+        "words_by_pair": {
+            ("en", "pt"): {
+                "original": 1000,
+                "translated": 1100,
+                "verified": 400,
+                "pending": 700,
+            }
+        },
+        "daily": [("2026-07-31", 12, 340)],
+    }
+
+    def test_the_three_tables_come_out(self):
+        titulos = [titulo for titulo, _cab, _linhas in db_tools.stats_tables(self.ESTATISTICAS)]
+        self.assertEqual(
+            titulos, ["progresso-por-obra", "palavras-por-par", "atividade-por-dia"]
+        )
+
+    def test_every_header_matches_its_rows(self):
+        """Um cabecalho com uma coluna a mais desalinha a planilha inteira."""
+        for titulo, cabecalho, linhas in db_tools.stats_tables(self.ESTATISTICAS):
+            for linha in linhas:
+                self.assertEqual(len(linha), len(cabecalho), titulo)
+
+    def test_the_language_pair_comes_out_readable(self):
+        _titulo, _cab, linhas = db_tools.stats_tables(self.ESTATISTICAS)[1]
+        self.assertEqual(linhas[0][0], app_config.language_label("en"))
+        self.assertEqual(linhas[0][1], "pt")
+
+    def test_empty_stats_produce_empty_tables_and_not_an_error(self):
+        tabelas = db_tools.stats_tables({})
+        self.assertEqual([linhas for _t, _c, linhas in tabelas], [[], [], []])
+
+
+class HistoryChangeSummaryTests(unittest.TestCase):
+    """O resumo por linha do historico (ROADMAP 22.12), sem Tk.
+
+    A lista dizia QUANDO e QUE TIPO, e nunca o TAMANHO da mudanca — e entre 100
+    linhas com o mesmo rotulo, o tamanho e o que distingue a versao procurada.
+    """
+
+    def test_it_counts_the_changed_stretches(self):
+        self.assertEqual(
+            history_window.history_change_summary("a torre e o bispo", "a TORRE e o BISPO"),
+            "2 trecho(s)",
+        )
+
+    def test_an_action_that_did_not_touch_the_text_says_so(self):
+        """"Verificacao" e "Regras automaticas" produzem entradas identicas."""
+        self.assertEqual(
+            history_window.history_change_summary("a torre", "a torre"),
+            "sem mudanca no texto",
+        )
+
+    def test_the_first_fill_counts_as_a_change(self):
+        self.assertEqual(
+            history_window.history_change_summary(None, "a torre"), "1 trecho(s)"
+        )
+
+
+class HistoryIsAListOfChangesTests(unittest.TestCase):
+    """Garantia F26: o historico lista ALTERACOES, e a versao inicial e
+    recuperavel (ROADMAP 23.1).
+
+    Medido no banco de dev de 6.500 linhas: **5.871 (90%) nao tinham nenhuma
+    linha de historico** e abriam a janela em "Nenhuma alteracao registrada"; das
+    889 entradas gravadas, **607 nao mudam o texto** (600 sao `verify`), e em 355
+    dos 629 comentarios com historico ERA SO ISSO — os dois painels mostravam o
+    mesmo texto, que e o "so aparece a traducao atual" que o usuario relatou.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.conn = initialize_database(str(Path(self.tmp.name) / "c.db"))
+        self.addCleanup(self.conn.close)
+        self.cur = self.conn.cursor()
+
+    def linha(self, original="the rook", traducao="a torre"):
+        save_translation(self.cur, original, traducao, "pt", "en")
+        self.conn.commit()
+        return self.cur.execute(
+            "SELECT id FROM comments WHERE original_comment = ?", (original,)
+        ).fetchone()[0]
+
+    # ------------------------------------------- a versao da maquina
+
+    def test_without_any_history_the_machine_version_is_the_current_text(self):
+        """O `INSERT` do pipeline e o unico caminho que nao registra historico."""
+        cid = self.linha()
+
+        self.assertEqual(machine_translation_for(self.cur, cid), "a torre")
+
+    def test_after_an_edit_the_machine_version_is_what_came_before_it(self):
+        cid = self.linha()
+        update_translation_by_id(self.cur, cid, "a TORRE de dama")
+        self.conn.commit()
+
+        self.assertEqual(machine_translation_for(self.cur, cid), "a torre")
+        self.assertEqual(
+            self.cur.execute(
+                "SELECT translated_comment FROM comments WHERE id = ?", (cid,)
+            ).fetchone()[0],
+            "a TORRE de dama",
+        )
+
+    def test_it_walks_back_past_several_edits(self):
+        """E a entrada MAIS ANTIGA que guarda o texto da maquina, e nao a ultima."""
+        cid = self.linha()
+        for texto in ("primeira edicao", "segunda edicao", "terceira edicao"):
+            update_translation_by_id(self.cur, cid, texto)
+        self.conn.commit()
+
+        self.assertEqual(machine_translation_for(self.cur, cid), "a torre")
+
+    def test_a_verification_in_the_middle_does_not_move_the_starting_point(self):
+        """`verify` grava entrada sem mudar texto: ela nao pode virar a origem."""
+        cid = self.linha()
+        set_translation_verified_by_id(self.cur, cid)
+        update_translation_by_id(self.cur, cid, "editada depois de verificar")
+        self.conn.commit()
+
+        self.assertEqual(machine_translation_for(self.cur, cid), "a torre")
+
+    def test_a_line_that_does_not_exist_answers_None(self):
+        self.assertIsNone(machine_translation_for(self.cur, 99999))
+
+    # ------------------------------------------------- a lista filtrada
+
+    def test_entries_that_do_not_change_the_text_stay_out_of_the_list(self):
+        cid = self.linha()
+        set_translation_verified_by_id(self.cur, cid)
+        self.conn.commit()
+
+        self.assertEqual(fetch_comment_history(self.cur, cid), [])
+        self.assertEqual(
+            len(fetch_comment_history(self.cur, cid, only_text_changes=False)), 1
+        )
+
+    def test_the_edits_stay(self):
+        """A ancora: o filtro nao pode levar embora o que se quer restaurar."""
+        cid = self.linha()
+        set_translation_verified_by_id(self.cur, cid)
+        update_translation_by_id(self.cur, cid, "editada")
+        self.conn.commit()
+
+        alteracoes = fetch_comment_history(self.cur, cid)
+        self.assertEqual(len(alteracoes), 1)
+        self.assertEqual(alteracoes[0][3], "editada")
+
+    def test_the_limit_is_spent_on_changes_and_not_on_verifications(self):
+        """O filtro e em SQL por causa disto.
+
+        Filtrando depois de buscar, 3 verificacoes gastariam um limite de 3 e a
+        alteracao — a unica coisa que interessa — ficaria de fora.
+        """
+        cid = self.linha()
+        for _ in range(3):
+            set_translation_verified_by_id(self.cur, cid)
+            self.cur.execute(
+                "UPDATE comments SET verified = 0 WHERE id = ?", (cid,)
+            )
+        update_translation_by_id(self.cur, cid, "a unica alteracao")
+        self.conn.commit()
+
+        pagina = fetch_comment_history(self.cur, cid, limit=3)
+
+        self.assertEqual([linha[3] for linha in pagina], ["a unica alteracao"])
+
+    def test_the_counts_say_what_was_left_out(self):
+        cid = self.linha()
+        set_translation_verified_by_id(self.cur, cid)
+        update_translation_by_id(self.cur, cid, "editada")
+        self.conn.commit()
+
+        com, sem = count_comment_history(self.cur, cid)
+
+        self.assertEqual((com, sem), (1, 1))
+
+    def test_an_untouched_line_has_nothing_to_leave_out(self):
+        self.assertEqual(count_comment_history(self.cur, self.linha()), (0, 0))
+
+
+class HiddenHistoryLabelTests(unittest.TestCase):
+    """A linha que diz o que a lista NAO esta mostrando (ROADMAP 23.1)."""
+
+    def test_showing_everything_says_nothing(self):
+        self.assertEqual(history_window.describe_hidden_history(3, 0), "")
+
+    def test_it_counts_the_verifications_left_out(self):
+        self.assertIn(
+            "7 verificações", history_window.describe_hidden_history(2, 7)
+        )
+
+    def test_one_verification_is_singular(self):
+        texto = history_window.describe_hidden_history(2, 1)
+        self.assertIn("1 verificação ", texto)
+        self.assertNotIn("verificações", texto)
+
+    def test_the_cut_at_the_limit_is_still_announced(self):
+        texto = history_window.describe_hidden_history(
+            history_window.HISTORY_LIMIT, 0
+        )
+        self.assertIn(str(history_window.HISTORY_LIMIT), texto)
+
+    def test_both_omissions_fit_in_the_same_line(self):
+        texto = history_window.describe_hidden_history(
+            history_window.HISTORY_LIMIT, 4
+        )
+        self.assertIn(str(history_window.HISTORY_LIMIT), texto)
+        self.assertIn("4 verificações", texto)
+
+
+class LogAutoscrollTests(unittest.TestCase):
+    """Garantia F23 (log): o log so rola quando o fim ja estava visivel (22.12).
+
+    O `see(END)` era incondicional: reler um `[AVISO]` durante uma execucao era
+    ser puxado de volta a cada mensagem nova.
+    """
+
+    class FakeLog:
+        def __init__(self, fim):
+            self.fim = fim
+
+        def yview(self):
+            return (0.0, self.fim)
+
+    def test_the_end_visible_means_follow(self):
+        self.assertTrue(app_actions.log_is_at_the_end(self.FakeLog(1.0)))
+
+    def test_scrolled_up_means_stay(self):
+        self.assertFalse(app_actions.log_is_at_the_end(self.FakeLog(0.42)))
+
+    def test_a_partially_visible_last_line_still_counts(self):
+        """A fracao e calculada em pixels: 0,999... e "esta no fim"."""
+        self.assertTrue(app_actions.log_is_at_the_end(self.FakeLog(0.9995)))
+
+    def test_a_log_that_cannot_answer_keeps_the_old_behaviour(self):
+        class SemYview:
+            def yview(self):
+                raise RuntimeError("ainda nao desenhado")
+
+        self.assertTrue(app_actions.log_is_at_the_end(SemYview()))
+
+
 class EditorTextTests(unittest.TestCase):
     def test_find_text_ranges_respects_case_option(self):
         self.assertEqual(find_text_ranges("Mate mate MATE", "mate"), [(0, 4), (5, 9), (10, 14)])
@@ -1029,7 +1560,7 @@ class DatabaseTests(unittest.TestCase):
                         """
                     ).fetchall()
                 }
-                history = fetch_comment_history(cursor=conn.cursor(), comment_id=verified_id)
+                history = fetch_comment_history(cursor=conn.cursor(), comment_id=verified_id, only_text_changes=False)
             finally:
                 conn.close()
 
@@ -1119,7 +1650,7 @@ class DatabaseTests(unittest.TestCase):
                 0,
             )
             conn.commit()
-            self.assertEqual(len(fetch_comment_history(cursor, comment_id)), 1)
+            self.assertEqual(len(fetch_comment_history(cursor, comment_id, only_text_changes=False)), 1)
 
             self.assertEqual(set_translation_verified_by_id(cursor, comment_id, False), 1)
             conn.commit()
@@ -1127,7 +1658,7 @@ class DatabaseTests(unittest.TestCase):
             pending = fetch_review_rows_page(cursor, "pt", limit=1, offset=0)[0]
             self.assertEqual(pending[3], 0)
             self.assertIsNone(pending[6])
-            history = fetch_comment_history(cursor, comment_id)
+            history = fetch_comment_history(cursor, comment_id, only_text_changes=False)
             self.assertEqual(len(history), 2)
             self.assertEqual(history[0][1], "mark_pending")
             self.assertEqual(history[0][4], 1)
@@ -1146,11 +1677,20 @@ class DatabaseTests(unittest.TestCase):
 
             detail = fetch_translation_by_id(cursor, comment_id)
             self.assertEqual(detail[1], "trans")
-            history = fetch_comment_history(cursor, comment_id)
+            # O historico INTEIRO: este teste e sobre o que a gravacao registra,
+            # e duas das tres entradas daqui (`mark_pending` e a verificacao) nao
+            # mudam o texto — a lista da janela as deixa de fora de proposito
+            # (ROADMAP 23.1), e perguntar por elas aqui e pedir outra coisa.
+            history = fetch_comment_history(cursor, comment_id, only_text_changes=False)
             self.assertEqual(len(history), 3)
             self.assertEqual(history[0][1], "restore")
             self.assertEqual(history[0][2], "trans revisada")
             self.assertEqual(history[0][3], "trans")
+            # Fechada DENTRO do `with`: o Windows nao apaga arquivo aberto, e a
+            # limpeza do diretorio temporario acontece na saida do bloco. Sem
+            # isto o teste depende de o coletor de lixo ter passado antes — e
+            # passou, por anos, ate um teste novo em outra classe mudar o ritmo
+            # das alocacoes e a limpeza estourar `PermissionError`.
             conn.close()
 
     def test_exact_translation_matches_can_be_verified_together(self):
@@ -1199,7 +1739,7 @@ class DatabaseTests(unittest.TestCase):
                 "SELECT id FROM comments WHERE original_comment = ?",
                 ("orig 2",),
             ).fetchone()[0]
-            history = fetch_comment_history(cursor, propagated_id)
+            history = fetch_comment_history(cursor, propagated_id, only_text_changes=False)
             self.assertEqual(len(history), 1)
             self.assertEqual(history[0][1], "verify_exact_match")
             self.assertEqual(history[0][4], 0)
@@ -2709,11 +3249,19 @@ class EditorCommonTests(unittest.TestCase):
         self.assertLessEqual(len(preview("x" * 500, 54)), 54)
 
     def test_both_editors_share_the_same_geometry_logic(self):
-        # As duas janelas so devem divergir no tamanho minimo.
+        # As duas janelas so devem divergir no tamanho minimo. O do editor de
+        # traducoes sai das constantes dos paineis desde 22.10 — escrever 1176
+        # aqui a mao recriaria a segunda fonte que aquele item eliminou.
         janela = FakeWindow(1920, 1080)
         self.assertEqual(
             safe_geometry(janela, "300x200+10+10"),
-            clamp_geometry("300x200+10+10", 1920, 1080, 1120, 680),
+            clamp_geometry(
+                "300x200+10+10",
+                1920,
+                1080,
+                edit_window.MIN_WIDTH,
+                edit_window.MIN_HEIGHT,
+            ),
         )
         self.assertEqual(
             glossary_safe_geometry(janela, "300x200+10+10"),
@@ -6399,7 +6947,7 @@ class TranslateTextTests(unittest.TestCase):
         """Garantia T3: nao se monta uma traducao pela metade."""
         chamadas = []
 
-        def fake(chunk, _lang, _log=None, session=None, pacer=None, source_language=""):
+        def fake(chunk, _lang, _log=None, session=None, pacer=None, source_language="", cancel_flag=None):
             chamadas.append(chunk)
             return None if len(chamadas) == 2 else "ok"
 
@@ -6413,7 +6961,7 @@ class TranslateTextTests(unittest.TestCase):
         chamadas = []
         flag = threading.Event()
 
-        def fake(chunk, _lang, _log=None, session=None, pacer=None, source_language=""):
+        def fake(chunk, _lang, _log=None, session=None, pacer=None, source_language="", cancel_flag=None):
             chamadas.append(chunk)
             flag.set()
             return "ok"
@@ -8866,14 +9414,35 @@ class TypedConfirmationTests(unittest.TestCase):
     def test_the_word_releases_the_action(self):
         self.assertTrue(confirmation_accepted(CONFIRMATION_WORD))
 
+    def test_the_word_is_in_the_language_of_the_dialog(self):
+        """O dialogo e todo em portugues e o botao dele se chama "Apagar".
+
+        A palavra era `delete`, e quem digitava "apagar" — a leitura mais natural
+        do que esta na tela — era RECUSADO sem explicacao (ROADMAP 22.12). Uma
+        barreira que existe para transformar clique em decisao nao pode falhar
+        por vocabulario.
+        """
+        self.assertEqual(CONFIRMATION_WORD, "apagar")
+
     def test_case_and_surrounding_space_do_not_matter(self):
-        """Quem digitou DELETE decidiu tanto quanto quem digitou delete."""
-        for texto in ["DELETE", " delete ", "Delete", "\tdelete\n"]:
+        """Quem digitou APAGAR decidiu tanto quanto quem digitou apagar."""
+        for texto in ["APAGAR", " apagar ", "Apagar", "\tapagar\n"]:
             with self.subTest(texto=texto):
                 self.assertTrue(confirmation_accepted(texto))
 
+    def test_the_old_word_still_passes_for_one_version(self):
+        """Quem usa o programa ha meses tem `delete` na memoria dos dedos."""
+        for texto in ["delete", "DELETE", " delete "]:
+            with self.subTest(texto=texto):
+                self.assertTrue(confirmation_accepted(texto))
+
+    def test_the_old_word_does_not_leak_into_another_word(self):
+        """Um chamador que peca outra palavra nao ganha `delete` de brinde."""
+        self.assertFalse(confirmation_accepted("delete", word="zerar"))
+        self.assertTrue(confirmation_accepted("zerar", word="zerar"))
+
     def test_anything_else_does_not(self):
-        for texto in ["", None, "del", "deletes", "apagar", "sim", "s"]:
+        for texto in ["", None, "apag", "apagars", "del", "sim", "s"]:
             with self.subTest(texto=texto):
                 self.assertFalse(confirmation_accepted(texto))
 
@@ -9317,6 +9886,86 @@ class ResetGlossaryTests(ResetToolsTestCase):
         db_tools.reset_glossary(app)
 
         self.assertEqual(avisos, [[]])
+
+    # ------------------------------------------------------- ROADMAP 22.12
+
+    def test_the_question_counts_the_file_and_not_the_applicable_rules(self):
+        """Garantia S16. Anunciava 7.325 e apagava 5.910 no glossario real.
+
+        Aqui a mesma divergencia cabe em duas linhas: a de `@casa@` vale 64
+        regras na aplicacao e UMA no arquivo, e a de limpeza nao entra na lista
+        aplicavel mas e apagada do mesmo jeito.
+        """
+        self.glossario_com(
+            [
+                ("@casa@-torre", "torre de @casa@", "suggestion"),
+                ("  x  ", "y", "cleanup"),
+            ]
+        )
+        app = self.app_falso(self.base / "traducoes.db")
+        # O estado que o dialogo lia antes: a lista APLICAVEL, com 64 regras.
+        app.glossary_substitutions = load_interactive_substitutions()
+        self.assertEqual(len(app.glossary_substitutions), 64)
+        self.resposta = False
+
+        db_tools.reset_glossary(app)
+
+        self.assertIn("2 regras", self.perguntas[0][1])
+        self.assertNotIn("64 regras", self.perguntas[0][1])
+
+    def test_the_question_says_the_number_by_type(self):
+        self.glossario_com([("rook", "torre", "suggestion"), ("  x  ", "y", "cleanup")])
+        app = self.app_falso(self.base / "traducoes.db")
+        self.resposta = False
+
+        db_tools.reset_glossary(app)
+
+        self.assertIn("1 sugestão e 1 limpeza", self.perguntas[0][1])
+
+    def test_the_factory_rules_do_not_come_back_from_nowhere(self):
+        """Zerar deixava a sessao sem regra nenhuma e a abertura seguinte com 232.
+
+        A semente e mesclada em toda carga (S15) e o zerar nao a apaga — ela vem
+        com o programa. Esvaziar a lista em memoria fazia o programa "recuperar"
+        sozinho, no dia seguinte, um glossario que o usuario acabou de zerar.
+        """
+        caminho = self.glossario_com([("rook", "torre")])
+        semente = self.base / "semente.txt"
+        semente.write_text(
+            "substituicoes = [('bishop', 'bispo', 'suggestion', 0, 'pt')]",
+            encoding="utf-8",
+        )
+        original = glossario._default_seed_path
+        glossario._default_seed_path = lambda: str(semente)
+        self.addCleanup(setattr, glossario, "_default_seed_path", original)
+
+        app = self.app_falso(self.base / "traducoes.db")
+
+        db_tools.reset_glossary(app)
+
+        self.assertEqual(load_glossary_entries(str(caminho), prefer_db=False), [])
+        self.assertEqual(
+            [tuple(regra[:2]) for regra in app.glossary_substitutions],
+            [("bishop", "bispo")],
+        )
+
+    def test_the_result_says_what_is_left(self):
+        """Sem isso, "glossario zerado" com sugestoes ainda aparecendo confunde."""
+        self.glossario_com([("rook", "torre")])
+        semente = self.base / "semente.txt"
+        semente.write_text(
+            "substituicoes = [('bishop', 'bispo', 'suggestion', 0, 'pt')]",
+            encoding="utf-8",
+        )
+        original = glossario._default_seed_path
+        glossario._default_seed_path = lambda: str(semente)
+        self.addCleanup(setattr, glossario, "_default_seed_path", original)
+
+        db_tools.reset_glossary(self.app_falso(self.base / "traducoes.db"))
+
+        infos = [m for tipo, _t, m in self.dialogos if tipo == "info"]
+        self.assertTrue(infos, self.dialogos)
+        self.assertIn("1 regra(s) de fábrica", infos[0])
 
 # ===========================================================================
 # Letras das pecas: correcao ancorada no comentario original
@@ -10363,8 +11012,24 @@ class MainWindowSettingsTests(unittest.TestCase):
                 "target_language": "es",
                 "process_subdirs": False,
                 "source_path": "C:/partidas",
+                # Ausente no que foi gravado: a janela principal so passou a
+                # lembrar tamanho e posicao em 22.12, e um arquivo de antes disso
+                # tem de abrir maximizada como sempre abriu.
+                "geometry": "",
             },
         )
+
+    def test_the_saved_geometry_comes_back(self):
+        """A janela principal era a unica que nunca lembrava onde estava."""
+        guardado = {MAIN_WINDOW_KEY: {"geometry": "1200x800+40+20"}}
+        self.assertEqual(
+            read_main_window_settings(guardado, self.IDIOMAS)["geometry"],
+            "1200x800+40+20",
+        )
+
+    def test_a_geometry_that_is_not_text_falls_back_to_maximizing(self):
+        guardado = {MAIN_WINDOW_KEY: {"geometry": 1200}}
+        self.assertEqual(read_main_window_settings(guardado, self.IDIOMAS)["geometry"], "")
 
     def test_detect_survives_next_to_a_non_default_target(self):
         """A string vazia e "Detectar", uma escolha legitima.
@@ -15949,18 +16614,23 @@ class GenerationIsLinearTests(unittest.TestCase):
                 self.assertTrue(cru.startswith(marca), nome)
                 self.assertEqual(cru.count(marca), 1, f"{nome}: {cru[:30]!r}")
 
-    def test_a_translation_the_input_encoding_cannot_hold_falls_back_to_utf8(self):
-        """O fallback de codificacao, agora que a gravacao e por pedacos.
+    def test_a_single_byte_input_encoding_does_not_become_the_output_encoding(self):
+        """A saida de um PGN cp1252 sai em UTF-8, inteira e com o log dizendo.
 
-        O erro de codificacao acontece NO MEIO da gravacao — o `w` da segunda
-        tentativa e o que trunca o arquivo pela metade que a primeira deixou. Sem
-        isso, o PGN de saida ficaria cortado no primeiro caractere que o cp1252
-        nao aceita, e o log diria que deu tudo certo.
+        Antes a saida herdava a codificacao da entrada. Um caractere que o
+        cp1252 nao representa cortava o arquivo no meio da gravacao, e so o
+        fallback do `UnicodeEncodeError` o salvava; um caractere que ele
+        representa — todo acento do portugues — nao acionava fallback nenhum e
+        saia em byte unico, para o leitor seguinte descartar.
+
+        As duas metades ficam aqui juntas de proposito: o arquivo tem de sair
+        INTEIRO (a checagem do truncamento, que era o ponto do teste antigo) e
+        tem de sair em UTF-8.
         """
         with tempfile.TemporaryDirectory() as tmp:
             pgn = Path(tmp) / "game.pgn"
             # Com acento: um PGN so de ASCII e detectado como UTF-8 (nunca como
-            # 'ascii'), e o fallback que este teste exercita nao aconteceria.
+            # 'ascii'), e a promocao que este teste exercita nao aconteceria.
             movetext = " ".join(
                 f"{i + 1}. e4 {{comentário {i} com ação}}" for i in range(400)
             )
@@ -15979,15 +16649,82 @@ class GenerationIsLinearTests(unittest.TestCase):
             )
 
             self.assertTrue(ok)
+            self.assertEqual(detect_encoding(saida), "utf-8")
             texto = Path(saida).read_text(encoding="utf-8")
             self.assertIn("posicao ganha 中", texto)
+            self.assertIn("comentário 0 com ação", texto)
             self.assertTrue(texto.rstrip().endswith("*"), "o arquivo saiu truncado")
             self.assertEqual(texto.count("{"), 400)
 
         self.assertTrue(
-            any("UTF-8" in linha for linha in logs),
+            any("cp1252" in linha and "utf-8" in linha for linha in logs),
             f"a troca de codificacao tem de aparecer no log: {logs}",
         )
+
+    def test_an_accented_translation_of_an_ascii_book_survives_the_next_reader(self):
+        """O caso real: livro em ingles, traducao para portugues, acento sumido.
+
+        Um PGN em ingles com dois nomes de jogador acentuados e detectado como
+        cp1252. A traducao para portugues enche o arquivo de acento, o cp1252 o
+        representa sem reclamar — nenhum `UnicodeEncodeError` —, e a saida
+        ficava com milhares de bytes altos de byte unico. Quem le esperando
+        UTF-8, como o ChessBase 26, descarta cada um deles: "Dragao" no lugar
+        de "Dragão", "posio" no lugar de "posição".
+
+        A prova aqui e a do leitor, e nao a do gravador: o arquivo e decodificado
+        como UTF-8 estrito. Antes da correcao esta linha levanta
+        `UnicodeDecodeError`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            pgn = Path(tmp) / "livro.pgn"
+            pgn.write_text(
+                '[Event "Torneio"]\n[White "Jimenez, José"]\n\n'
+                "1. e4 {A sharp line in the Dragon} 1-0\n",
+                encoding="cp1252",
+            )
+            self.assertEqual(detect_encoding(str(pgn)), "cp1252")
+
+            info = extract_comments_from_file(str(pgn))
+            traducao = "Uma linha aguda na Dragão, com posição de ataque"
+            saida = Path(tmp) / "livro-BR.pgn"
+
+            self.assertTrue(
+                generate_translated_pgn(
+                    str(pgn),
+                    str(saida),
+                    {info["comments"][0]: traducao},
+                    info["positions"],
+                )
+            )
+
+            texto = saida.read_bytes().decode("utf-8")  # estrito de proposito
+            self.assertIn(traducao, texto)
+            self.assertIn("Jimenez, José", texto)
+
+    def test_the_output_encoding_promotes_only_what_is_not_unicode(self):
+        """A tabela da promocao, sem passar por disco.
+
+        UTF-16 e UTF-32 nao entram: carregam BOM, se anunciam ao leitor e nao
+        perdem caractere. E a opcao de BOM continua valendo DEPOIS da promocao.
+        """
+        casos = [
+            # (codificacao de entrada, use_bom, codificacao de gravacao)
+            ("cp1252", False, "utf-8"),
+            ("cp1252", True, "utf-8-sig"),
+            ("latin-1", False, "utf-8"),
+            ("iso-8859-1", False, "utf-8"),
+            ("utf-8", False, "utf-8"),
+            ("utf-8", True, "utf-8-sig"),
+            ("utf-8-sig", False, "utf-8-sig"),
+            ("utf-16", False, "utf-16"),
+            ("utf-16", True, "utf-16"),
+            ("utf-32", False, "utf-32"),
+        ]
+        for entrada, bom, esperada in casos:
+            with self.subTest(entrada=entrada, use_bom=bom):
+                self.assertEqual(
+                    pgn_utils._output_encoding(entrada, bom), esperada
+                )
 
     def test_cancelling_stops_the_generation_before_writing_anything(self):
         """A fase nao tinha checagem de `cancel_flag` nenhuma (ROADMAP 20.1)."""
@@ -17212,6 +17949,245 @@ class FirstRunTests(unittest.TestCase):
 
     def test_the_data_dir_is_announced(self):
         self.assertIn(str(self.dados), first_run.describe_data_dir())
+
+
+class ProseSpellcheckTests(unittest.TestCase):
+    """O corretor de prosa do idioma de destino (ROADMAP 19.11 e 26).
+
+    O dicionario e carregado uma vez para a classe inteira: sao 4,6 MB e ~2,3 s,
+    e paga-los por teste seria mais tempo do que a suite toda leva hoje.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dicionario = prose_spellcheck.load_dictionary("pt")
+        if cls.dicionario is None:
+            raise unittest.SkipTest(
+                "sem dicionario pt-BR em dicionarios/ (ou sem o spylls instalado)"
+            )
+
+    def marcas(self, texto, origem=""):
+        conhecidas = prose_spellcheck.source_vocabulary(origem)
+        return [
+            palavra
+            for _i, _f, palavra in prose_spellcheck.misspelled_spans(
+                texto, self.dicionario, conhecidas
+            )
+        ]
+
+    def test_a_typo_is_marked_and_the_prose_around_it_is_not(self):
+        self.assertEqual(
+            self.marcas("As pretas ficam com uma posiçao dificil aqui."),
+            ["posiçao", "dificil"],
+        )
+
+    def test_the_offsets_point_at_the_word_and_not_at_the_line(self):
+        """A janela pinta por deslocamento; errar o intervalo sublinha o vizinho."""
+        texto = "As pretas ficam com uma posiçao boa."
+        inicio, fim, palavra = prose_spellcheck.misspelled_spans(
+            texto, self.dicionario
+        )[0]
+        self.assertEqual(texto[inicio:fim], palavra)
+        self.assertEqual(palavra, "posiçao")
+
+    def test_chess_notation_is_never_marked(self):
+        """Sem isto o corretor marca o livro inteiro: cada lance e uma palavra
+        que dicionario nenhum conhece."""
+        self.assertEqual(
+            self.marcas("Depois de 13.Cd4 exd5 14 Bxf7+ Rxf7 0-0-0 e4-e5, tudo bem."),
+            [],
+        )
+
+    def test_a_word_glued_to_a_digit_is_not_split_into_a_mark(self):
+        """O defeito que a medicao das 6.500 linhas encontrou.
+
+        Quebrar a palavra no digito transforma `Cd4` em `Cd`, e `Cd` nao casa
+        padrao nenhum de notacao — eram 40 das 70 marcas mais frequentes, todas
+        estilhaco de um token que o texto nao tem.
+        """
+        for texto in ("13.Cd4", "Cxd5", "h4-h5", "Th8", "20Ca2"):
+            with self.subTest(texto=texto):
+                self.assertEqual(self.marcas(texto), [])
+
+    def test_a_name_from_the_source_text_is_not_marked(self):
+        """O filtro que faz o trabalho: 3.347 marcas viram 95.
+
+        Nome de jogador, de torneio e de cidade chegam a traducao vindos do
+        original em ingles, e e la que eles estao.
+        """
+        original = "Anand beat Karpov in Wijk aan Zee, a Ftacnik line."
+        traducao = "Anand venceu Karpov em Wijk aan Zee, numa linha de Ftacnik."
+        self.assertEqual(self.marcas(traducao, original), [])
+        # A contraprova: sem o texto de origem, os quatro nomes viram marca.
+        self.assertTrue(len(self.marcas(traducao)) >= 4)
+
+    def test_the_source_filter_ignores_case(self):
+        """`White` no original tem de cobrir `white` na traducao, e vice-versa."""
+        self.assertEqual(self.marcas("O plano de Ftacnik.", "a FTACNIK plan"), [])
+
+    def test_a_quoted_word_does_not_keep_the_apostrophe(self):
+        """O outro defeito da medicao: `'insipido'` virava a palavra
+        `insipido'`, que dicionario nenhum conhece."""
+        self.assertEqual(self.marcas("Um lance 'insípido' aqui."), [])
+
+    def test_an_internal_hyphen_keeps_the_word_whole(self):
+        """`bem-vindo` e uma palavra so; parti-la marca as duas metades."""
+        self.assertEqual(self.marcas("Um lance bem-vindo."), [])
+
+    def test_a_language_without_a_dictionary_says_so_instead_of_going_quiet(self):
+        """Sem o aviso, "nenhuma marca" quer dizer duas coisas opostas: texto
+        sem erro e corretor ausente. A janela nao distingue as duas sozinha."""
+        self.assertFalse(prose_spellcheck.has_dictionary("it"))
+        aviso = prose_spellcheck.unsupported_language_notice("it")
+        self.assertIn("IT", aviso)
+        self.assertEqual(prose_spellcheck.unsupported_language_notice("pt"), "")
+
+    def test_without_a_dictionary_nothing_is_marked_and_nothing_raises(self):
+        self.assertIsNone(prose_spellcheck.load_dictionary("it"))
+        self.assertEqual(
+            prose_spellcheck.misspelled_spans("qualquer coisa", None), []
+        )
+        self.assertEqual(prose_spellcheck.suggestions("qualquer", None), [])
+
+    def test_the_dictionary_is_loaded_once_per_process(self):
+        """A carga custa 2,3 s. Uma por tecla digitada seria o editor parado."""
+        self.assertIs(
+            prose_spellcheck.load_dictionary("pt"),
+            prose_spellcheck.load_dictionary("pt"),
+        )
+
+    def test_threads_asking_at_once_do_not_each_load_their_own_copy(self):
+        """O defeito que a suite de janelas encontrou (ROADMAP 26.4).
+
+        A primeira versao conferia o cache com o cadeado e o SOLTAVA para
+        carregar. Cada janela dispara a carga do seu lado, nenhuma tinha
+        terminado quando as outras conferiram, e o processo montou varias copias
+        de 4,6 MB ao mesmo tempo — 1,3 GB e a suite sem terminar.
+
+        O teste falha com aquela versao: `chamadas` fica em 8, e nao em 1.
+        """
+        idioma = "zz-teste"
+        chamadas = []
+        real = prose_spellcheck.dictionary_files
+
+        def falso(alvo):
+            if alvo == idioma:
+                return real("pt")
+            return real(alvo)
+
+        def contando(*args, **kwargs):
+            chamadas.append(args)
+            time.sleep(0.05)  # a janela em que a versao errada duplicava
+            return object()
+
+        modulo = importlib.import_module("spylls.hunspell")
+        original = modulo.Dictionary.from_files
+        prose_spellcheck.dictionary_files = falso
+        modulo.Dictionary.from_files = staticmethod(contando)
+        try:
+            resultados = []
+            threads = [
+                threading.Thread(
+                    target=lambda: resultados.append(
+                        prose_spellcheck.load_dictionary(idioma)
+                    )
+                )
+                for _ in range(8)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        finally:
+            modulo.Dictionary.from_files = original
+            prose_spellcheck.dictionary_files = real
+            prose_spellcheck._dictionaries.pop(idioma, None)
+            prose_spellcheck._language_locks.pop(idioma, None)
+
+        self.assertEqual(len(chamadas), 1, "o dicionario foi carregado mais de uma vez")
+        self.assertEqual(len(set(id(r) for r in resultados)), 1)
+
+    def test_the_loader_never_calls_back_into_the_caller(self):
+        """A janela PERGUNTA; a thread nao avisa (ROADMAP 26.5).
+
+        A versao anterior recebia um `on_ready` e o chamava na thread de carga.
+        Do outro lado isso virava `win.after(...)`, que registra um comando no
+        interpretador Tk — e fora da thread principal levanta `RuntimeError:
+        main thread is not in main loop`. A suite de janelas produziu esse
+        traceback uma vez por janela.
+
+        O contrato que substitui aquele: `request_dictionary` devolve o
+        dicionario ou `None`, e `is_loading` diz se vale a pena perguntar de
+        novo. Nenhuma das duas toca em nada de fora.
+        """
+        idioma = "zy-teste"
+        real = prose_spellcheck.dictionary_files
+        prose_spellcheck.dictionary_files = lambda alvo: (
+            real("pt") if alvo == idioma else real(alvo)
+        )
+        try:
+            self.assertIsNone(prose_spellcheck.request_dictionary(idioma))
+            for _ in range(200):  # ate 20 s; a carga leva ~2,3 s
+                if not prose_spellcheck.is_loading(idioma):
+                    break
+                time.sleep(0.1)
+            self.assertFalse(prose_spellcheck.is_loading(idioma))
+            self.assertIsNotNone(prose_spellcheck.request_dictionary(idioma))
+        finally:
+            prose_spellcheck.dictionary_files = real
+            prose_spellcheck._dictionaries.pop(idioma, None)
+            prose_spellcheck._language_locks.pop(idioma, None)
+
+    def test_asking_for_a_language_without_a_dictionary_starts_no_thread(self):
+        self.assertIsNone(prose_spellcheck.request_dictionary("it"))
+        self.assertFalse(prose_spellcheck.is_loading("it"))
+
+    def test_a_suggestion_is_offered_for_the_typo(self):
+        self.assertIn(
+            "posição", prose_spellcheck.suggestions("posiçao", self.dicionario)
+        )
+
+    def test_the_dictionary_knows_the_chess_terms_the_glossary_imposes(self):
+        """A contraprova do dicionario escolhido: se ele nao souber a
+        terminologia que o glossario impoe, o corretor briga com a decisao de
+        quem o usa."""
+        for termo in (
+            "xeque", "cravada", "qualidade", "abandonaram", "peão",
+            "coluna", "fila", "casa", "dama", "cavalo", "bispo", "torre",
+            "lance", "partida", "final", "empate",
+        ):
+            with self.subTest(termo=termo):
+                self.assertEqual(self.marcas(f"Uma {termo} aqui."), [])
+
+    def test_a_term_the_dictionary_lacks_is_covered_by_the_glossary(self):
+        """O que o dicionario de 2010 nao tem, o glossario cobre.
+
+        `contra-jogo` sozinho respondia por 58 das 143 marcas do banco de
+        desenvolvimento, e o filtro que o cala nao e uma lista nova: e o lado
+        direito das regras que o proprio usuario escreveu.
+        """
+        texto = "As pretas ficam com contra-jogo suficiente."
+        self.assertEqual(self.marcas(texto), ["contra-jogo"])
+
+        vocabulario = prose_spellcheck.glossary_vocabulary(
+            [("counterplay", "contra-jogo"), ("check", "xeque")]
+        )
+        self.assertEqual(
+            prose_spellcheck.misspelled_spans(texto, self.dicionario, vocabulario),
+            [],
+        )
+
+    def test_the_glossary_vocabulary_comes_from_the_replacement_side(self):
+        """O lado ESQUERDO e o texto que se quer trocar — o errado. Ensina-lo ao
+        corretor calaria o aviso no unico lugar em que ele acerta sozinho."""
+        vocabulario = prose_spellcheck.glossary_vocabulary(
+            [("posiçao", "posição")]
+        )
+        self.assertIn("posição", vocabulario)
+        self.assertNotIn("posiçao", vocabulario)
+        self.assertEqual(
+            self.marcas("Uma posiçao ruim."), ["posiçao"]
+        )
 
 
 if __name__ == "__main__":

@@ -27,8 +27,8 @@ from .glossario import (
     resolve_glossary_conflict,
     find_glossary_entry_index,
     apply_all_substitutions,
-    apply_substitution,
     import_glossary_csv,
+    interactive_rules_from_entries,
     glossary_entry_pair,
     glossary_entry_priority,
     glossary_entry_type,
@@ -44,11 +44,15 @@ from .glossario import (
 )
 from .settings import load_settings
 from .editor_common import (
+    ERROR_TEXT_COLOR,
+    MUTED_TEXT_COLOR,
+    OK_TEXT_COLOR,
     ROW_COLOR,
     ROW_HOVER_COLOR,
     ROW_TEXT_COLOR,
     SELECTED_ROW_COLOR,
     SELECTED_ROW_TEXT_COLOR,
+    WARNING_TEXT_COLOR,
     clamp_page,
     page_count as compute_page_count,
     page_offset,
@@ -65,9 +69,12 @@ from .window_utils import restore_or_maximize
 
 
 INVALID_PRIORITY_WARNING = "Prioridade precisa ser um número inteiro."
-WARNING_COLOR = "#f59e0b"
-OK_COLOR = "#16a34a"
-ERROR_COLOR = "#dc2626"
+# Os tres nomes ficam — sao a linguagem desta janela —, mas o valor vem da
+# paleta compartilhada (ROADMAP 22.9): eram um hex por cor, e um hex so nao serve
+# aos dois temas.
+WARNING_COLOR = WARNING_TEXT_COLOR
+OK_COLOR = OK_TEXT_COLOR
+ERROR_COLOR = ERROR_TEXT_COLOR
 PAGE_SIZE = 150
 MIN_WIDTH = 1040
 MIN_HEIGHT = 640
@@ -469,7 +476,7 @@ class GlossaryEditor:
         ctk.CTkLabel(
             type_bar,
             text="(maior vence; 0 deixa o comprimento decidir)",
-            text_color="#64748b",
+            text_color=MUTED_TEXT_COLOR,
             anchor="w",
         ).grid(row=0, column=4, sticky="w", padx=(8, 0))
 
@@ -496,7 +503,7 @@ class GlossaryEditor:
             text=(
                 f"(destino, ou 'en>pt'; '*' = todos; padrão do arquivo: {padrao})"
             ),
-            text_color="#64748b",
+            text_color=MUTED_TEXT_COLOR,
             anchor="w",
         ).grid(row=0, column=2, sticky="w", padx=(8, 0))
 
@@ -566,7 +573,7 @@ class GlossaryEditor:
         self.msg_label.pack(side=tk.LEFT)
         self.dirty_label = ctk.CTkLabel(status_line, text="Salvo", text_color=OK_COLOR)
         self.dirty_label.pack(side=tk.LEFT, padx=(12, 0))
-        self.file_label = ctk.CTkLabel(status_line, text="", text_color="#64748b")
+        self.file_label = ctk.CTkLabel(status_line, text="", text_color=MUTED_TEXT_COLOR)
         self.file_label.pack(side=tk.LEFT, padx=(12, 0))
 
         actions = ctk.CTkFrame(footer, fg_color="transparent")
@@ -630,6 +637,17 @@ class GlossaryEditor:
         self.win.bind("<Control-S>", lambda _event: (self.save_current(), "break")[1])
         self.win.bind("<Control-n>", lambda _event: (self.new_entry(), "break")[1])
         self.win.bind("<Control-N>", lambda _event: (self.new_entry(), "break")[1])
+        # A paridade minima com o editor de traducoes (ROADMAP 22.12). Este
+        # editor ligava dois atalhos contra os treze do outro, e os que faltavam
+        # sao os do fluxo de quem varre uma lista: achar, andar e virar pagina.
+        # O resto do que o outro tem (voltar, campo de pagina, selecao em lote)
+        # continua de fora — ver a secao 10 da SPEC.
+        self.win.bind("<Control-l>", self.focus_search)
+        self.win.bind("<Control-L>", self.focus_search)
+        self.win.bind("<Alt-Left>", lambda _event: (self.step_entry(-1), "break")[1])
+        self.win.bind("<Alt-Right>", lambda _event: (self.step_entry(1), "break")[1])
+        self.win.bind("<Control-Prior>", lambda _event: (self.change_page(-1), "break")[1])
+        self.win.bind("<Control-Next>", lambda _event: (self.change_page(1), "break")[1])
         self.win.protocol("WM_DELETE_WINDOW", self.close_editor)
 
     def load_first_entry(self, initial_original=None, initial_replacement=None):
@@ -643,7 +661,10 @@ class GlossaryEditor:
         self.win.after(100, self.restore_pane_position)
 
     def show_message(self, text, color=OK_COLOR):
-        flash_message(self.msg_label, self.win, text, 1800, text_color=color)
+        # Sem tempo fixo: ele vem do tamanho do texto (ROADMAP 22.6). Eram 1.800
+        # ms para qualquer mensagem, e as desta janela variam de "Salvo" a frases
+        # que nomeiam a regra em conflito.
+        flash_message(self.msg_label, self.win, text, text_color=color)
 
     def save_editor_settings(self):
         save_window_section(
@@ -759,16 +780,66 @@ class GlossaryEditor:
         if not self.state.loading:
             self.set_dirty(self.form_changed())
 
+    def preview_languages(self):
+        """O par com que a previa avalia o escopo (garantia S11).
+
+        Sai da janela principal, que e onde o par de uma traducao e escolhido.
+        Sem ele — um `app` de teste, ou uma versao futura sem esses seletores —
+        `None` desliga o filtro por escopo, que e o comportamento de sempre.
+        """
+        def valor(nome):
+            variavel = getattr(self.app, nome, None)
+            try:
+                return variavel.get() or None
+            except AttributeError:
+                return None
+
+        return valor("source_language"), valor("target_language")
+
+    def preview_rules(self, entries):
+        """As regras que o PIPELINE tiraria destas entradas (ROADMAP 22.12).
+
+        A previa usava os pares crus, e por isso divergia da aplicacao real em
+        tres pontos: a prioridade era descartada (com uma regra promovida por
+        "Priorizar esta", a previa dava um resultado e o pipeline outro — a
+        previa contradizia o banner de conflito exibido ao lado dela, garantia
+        S9), o escopo era ignorado e o `@casa@` ficava inerte, casando nada.
+        """
+        return interactive_rules_from_entries(entries, *self.preview_languages())
+
     def refresh_preview(self):
+        """A previa da regra ABERTA, com a conversao de verdade.
+
+        A entrada e montada dos campos do formulario, e nao lida do arquivo: o
+        proposito do teste rapido e experimentar o que ainda nao foi salvo.
+
+        `apply_all_substitutions` com uma regra so, e nao `apply_substitution`:
+        o pipeline troca TODAS as ocorrencias, e a previa trocava apenas a
+        primeira — num paragrafo com tres "bishop" ela mostrava um resultado que
+        nunca aconteceria.
+        """
         orig, new = self.current_pair()
         sample = self.test_text_var.get()
-        result = apply_substitution(sample, orig, new) if orig else sample
-        self.set_preview_text(result)
+        if not orig:
+            self.set_preview_text(sample)
+            return
+
+        entrada = (
+            orig,
+            new,
+            self.current_rule_type(),
+            self.current_priority() or 0,
+            self.current_scope(),
+        )
+        regras = self.preview_rules([entrada])
+        self.set_preview_text(
+            apply_all_substitutions(sample, regras) if regras else sample
+        )
 
     def apply_all_to_preview(self):
         self.set_preview_text(
             apply_all_substitutions(
-                self.test_text_var.get(), entry_pairs(self.state.entries)
+                self.test_text_var.get(), self.preview_rules(self.state.entries)
             )
         )
 
@@ -932,7 +1003,13 @@ class GlossaryEditor:
             self.state.entries = []
             self.state.diagnostics = []
             self.state.conflicts = {}
-            messagebox.showerror("Erro", f"Erro ao carregar glossário:\n{exc}")
+            # Com `parent`, como os outros treze dialogos deste arquivo. Era o
+            # unico sem ele, e por isso o unico que abria ATRAS do editor
+            # maximizado — um erro invisivel numa janela que parece travada
+            # (ROADMAP 22.12).
+            messagebox.showerror(
+                "Erro", f"Erro ao carregar glossário:\n{exc}", parent=self.win
+            )
         # O indice de validacao e derivado de `entries`; invalida junto.
         self.state.validation_lookup = None
         self.file_label.configure(text=f"Arquivo: Substituicoes.txt")
@@ -975,6 +1052,39 @@ class GlossaryEditor:
         if 0 <= new_page < self.page_count():
             self.state.page_index = new_page
             self.render_rows()
+
+    def step_entry(self, delta):
+        """Vai para a entrada anterior ou seguinte DA LISTA FILTRADA (22.12).
+
+        Pela lista filtrada, e nao pela posicao no arquivo: com "Duplicadas"
+        ativo, `+1` sobre o indice do arquivo pousaria numa regra que a tela nao
+        mostra — o mesmo erro que a garantia R10 nomeou no editor de traducoes.
+
+        Vira a pagina quando passa da borda, porque a alternativa e um atalho que
+        para de funcionar na centesima linha sem dizer por que.
+        """
+        visiveis = self.state.filtered_indices
+        if not visiveis:
+            return None
+        try:
+            posicao = visiveis.index(self.state.selected_index)
+        except ValueError:
+            posicao = -1 if delta > 0 else len(visiveis)
+
+        nova = posicao + delta
+        if not (0 <= nova < len(visiveis)):
+            return None
+
+        pagina = nova // PAGE_SIZE
+        if pagina != self.state.page_index:
+            self.state.page_index = pagina
+            self.render_rows()
+        self.select_entry(visiveis[nova])
+        return visiveis[nova]
+
+    def focus_search(self, _event=None):
+        self.search_entry.focus_set()
+        return "break"
 
     def restart_at_first_page(self, _value=None):
         """Trocar o filtro ou a ordem volta para a primeira pagina.

@@ -136,13 +136,38 @@ def translate_text_chunk(
     session=None,
     pacer=None,
     source_language="",
+    cancel_flag=None,
 ):
     """Traduz um trecho. `source_language` vazio mantem o `sl=auto` de sempre.
 
     Declarar o idioma de origem nao e so metadado: `sl=auto` faz o endpoint
     adivinhar a partir do texto, e um comentario curto de xadrez — "Ng5!", "Bien
     jugado" — e pouco texto para adivinhar. Dito o idioma, ele para de tentar.
+
+    **`cancel_flag` alcanca o laco de tentativas** (ROADMAP 22.13). Esta funcao
+    nem recebia o flag: `translate_text` o conferia so ENTRE chunks, e o laco de
+    tres tentativas dormia em `time.sleep` sem olhar cancelamento nenhum. Com o
+    timeout real de 30 s por tentativa, a janela em que "Cancelar" nao tem efeito
+    chega a ~93 s por chunk contra um endpoint que pendura a conexao — que e
+    justamente o cenario em que mais se clica Cancelar. Reproduzido com sessao
+    falsa: flag ligado durante a primeira tentativa, e as tres rodaram mesmo
+    assim.
+
+    Conferido em dois pontos, e os dois sao necessarios: antes de cada tentativa
+    (senao o cancelamento durante a espera ainda dispara a requisicao seguinte) e
+    antes de cada espera (senao espera-se 1,5 s para depois desistir). A
+    requisicao EM VOO continua inevitavel — quem a interromperia seria o timeout
+    do `requests`, e ele ja esta em 30 s.
+
+    Devolve `None` ao cancelar, que e o que os chamadores ja tratam como "nao
+    traduziu": para eles, cancelado e falha sao o mesmo caminho.
     """
+    def cancelado():
+        return cancel_flag is not None and cancel_flag.is_set()
+
+    if cancelado():
+        return None
+
     url = "https://translate.googleapis.com/translate_a/single"
     params = {
         "client": "gtx",
@@ -154,6 +179,8 @@ def translate_text_chunk(
     http_client = session or requests
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        if cancelado():
+            return None
         status_code = None
         try:
             response = http_client.get(url, params=params, timeout=30)
@@ -194,6 +221,8 @@ def translate_text_chunk(
             return None
 
         if attempt < MAX_ATTEMPTS:
+            if cancelado():
+                return None
             time.sleep(retry_delay_seconds(attempt, status_code))
 
     return None
@@ -224,6 +253,10 @@ def translate_text(
             session=session,
             pacer=pacer,
             source_language=source_language,
+            # O flag ATRAVESSA (ROADMAP 22.13). A conferencia acima cobre a
+            # fronteira entre chunks; sem passa-lo adiante, um comentario de um
+            # chunk so — a maioria — nao tinha nenhuma.
+            cancel_flag=cancel_flag,
         )
         if translated is None:
             return None

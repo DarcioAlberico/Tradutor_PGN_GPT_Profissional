@@ -32,6 +32,7 @@ from .failed_runs import (
 from .glossario import load_interactive_substitutions, report_glossary_error
 from .glossary_editor import open_glossary_editor
 from .pgn_spellcheck import normalize_pgn_metadata_path
+from .settings import write_main_window_settings
 from .translation_worker import run_translation
 
 
@@ -211,6 +212,24 @@ def log_message(app, message: str):
             pass
 
 
+def log_is_at_the_end(log_text):
+    """A ultima linha do log esta visivel?
+
+    E a pergunta que decide o autoscroll (ROADMAP 22.12). `yview()` devolve a
+    fracao visivel `(inicio, fim)`; `fim >= 1.0` quer dizer que o fim do texto
+    esta na tela. A tolerancia existe porque a fracao e calculada em pixels e uma
+    linha parcialmente visivel devolve 0,999...
+
+    Fora do Tk (um log ainda nao desenhado) a resposta e "sim": o comportamento
+    de quem nunca rolou nada tem de ser o de sempre.
+    """
+    try:
+        _inicio, fim = log_text.yview()
+    except Exception:
+        return True
+    return fim >= 0.999
+
+
 def update_log(app):
     try:
         while not app.log_queue.empty():
@@ -219,9 +238,20 @@ def update_log(app):
             except queue.Empty:
                 break
             try:
+                # **Autoscroll condicional** (ROADMAP 22.12). O `see(END)` era
+                # incondicional: reler um `[AVISO]` no meio de uma execucao era
+                # ser puxado de volta para o fim a cada mensagem nova — e numa
+                # traducao longa elas chegam sem parar. Rolar so quando o fim ja
+                # estava visivel e o padrao de console: quem esta lendo o meio
+                # fica onde estava, e quem esta acompanhando continua acompanhando.
+                #
+                # A pergunta e feita ANTES de inserir: depois da insercao o fim ja
+                # e outro, e a resposta seria sempre "nao".
+                acompanhando = log_is_at_the_end(app.log_text)
                 app.log_text.configure(state="normal")
                 app.log_text.insert(tk.END, msg + "\n")
-                app.log_text.see(tk.END)
+                if acompanhando:
+                    app.log_text.see(tk.END)
                 app.log_text.configure(state="disabled")
             except Exception:
                 pass
@@ -381,6 +411,75 @@ def cancel_translation(app):
         app.resume_button.configure(state="disabled")
         app.cancel_button.configure(state="disabled")
         app.log_message("Cancelamento solicitado…")
+
+
+def close_main_window(app):
+    """O X da janela principal (ROADMAP 22.12). `True` se o programa vai fechar.
+
+    A raiz nao tinha handler nenhum, e o X e o botao mais perto do cursor de quem
+    acha que terminou. Ele matava o processo inteiro, e com ele duas coisas:
+
+    - **a traducao em andamento**, no meio de um PGN — o arquivo da vez pode ficar
+      truncado, e a lista de falhas (T4) so e gravada no caminho feliz, entao o
+      que ficou por fazer some junto;
+    - **os fechamentos das janelas filhas**, que nao sao decoracao: o
+      `close_editor` do editor de traducoes grava a edicao aberta e a posicao da
+      janela, e sem ele se perdem ate 2,5 s de digitacao (o `DRAFT_SAVE_DELAY_MS`).
+
+    Com traducao ativa o X CANCELA em vez de fechar, e diz isso. Fechar depois de
+    pedir o cancelamento seria matar a thread do mesmo jeito, so que depois de uma
+    pergunta — e o worker precisa de tempo para fechar o arquivo que esta
+    escrevendo.
+    """
+    if app.is_processing:
+        if not messagebox.askyesno(
+            "Fechar",
+            "Há uma tradução em andamento.\n\n"
+            "Fechar agora deixaria o arquivo em processamento pela metade e "
+            "perderia a lista do que faltou.\n\n"
+            "Cancelar a tradução? (o programa continua aberto para você fechar "
+            "quando ela parar)",
+            parent=app.root,
+        ):
+            return False
+        cancel_translation(app)
+        return False
+
+    # O tamanho e a posicao, antes de destruir qualquer coisa: depois do
+    # `destroy` a geometria nao existe mais para ser lida (ROADMAP 22.12).
+    try:
+        write_main_window_settings({"geometry": app.root.geometry()})
+    except (OSError, tk.TclError):
+        # Perder a posicao da janela e aborrecimento; impedir o programa de
+        # fechar por causa disso, nao.
+        pass
+
+    # As filhas primeiro, e cada uma pelo SEU fechamento: e ele que grava o que
+    # esta aberto. Uma que falhe nao pode impedir as outras nem o programa de
+    # fechar — o X ja foi clicado, e travar ai deixaria a janela sem saida.
+    #
+    # O `tk.call` executa o comando Tcl que o `protocol` registrou, e uma excecao
+    # DENTRO do fechamento da filha nao volta por aqui: o Tk a entrega ao relator
+    # de callbacks (garantia C3), que a transforma em log e dialogo. O `except`
+    # abaixo cobre o outro caso — o comando ja nao existir, com a filha morrendo
+    # no meio do laco.
+    for filha in list(app.root.winfo_children()):
+        if not isinstance(filha, tk.Toplevel):
+            continue
+        try:
+            fechar = filha.protocol("WM_DELETE_WINDOW")
+        except tk.TclError:
+            continue
+        try:
+            if fechar:
+                filha.tk.call(fechar)
+            else:
+                filha.destroy()
+        except Exception:  # noqa: BLE001 - fechar nao pode falhar por causa de uma filha
+            pass
+
+    app.root.destroy()
+    return True
 
 
 def reset_buttons(app):
