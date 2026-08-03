@@ -1497,6 +1497,41 @@ E o que sai da lista e anunciado embaixo dela, junto com o corte em 100 versoes 
 esconder 607 de 889 entradas em silencio trocaria uma lista confusa por uma
 incompleta.
 
+**Garantia F27 — o corretor de prosa marca erro de digitacao, e nunca xadrez.**
+O texto da traducao e conferido contra um dicionario hunspell do idioma de
+DESTINO, e a palavra desconhecida sai sublinhada na propria caixa. Tres coisas
+nunca sao marcadas, e as tres foram medidas nas 6.500 linhas do banco de
+desenvolvimento:
+
+- **notacao**, e toda palavra com digito colado (`Cd4`, `13.exd5`, `h4-h5`).
+  Nenhuma palavra de prosa tem digito, e quebrar o token nele produzia
+  estilhacos (`Cd`) que eram 40 das 70 marcas mais frequentes;
+- **o vocabulario do texto de ORIGEM da linha.** Nome de jogador, de torneio e
+  de cidade chegam a traducao vindos de la. Sozinho, este filtro leva 3.347
+  marcas a 143;
+- **o lado direito do glossario** — a terminologia que o usuario impos; marca-la
+  seria brigar com a decisao dele. O lado esquerdo NAO entra: la esta o texto que
+  ele quer trocar. Este filtro leva as 143 a **81**, em **80 linhas de 6.500**.
+
+**O corretor nunca fica em silencio onde nao funciona.** So o portugues tem
+dicionario embarcado; nos outros idiomas de destino a janela diz "sem dicionario
+para XX" em vez de nao marcar nada — sem isso, "nenhuma marca" significaria duas
+coisas opostas, texto sem erro e corretor ausente. Se o `spylls` faltar, o
+programa abre igual e so o corretor sai de cena.
+
+A carga do dicionario (4,6 MB em disco, **258 MB em memoria**, ~2,3 s) e
+**preguicosa** e acontece **fora da thread da interface**: so na primeira linha
+aberta num idioma que tem dicionario, e o realce e refeito quando ela chega. Quem
+nunca abre o editor nao paga nada.
+
+**Nenhuma chamada Tk sai da thread principal.** A thread de carga nao avisa
+ninguem; a janela pergunta (`request_dictionary`) e reagenda a si mesma com o
+`after` dela. Um retorno vindo da thread precisaria de `after` para voltar ao Tk,
+e `after` registra um comando no interpretador — fora da thread principal isso
+levanta `RuntimeError`, que nao e `TclError` e escapa do `except` obvio.
+
+A conferencia custa 1,00 ms por linha, o que permite refaze-la a cada tecla.
+
 **Garantia F17 — nenhum campo depende do placeholder para ser identificado.**
 Nenhum placeholder do programa aparece: o CustomTkinter decide mostra-lo
 comparando o OBJETO `StringVar` com `""`, e essa comparacao e falsa sempre. Dos

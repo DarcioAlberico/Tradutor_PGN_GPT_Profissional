@@ -80,6 +80,7 @@ from .editor_widgets import (
 )
 from .glossary_editor import open_glossary_editor
 from .history_window import HistoryWindow
+from . import prose_spellcheck
 from .review_quality import (
     QUALITY_REPORT_HEADERS,
     build_quality_report_rows,
@@ -653,6 +654,12 @@ class TranslationEditor:
         # atras de uma frase inteira e ilegivel.
         self.diff_removed_bg = "#7f1d1d" if escuro else "#fecaca"
         self.diff_added_bg = "#14532d" if escuro else "#bbf7d0"
+        # O sublinhado do corretor de prosa (ROADMAP 26). Sublinhado e nao fundo:
+        # a marca cai sobre uma palavra ISOLADA no meio da revisao, e pintar o
+        # fundo dela competiria com o realce do glossario e o da busca, que sao
+        # dois fundos ja disputando a mesma caixa. A cor tem contraste sobre o
+        # fundo do texto nos dois temas (5,0:1 no escuro, 5,9:1 no claro).
+        self.spell_error_fg = "#fca5a5" if escuro else "#b91c1c"
 
     def apply_theme_colors(self, _mode=None):
         """Reaplica as cores do Tk puro. Chamada pelo rastreador de tema do CTk.
@@ -691,6 +698,9 @@ class TranslationEditor:
                 "find_current",
                 background=self.current_find_bg,
                 foreground=self.current_find_fg,
+            )
+            texto.tag_configure(
+                "spell_error", foreground=self.spell_error_fg, underline=True
             )
             self.paint_focus_border(texto, texto is self.focused_text)
 
@@ -783,6 +793,13 @@ class TranslationEditor:
         # `self.lang` e dos seletores existirem — ver `scoped_languages`.
         self.glossary = self.app.glossary_substitutions
         self.automatic_glossary = []
+        # O corretor de prosa (ROADMAP 26). O cache do dicionario e do PROCESSO e
+        # vive em `prose_spellcheck`; o que a janela guarda e so a trava da
+        # reagendagem, para nao empilhar um `after` por tecla enquanto o
+        # dicionario ainda esta sendo lido.
+        self._prose_retry_scheduled = False
+        self._prose_glossary_key = None
+        self._prose_glossary_vocabulary = frozenset()
         self.current_suggestions = []
         self.suggestion_buttons = []
         self.search_text = tk.StringVar(master=self.win, value="")
@@ -1300,6 +1317,9 @@ class TranslationEditor:
             "find_current",
             background=self.current_find_bg,
             foreground=self.current_find_fg,
+        )
+        text.tag_configure(
+            "spell_error", foreground=self.spell_error_fg, underline=True
         )
 
         # O foco do teclado passa a ter sinal (garantia F18, ROADMAP 22.8). Numa
@@ -2029,6 +2049,7 @@ class TranslationEditor:
         """
         if not self.current["id"]:
             self.qa_label.configure(text="", text_color=OK_TEXT_COLOR)
+            self.highlight_spelling()
             return
 
         origem, destino = self.current_row_languages()
@@ -2038,13 +2059,23 @@ class TranslationEditor:
             origem,
             destino,
         )
+        # O corretor de prosa e o unico recurso da janela que pode estar AUSENTE
+        # por idioma, e um sublinhado que nunca aparece nao distingue "sem erro"
+        # de "sem dicionario". A frase entra na mesma linha do QA porque e a
+        # mesma pergunta ("o que esta errado nesta linha?"), e sai sozinha
+        # quando nao ha aviso nenhum (ROADMAP 26).
+        sem_dicionario = prose_spellcheck.unsupported_language_notice(destino)
         if warnings:
             self.qa_label.configure(
                 text="QA: " + " | ".join(warnings),
                 text_color=WARNING_TEXT_COLOR,
             )
+        elif sem_dicionario:
+            self.qa_label.configure(text=sem_dicionario, text_color=OK_TEXT_COLOR)
         else:
             self.qa_label.configure(text="QA: sem avisos", text_color=OK_TEXT_COLOR)
+
+        self.highlight_spelling()
 
     def update_history_label(self):
         if not self.current["id"]:
@@ -2412,6 +2443,91 @@ class TranslationEditor:
         else:
             self.trans_text.tag_add("bold", inicio, fim)
         return "break"
+
+    def prose_dictionary(self):
+        """O dicionario do idioma da linha, ou `None` enquanto ele nao chegou.
+
+        A carga custa ~2,3 s e le 4,6 MB — na thread da interface isso e a janela
+        congelada na abertura, que e exatamente o que 2.11 tirou de todo o resto
+        do programa. Ela vai para uma thread, e **a janela pergunta** em vez de
+        ser chamada de volta: um retorno vindo da thread de carga precisaria de
+        `after` para voltar ao Tk, e `after` fora da thread principal levanta
+        `RuntimeError` (ROADMAP 26.5). Aqui o unico `after` e este, e ele roda
+        onde deve.
+
+        Ate a resposta chegar o texto fica sem marca — o mesmo que ele mostrava
+        antes deste recurso existir.
+        """
+        _origem, destino = self.current_row_languages()
+        dicionario = prose_spellcheck.request_dictionary(destino)
+        if dicionario is not None:
+            self._prose_retry_scheduled = False
+            return dicionario
+
+        # Uma reagendagem por vez: `highlight_spelling` roda a cada tecla, e sem
+        # a trava cada uma delas poria mais um `after` na fila enquanto o
+        # dicionario ainda estivesse sendo lido.
+        if prose_spellcheck.is_loading(destino) and not self._prose_retry_scheduled:
+            self._prose_retry_scheduled = True
+
+            def tentar():
+                self._prose_retry_scheduled = False
+                self.highlight_spelling()
+
+            try:
+                self.win.after(250, tentar)
+            except tk.TclError:  # pragma: no cover - janela ja fechada
+                self._prose_retry_scheduled = False
+        return None
+
+    def glossary_vocabulary(self):
+        """A terminologia do glossario DESTA janela, para o corretor nao marca-la.
+
+        Calculada uma vez por carga do glossario e nao por tecla: sao ~2.000
+        palavras varridas de ~6.000 regras, e refaze-las a cada caractere e o
+        mesmo desperdicio que `highlight_glossary_hits` ja tinha corrigido lendo
+        o texto uma vez em vez de por regra.
+
+        O cache e invalidado comparando a IDENTIDADE das listas, e nao o
+        conteudo: `reload_glossary` troca os objetos, entao `is` responde a
+        pergunta sem varrer nada.
+        """
+        atual = (id(self.glossary), id(self.automatic_glossary))
+        if self._prose_glossary_key != atual:
+            self._prose_glossary_key = atual
+            self._prose_glossary_vocabulary = (
+                prose_spellcheck.glossary_vocabulary(self.glossary)
+                | prose_spellcheck.glossary_vocabulary(self.automatic_glossary)
+            )
+        return self._prose_glossary_vocabulary
+
+    def highlight_spelling(self):
+        """Sublinha o que o dicionario do idioma de destino nao conhece.
+
+        O filtro do ruido e o texto de ORIGEM da propria linha: o nome do
+        jogador, do torneio e da cidade chegaram a traducao vindos de la, e
+        compara-los com ele tira 3.347 marcas das 3.442 sem lista nova para
+        manter (ROADMAP 26).
+        """
+        self.trans_text.tag_remove("spell_error", "1.0", tk.END)
+        if not self.current["id"]:
+            return
+
+        dicionario = self.prose_dictionary()
+        if dicionario is None:
+            return
+
+        texto = self.trans_text.get("1.0", tk.END)
+        conhecidas = prose_spellcheck.source_vocabulary(self.current["orig"])
+        conhecidas |= self.glossary_vocabulary()
+        for inicio, fim, _palavra in prose_spellcheck.misspelled_spans(
+            texto, dicionario, conhecidas
+        ):
+            self.trans_text.tag_add(
+                "spell_error",
+                self.text_index_for_offset(inicio),
+                self.text_index_for_offset(fim),
+            )
 
     def highlight_glossary_hits(self):
         self.trans_text.tag_remove("glossary_hit", "1.0", tk.END)

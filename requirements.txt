@@ -1,3 +1,9 @@
 requests>=2.32
 chardet>=5.2
 customtkinter>=5.2
+# Motor hunspell do corretor de prosa (ROADMAP 26). Python puro (MIT): nao pede
+# compilador na maquina de quem instala e nao muda a forma do build do
+# PyInstaller, que e o que uma extensao em C mudaria. Se faltar, o programa abre
+# igual e so o corretor fica de fora — `prose_spellcheck.load_dictionary` trata
+# o import que falha como "sem dicionario".
+spylls>=0.1.7

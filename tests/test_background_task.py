@@ -24,7 +24,12 @@ import time
 import tkinter as tk
 import unittest
 
-from tests.gui_harness import GuiTestCase
+# `gui_harness`, e nao `tests.gui_harness`: o runner documentado no README e
+# `unittest discover -s tests`, que poe `tests/` no `sys.path` — e nao a raiz do
+# projeto. Com o nome pontuado este modulo INTEIRO deixava de ser carregado,
+# ficando como um unico `ImportError` no meio de 1.369 testes que passavam. Os
+# outros dois modulos de janela sempre usaram a forma sem ponto.
+from gui_harness import GuiTestCase
 from tradutor_pgn import background_task
 from tradutor_pgn.background_task import (
     BackgroundTask,

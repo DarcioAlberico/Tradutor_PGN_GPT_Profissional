@@ -73,6 +73,12 @@ avisa e segue: o executavel sai sem o dicionario e so o "Normalizar PGN" fica
 sem funcionar. Estar embutido nao o congela — o build e onedir, entao da para
 troca-lo por uma edicao mais nova das classificacoes sem reconstruir.
 
+O mesmo vale para `dicionarios\`, que leva os dicionarios hunspell do corretor
+ortografico de prosa: o `.spec` empacota o diretorio por varredura, e sem ele o
+executavel sai sem corretor — a janela de edicao avisa, e nada mais deixa de
+funcionar. Ver `dicionarios/LEIAME.md` para a procedencia, a licenca e como
+acrescentar um idioma.
+
 ### Onde ficam os seus dados
 
 **Nao e mais ao lado do `.exe`.** Quem decide e como o programa foi iniciado:
@@ -392,6 +398,7 @@ mao.
 - `tradutor_pgn/history_window.py`: subjanela com o historico de alteracoes de uma traducao.
 - `tradutor_pgn/main_window.py`: montagem da janela principal.
 - `tradutor_pgn/pgn_spellcheck.py`: normalizacao opcional de metadados PGN com `spelling.ssp`.
+- `tradutor_pgn/prose_spellcheck.py`: corretor ortografico da PROSA traduzida, com o filtro que separa erro de digitacao de notacao, nome proprio e terminologia do glossario.
 - `tradutor_pgn/pgn_utils.py`: leitura, escrita, encoding e manipulacao de arquivos PGN.
 - `tradutor_pgn/review_quality.py`: avisos de qualidade das traducoes, genericos e de xadrez (lance perdido, anotacao rompida, NAG, terminologia), com a versao das heuristicas que decide quando reavaliar o banco.
 - `tradutor_pgn/settings.py`: preferencias da interface e rascunhos de edicao.
@@ -400,6 +407,7 @@ mao.
 - `tradutor_pgn/window_utils.py`: utilitarios de janela.
 - `tests/`: suite automatizada; `tests/gui_harness.py` traz o sandbox de caminhos e o silenciamento de dialogos que os testes de janela compartilham.
 - `.claude/skills/run-tradutor-pgn/`: ferramenta para abrir e dirigir o app sem interacao manual (inclusive o worker de traducao, sem abrir janela) e capturar telas.
+- `dicionarios/`: dicionarios hunspell do idioma de destino, para o corretor de prosa. So `pt_BR` por enquanto, e a janela diz isso nos outros idiomas.
 - `Substituicoes.txt`: as regras do glossario do usuario (original, substituicao e, quando ha, tipo, prioridade e escopo de idioma).
 - `tradutor_pgn/Substituicoes-semente.txt`: a terminologia que vem com o programa, escopada por idioma de destino. Nunca sobrepoe o `Substituicoes.txt`.
 - `tradutor_pgn/Termos-suspeitos.txt`: os pares "termo no original / forma errada na traducao" que geram aviso de qualidade. Vem com o programa, medido no banco de desenvolvimento, e nao corrige nada — leva o revisor ate a linha.

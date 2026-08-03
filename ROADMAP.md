@@ -5,9 +5,10 @@ Registro das melhorias do programa. Cada item traz o motivo, o impacto medido
 verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
-**Pendente: o item 19.11** (corretor ortografico de prosa), unico item nao
-entregue do registro inteiro. A secao 22 (revisao de UI) foi concluida nos itens
-22.1 a 22.14, em 2026-07-31 e 2026-08-01. As secoes 18 a 20 — que ficaram
+**Nada pendente.** O item 19.11 (corretor ortografico de prosa), que era o
+unico nao entregue do registro inteiro, saiu na secao 26 em 2026-08-03. A secao
+22 (revisao de UI) foi concluida nos itens 22.1 a 22.14, em 2026-07-31 e
+2026-08-01. As secoes 18 a 20 — que ficaram
 registradas aqui como pendentes — foram concluidas em 2026-07-30, junto com a 21
 (instalador). As garantias que os testes ja protegem estao na
 [SPEC.md](SPEC.md), secao 9 — inclusive as nove da secao 22, que nasceram e
@@ -4691,7 +4692,7 @@ consulta certa e lenta, e um texto certo que nao cabe.
 
 ---
 
-## 19. O fluxo do tradutor profissional — CONCLUIDO (2026-07-30), menos o item 11
+## 19. O fluxo do tradutor profissional — CONCLUIDO (2026-07-30); o item 11 em 2026-08-03
 
 O editor foi construido para revisar uma linha; um livro sao vinte mil. Os
 itens abaixo sao o que separa "da para revisar" de "da para trabalhar o dia
@@ -4699,11 +4700,13 @@ inteiro nisso", em ordem de retorno por esforco. Nenhum exige o esquema novo
 (18); os que se beneficiam dele estao marcados — e a **tabela `occurrences` ja
 existe**, entao os marcados deixaram de esperar por ela.
 
-**Entregue: 12 dos 13 itens, e as garantias F1-F11 (secao 9 da SPEC).** O item 11
-(corretor ortografico de prosa) **nao foi feito**, e o motivo esta em 19.14: ele
-depende de um dicionario e de uma dependencia que nao cabe decidir aqui. O que a
-verificacao mostrou esta em 19.16, e inclui uma correcao ao proprio codigo que
-somente um teste de janela encontrou.
+**Entregue: os 13 itens, e as garantias F1-F11 (secao 9 da SPEC).** Doze sairam
+em 2026-07-30. O item 11 (corretor ortografico de prosa) ficou para depois
+porque dependia de um dicionario e de uma dependencia que nao cabia decidir aqui
+(19.14); as duas escolhas foram feitas em 2026-08-03 e ele saiu na **secao 26**,
+que tambem corrige um numero desta secao — o dicionario e de 5,5 MB, e nao de
+~1 MB. O que a verificacao mostrou esta em 19.16, e inclui uma correcao ao
+proprio codigo que somente um teste de janela encontrou.
 
 A ordem abaixo e a do plano original (retorno por esforco); a implementacao de
 cada um esta no subitem 19.x correspondente.
@@ -4964,9 +4967,12 @@ fazem a segunda ler o disco ANTES de a primeira gravar, e o que a primeira escre
 desaparece: e a perda que a garantia R4 existe para impedir, agora por corrida em
 vez de por snapshot velho. O teste roda 24 threads e exige as 24 chaves.
 
-### 19.11 Corretor ortografico de prosa — NAO FEITO
+### 19.11 Corretor ortografico de prosa — CONCLUIDO (2026-08-03)
 
-Ver 19.14. E o unico item da secao que nao foi entregue.
+Ficou por ultimo, e o motivo esta em 19.14. **Feito na secao 26**, depois que as
+duas escolhas que ele esperava foram tomadas: `spylls` (hunspell em Python puro,
+MIT) e o dicionario pt-BR do VERO, empacotado junto. O item da secao 26 traz a
+medicao do filtro de ruido, que e onde o trabalho de fato estava.
 
 ### 19.12 Status alem do binario — CONCLUIDO
 
@@ -5030,7 +5036,14 @@ Quatro decisoes que a implementacao obrigou a tomar:
 Custo medido: **277 ms** para requebrar 15.000 comentarios de 60 palavras — o
 tamanho do PGN de 40 MB que a secao 20 usa como pior caso.
 
-### 19.14 O item que nao foi feito, e por que
+### 19.14 O item que esperou, e o que ele esperava
+
+> **Resolvido em 2026-08-03, na secao 26.** As tres decisoes abaixo foram
+> tomadas: `spylls`, dicionario pt-BR empacotado, portugues so — com a janela
+> anunciando a ausencia nos outros seis idiomas. A estimativa de tamanho deste
+> item estava errada por 5x: o par `.dic`/`.aff` e de **5,5 MB**, e nao de ~1 MB.
+> O texto abaixo fica como estava, porque e o registro do que era sabido quando
+> a decisao foi adiada.
 
 **Item 11, corretor ortografico do idioma de destino.** O `spelling.ssp` que o
 programa ja traz e dicionario de nomes proprios e nao serve para prosa; um corretor
@@ -7227,3 +7240,193 @@ programa, com a retencao dela.
 `test_the_real_glossary_declares_the_portuguese_scope` (310 -> 19 globais,
 limite 25) e `test_the_real_glossary_uses_the_placeholder` (466 -> 18 literais,
 limite 40). Suite inteira: **934 passam, nenhum falha**.
+
+## 26. Corretor ortografico de prosa — CONCLUIDO (2026-08-03)
+
+O item 19.11, o unico que a secao 19 nao entregou. Ele ficou de fora porque
+dependia de duas escolhas que 19.14 registrou como sendo de quem mantem o
+programa — a dependencia e o dicionario —, e o item so pode ser feito depois que
+elas sao feitas. **Foram**, e o levantamento mudou um numero do proprio 19.14
+antes de qualquer codigo:
+
+|                          | 19.14 estimava | medido                            |
+| ------------------------ | -------------- | --------------------------------- |
+| dicionario pt-BR         | ~1 MB          | **5,5 MB** (4,58 `.dic` + 0,97 `.aff`) |
+| licenca                  | a decidir      | **LGPL 2.1**, VERO/OpenOffice.org.br |
+| codificacao do `.aff`    | —              | **ISO-8859-1**                    |
+
+**Motor: `spylls`, hunspell em Python puro, MIT.** Python puro decide contra o
+`cyhunspell`: uma extensao em C pede compilador na maquina de quem instala e
+muda a forma do build do PyInstaller, e nenhuma das duas coisas se paga aqui. Se
+o pacote faltar, `load_dictionary` trata o import que falha como "sem
+dicionario" — o programa abre igual e so o corretor fica de fora.
+
+**Empacotar, e nao baixar na primeira execucao.** Baixar dicionario e
+comportamento novo que ninguem pediu, e procura-lo na maquina faria o recurso
+existir em umas e nao em outras — o oposto da decisao que 19.14 registrou sobre
+recurso pela metade. Os 5,5 MB entram ao lado dos 30 MB de `spelling.ssp` que o
+pacote ja carrega: crescimento de ~18%, e nao de ordem de grandeza.
+
+**So o portugues tem dicionario, e a janela diz isso.** Nos outros seis idiomas
+de destino ela mostra "Ortografia: sem dicionario para IT (so PT por enquanto)"
+em vez de nao marcar nada. Um sublinhado que nunca aparece nao distingue "texto
+sem erro" de "corretor ausente", e a janela nao responderia sozinha qual dos
+dois e — a mesma discussao da garantia X3.
+
+### 26.1 O filtro do ruido e o item; o dicionario e so o comeco dele
+
+Um corretor generico sobre prosa enxadristica marca o livro inteiro. Medido nas
+6.500 linhas do banco de desenvolvimento, com cada filtro em cima do anterior:
+
+| etapa                                          | ocorrencias | distintas |
+| ---------------------------------------------- | ----------- | --------- |
+| o dicionario nao conhece                       | 5.098       | 2.380     |
+| menos notacao e palavra colada a digito        | 3.347       | 1.969     |
+| menos o vocabulario do texto de ORIGEM da linha| 143         | 53        |
+| menos o lado direito do glossario              | **81**      | **49**    |
+
+**80 linhas de 6.500 recebem alguma marca — 1,2%.** O custo e de **1,00 ms por
+linha**, que e o que permite refazer o realce a cada tecla.
+
+Os dois filtros que fazem o trabalho nao sao listas novas para manter:
+
+- **o texto de origem da propria linha.** Nome de jogador, de torneio e de
+  cidade chegam a traducao vindos do PGN em ingles, e e la que eles estao.
+  Sozinho, leva 3.347 marcas para 143;
+- **o lado direito do glossario.** E a terminologia que o proprio usuario impos;
+  marca-la seria brigar com a decisao dele. `contra-jogo` sozinho respondia por
+  58 das 143. **O lado direito e nao o esquerdo**: a esquerda esta o texto que
+  ele quer TROCAR, que e justamente o errado — ensina-lo ao corretor calaria o
+  aviso no unico lugar em que ele acerta sozinho.
+
+### 26.2 O que a medicao encontrou, e que nenhum teste teria encontrado
+
+**Dois defeitos meus, os dois no tokenizador, os dois virados regra e teste:**
+
+- **quebrar a palavra no digito** transforma `Cd4` em `Cd`, e `Cd` nao casa
+  padrao nenhum de notacao. Eram **40 das 70 marcas mais frequentes** —
+  estilhacos de um token que o texto nao tem. Hoje o digito entra no token e
+  palavra com digito nunca e marcada: nenhuma palavra de prosa tem um;
+- **deixar o apostrofo na ponta** faz `'insipido'` virar a palavra `insipido'`.
+
+**Um erro de medicao meu, que quase apagou o segundo filtro.** A primeira
+medicao dizia que o glossario nao tirava marca nenhuma, e por isso ele quase
+ficou de fora. O script carregava o glossario sem caminho, e
+`_default_substitutions_path()` deriva de `sys.argv[0]` — sob um script do
+scratchpad, ele resolvia para o scratchpad e devolvia **vazio**. E a mesma
+armadilha que o `setUpModule` da suite documenta, e ela custou aqui a conclusao
+oposta da verdadeira: o filtro tira 43% das marcas restantes.
+
+**O indice de sobrenomes do `spelling.ssp` foi medido e descartado.** Ele era a
+ideia obvia — 514 mil entradas de jogador ja no programa — e as entradas sao
+chaveadas pelo nome INTEIRO (`Carlsen, Magnus`), enquanto a prosa traz o
+sobrenome sozinho. Derivar os 212.787 sobrenomes e consulta-los tira **uma**
+palavra do resultado (27 -> 26 distintas, na medicao em que ele foi avaliado).
+Um indice novo, uma versao de esquema a mais e 25 MB a manter, por uma palavra —
+enquanto o filtro do texto de origem ja pega os mesmos nomes de graca, e pela
+mesma razao: eles vieram de la.
+
+### 26.3 O que sobra e o que se queria ver
+
+As 49 palavras restantes sao, quase todas, vocabulario que um dicionario de 2010
+nao tem — `subvariações`, `dragonistas`, `fianquetada`, `pseudo-sacrifício`,
+`contramedidas`, `precisíssimo` — mais alguns toponimos (`Tromsø`, `Breslávia`,
+`Calcídica`) e uns poucos nomes que nao aparecem no original da mesma linha. Nao
+sao falso positivo barato: sao exatamente as palavras sobre as quais um revisor
+decide, e a decisao dele hoje pode virar uma regra de glossario, que **ensina o
+corretor no mesmo gesto**.
+
+O sublinhado e vermelho e sem fundo, e nao um realce: a marca cai sobre uma
+palavra isolada, e pintar o fundo dela competiria com o realce do glossario e o
+da busca, que ja disputam a mesma caixa. Contraste medido sobre o fundo do
+texto: 5,0:1 no tema escuro, 5,9:1 no claro.
+
+**O que o dicionario custa, medido e nao estimado**: 2,3 s de carga e **258 MB
+de objetos Python** (`tracemalloc`) para os 4,6 MB em disco. E muito, e por isso
+a carga e **preguicosa**: acontece na primeira linha aberta num idioma que tem
+dicionario, e quem nunca abre o editor — ou trabalha num dos outros seis idiomas
+— nao paga nada. A carga vai para uma **thread**, com o realce refeito quando
+ela termina; na thread da interface seria a janela congelada na abertura, que e
+o que 2.11 tirou de todo o resto do programa.
+
+### 26.4 O cache que nao era cache, e quem o encontrou
+
+A primeira versao de `load_dictionary` conferia o cache **com o cadeado** e o
+**soltava para carregar**:
+
+```python
+with _dictionary_lock:
+    if chave in _dictionaries:
+        return _dictionaries[chave]
+dicionario = Dictionary.from_files(...)   # <- fora do cadeado
+```
+
+Numa janela so isso passa despercebido: a segunda pergunta chega depois de a
+primeira ter terminado. Na suite de janelas, nao — cada janela de teste dispara
+a carga do seu lado, **nenhuma delas terminou quando as outras conferem o
+cache**, e o processo passa a montar varias copias de 4,6 MB em paralelo.
+
+**Medido**: a suite ia de 407 s para nao terminar, com o processo em **1.287 MB**
+e subindo. Foi assim que o defeito apareceu — nao num teste que o procurava, mas
+no tempo de uma suite que antes fechava em sete minutos.
+
+O conserto sao dois cadeados, e os dois precisam existir: um do **registro**
+(rapido, so protege o dicionario) e um por **idioma**, segurado durante a carga
+inteira, com a checagem do cache refeita dentro dele. Um cadeado unico segurado
+durante a carga faria o idioma B esperar o A sem precisar; um cadeado unico
+solto durante a carga e exatamente o defeito.
+
+`test_threads_asking_at_once_do_not_each_load_their_own_copy` fixa isso com oito
+threads e um `from_files` que conta chamadas: com a versao errada ele conta
+**oito**, com a certa conta **uma**.
+
+### 26.5 O retorno que vinha da thread errada
+
+Consertada a corrida de 26.4, a suite de janelas voltou a terminar — e mostrou o
+**segundo** defeito da mesma peca, que so aparece quando a carga de fato termina
+em paralelo com janelas sendo abertas e destruidas:
+
+```
+Exception in thread Thread-35 (trabalho):
+  File "tradutor_pgn/edit_window.py", line 2478, in pronto
+    self.win.after(0, aplicar)
+  File "tkinter/__init__.py", line 1698, in _register
+    self.tk.createcommand(name, f)
+RuntimeError: main thread is not in main loop
+```
+
+A carga recebia um `on_ready` e o chamava **na thread**; do outro lado, a janela
+precisava de `win.after(...)` para voltar a thread do Tk. Mas `after` **registra
+um comando no interpretador Tk**, e fora da thread principal isso levanta
+`RuntimeError` sempre que a janela ja morreu ou nao ha mainloop rodando. A suite
+produziu o traceback **uma vez por janela de teste**, e o `except tk.TclError`
+que existia nao pega `RuntimeError`.
+
+Alargar o `except` calaria o sintoma e manteria o desenho errado. **A inversao
+conserta a causa**: a thread nao avisa mais ninguem, e a janela **pergunta** —
+`request_dictionary` devolve o dicionario ou `None`, `is_loading` diz se vale
+perguntar de novo, e quem reagenda e a propria janela, com o `after` dela, que
+roda onde deve. Depois disso nenhuma chamada Tk sai da thread principal.
+
+A trava `_prose_retry_scheduled` existe porque `highlight_spelling` roda a cada
+tecla: sem ela, cada tecla digitada durante os 2,3 s da carga poria mais um
+`after` na fila.
+
+**18 testes** em `ProseSpellcheckTests`, entre eles os dois defeitos do
+tokenizador, a corrida de 26.4, o contrato de 26.5 e a contraprova do dicionario
+escolhido (ele conhece os 16 termos que o glossario impoe).
+
+### 26.6 Um modulo de teste inteiro nunca rodava
+
+Achado de passagem, ao rodar a suite documentada para conferir 26.5:
+`test_background_task.py` importava `from tests.gui_harness import GuiTestCase`,
+com o nome **pontuado**. O runner do README e `unittest discover -s tests`, que
+poe `tests/` no `sys.path` — e nao a raiz do projeto. Os outros dois modulos de
+janela sempre usaram `from gui_harness import`.
+
+O efeito: o modulo **nao era carregado**, e a suite terminava em
+`FAILED (errors=1)` com um unico `ImportError` no meio de 1.368 testes que
+passavam — a forma mais facil de um erro virar paisagem. Os **17 testes** que
+ele traz passam todos; nunca tinham rodado por aqui.
+
+Suite inteira, com o runner documentado: **1.385 testes, OK**.
