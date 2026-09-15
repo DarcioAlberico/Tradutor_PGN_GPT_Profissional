@@ -197,6 +197,59 @@ class EditorWindowTestCase(GuiTestCase):
 # ===========================================================================
 
 
+class PendingOnlyQaFilterWindowTests(EditorWindowTestCase):
+    """Garantia F28 na janela: "Avisos QA" e F7 pulam as verificadas por padrao.
+
+    O aviso e sobre o texto e nao sabe quem o revisou (SPEC 10). Sem este
+    recorte, a versao 2 das heuristicas (ROADMAP 28.2) devolveria a fila as
+    linhas que o revisor ja aprovou — 15 de 107 no banco de dev.
+    """
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        for texto in ("AAA igual", "BBB igual", "CCC igual"):
+            save_translation(cur, texto, texto, "pt", "en")
+        cur.execute("UPDATE comments SET verified = 1 WHERE original_comment = 'BBB igual'")
+        conn.commit()
+        conn.close()
+        self.open_window(edit_window.open_translation_editor)
+
+    def choose(self, valor):
+        for widget in self.widgets(edit_window.ctk.CTkSegmentedButton):
+            if valor in widget.cget("values"):
+                widget.set(valor)
+                widget._command(valor)
+                self.pump()
+                return
+        self.fail(f"nenhum seletor oferece {valor!r}")
+
+    def labels(self):
+        return [text.split("O: ")[-1][:3] for _w, text in self.buttons() if "igual" in text]
+
+    def loaded(self):
+        return self.text_value(self.texts()[0])[:3]
+
+    def test_the_qa_filter_hides_the_verified_line(self):
+        self.choose("Avisos QA")
+        self.assertEqual(self.labels(), ["AAA", "CCC"])
+
+    def test_next_warning_skips_the_verified_line_unless_looking_at_verified(self):
+        self.choose("Todas")
+        self.click([w for w, t in self.buttons() if t.startswith("AAA") or "AAA" in t][0])
+        self.assertEqual(self.loaded(), "AAA")
+
+        self.click(self.button("Próximo aviso QA"))
+        self.assertEqual(self.loaded(), "CCC", "F7 pulou a verificada")
+
+        self.choose("Verificadas")
+        self.click(self.button("Próximo aviso QA"))
+        self.assertEqual(self.loaded(), "BBB", "no filtro Verificadas ela e o trabalho")
+
+
 class TranslationEditorTests(EditorWindowTestCase):
     """Garantia R7: a lista carrega o item clicado."""
 

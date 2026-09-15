@@ -82,6 +82,7 @@ from tradutor_pgn.database import (
     get_quality_heuristics_version,
     get_review_row_offset,
     get_review_status_counts,
+    quality_warning_flag,
     get_database_stats,
     initialize_database,
     list_occurrence_files,
@@ -270,6 +271,7 @@ from tradutor_pgn.settings import (
     update_settings,
 )
 from tradutor_pgn import pgn_utils
+from tradutor_pgn.chess_terms import load_suspect_terms
 from tradutor_pgn.prose_fixes import (
     fix_move_spacing,
     fix_piece_square_hyphen,
@@ -1801,6 +1803,8 @@ class DatabaseTests(unittest.TestCase):
                     "pending": 4,
                     "verified": 1,
                     "warnings": 0,
+                    # O subconjunto pendente dos avisos, que "Avisos QA" lista (F28).
+                    "pending_warnings": 0,
                     # Recortes das pendentes (ROADMAP 19, item 12). A comparacao e do
                     # dicionario INTEIRO de proposito: uma chave nova que a lista nao
                     # soubesse ler deixaria um filtro paginando pelo total errado.
@@ -1815,6 +1819,7 @@ class DatabaseTests(unittest.TestCase):
                     "pending": 0,
                     "verified": 1,
                     "warnings": 0,
+                    "pending_warnings": 0,
                     "rejected": 0,
                     "doubt": 0,
                 },
@@ -1882,6 +1887,7 @@ class DatabaseTests(unittest.TestCase):
                     "pending": 5,
                     "verified": 0,
                     "warnings": 0,
+                    "pending_warnings": 0,
                     "rejected": 0,
                     "doubt": 0,
                 },
@@ -8186,6 +8192,125 @@ class ProseInDatabaseTests(unittest.TestCase):
 
         self.assertEqual([tipo for tipo, _t, _m in self.dialogos], ["info"])
         self.assertIn("Nenhuma tradu", self.dialogos[0][2])
+
+
+class ProseQualityHeuristicsTests(unittest.TestCase):
+    """Garantia Q4: as tres heuristicas de prosa e as formas novas da lista.
+
+    Medidas contra as decisoes humanas do banco de dev (ROADMAP 28.2, camada
+    1): `after`/`depois` 124/1, "Brancas" no meio 10/0, "sao melhores" 8/1.
+    Juntas com a lista ampliada, a versao 2 marca 1.254 linhas da saida da
+    maquina (a 1: 359) com 96 % de precisao humana. "ele" para o lado (6/5)
+    ficou de fora.
+    """
+
+    def avisos(self, original, translated, source="en", target="pt"):
+        return evaluate_translation_quality(original, translated, source, target)
+
+    def test_after_without_de_is_flagged_and_de_is_not(self):
+        self.assertTrue(any("sem o 'de'" in a for a in self.avisos("White is better after", "As brancas estao melhores depois")))
+        self.assertEqual(self.avisos("White is better after", "As brancas estao melhores depois de"), [])
+        self.assertEqual(self.avisos("White is better after", "As brancas estao melhores apos"), [])
+
+    def test_the_adverbial_after_is_not_flagged(self):
+        self.assertEqual(self.avisos("does not lose immediately after", "nao perde imediatamente depois"), [])
+
+    def test_the_after_heuristic_is_pair_scoped(self):
+        """A primeira heuristica com escopo de PAR: le o original em ingles.
+        Origem nao declarada nao a desliga; uma origem que nao e ingles, sim."""
+        self.assertTrue(self.avisos("White is better after", "As brancas estao melhores depois", source=""))
+        self.assertEqual(self.avisos("White is better after", "As brancas estao melhores depois", source="es"), [])
+
+    def test_capitalized_side_mid_sentence(self):
+        self.assertTrue(any("mai" in a for a in self.avisos("a refutation of White's setup", "uma refutacao da configuracao das Brancas")))
+        self.assertEqual(self.avisos("White's setup", "As Brancas tem uma configuracao"), [], "no inicio da frase e caixa normal")
+
+    def test_side_are_better(self):
+        self.assertTrue(any("estao" in a or "est\u00e3o" in a for a in self.avisos("Black is better", "as pretas sao melhores")))
+        self.assertEqual(self.avisos("Black is better", "as pretas estao melhores"), [])
+
+    def test_nothing_fires_outside_portuguese(self):
+        for original, translated in (
+            ("White is better after", "le bianche stanno meglio dopo"),
+            ("a refutation of White's setup", "una confutazione delle Bianche"),
+            ("Black is better", "le nere sono migliori"),
+            # Texto que CASARIA os padroes do portugues: e o destino que desliga.
+            ("White is better after", "as brancas estao melhores depois"),
+            ("Black is better", "as pretas sao melhores"),
+            ("White's setup", "a configuracao das Brancas"),
+        ):
+            with self.subTest(translated=translated):
+                self.assertEqual(self.avisos(original, translated, target="it"), [])
+
+    def test_the_materialized_flag_and_the_screen_agree_on_the_pair(self):
+        """Garantia Q3, agora com uma heuristica que depende do PAR: a coluna
+        materializada e a exibicao recebem os mesmos argumentos, entao o
+        veredito e o mesmo para cada origem — inclusive onde ele muda."""
+        original, translated = "White is better after", "As brancas estao melhores depois"
+        for source in ("en", "", "es"):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    quality_warning_flag(original, translated, source, "pt"),
+                    1 if self.avisos(original, translated, source=source) else 0,
+                )
+        self.assertEqual(quality_warning_flag(original, translated, "en", "pt"), 1)
+        self.assertEqual(quality_warning_flag(original, translated, "es", "pt"), 0)
+
+    def test_the_new_suspect_forms_are_shipped_and_the_rejected_ones_are_not(self):
+        termos = {(t, s) for t, s, e in load_suspect_terms() if e == "pt"}
+        for par in (("move", "movimento"), ("resign", "renunci"), ("check", "verific"), ("exchange sacrifice", "troca"), ("kingside", "lado do rei")):
+            self.assertIn(par, termos)
+        for par in (("game", "jogo"), ("move", "jogada"), ("the exchange", "troca"), ("fork", "bifurca")):
+            self.assertNotIn(par, termos, "ficou de fora pela medicao")
+        self.assertTrue(any("Terminologia: 'exchange sacrifice'" in a for a in self.avisos("a classic exchange sacrifice", "um classico sacrificio de troca")))
+        self.assertEqual(self.avisos("to exchange the knights", "trocar os cavalos"), [], "o verbo e troca mesmo")
+
+    def test_the_heuristics_version_moved(self):
+        """Q2: mexer nas heuristicas obriga a subir a versao, senao o banco
+        continua com o veredito da 1."""
+        self.assertGreaterEqual(QUALITY_HEURISTICS_VERSION, 2)
+
+
+class PendingOnlyQaFilterTests(unittest.TestCase):
+    """Garantia F28, a metade do banco: "pending_warnings" e a fila de F7."""
+
+    def banco(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        conn = initialize_database(str(Path(tmp.name) / "c.db"))
+        self.addCleanup(conn.close)
+        cur = conn.cursor()
+        # Igual ao original => aviso nas tres; a segunda e verificada.
+        for texto in ("AAA igual", "BBB igual", "CCC igual"):
+            save_translation(cur, texto, texto, "pt", "en")
+        cur.execute("UPDATE comments SET verified = 1 WHERE original_comment = 'BBB igual'")
+        conn.commit()
+        return cur
+
+    def test_the_filter_and_the_summary_count_only_pending_warnings(self):
+        cur = self.banco()
+        contagens = get_review_status_counts(cur, "pt")
+        self.assertEqual(contagens["warnings"], 3)
+        self.assertEqual(contagens["pending_warnings"], 2)
+        self.assertEqual(count_from_status_counts(contagens, "pending_warnings"), 2)
+        linhas = [r[1] for r in fetch_review_rows(cur, "pt", status_filter="pending_warnings")]
+        self.assertEqual(linhas, ["AAA igual", "CCC igual"])
+        self.assertEqual(len(list(fetch_review_rows(cur, "pt", status_filter="warnings"))), 3, "o relatorio continua levando todas")
+
+    def test_the_summary_still_reads_only_the_index(self):
+        """22.13 de novo: a coluna nova do resumo nao pode tirar a cobertura."""
+        cur = self.banco()
+        sql, params = database.review_status_counts_query("pt")
+        plano = " ".join(l[3] for l in cur.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall())
+        self.assertIn("COVERING INDEX", plano)
+
+    def test_find_first_quality_warning_skips_verified_on_request(self):
+        pendente = (1, "AAA igual", "AAA igual", 0)
+        verificada = (2, "BBB igual", "BBB igual", 1)
+        rows = [verificada, pendente]
+        self.assertEqual(find_first_quality_warning(rows)[0], 0)
+        self.assertEqual(find_first_quality_warning(rows, include_verified=False)[0], 1)
+        self.assertIsNone(find_first_quality_warning([verificada], include_verified=False))
 
 
 class WorkerTrailingPrepositionTests(WorkerFallbackHarness, unittest.TestCase):

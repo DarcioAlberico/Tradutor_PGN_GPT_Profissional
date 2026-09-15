@@ -188,7 +188,12 @@ STATUS_FILTER_LABELS = {
     "Rejeitadas": REVIEW_STATUS_REJECTED,
     "Em dúvida": REVIEW_STATUS_DOUBT,
     "Verificadas": "verified",
-    "Avisos QA": "warnings",
+    # So as pendentes (garantia F28, ROADMAP 28.2): o aviso e sobre o texto
+    # e nao sabe quem o revisou; sem o recorte, cada versao nova das
+    # heuristicas devolveria a fila as linhas ja aprovadas. As verificadas
+    # com aviso continuam alcancaveis pelo filtro "Verificadas" + F7, e o
+    # relatorio "Exportar QA" continua levando todas.
+    "Avisos QA": "pending_warnings",
 }
 
 # Pausa na digitacao que dispara a gravacao do rascunho. Eram 700 ms (ROADMAP 19,
@@ -241,7 +246,7 @@ KEYBOARD_SHORTCUTS = (
             ("Ctrl+PageUp", "<Control-Prior>", "Página anterior da lista"),
             ("Ctrl+PageDown", "<Control-Next>", "Próxima página da lista"),
             ("Alt+Backspace", "<Alt-BackSpace>", "Voltar ao ponto anterior"),
-            ("F7", "<F7>", "Próximo aviso de qualidade"),
+            ("F7", "<F7>", "Próximo aviso de qualidade (pula as verificadas, salvo no filtro Verificadas)"),
         ),
     ),
     (
@@ -3113,8 +3118,11 @@ class TranslationEditor:
             self.state.status_counts.update(
                 get_review_status_counts(cur, self.lang, **filtros)
             )
-            # A contagem de avisos ja vem agregada junto com as demais.
-            self.state.status_counts["qa"] = self.state.status_counts.get("warnings", 0)
+            # A contagem de avisos ja vem agregada junto com as demais — a dos
+            # PENDENTES, que e o que o filtro "Avisos QA" lista (F28).
+            self.state.status_counts["qa"] = self.state.status_counts.get(
+                "pending_warnings", 0
+            )
 
             # O total do filtro ativo tambem ja veio no resumo acima: as duas
             # consultas varriam a mesma tabela com o mesmo `WHERE`. Com busca
@@ -3477,10 +3485,12 @@ class TranslationEditor:
         new_warning = False
         if index is not None and 0 <= index < len(self.state.rows):
             old_verified = self.state.rows[index][3] if len(self.state.rows[index]) > 3 else 0
-            old_warning = row_has_quality_warning(self.state.rows[index])
+            # "qa" conta avisos PENDENTES (F28): verificar uma linha com aviso
+            # a tira da fila tanto quanto corrigir o aviso.
+            old_warning = row_has_quality_warning(self.state.rows[index]) and old_verified != 1
             verified = 1 if mark_verified else old_verified
             self.update_current_row_cache(verified)
-            new_warning = row_has_quality_warning(self.state.rows[index])
+            new_warning = row_has_quality_warning(self.state.rows[index]) and verified != 1
             if old_warning != new_warning:
                 if new_warning:
                     self.state.status_counts["qa"] += 1
@@ -3709,7 +3719,13 @@ class TranslationEditor:
                 if page_limit < len(page_rows):
                     page_rows = page_rows[:page_limit]
 
-                found = find_first_quality_warning(page_rows, local_start)
+                found = find_first_quality_warning(
+                    page_rows,
+                    local_start,
+                    # F28: a fila pula as verificadas, salvo quando o revisor
+                    # esta olhando justamente elas.
+                    include_verified=self.selected_status_filter() == "verified",
+                )
                 if found is not None:
                     found_index, _row, warnings = found
                     return page_start + found_index, warnings

@@ -415,9 +415,19 @@ curta demais, longa demais) e os demais sabem que o texto e xadrez:
 - **`U+FFFD`** no texto (bytes perdidos na leitura) e **`|||`** vazado de um lote;
 - **traducao quase identica** ao original;
 - **terminologia suspeita**, pelo `Termos-suspeitos.txt`: "check" no original com
-  "cheque" na traducao, "file" com "arquivo", "square" com "quadrado". Medido nas
-  6.500 traducoes do banco de desenvolvimento, isto marca 347 linhas (5,3%) que
-  antes passavam limpas.
+  "cheque" na traducao, "file" com "arquivo", "square" com "quadrado" — 57
+  entradas, cada uma com o numero medido no proprio arquivo;
+- **tres avisos de prosa** para o portugues (ROADMAP 28.2): o fragmento
+  terminado em `after` que saiu "depois" sem "de", "Brancas"/"Pretas" com
+  maiuscula no meio da frase, e "as brancas sao melhores" (a convencao e
+  "estao"). Medido nas 6.500 traducoes do banco de desenvolvimento, a versao 2
+  das heuristicas marca 1.254 linhas da saida da maquina, com 96% de precisao
+  contra o que o revisor humano de fato editou.
+
+**"Avisos QA" lista so as pendentes.** O aviso e sobre o texto e nao sabe quem
+o revisou; sem esse recorte, cada versao nova das heuristicas devolveria a fila
+as linhas ja aprovadas. As verificadas com aviso continuam alcancaveis pelo
+filtro "Verificadas" com "Proximo aviso QA", e "Exportar QA" leva todas.
 
 O aviso e **cache**: fica materializado numa coluna para que contar e paginar por
 "com aviso" seja uma consulta indexada. As heuristicas tem versao, e quando ela

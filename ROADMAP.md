@@ -6,7 +6,7 @@ verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
 **Pendente: a secao 28** (revisao de 2026-09-14), que e plano e nao
-entrega — quinze itens medidos (28.1, 28.4 e a camada 2 de 28.2 ja feitos), com a ordem em 28.15 e as garantias planejadas
+entrega — quinze itens medidos (28.1, 28.2 e 28.4 ja feitos), com a ordem em 28.15 e as garantias planejadas
 na secao 11 da SPEC. Ate ela, o registro estava assim:
 
 **Nada pendente.** O item 19.11 (corretor ortografico de prosa), que era o
@@ -7766,7 +7766,7 @@ anterior, o dialogo bloqueia. O harness passou a silenciar os tres.
 configuracao nova torna parte do projeto. As garantias I8, M3 e B4 migraram
 para a secao 9 da SPEC.
 
-### 28.2 O aviso de qualidade ve 359 das 1.677 linhas que tem defeito — camada 2 CONCLUIDA (2026-09-14)
+### 28.2 O aviso de qualidade ve 359 das 1.677 linhas que tem defeito — CONCLUIDO (2026-09-14)
 
 **Medido no banco de dev**, uniao de 33 detectores por regra (regex no
 original e na traducao, o par generalizando o formato do
@@ -7841,8 +7841,64 @@ pendentes por padrao), **P5** (as normalizacoes so agem onde o original
 prova a forma — nunca inventam espaco nem hifen) e **P6** (a passada sobre o
 banco alcanca o que ja esta gravado, com historico).
 
-**A camada 2 foi feita no mesmo dia** (a camada 1, o QA, continua pendente).
-O que a medicao decidiu e o que saiu diferente do plano:
+**A camada 1 (o QA) foi feita no mesmo dia, depois da 2.** O que a medicao
+decidiu, forma a forma:
+
+- **35 formas novas no `Termos-suspeitos.txt`**, cada uma com o numero no
+  proprio arquivo. Medidas de dois jeitos: contra as decisoes humanas
+  (`move` -> "movimento" 8/0, `endgame` -> "final de jogo" 7/0, `trade` ->
+  "comercio"/"negociar" 7/0, `for the exchange` -> "troca" 2/0) e, onde nao
+  havia amostra humana, lendo o que cada uma marca na saida da maquina, como
+  16.1 fez (`resign` -> "renunciar" 13/13 erro, `check` -> "verificacao"
+  11/11, `sharp` -> "nitido" 5/5, `pin` -> "imobilizacao" 6/6 e a revisao
+  trocou todas por "cravada", `kingside` -> "lado do rei" 5/5 por "ala do
+  rei"). `the exchange` entrou **so com contexto** — `for/up/down/win/lose/
+  sacrifice the exchange`, `exchange sacrifice` — porque sem ele a precisao
+  humana e 60 % ("to exchange the knight" e troca mesmo, como 16.1 ja dizia).
+  **Quatro candidatas lidas ficaram de fora**: `game` -> "jogo" (39/14,
+  74 %), `move` -> "jogada" (4/1), `the exchange` -> "troca" sem contexto
+  (3/2) e `fork` -> "bifurcacao" (2 linhas, as duas "fork in the road").
+- **Tres heuristicas de prosa** em `review_quality._prose_warnings`, so para
+  o destino `pt`: `after` no fim do original com "depois" sem "de" no fim da
+  traducao (124/1), "Brancas/Pretas" com maiuscula no meio da frase (10/0) e
+  "as brancas sao/sejam melhores" (8/1). **"ele" para o lado ficou de fora**
+  (6/5 — entrevistas e pessoas), pela regra de 16.3. A primeira e a
+  **primeira heuristica com escopo de PAR** do programa: le o original em
+  ingles, entao vale com origem `en` ou nao declarada e e desligada por uma
+  origem declarada que nao seja ingles; a SPEC 10 dizia que a simetria
+  coluna x tela (Q3) so estaria testada quando isso existisse, e agora esta —
+  o veredito e o mesmo dos dois lados para `en`, para `""` e para `es`, onde
+  ele muda.
+- **A versao das heuristicas subiu para 2** (Q2): o banco reavalia na
+  abertura, com barra.
+- **F28**: "Avisos QA" passou a listar so as pendentes — um filtro
+  `pending_warnings` novo no banco, com a coluna correspondente no resumo por
+  status (o `EXPLAIN QUERY PLAN` continua em `COVERING INDEX`, o que 22.13
+  perdeu uma vez), o rodape conta essas, e F7 pula as verificadas **salvo no
+  filtro "Verificadas"**, onde elas sao justamente o trabalho. "Exportar QA"
+  e "Reavaliar QA" continuam alcancando tudo. Nenhum controle novo na tela:
+  o par filtro + F7 ja expressa "so pendentes" e "as verificadas", e 22.10
+  mediu que nao ha largura para um terceiro.
+
+Medido: a versao 2 marca **1.254 linhas da saida da maquina** (a 1: 359),
+com **96 % de precisao contra as decisoes humanas** (181 editadas, 7
+aceitas; a taxa geral de edicao humana e 36 %). Hoje, 107 linhas — 92
+pendentes na fila e 15 verificadas que F28 deixa fora dela.
+
+**O que a verificacao fixou.** `ProseQualityHeuristicsTests` (9 testes,
+inclusive a simetria Q3 por origem e a lista do que entrou e do que ficou de
+fora), `PendingOnlyQaFilterTests` (3, com o plano de consulta) e
+`PendingOnlyQaFilterWindowTests` (2, na janela real: o filtro esconde a
+verificada; F7 a pula e a acha no filtro "Verificadas"). Onze mutacoes
+mortas; **duas sobreviveram a primeira passada**: um lookbehind redundante
+no padrao de "depois" — "depois de" termina em "de" e nunca casou —, que
+saiu do codigo em vez de ganhar teste; e "prosa roda fora do pt", porque o
+teste italiano usava texto que nao casava os padroes portugueses de qualquer
+jeito — ganhou tres casos que casam. Q4 e F28 migraram para a secao 9 da
+SPEC.
+
+**A camada 2 foi feita antes da 1, no mesmo dia.** O que a medicao decidiu
+e o que saiu diferente do plano:
 
 - **As formas coladas nunca vem do livro** — `10...d5`, `...Cd3` e `12h5`
   somam 111 ocorrencias na saida da maquina e **zero** no original. Ainda

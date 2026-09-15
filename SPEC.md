@@ -1975,6 +1975,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | F25 | Restaurar uma versao do historico pergunta antes, e a janela diz o que mudou entre as duas | Risco: a unica restauracao do programa sem confirmacao, com os dois botoes colados no "Fechar" e nenhum diff pintado |
 | F26 | O historico lista as ALTERACOES, e a versao da traducao automatica e sempre recuperavel | Bug: 90% das linhas abriam em "nenhuma alteracao registrada" e 607 das 889 entradas mostravam o mesmo texto dos dois lados — nao havia como voltar ao que a maquina produziu |
 | F27 | O corretor de prosa marca erro de digitacao, e nunca xadrez | Limite: os erros de digitacao da revisao chegavam ao proximo leitor (ROADMAP 26) |
+| F28 | "Avisos QA" lista so as pendentes com aviso, o rodape conta essas, e F7 pula as verificadas — salvo no filtro "Verificadas", onde elas sao o trabalho; "Exportar QA" e "Reavaliar QA" continuam alcancando tudo | Risco: o aviso e sobre o texto e nao sabe quem o revisou; cada versao nova das heuristicas devolveria a fila as linhas ja aprovadas — 15 de 107 no banco de dev (ROADMAP 28.2) |
 | S16 | O dialogo de zerar o glossario conta o que apaga, por tipo, e a semente nao "volta" depois | Bug: anunciava 7.325 regras e apagava 5.910; e zerar deixava a sessao sem sugestao nenhuma e a abertura seguinte com 232 |
 | S17 | O "Teste rápido" do glossario usa a conversao do pipeline, e nao os pares crus | Bug: prioridade descartada, escopo ignorado, `@casa@` inerte e so a primeira ocorrencia trocada — a previa contradizia o banner S9 ao lado dela |
 | S18 | O editor de glossario anda pelo teclado: achar, andar pela lista filtrada e virar pagina | Custo: dois atalhos contra os treze do outro editor, numa janela que existe para varrer 7 mil linhas |
@@ -2002,6 +2003,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | R6 | Cache de avisos nao diverge | Risco da coluna materializada |
 | Q1 | Lance perdido e anotacao rompida geram aviso | Medicao: 401 erros de terminologia contra 11 linhas marcadas, intersecao zero |
 | Q2 | As heuristicas de QA tem versao, e muda-las reavalia o banco | Risco: a melhoria violar R6 nas 200 mil linhas ja avaliadas |
+| Q4 | Tres heuristicas de prosa para o destino `pt` — `after` no fim do original com "depois" sem "de" no fim da traducao (so com origem `en` ou nao declarada), "Brancas/Pretas" com maiuscula no meio da frase, "as brancas sao/sejam melhores" — e 35 formas novas no `Termos-suspeitos.txt`; "ele" para o lado, `game` -> "jogo", `the exchange` -> "troca" sem contexto e `fork` -> "bifurcacao" ficam de fora | Limite: o QA via 359 das 1.677 linhas com defeito detectavel; a versao 2 ve 1.254 da saida da maquina, com 96 % de precisao contra as decisoes humanas — 181 editadas, 7 aceitas (ROADMAP 28.2) |
 | Q3 | A avaliacao de QA na tela usa o par de idiomas da LINHA, e sem linha aberta nao ha veredito | Bug: "QA: sem avisos" em verde numa linha que a lista marcava com "⚠ QA"; e "traducao vazia" anunciado com o editor vazio |
 | R7 | A lista carrega o item clicado | Bug: clicar em B carregava C |
 | R9 | O editor mostra um par de idiomas de cada vez | Queixa de uso: revisar em espanhol achando que era italiano |
@@ -2242,13 +2244,11 @@ X3). O que resta declarado como limite:
   marcada como verificada que gera aviso continua gerando: o aviso e sobre o
   texto, e "verificada" e sobre quem olhou. O editor mostra os dois, e o
   relatorio de QA separa por status.
-- **Nenhuma entrada do `Termos-suspeitos.txt` tem escopo de PAR.** Sao 24, todas
-  por destino (14 `pt`, 2 para cada uma das outras cinco linguas), entao com o
-  arquivo que vem no programa o idioma de ORIGEM nunca muda o resultado da
-  terminologia. Ele e passado a avaliacao mesmo assim, porque a coluna
-  materializada o passa e as duas tem de receber os mesmos argumentos (Q3) — mas
-  a simetria nao esta testada, e so estara quando existir uma entrada `en>pt`.
-  (ROADMAP 22.2)
+- **Nenhuma entrada do `Termos-suspeitos.txt` tem escopo de PAR** — sao 57,
+  todas por destino. A primeira heuristica que depende da ORIGEM e a de
+  `after`/"depois" (Q4, 28.2), e com ela a simetria coluna x tela (Q3) passou
+  a ter teste: o veredito e o mesmo dos dois lados para `en`, para origem nao
+  declarada e para `es`, onde ele muda. (ROADMAP 22.2, 28.2)
 - **A reavaliacao nao acontece quando so o `Termos-suspeitos.txt` e editado a
   mao.** A versao das heuristicas e uma constante no codigo (Q2), e nao um hash do
   arquivo: quem editar a lista tem de subir a constante ou clicar em "Reavaliar
@@ -2357,10 +2357,11 @@ numero e o do item que o resolve.
 - **"Aplicar Automaticas" nao filtra `verified`**: reescreve linhas que o
   revisor ja aprovou. Promover uma regra a `automatic` e clicar a ferramenta
   alcanca o acervo inteiro do par. (28.1, 28.5)
-- **O aviso de qualidade ve 359 das 1.677 linhas com defeito detectavel por
-  regra** no banco de dev (25,8 %). O aviso tambem nao sabe se a linha ja foi
-  revisada, e por isso reavaliar o banco com heuristicas novas marcaria
-  linhas aprovadas. (28.2) O defeito mais frequente — o fragmento terminado
+- **O aviso de qualidade ve 1.254 das 1.677 linhas com defeito detectavel por
+  regra** na saida da maquina do banco de dev (a versao 1 via 359). O que
+  sobra e o que nao tem regra segura: `game` -> "jogo" (74 % de precisao
+  humana), `the exchange` -> "troca" sem contexto (60 %), "ele" para o lado
+  (55 %). (28.2) O defeito mais frequente — o fragmento terminado
   em `after` que saia "depois" sem "de" — esta corrigido no pipeline (P7,
   28.4), e "Consertar Prosa" (P6) alcanca as linhas ja gravadas, menos as
   verificadas: 3 no banco de dev, que a revisao aprovou com o defeito e a
@@ -2436,20 +2437,19 @@ protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
 **Pendentes: as da secao 28 do ROADMAP (revisao de 2026-09-14), menos as tres
-de 28.1, a de 28.4 e as duas da camada 2 de 28.2** — I8, M3 e B4 migraram
+de 28.1, a de 28.4 e as quatro de 28.2** — I8, M3 e B4 migraram
 para a secao 9 em 2026-09-14, com 3, 5 e 4 testes e nove mutacoes sem
 sobrevivente; P7 no mesmo dia, com 6 testes e sete mutacoes; P5 e P6 no
 mesmo dia, com 8 e 5 testes e doze mutacoes (duas sobreviveram a primeira
 passada e viraram teste — as duas do padrao "o cenario cai numa guarda
-vizinha"). Cada uma das que ficam esta escrita
+vizinha"); Q4 e F28 no mesmo dia, com 9 + 3 testes headless, 2 de janela e
+onze mutacoes (uma sobrevivente era um lookbehind redundante, que saiu). Cada uma das que ficam esta escrita
 como o teste que a fara migrar — "falha sem a correcao" —, e as
 que dependem de medicao no banco de dev dizem qual e o comportamento
 testavel e qual e o numero que fica so no ROADMAP.
 
 | # | Garantia planejada | Item | Como o teste falha sem ela |
 |---|---|---|---|
-| Q4 | `after$` com `depois$`, "Brancas/Pretas" com maiuscula no meio e "sao/sejam melhores" geram aviso, e "ele" para o lado nao gera; as formas novas do `Termos-suspeitos.txt` acusam o par medido | 28.2 | Cada heuristica tem um par (marca, nao marca); a primeira heuristica `en>pt` tem o teste de simetria coluna x tela (Q3) |
-| F28 | "Avisos QA" e "Proximo aviso QA" mostram so pendentes por padrao, e o botao "Reavaliar QA" continua alcancando tudo | 28.2 | Uma linha verificada com aviso nao aparece no filtro nem para o "Proximo aviso"; aparece ao desligar o padrao |
 | S19 | "Aplicar Automaticas" tem escopo, e o padrao e "so pendentes" | 28.5 | Linha verificada nao muda no escopo padrao; muda quando o escopo pede |
 | S20 | Promover uma regra a `automatic` mostra quantas linhas pendentes ela alteraria e dez delas, fora da thread do Tk | 28.5 | O dialogo traz o numero e a amostra; a contagem roda por `run_with_progress` (mutacao: chamar direto quebra o teste de thread) |
 | S21 | "Trocas repetidas nesta obra" lista os pares mais frequentes do historico do arquivo e diz se ja ha regra | 28.5 | Historico sintetico com `troca -> qualidade` 5 vezes: o par aparece com "sem regra"; com a regra no glossario, aparece "automatica" |

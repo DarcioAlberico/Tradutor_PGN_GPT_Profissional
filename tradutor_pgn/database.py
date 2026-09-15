@@ -1670,6 +1670,13 @@ def _review_where(
         # Usa a coluna materializada: contar e paginar "com aviso" vira uma
         # consulta indexada, em vez de ler a tabela inteira e avaliar em Python.
         clauses.append("quality_warning = 1")
+    elif status_filter == "pending_warnings":
+        # O que o filtro "Avisos QA" do editor mostra por padrao (garantia
+        # F28): o aviso e sobre o texto e nao sabe quem o revisou, entao sem
+        # este recorte cada versao nova das heuristicas devolveria a fila as
+        # linhas que um revisor ja aprovou. "warnings" continua existindo para
+        # o relatorio e para quem pede tudo.
+        clauses.append("verified <> 1 AND quality_warning = 1")
 
     search_text = (search_text or "").strip()
     if search_text:
@@ -1848,6 +1855,9 @@ def review_status_counts_query(
             COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN quality_warning = 1 THEN 1 ELSE 0 END), 0),
             COALESCE(SUM(
+                CASE WHEN verified <> 1 AND quality_warning = 1 THEN 1 ELSE 0 END
+            ), 0),
+            COALESCE(SUM(
                 CASE WHEN verified <> 1 AND review_status = '{REVIEW_STATUS_REJECTED}'
                 THEN 1 ELSE 0 END
             ), 0),
@@ -1877,14 +1887,16 @@ def get_review_status_counts(
         source_file=source_file,
         cursor=cursor,
     )
-    total, pending, verified, warnings, rejected, doubt = cursor.execute(
-        sql, params
-    ).fetchone()
+    total, pending, verified, warnings, pending_warnings, rejected, doubt = (
+        cursor.execute(sql, params).fetchone()
+    )
     return {
         "total": total,
         "pending": pending,
         "verified": verified,
         "warnings": warnings,
+        # O subconjunto pendente dos avisos — o que "Avisos QA" lista (F28).
+        "pending_warnings": pending_warnings,
         # Subconjuntos de `pending`, e nao categorias ao lado dela: uma linha
         # rejeitada continua sendo uma linha que falta resolver, e some-la ao
         # pendente daria um total maior que a tabela (ROADMAP 19, item 12).
@@ -1904,6 +1916,7 @@ STATUS_COUNT_KEYS = {
     "pending": "pending",
     "verified": "verified",
     "warnings": "warnings",
+    "pending_warnings": "pending_warnings",
     REVIEW_STATUS_REJECTED: REVIEW_STATUS_REJECTED,
     REVIEW_STATUS_DOUBT: REVIEW_STATUS_DOUBT,
 }
