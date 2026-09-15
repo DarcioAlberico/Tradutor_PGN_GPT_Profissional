@@ -382,13 +382,24 @@ novo.
 ## O que o pipeline conserta na prosa
 
 Depois das regras automaticas e antes de gravar, o programa repoe o que a
-traducao automatica perde de forma mecanica e o original prova. A primeira
-dessas correcoes (ROADMAP 28.4): um comentario que termina em `after` — um
-fragmento, com o lance no movetext — sai em "depois de", e nao em "depois".
-Medido no banco de desenvolvimento, eram 532 linhas de 6.500, a troca mais
-frequente da revisao. So age no par ingles -> portugues, nunca quando a
-traducao ja termina em "depois de" ou "apos", e respeita o `after` adverbial
-("immediately after"). O resumo da execucao conta quantas repos.
+traducao automatica perde de forma mecanica e o original prova (ROADMAP 28.2
+e 28.4). Quatro consertos, todos guiados pelo comentario original:
+
+- o espaco entre o numero ou a reticencia e o lance (`10...d5` -> `10... d5`,
+  `12h5` -> `12 h5`), so quando o original tem o mesmo lance com espaco;
+- `cavalo-d5` -> `cavalo de d5`, so quando o original tem `d5-knight`, e so
+  para o portugues;
+- o espaco de largura zero (`U+200B`) que a API insere, quando o original nao
+  tem nenhum;
+- o fragmento que termina em `after` sai em "depois de", e nao em "depois" —
+  nunca quando a traducao ja termina em "depois de" ou "apos", e respeitando
+  o `after` adverbial ("immediately after").
+
+Medido no banco de desenvolvimento, sao 731 linhas de 6.500 na saida da
+maquina. O resumo da execucao conta os consertos. **"Consertar Prosa"**, em
+Ferramentas, aplica os mesmos consertos as traducoes **pendentes** ja gravadas
+do par selecionado — com backup, previa e historico; uma traducao verificada
+nunca e tocada por ele.
 
 ## Avisos de qualidade
 

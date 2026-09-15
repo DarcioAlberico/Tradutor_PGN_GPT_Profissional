@@ -17,6 +17,7 @@ from .db_tools import export_csv as export_translations_csv
 from .db_tools import export_tmx as export_translations_tmx
 from .db_tools import import_csv as import_translations_csv
 from .db_tools import fix_move_notation_in_database
+from .db_tools import normalize_prose_in_database
 from .db_tools import reevaluate_quality_in_database
 from .db_tools import reset_glossary as reset_glossary_file
 from .db_tools import reset_translations as reset_translations_database
@@ -580,6 +581,24 @@ def fix_move_notation(app):
     ):
         return
     fix_move_notation_in_database(
+        app,
+        app.source_language.get(),
+        app.target_language.get(),
+    )
+
+
+def normalize_prose(app):
+    """Conserta a prosa das traducoes pendentes ja gravadas do par selecionado.
+
+    O par sai dos mesmos seletores que "Corrigir Lances" usa, pelo mesmo motivo:
+    nao ha uma segunda pergunta a fazer. "Detectar" e aceito — as normalizacoes
+    de prosa sao guiadas pelo texto do original, nao pelo alfabeto declarado.
+    """
+    if _busy_with_translation(
+        app, "Consertar Prosa", "consertar as traduções já gravadas"
+    ):
+        return
+    normalize_prose_in_database(
         app,
         app.source_language.get(),
         app.target_language.get(),

@@ -223,6 +223,10 @@ def setup_main_ui(app):
             {"text": "Editar Traduções", "command": app.open_edit_window},
             {"text": "Editar Glossário", "command": app.open_glossary_window},
             {"text": "Corrigir Lances", "command": app.fix_move_notation},
+            # Ao lado de "Corrigir Lances" porque e a mesma ferramenta vista
+            # de outro angulo: aquela alcanca as letras dos lances ja
+            # gravados (P4), esta alcanca a prosa (P6, ROADMAP 28.2).
+            {"text": "Consertar Prosa", "command": app.normalize_prose},
             # A abertura ja reavalia sozinha quando as heuristicas mudam
             # (garantia Q2); este botao e para quem cancelou aquela, ou quem quer
             # conferir em que versao o banco esta.

@@ -270,7 +270,13 @@ from tradutor_pgn.settings import (
     update_settings,
 )
 from tradutor_pgn import pgn_utils
-from tradutor_pgn.prose_fixes import fix_trailing_preposition
+from tradutor_pgn.prose_fixes import (
+    fix_move_spacing,
+    fix_piece_square_hyphen,
+    fix_trailing_preposition,
+    normalize_prose,
+    strip_zero_width_spaces,
+)
 from tradutor_pgn.translation_api import split_text_for_translation, translate_text
 from tradutor_pgn import (
     editor_common,
@@ -7963,6 +7969,225 @@ class TrailingPrepositionTests(unittest.TestCase):
         self.assertEqual(self.fix("better after", "melhor depois", source=""), ("melhor depois de", 1))
 
 
+class ProseNormalizationTests(unittest.TestCase):
+    """Garantia P5: as normalizacoes so agem onde o original prova a forma.
+
+    Medido no banco de dev (ROADMAP 28.2, camada 2): as formas coladas
+    (`10...d5`, `...Cd3`, `12h5`) aparecem 111 vezes na saida da maquina e
+    ZERO no original; `cavalo-d5` 131 vezes contra `d5-knight` 413 no original,
+    e a revisao trocou 124 por "cavalo de d5"; `U+200B` 68 contra 0.
+    """
+
+    def test_the_space_after_the_ellipsis_comes_back_from_the_original(self):
+        self.assertEqual(
+            fix_move_spacing("After 10... d5 and ... Nd3, then 12 h5", "Depois de 10...d5 e ...Cd3, entao 12h5"),
+            ("Depois de 10... d5 e ... Cd3, entao 12 h5", 3),
+        )
+
+    def test_a_space_the_original_does_not_have_is_never_invented(self):
+        for original, translation in (
+            ("threatening ...Qxh2+", "ameacando ...Dxh2+"),   # colado no original
+            ("After 10... d5", "Depois de 10...e5"),           # ancora diferente
+            ("After 10... d5", "Depois de 11...d5"),           # numero diferente
+            ("after 12 h5", "depois de 13h5"),                 # numero colado, numero diferente
+            ("after 12 h5", "depois de 12e5"),                 # numero colado, ancora diferente
+            ("", "10...d5"),
+            ("After 10... d5", ""),
+        ):
+            with self.subTest(original=original):
+                self.assertEqual(fix_move_spacing(original, translation), (translation, 0))
+
+    def test_an_ellipsis_glued_on_both_sides_gets_both_spaces(self):
+        """"playing ... b5" vira "jogar...b5": o original prova os dois lados."""
+        self.assertEqual(fix_move_spacing("playing ... b5-b4", "jogar...b5-b4"), ("jogar ... b5-b4", 1))
+        # sem espaco antes no original, so o de depois volta — mesmo com a
+        # traducao colada a palavra anterior
+        self.assertEqual(fix_move_spacing("playing... b5-b4", "jogar...b5-b4"), ("jogar... b5-b4", 1))
+        self.assertEqual(fix_move_spacing("(... b5)", "(...b5)"), ("(... b5)", 1))
+
+    def test_captures_and_checks_do_not_break_the_anchor(self):
+        self.assertEqual(
+            fix_move_spacing("after 12... Nxe4+", "depois de 12...Cxe4+"),
+            ("depois de 12... Cxe4+", 1),
+        )
+
+    def test_the_hyphen_becomes_de_only_with_the_original_square(self):
+        self.assertEqual(
+            fix_piece_square_hyphen("the d5-knight and the e7-pawn", "o cavalo-d5 e o pe\u00e3o-e7", "pt"),
+            ("o cavalo de d5 e o pe\u00e3o de e7", 2),
+        )
+        # a casa que o original nao tem com hifen fica como esta
+        self.assertEqual(
+            fix_piece_square_hyphen("the d5-knight", "o cavalo-d5 e a torre-a1", "pt"),
+            ("o cavalo de d5 e a torre-a1", 1),
+        )
+        # so a casa completa: `e-pawn` fica de fora (3 ocorrencias, a revisao nao usou "de")
+        self.assertEqual(fix_piece_square_hyphen("the e-pawn", "o pe\u00e3o-e", "pt"), ("o pe\u00e3o-e", 0))
+
+    def test_the_hyphen_rule_is_portuguese_only(self):
+        self.assertEqual(fix_piece_square_hyphen("the d5-knight", "il cavallo-d5", "it"), ("il cavallo-d5", 0))
+        self.assertEqual(fix_piece_square_hyphen("the d5-knight", "o cavalo-d5", ""), ("o cavalo-d5", 0))
+
+    def test_zero_width_spaces_go_unless_the_original_has_them(self):
+        self.assertEqual(strip_zero_width_spaces("a b", "a \u200b \u200bb"), ("a b", 2))
+        self.assertEqual(strip_zero_width_spaces("a\u200bb", "a\u200bb"), ("a\u200bb", 0))
+        self.assertEqual(strip_zero_width_spaces("a b", "a b"), ("a b", 0))
+
+    def test_normalize_prose_composes_all_four_and_counts(self):
+        self.assertEqual(
+            normalize_prose(
+                "The d5-knight is strong after 12... Nf6, and after",
+                "O cavalo-d5 \u200b e forte depois de 12...Cf6, e depois",
+                "en",
+                "pt",
+            ),
+            ("O cavalo de d5 e forte depois de 12... Cf6, e depois de", 4),
+        )
+        self.assertEqual(normalize_prose("A quiet move.", "Um lance tranquilo.", "en", "pt"), ("Um lance tranquilo.", 0))
+
+
+class ProseInDatabaseTests(unittest.TestCase):
+    """Garantia P6: a passada sobre o banco alcanca o que ja esta gravado —
+    so as linhas pendentes, com historico, e nunca as verificadas.
+
+    A secao 11 do ROADMAP nasceu porque a correcao de lances so alcancava a
+    traducao nova e 4.144 linhas ficaram erradas; as normalizacoes de prosa
+    nascem com a passada.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.db_path = self.base / "traducoes.db"
+        conn = initialize_database(str(self.db_path))
+        cur = conn.cursor()
+        save_translation(cur, "The d5-knight is strong after", "O cavalo-d5 e forte depois", "pt", "en")
+        save_translation(cur, "After 10... d5 White is fine", "Depois de 10...d5 as brancas estao bem", "pt", "en")
+        save_translation(cur, "A quiet move.", "Um lance tranquilo.", "pt", "en")
+        # A verificada tem o mesmo defeito e NAO pode ser tocada.
+        save_translation(cur, "Black is better after", "As pretas estao melhores depois", "pt", "en")
+        cur.execute("UPDATE comments SET verified = 1 WHERE original_comment = ?", ("Black is better after",))
+        conn.commit()
+        conn.close()
+
+        self.dialogos = []
+        self.confirma = True
+        original = db_tools.messagebox
+        db_tools.messagebox = types.SimpleNamespace(
+            showinfo=lambda t, m, **_k: self.dialogos.append(("info", t, m)),
+            showerror=lambda t, m, **_k: self.dialogos.append(("error", t, m)),
+            askyesno=lambda t, m, **_k: (self.dialogos.append(("askyesno", t, m)) or self.confirma),
+        )
+        self.addCleanup(setattr, db_tools, "messagebox", original)
+        original_run = db_tools.run_with_progress
+        db_tools.run_with_progress = self.rodar_sincrono
+        self.addCleanup(setattr, db_tools, "run_with_progress", original_run)
+
+    def rodar_sincrono(self, _parent, _titulo, work, on_success=None, on_cancel=None, **_kw):
+        try:
+            resultado = work(BackgroundTask())
+        except TaskCanceled:
+            if on_cancel is not None:
+                on_cancel(None)
+            return
+        if on_success is not None:
+            on_success(resultado)
+
+    def app_falso(self):
+        return types.SimpleNamespace(
+            output_db=str(self.db_path),
+            root=None,
+            translation_cache={"A quiet move.": "Um lance tranquilo."},
+            log_message=lambda _m: None,
+        )
+
+    def linhas(self):
+        conn = initialize_database(str(self.db_path))
+        try:
+            return {
+                orig: (trad, verified)
+                for orig, trad, verified in conn.execute(
+                    "SELECT original_comment, translated_comment, verified FROM comments"
+                )
+            }
+        finally:
+            conn.close()
+
+    def historico(self):
+        conn = initialize_database(str(self.db_path))
+        try:
+            return conn.execute(
+                "SELECT c.original_comment, h.action, h.previous_translation, h.new_translation"
+                " FROM comment_history h JOIN comments c ON c.id = h.comment_id"
+                " WHERE h.action = 'prose_fix' ORDER BY h.id"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def test_the_preview_counts_only_pending_rows_and_writes_nothing(self):
+        antes = self.linhas()
+        stats = db_tools.analyze_database_prose(str(self.db_path), "en", "pt")
+
+        self.assertEqual(stats["scanned"], 3, "a verificada nem entra na contagem")
+        self.assertEqual(stats["changed"], 2)
+        self.assertEqual(stats["moves"], 3, "hifen + preposicao na primeira, espaco na segunda")
+        self.assertEqual(self.linhas(), antes, "a previa gravou")
+
+    def test_applying_rewrites_pending_rows_with_history_and_leaves_verified_alone(self):
+        db_tools.normalize_prose_in_database(self.app_falso(), "en", "pt")
+
+        self.assertEqual(
+            self.linhas(),
+            {
+                "The d5-knight is strong after": ("O cavalo de d5 e forte depois de", 0),
+                "After 10... d5 White is fine": ("Depois de 10... d5 as brancas estao bem", 0),
+                "A quiet move.": ("Um lance tranquilo.", 0),
+                "Black is better after": ("As pretas estao melhores depois", 1),
+            },
+        )
+        self.assertEqual(
+            self.historico(),
+            [
+                ("The d5-knight is strong after", "prose_fix", "O cavalo-d5 e forte depois", "O cavalo de d5 e forte depois de"),
+                ("After 10... d5 White is fine", "prose_fix", "Depois de 10...d5 as brancas estao bem", "Depois de 10... d5 as brancas estao bem"),
+            ],
+        )
+
+    def test_saying_no_leaves_everything_and_the_preview_names_the_scope(self):
+        self.confirma = False
+        antes = self.linhas()
+
+        db_tools.normalize_prose_in_database(self.app_falso(), "en", "pt")
+
+        self.assertEqual(self.linhas(), antes)
+        pergunta = next(m for tipo, _t, m in self.dialogos if tipo == "askyesno")
+        self.assertIn("PENDENTES", pergunta)
+        self.assertIn("Traducoes que serao alteradas: 2", pergunta)
+        self.assertIn("ja verificadas nao sao tocadas", pergunta)
+
+    def test_a_backup_is_created_and_the_cache_is_dropped(self):
+        app = self.app_falso()
+
+        db_tools.normalize_prose_in_database(app, "en", "pt")
+
+        copias = list((self.base / "backups").glob("traducoes-backup-*.db"))
+        self.assertEqual(len(copias), 1)
+        self.assertIn(copias[0].name, self.dialogos[-1][2])
+        self.assertEqual(app.translation_cache, {}, "o cache tem o texto de ANTES")
+
+    def test_nothing_to_do_says_so_without_asking(self):
+        conn = initialize_database(str(self.db_path))
+        conn.execute("UPDATE comments SET verified = 1")
+        conn.commit()
+        conn.close()
+
+        db_tools.normalize_prose_in_database(self.app_falso(), "en", "pt")
+
+        self.assertEqual([tipo for tipo, _t, _m in self.dialogos], ["info"])
+        self.assertIn("Nenhuma tradu", self.dialogos[0][2])
+
+
 class WorkerTrailingPrepositionTests(WorkerFallbackHarness, unittest.TestCase):
     """O conserto roda nos DOIS caminhos do worker e chega ao banco e ao PGN."""
 
@@ -8004,7 +8229,7 @@ class WorkerTrailingPrepositionTests(WorkerFallbackHarness, unittest.TestCase):
                 self.assertEqual(gravadas["Black is fine after"], "As pretas estao bem depois de")
                 self.assertIn("{As brancas estao melhores depois de}", saida)
                 self.assertTrue(
-                    any("Preposicoes finais repostas" in l and l.endswith("2") for l in app.logs),
+                    any("Consertos de prosa" in l and l.endswith("2") for l in app.logs),
                     "o resumo conta as duas",
                 )
 

@@ -6,7 +6,7 @@ verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
 **Pendente: a secao 28** (revisao de 2026-09-14), que e plano e nao
-entrega — quinze itens medidos (28.1 e 28.4 ja feitos), com a ordem em 28.15 e as garantias planejadas
+entrega — quinze itens medidos (28.1, 28.4 e a camada 2 de 28.2 ja feitos), com a ordem em 28.15 e as garantias planejadas
 na secao 11 da SPEC. Ate ela, o registro estava assim:
 
 **Nada pendente.** O item 19.11 (corretor ortografico de prosa), que era o
@@ -7766,7 +7766,7 @@ anterior, o dialogo bloqueia. O harness passou a silenciar os tres.
 configuracao nova torna parte do projeto. As garantias I8, M3 e B4 migraram
 para a secao 9 da SPEC.
 
-### 28.2 O aviso de qualidade ve 359 das 1.677 linhas que tem defeito
+### 28.2 O aviso de qualidade ve 359 das 1.677 linhas que tem defeito — camada 2 CONCLUIDA (2026-09-14)
 
 **Medido no banco de dev**, uniao de 33 detectores por regra (regex no
 original e na traducao, o par generalizando o formato do
@@ -7840,6 +7840,54 @@ uma com a precisao humana registrada), **F28** (avisos e "Proximo aviso" so
 pendentes por padrao), **P5** (as normalizacoes so agem onde o original
 prova a forma — nunca inventam espaco nem hifen) e **P6** (a passada sobre o
 banco alcanca o que ja esta gravado, com historico).
+
+**A camada 2 foi feita no mesmo dia** (a camada 1, o QA, continua pendente).
+O que a medicao decidiu e o que saiu diferente do plano:
+
+- **As formas coladas nunca vem do livro** — `10...d5`, `...Cd3` e `12h5`
+  somam 111 ocorrencias na saida da maquina e **zero** no original. Ainda
+  assim a regra so repoe o espaco quando o original tem a forma espacada para
+  o MESMO lance (numero e ancora, a ancora sendo o corpo sem a letra da peca,
+  como em `chess_notation`): e o que a torna incapaz de inventar (P5). A
+  primeira versao repunha 62 das 111; as 49 restantes eram a maquina colando
+  dos DOIS lados ("playing ... b5" -> "jogar...b5"), e o original prova
+  tambem o espaco de antes. Com isso, 111 de 111.
+- **O hifen so na casa completa.** `peca-coluna` ("peoes-c") aparece 3 vezes
+  e a revisao nao a resolveu com "de"; fica de fora. Na casa completa, 128
+  ocorrencias em 131 linhas, guiadas pela casa que o original tem em
+  `casa-peca` (413).
+- **`U+200B` so quando o original nao tem nenhum** (68 contra 0), e os
+  espacos que sobram colapsam. Os humanos aceitaram 3 linhas com ele porque
+  e invisivel — por isso e limpeza e nao aviso.
+- **A passada sobre o banco (P6) e a ferramenta "Consertar Prosa"**, ao lado
+  de "Corrigir Lances" e pelo mesmo caminho dela — `analyze/apply_move_notation_updates`
+  ganharam `only_pending` e `history_action`, e a funcao injetada e
+  `normalize_prose` (as tres normalizacoes mais a preposicao de 28.4). Duas
+  diferencas de P4, e as duas sao o item: o escopo e `verified = 0` — uma linha
+  que o revisor aprovou como esta nao e reescrita por aqui —, e nao rotula
+  origem nenhuma (rotular e a declaracao de "Corrigir Lances"). Backup antes,
+  previa com exemplos, historico `prose_fix` (que a janela de historico agora
+  nomeia; `move_notation` tambem estava sem rotulo), reavaliacao do aviso (R6),
+  cache em memoria limpo, guarda T5.
+
+Medido no banco de dev: `normalize_prose` altera **731 das 6.500 linhas** na
+saida da maquina; hoje, 84 — 81 pendentes que a ferramenta reescreve e 3
+verificadas que ela deixa (as que a revisao aprovou com o defeito). Zero em
+italiano.
+
+**O que a verificacao fixou.** `ProseNormalizationTests` (8 testes) e
+`ProseInDatabaseTests` (5: previa sem gravar e so pendentes, aplicacao com
+historico e verificada intacta, recusa, backup e cache, "nada a fazer"), o
+"Consertar Prosa" na lista de T5 em `test_main_window`, e doze mutacoes — sete
+de P5, quatro de P6 e uma do worker. **Duas sobreviveram a primeira passada**,
+as duas pelo padrao 3 da memoria de testes (o cenario cai numa guarda vizinha
+com o mesmo observavel): "espaco antes da reticencia inventado" passava porque
+o unico caso com a traducao colada a palavra anterior tambem tinha o espaco no
+original, e "numero colado sem conferir o original" passava porque os casos
+negativos caiam todos na regra da reticencia. Viraram dois casos novos, e o
+primeiro obrigou a alargar o padrao do original (`playing... b5`, reticencia
+colada a palavra, tambem registra a ancora). P5 e P6 migraram para a secao 9
+da SPEC.
 
 **O que fica de fora, dito por extenso:** `game` -> "jogo" (492) e
 `the exchange` -> "troca" (106) nao tem regra segura — ~100 e ~30 usos sao
@@ -7919,9 +7967,9 @@ a funcao muda 530 das 532 linhas na saida da maquina (as 2 sao a excecao), 82
 das de hoje (3 verificadas — as que a revisao deixou passar), nunca uma que
 termina em "depois de" ou "apos", e zero com destino `it`.
 
-**O que ficou de fora:** as 82 linhas ja gravadas. Uma passada sobre o banco e
-o P6 de 28.2, uma ferramenta para todas as normalizacoes — e nao uma por
-regra. Esta dito na SPEC 10.
+**O que ficou de fora na hora:** as 82 linhas ja gravadas. A passada sobre o
+banco saiu horas depois como "Consertar Prosa" (P6, 28.2 camada 2), uma
+ferramenta para todas as normalizacoes — e nao uma por regra.
 
 **O que a verificacao fixou.** `TrailingPrepositionTests` (5 testes) e
 `WorkerTrailingPrepositionTests` (1 teste que percorre o caminho do lote E o

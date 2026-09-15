@@ -260,6 +260,9 @@ class PGNTranslatorApp:
     def fix_move_notation(self):
         app_actions.fix_move_notation(self)
 
+    def normalize_prose(self):
+        app_actions.normalize_prose(self)
+
     def reevaluate_quality_warnings(self):
         app_actions.reevaluate_quality_warnings(self)
 

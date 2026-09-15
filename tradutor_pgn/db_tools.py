@@ -10,6 +10,7 @@ from xml.sax.saxutils import escape as xml_escape
 from . import __version__
 from .app_config import language_label
 from .chess_notation import fix_move_notation, supports_notation
+from .prose_fixes import normalize_prose
 from .database import (
     MoveNotationCanceled,
     QUALITY_VERSION_KEY,
@@ -2197,6 +2198,194 @@ def _format_move_notation_preview(stats):
             )
     linhas.extend(["", "Um backup do banco sera criado antes de alterar os dados."])
     return "\n".join(linhas)
+
+
+def analyze_database_prose(
+    db_path, source_language, target_language, progress_callback=None, should_cancel=None
+):
+    """Previa da passada de prosa: so as linhas PENDENTES do par (garantia P6)."""
+    conn = initialize_database(db_path)
+    try:
+        return analyze_move_notation_updates(
+            conn.cursor(),
+            source_language,
+            target_language,
+            normalize_prose,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
+            only_pending=True,
+        )
+    finally:
+        conn.close()
+
+
+def apply_database_prose(
+    db_path,
+    source_language,
+    target_language,
+    create_backup=True,
+    backup_dir=None,
+    progress_callback=None,
+    should_cancel=None,
+):
+    """Aplica as normalizacoes de prosa as traducoes pendentes ja gravadas.
+
+    E o mesmo laco da correcao de lances (P4), com tres diferencas que sao o
+    item: a funcao injetada e `normalize_prose`; o escopo e `verified = 0` —
+    uma linha que o revisor aprovou como esta nao e reescrita por aqui; e a
+    acao do historico e `prose_fix`. Nao rotula origem nenhuma: rotular e a
+    declaracao de "Corrigir Lances", e esta ferramenta nao a repete.
+    """
+    backup_path = None
+    if create_backup:
+        backup_path = create_database_backup(db_path, backup_dir=backup_dir)
+
+    conn = initialize_database(db_path)
+    try:
+        stats = apply_move_notation_updates(
+            conn.cursor(),
+            source_language,
+            target_language,
+            normalize_prose,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
+            only_pending=True,
+            history_action="prose_fix",
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    stats["backup_path"] = backup_path
+    return stats
+
+
+def _format_prose_preview(stats):
+    linhas = [
+        "Consertar a prosa das traducoes PENDENTES ja gravadas?",
+        "",
+        "O que muda: espaco entre numero/reticencia e lance, 'cavalo-d5' -> "
+        "'cavalo de d5', espaco de largura zero, e 'depois' -> 'depois de' no "
+        "fim de fragmento — sempre guiado pelo comentario original.",
+        "As traducoes ja verificadas nao sao tocadas.",
+        "",
+        f"Par de idiomas: {format_move_notation_scope(stats['source_language'], stats['target_language'])}",
+        f"Traducoes pendentes analisadas: {stats['scanned']}",
+        f"Traducoes que serao alteradas: {stats['changed']}",
+        f"Consertos: {stats['moves']}",
+    ]
+    if stats["examples"]:
+        linhas.append("")
+        linhas.append("Exemplos:")
+        for exemplo in stats["examples"][:5]:
+            linhas.extend(
+                [
+                    f"  ID {exemplo['id']}:",
+                    f"    Antes: {_preview_line(exemplo['previous_translation'])}",
+                    f"    Depois: {_preview_line(exemplo['new_translation'])}",
+                ]
+            )
+    linhas.extend(["", "Um backup do banco sera criado antes de alterar os dados."])
+    return "\n".join(linhas)
+
+
+def normalize_prose_in_database(app, source_language, target_language, on_finish=None):
+    """Aplica as normalizacoes de prosa ao que ja esta gravado (garantia P6).
+
+    O pipeline conserta so o que passa pela traducao (P5, P7); o que ja estava
+    no banco fica como a maquina deixou — a secao 11 do ROADMAP nasceu porque a
+    correcao de lances tinha exatamente esse buraco. Medido no banco de
+    desenvolvimento: 84 traducoes pendentes de 6.500.
+    """
+    janela = app.root
+    falhou, cancelado = _database_task_callbacks(
+        app, "Consertar Prosa", "Erro ao consertar a prosa:", on_finish
+    )
+
+    def aplicar(preview):
+        def trabalho(task):
+            return apply_database_prose(
+                app.output_db,
+                source_language,
+                target_language,
+                progress_callback=task.report,
+                should_cancel=task.cancelado,
+            )
+
+        def aplicado(stats):
+            if hasattr(app, "translation_cache"):
+                # O cache em memoria tem o texto de ANTES e vence o banco na
+                # proxima traducao — a mesma razao de "Corrigir Lances".
+                app.translation_cache.clear()
+            app.log_message(
+                f"Prosa consertada: {stats['moves']} conserto(s) em "
+                f"{stats['changed']} traducao(oes) pendente(s)."
+            )
+            messagebox.showinfo(
+                "Consertar Prosa",
+                (
+                    "Consertos concluidos.\n\n"
+                    f"Traduções alteradas: {stats['changed']}\n"
+                    f"Consertos: {stats['moves']}\n\n"
+                    f"Backup criado em:\n{stats['backup_path']}"
+                ),
+            )
+            if on_finish is not None:
+                on_finish(stats)
+
+        run_with_progress(
+            janela,
+            "Consertando a prosa",
+            _cancelable_notation(trabalho),
+            on_success=aplicado,
+            on_error=falhou,
+            on_cancel=cancelado,
+            message=f"Reescrevendo {preview['changed']} traducao(oes)...",
+        )
+
+    def analisado(preview):
+        if preview["changed"] == 0:
+            messagebox.showinfo(
+                "Consertar Prosa",
+                (
+                    "Nenhuma tradução pendente precisa de conserto.\n\n"
+                    f"Par de idiomas: "
+                    f"{format_move_notation_scope(source_language, target_language)}\n"
+                    f"Traduções pendentes analisadas: {preview['scanned']}"
+                ),
+            )
+            if on_finish is not None:
+                on_finish(preview)
+            return
+
+        if not messagebox.askyesno("Consertar Prosa", _format_prose_preview(preview)):
+            if on_finish is not None:
+                on_finish(None)
+            return
+
+        aplicar(preview)
+
+    def analisar(task):
+        return analyze_database_prose(
+            app.output_db,
+            source_language,
+            target_language,
+            progress_callback=task.report,
+            should_cancel=task.cancelado,
+        )
+
+    run_with_progress(
+        janela,
+        "Consertar Prosa",
+        _cancelable_notation(analisar),
+        on_success=analisado,
+        on_error=falhou,
+        on_cancel=cancelado,
+        message="Analisando as traducoes pendentes...",
+    )
 
 
 NO_SOURCE_LANGUAGE_MESSAGE = (

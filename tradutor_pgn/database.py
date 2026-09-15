@@ -2926,7 +2926,7 @@ class MoveNotationCanceled(Exception):
     """A varredura da correcao de lances foi interrompida pelo usuario."""
 
 
-def _move_notation_where(source_language, include_unknown):
+def _move_notation_where(source_language, include_unknown, only_pending=False):
     """O `WHERE` das linhas em escopo, num lugar so.
 
     A previa e a aplicacao PRECISAM usar o mesmo criterio, e a primeira versao
@@ -2937,6 +2937,11 @@ def _move_notation_where(source_language, include_unknown):
 
     E a mesma armadilha dos itens 2.8 e 3.6: dois criterios em dois lugares nao
     quebram nada visivel — eles so discordam.
+
+    `only_pending` restringe a `verified = 0`. E o escopo da passada de prosa
+    (garantia P6, ROADMAP 28.2): ela reescreve texto que um revisor pode ter
+    aprovado como esta, e a linha aprovada so entra com escopo explicito. A
+    correcao de lances nao usa — la a letra errada e erro em qualquer linha.
     """
     clauses = [
         "target_language = ?",
@@ -2945,6 +2950,8 @@ def _move_notation_where(source_language, include_unknown):
         "original_comment IS NOT NULL",
         "original_comment <> ''",
     ]
+    if only_pending:
+        clauses.append("verified = 0")
     params = [None]  # o destino, preenchido por quem chama
     if include_unknown:
         clauses.insert(1, "source_language IN (?, ?)")
@@ -2955,9 +2962,13 @@ def _move_notation_where(source_language, include_unknown):
     return " AND ".join(clauses), params
 
 
-def _move_notation_rows(cursor, source_language, target_language, include_unknown):
+def _move_notation_rows(
+    cursor, source_language, target_language, include_unknown, only_pending=False
+):
     """As linhas em escopo que tem texto dos dois lados para comparar."""
-    where_sql, params = _move_notation_where(source_language, include_unknown)
+    where_sql, params = _move_notation_where(
+        source_language, include_unknown, only_pending
+    )
     params[0] = target_language
     return cursor.execute(
         f"""
@@ -2970,8 +2981,12 @@ def _move_notation_rows(cursor, source_language, target_language, include_unknow
     )
 
 
-def _move_notation_total(cursor, source_language, target_language, include_unknown):
-    where_sql, params = _move_notation_where(source_language, include_unknown)
+def _move_notation_total(
+    cursor, source_language, target_language, include_unknown, only_pending=False
+):
+    where_sql, params = _move_notation_where(
+        source_language, include_unknown, only_pending
+    )
     params[0] = target_language
     return cursor.execute(
         f"SELECT COUNT(*) FROM comments WHERE {where_sql}", params
@@ -3037,8 +3052,12 @@ def analyze_move_notation_updates(
     should_cancel=None,
     progress_every=2000,
     include_unknown=True,
+    only_pending=False,
 ):
     """Previa da correcao de lances: quantas linhas mudam, e alguns exemplos.
+
+    Serve tambem a passada de prosa (P6): a diferenca esta na funcao injetada
+    e em `only_pending`, que restringe o escopo as linhas nao verificadas.
 
     `fix_notation(original, traduzido, origem, destino) -> (texto, quantos)` e
     injetada em vez de importada para manter `database.py` sem saber de xadrez —
@@ -3057,14 +3076,14 @@ def analyze_move_notation_updates(
             cursor, target_language, source_language
         )
     total = _move_notation_total(
-        cursor, source_language, target_language, include_unknown
+        cursor, source_language, target_language, include_unknown, only_pending
     )
     if progress_callback:
         progress_callback(0, total)
 
     lidas = 0
     for _id, original, traduzido, _verified in _move_notation_rows(
-        cursor, source_language, target_language, include_unknown
+        cursor, source_language, target_language, include_unknown, only_pending
     ):
         lidas += 1
         stats["scanned"] += 1
@@ -3102,8 +3121,14 @@ def apply_move_notation_updates(
     should_cancel=None,
     progress_every=2000,
     include_unknown=True,
+    only_pending=False,
+    history_action="move_notation",
 ):
     """Aplica a correcao de lances nas traducoes ja gravadas do par.
+
+    Com `only_pending=True` e `history_action="prose_fix"` e a passada de prosa
+    (garantia P6): mesmo laco, mesma reavaliacao do aviso, mesmo historico —
+    so a funcao injetada, o escopo e o nome da acao mudam.
 
     Calcula e grava no mesmo laco, com um cursor proprio para o `UPDATE` —
     escrever no cursor que esta iterando o `SELECT` invalidaria a iteracao. E a
@@ -3122,14 +3147,14 @@ def apply_move_notation_updates(
     write_cursor = cursor.connection.cursor()
     stats = _empty_move_notation_stats(source_language, target_language)
     total = _move_notation_total(
-        cursor, source_language, target_language, include_unknown
+        cursor, source_language, target_language, include_unknown, only_pending
     )
     if progress_callback:
         progress_callback(0, total)
 
     lidas = 0
     for row_id, original, traduzido, verified in _move_notation_rows(
-        cursor, source_language, target_language, include_unknown
+        cursor, source_language, target_language, include_unknown, only_pending
     ):
         lidas += 1
         stats["scanned"] += 1
@@ -3174,7 +3199,7 @@ def apply_move_notation_updates(
             record_comment_history(
                 write_cursor,
                 row_id,
-                "move_notation",
+                history_action,
                 traduzido,
                 novo,
                 verified,

@@ -21,6 +21,8 @@ medicao encontrou uma.
 """
 import re
 
+from .chess_notation import CAPTURE_MARKS, PIECE_LETTERS
+
 # (idioma de origem, palavra final do original, palavra final da traducao,
 #  complemento). A traducao que ja termina em "depois de" nao casa o segundo
 # padrao — "de" e a ultima palavra — e fica como esta.
@@ -89,3 +91,190 @@ def fix_trailing_preposition(original, translation, source_language, target_lang
         return f"{stripped} {complement}{trailing}", 1
 
     return translation, 0
+
+
+# ============================================================================
+# As normalizacoes de 28.2 (camada 2): espaco do lance, hifen peca-casa e o
+# espaco de largura zero. Todas guiadas pelo original (garantia P5).
+# ============================================================================
+
+# O corpo de um lance, sem as bordas de `chess_notation._move_pattern`: aqui
+# ele precisa casar COLADO a um numero (`12h5`) ou a uma reticencia (`...Cd3`),
+# que e justamente o defeito. As letras sao as de todos os idiomas, porque a
+# traducao ja veio com a letra do destino.
+_LETTERS = "|".join(
+    sorted(
+        {re.escape(letra) for letras in PIECE_LETTERS.values() for letra in letras.values()},
+        key=len,
+        reverse=True,
+    )
+)
+_CAPTURE = f"[{re.escape(CAPTURE_MARKS)}]"
+_MOVE_BODY = (
+    rf"(?:(?:{_LETTERS})?[a-h]?[1-8]?{_CAPTURE}?[a-h][1-8](?:=(?:{_LETTERS}))?"
+    r"|[0O]-[0O](?:-[0O])?)[+#]?"
+)
+_CAPTURE_TO_X = {ord(marca): "x" for marca in CAPTURE_MARKS}
+_LEADING_LETTER = re.compile(rf"^(?:{_LETTERS})")
+
+# No ORIGINAL, as formas com espaco: `10... d5`, `... Nd3`, `12 h5`.
+_ORIG_NUM_ELLIPSIS = re.compile(rf"(?<!\w)(\d+)\.\.\. ({_MOVE_BODY})(?!\w)")
+_ORIG_ELLIPSIS = re.compile(rf"(?<![\d.])\.\.\. ({_MOVE_BODY})(?!\w)")
+# A mesma forma quando ha um espaco tambem ANTES da reticencia ("playing ... b5"):
+# a maquina cola dos dois lados ("jogar...b5"), e o original prova os dois.
+_ORIG_ELLIPSIS_SPACED = re.compile(rf"(?<= )\.\.\. ({_MOVE_BODY})(?!\w)")
+_ORIG_NUM_SPACE = re.compile(rf"(?<!\w)(\d+) ({_MOVE_BODY})(?!\w)")
+# Na TRADUCAO, as mesmas formas coladas.
+_TRANS_NUM_ELLIPSIS = re.compile(rf"(?<!\w)(\d+)\.\.\.({_MOVE_BODY})(?!\w)")
+_TRANS_ELLIPSIS = re.compile(rf"(?<![\d.])\.\.\.({_MOVE_BODY})(?!\w)")
+_TRANS_NUM_GLUED = re.compile(rf"(?<!\w)(\d+)({_MOVE_BODY})(?!\w)")
+
+
+def _move_anchor(body):
+    """A parte do lance que nao muda de idioma: sem a letra da peca, com a
+    captura normalizada em `x` e sem `+`/`#` — a mesma ideia de
+    `chess_notation._anchor`, sobre o corpo cru."""
+    corpo = _LEADING_LETTER.sub("", body).translate(_CAPTURE_TO_X)
+    return corpo.rstrip("+#")
+
+
+def fix_move_spacing(original, translation):
+    """Repoe o espaco entre a reticencia (ou o numero) e o lance.
+
+    A maquina devolve `10...d5`, `...Cd3` e `12h5` onde o original tinha
+    `10... d5`, `... Nd3` e `12 h5`. Medido no banco de desenvolvimento: 40 +
+    66 + 5 ocorrencias na saida da maquina e **zero** no original — a forma
+    colada nunca vem do livro. Ainda assim a regra so age quando o original
+    tem a forma com espaco para o MESMO lance (numero e ancora): e o que a
+    torna incapaz de inventar um espaco (garantia P5).
+
+    Devolve `(texto, quantos)`.
+    """
+    if not original or not translation:
+        return translation, 0
+
+    com_numero = {
+        (numero, _move_anchor(lance))
+        for numero, lance in _ORIG_NUM_ELLIPSIS.findall(original)
+    }
+    sem_numero = {_move_anchor(lance) for lance in _ORIG_ELLIPSIS.findall(original)}
+    espaco_antes = {
+        _move_anchor(lance) for lance in _ORIG_ELLIPSIS_SPACED.findall(original)
+    }
+    numero_espaco = {
+        (numero, _move_anchor(lance))
+        for numero, lance in _ORIG_NUM_SPACE.findall(original)
+    }
+    if not (com_numero or sem_numero or numero_espaco):
+        return translation, 0
+
+    quantos = 0
+
+    def com_numero_sub(m):
+        nonlocal quantos
+        if (m.group(1), _move_anchor(m.group(2))) in com_numero:
+            quantos += 1
+            return f"{m.group(1)}... {m.group(2)}"
+        return m.group(0)
+
+    def sem_numero_sub(m):
+        nonlocal quantos
+        ancora = _move_anchor(m.group(1))
+        if ancora not in sem_numero:
+            return m.group(0)
+        quantos += 1
+        colada_antes = m.start() > 0 and m.string[m.start() - 1].isalnum()
+        antes = " " if colada_antes and ancora in espaco_antes else ""
+        return f"{antes}... {m.group(1)}"
+
+    def numero_colado_sub(m):
+        nonlocal quantos
+        if (m.group(1), _move_anchor(m.group(2))) in numero_espaco:
+            quantos += 1
+            return f"{m.group(1)} {m.group(2)}"
+        return m.group(0)
+
+    texto = _TRANS_NUM_ELLIPSIS.sub(com_numero_sub, translation)
+    texto = _TRANS_ELLIPSIS.sub(sem_numero_sub, texto)
+    texto = _TRANS_NUM_GLUED.sub(numero_colado_sub, texto)
+    return texto, quantos
+
+
+# O hifen do ingles (`d5-knight`, `e7-pawn`) sobrevive a traducao como
+# `cavalo-d5`, `peao-e7`. A forma portuguesa e "cavalo de d5". So a CASA
+# completa: `e-pawn` (so a coluna) aparece 3 vezes na saida da maquina e a
+# revisao nao a resolveu com "de" — fica de fora.
+_PIECE_WORDS = {
+    "pt": r"cavalos?|bispos?|torres?|damas?|reis?|pe[ãa]o|pe[õo]es",
+}
+_ORIG_SQUARE_PIECE = re.compile(
+    r"(?<!\w)([a-h][1-8])-(?:knights?|bishops?|rooks?|queens?|kings?|pawns?)(?!\w)",
+    re.I,
+)
+
+
+def fix_piece_square_hyphen(original, translation, target_language):
+    """`cavalo-d5` -> `cavalo de d5`, so onde o original tem `d5-knight`.
+
+    Medido: 413 `casa-peca` no original, 131 `peca-casa` na saida da maquina,
+    e a revisao trocou 124 delas por "peca de casa". Nenhum original portugues
+    usa o hifen, e a tabela e por destino: fora do `pt` nao ha regra.
+    """
+    if not original or not translation:
+        return translation, 0
+    pecas = _PIECE_WORDS.get(target_language or "")
+    if pecas is None:
+        return translation, 0
+    casas = {casa.lower() for casa in _ORIG_SQUARE_PIECE.findall(original)}
+    if not casas:
+        return translation, 0
+
+    padrao = re.compile(rf"(?<!\w)({pecas})-([a-h][1-8])(?!\w)", re.I)
+    quantos = 0
+
+    def sub(m):
+        nonlocal quantos
+        if m.group(2).lower() in casas:
+            quantos += 1
+            return f"{m.group(1)} de {m.group(2)}"
+        return m.group(0)
+
+    return padrao.sub(sub, translation), quantos
+
+
+_ZERO_WIDTH = "​"
+
+
+def strip_zero_width_spaces(original, translation):
+    """Tira o `U+200B` que a API insere.
+
+    Medido: 68 na saida da maquina, zero no original. So age quando o original
+    nao tem nenhum — se tiver, e conteudo, nao lixo. Os espacos que sobram
+    colados sao colapsados.
+    """
+    if not translation or _ZERO_WIDTH not in translation:
+        return translation, 0
+    if original and _ZERO_WIDTH in original:
+        return translation, 0
+    quantos = translation.count(_ZERO_WIDTH)
+    texto = translation.replace(_ZERO_WIDTH, "")
+    texto = re.sub(r" {2,}", " ", texto).strip()
+    return texto, quantos
+
+
+def normalize_prose(original, translation, source_language, target_language):
+    """Todas as normalizacoes, na ordem em que o pipeline as aplica.
+
+    E a funcao que o worker chama e que a passada sobre o banco (garantia P6)
+    injeta, com a mesma forma de `fix_move_notation`: `(texto, quantos)`. O
+    espaco de largura zero vai primeiro — os outros regexes nao o enxergam
+    como fronteira de palavra.
+    """
+    texto, total = strip_zero_width_spaces(original, translation)
+    texto, n = fix_move_spacing(original, texto)
+    total += n
+    texto, n = fix_piece_square_hyphen(original, texto, target_language)
+    total += n
+    texto, n = fix_trailing_preposition(original, texto, source_language, target_language)
+    total += n
+    return texto, total

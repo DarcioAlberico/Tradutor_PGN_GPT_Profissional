@@ -1185,6 +1185,7 @@ class MassWriteGuardTests(MainWindowTestCase):
         "Importar CSV": "import_translations_csv",
         "Aplicar Automaticas": "apply_auto_rules_to_database",
         "Corrigir Lances": "fix_move_notation_in_database",
+        "Consertar Prosa": "normalize_prose_in_database",
         "Zerar Traduções": "reset_translations_database",
         "Zerar Glossário": "reset_glossary_file",
     }
