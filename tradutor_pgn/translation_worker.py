@@ -37,6 +37,7 @@ from .pgn_utils import (
     split_batch_translation,
     translated_output_path,
 )
+from .prose_fixes import fix_trailing_preposition
 from itertools import chain
 
 from .app_config import TRANSLATION_REQUEST_DELAY_SECONDS  # noqa: F401 (compat)
@@ -346,6 +347,7 @@ def run_translation(
         processed_comments = 0
         translated_count = 0
         move_fixes = 0
+        preposition_fixes = 0
         filled_empty_count = 0
         cache_count = 0
         cleaned_empty_count = 0
@@ -538,6 +540,13 @@ def run_translation(
                                 translation, corrigidos = fix_move_notation(
                                     original, translation, source_language, target_language
                                 )
+                                # Depois dos lances e antes de restaurar as
+                                # anotacoes, como o fix acima: o que vai para o
+                                # banco e para o PGN e o mesmo texto (P7).
+                                translation, repostas = fix_trailing_preposition(
+                                    original, translation, source_language, target_language
+                                )
+                                preposition_fixes += repostas
                                 # A restauracao e o ULTIMO passo, e e verificada:
                                 # se a traducao nao devolveu cada sentinela
                                 # exatamente uma vez, gravar seria guardar uma
@@ -653,6 +662,10 @@ def run_translation(
                                         source_language,
                                         target_language,
                                     )
+                                    translation, repostas = fix_trailing_preposition(
+                                        original, translation, source_language, target_language
+                                    )
+                                    preposition_fixes += repostas
                                     # A mesma verificacao do caminho do lote, e
                                     # nao por zelo: uma correcao que so
                                     # existisse num dos dois daria uma execucao
@@ -902,6 +915,13 @@ def run_translation(
         app.log_message(f"Arquivos PGN traduzidos gerados: {generated_files}")
         if corrige_lances:
             app.log_message(f"Lances com a letra da peca corrigida: {move_fixes}")
+        if preposition_fixes:
+            # So quando houve: e um conserto de um par de idiomas, e um "0"
+            # fixo faria quem traduz para o italiano procurar o que nao ha.
+            app.log_message(
+                f"Preposicoes finais repostas (\"depois\" -> \"depois de\"): "
+                f"{preposition_fixes}"
+            )
         if total_semicolon:
             # So quando existe (garantia X3): um "0 ignorados" fixo faria o
             # usuario procurar um problema que nao ha — o mesmo criterio da

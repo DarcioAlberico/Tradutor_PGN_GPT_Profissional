@@ -379,6 +379,17 @@ lugar nenhum do banco, e nada e inventado para elas. Elas aparecem em "Todos os
 arquivos" e ganham a primeira ocorrencia quando o PGN delas for processado de
 novo.
 
+## O que o pipeline conserta na prosa
+
+Depois das regras automaticas e antes de gravar, o programa repoe o que a
+traducao automatica perde de forma mecanica e o original prova. A primeira
+dessas correcoes (ROADMAP 28.4): um comentario que termina em `after` — um
+fragmento, com o lance no movetext — sai em "depois de", e nao em "depois".
+Medido no banco de desenvolvimento, eram 532 linhas de 6.500, a troca mais
+frequente da revisao. So age no par ingles -> portugues, nunca quando a
+traducao ja termina em "depois de" ou "apos", e respeita o `after` adverbial
+("immediately after"). O resumo da execucao conta quantas repos.
+
 ## Avisos de qualidade
 
 O editor de traducoes marca linhas suspeitas e o filtro **Avisos QA** as isola.

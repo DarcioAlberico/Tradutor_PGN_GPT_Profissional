@@ -1941,6 +1941,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | T5 | Nenhuma ferramenta de escrita em massa roda durante uma traducao | Bug: restaurar um backup durante uma execucao produz um banco que nao e nem um nem outro |
 | P1 | O par (original, origem, destino) e a identidade da traducao | Limite: o mesmo texto em duas linguas era uma linha so |
 | P2 | Declarar o idioma adota o cache existente em vez de paga-lo de novo | Risco: a mudanca de chave cobrar 201.607 traducoes ja feitas |
+| P7 | Um fragmento cujo original termina em `after` sai em "depois de", nunca em "depois" — so quando o original prova a forma, sem adverbio antes dela, e so no par medido | Bug: 532 de 680 fragmentos saiam sem o "de", e `'' -> 'de'` era a troca mais frequente da revisao (ROADMAP 28.4) |
 | O1 | O banco registra onde cada comentario foi lido: arquivo, partida, indice e lance | Limite: `ORDER BY id` nao e ordem de leitura de obra nenhuma |
 | O2 | O contexto entra ao lado da traducao (N para 1), e nunca e inventado | Risco: o arquivo na chave faria a revisao ser feita uma vez por livro |
 | O3 | Com um arquivo escolhido, a lista e a obra em ordem de leitura, cada comentario uma vez | Limite: nao havia como revisar um livro na ordem em que ele se le |
@@ -2355,11 +2356,12 @@ numero e o do item que o resolve.
   revisor ja aprovou. Promover uma regra a `automatic` e clicar a ferramenta
   alcanca o acervo inteiro do par. (28.1, 28.5)
 - **O aviso de qualidade ve 359 das 1.677 linhas com defeito detectavel por
-  regra** no banco de dev (25,8 %), e nao ha aviso nem correcao para o
-  defeito mais frequente do livro — o fragmento terminado em `after` que sai
-  "depois" sem "de" (527 linhas; 124 de 125 editadas pelo humano). O aviso
-  tambem nao sabe se a linha ja foi revisada, e por isso reavaliar o banco
-  com heuristicas novas marcaria linhas aprovadas. (28.2, 28.4)
+  regra** no banco de dev (25,8 %). O aviso tambem nao sabe se a linha ja foi
+  revisada, e por isso reavaliar o banco com heuristicas novas marcaria
+  linhas aprovadas. (28.2) O defeito mais frequente — o fragmento terminado
+  em `after` que saia "depois" sem "de" — esta corrigido no pipeline (P7,
+  28.4); **as linhas ja gravadas continuam como estao** (82 no banco de dev),
+  ate a passada sobre o banco de P6 (28.2).
 - **O nome do jogador numa citacao de partida vai cru para a API** e volta
   traduzido em ~2,5 % das citacoes (E. Can -> "E. Pode"). (28.3)
 - **O lote `|||` alinha por posicao**: `split_batch_translation` so confere
@@ -2431,8 +2433,9 @@ protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
 **Pendentes: as da secao 28 do ROADMAP (revisao de 2026-09-14), menos as tres
-de 28.1** — I8, M3 e B4 migraram para a secao 9 em 2026-09-14, com 3, 5 e 4
-testes e nove mutacoes sem sobrevivente. Cada uma das que ficam esta escrita
+de 28.1 e a de 28.4** — I8, M3 e B4 migraram para a secao 9 em 2026-09-14,
+com 3, 5 e 4 testes e nove mutacoes sem sobrevivente; P7 no mesmo dia, com 6
+testes e sete mutacoes. Cada uma das que ficam esta escrita
 como o teste que a fara migrar — "falha sem a correcao" —, e as
 que dependem de medicao no banco de dev dizem qual e o comportamento
 testavel e qual e o numero que fica so no ROADMAP.
@@ -2443,7 +2446,6 @@ testavel e qual e o numero que fica so no ROADMAP.
 | F28 | "Avisos QA" e "Proximo aviso QA" mostram so pendentes por padrao, e o botao "Reavaliar QA" continua alcancando tudo | 28.2 | Uma linha verificada com aviso nao aparece no filtro nem para o "Proximo aviso"; aparece ao desligar o padrao |
 | P5 | As normalizacoes de prosa (reticencia, numero colado, hifen peca-casa, `U+200B`) so agem onde o original prova a forma, e o hifen so com destino `pt` | 28.2 | Original sem espaco na reticencia -> traducao sem espaco fica como esta; destino `it` -> `cavallo-d5` intacto |
 | P6 | A passada sobre o banco gravado aplica as mesmas normalizacoes com historico, e nunca sobre linha verificada sem escopo explicito | 28.2 | Banco com uma linha pendente e uma verificada: so a pendente muda, e `comment_history` ganha uma entrada |
-| P7 | Um fragmento cujo original termina em preposicao sai com a preposicao do destino, exceto quando ha adverbio antes dela | 28.4 | `"... after"` -> termina em "depois de"; `"... immediately after"` fica como a API devolveu |
 | S19 | "Aplicar Automaticas" tem escopo, e o padrao e "so pendentes" | 28.5 | Linha verificada nao muda no escopo padrao; muda quando o escopo pede |
 | S20 | Promover uma regra a `automatic` mostra quantas linhas pendentes ela alteraria e dez delas, fora da thread do Tk | 28.5 | O dialogo traz o numero e a amostra; a contagem roda por `run_with_progress` (mutacao: chamar direto quebra o teste de thread) |
 | S21 | "Trocas repetidas nesta obra" lista os pares mais frequentes do historico do arquivo e diz se ja ha regra | 28.5 | Historico sintetico com `troca -> qualidade` 5 vezes: o par aparece com "sem regra"; com a regra no glossario, aparece "automatica" |

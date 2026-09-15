@@ -6,7 +6,7 @@ verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
 **Pendente: a secao 28** (revisao de 2026-09-14), que e plano e nao
-entrega — quinze itens medidos (o 28.1 ja feito), com a ordem em 28.15 e as garantias planejadas
+entrega — quinze itens medidos (28.1 e 28.4 ja feitos), com a ordem em 28.15 e as garantias planejadas
 na secao 11 da SPEC. Ate ela, o registro estava assim:
 
 **Nada pendente.** O item 19.11 (corretor ortografico de prosa), que era o
@@ -7876,7 +7876,7 @@ dentro da prosa, e um sentinela engolido transforma "nome errado" em
 "comentario falhou" (T2/T3), que e pior. Se a taxa passar de 1 %, o item
 vira aviso QA em vez de mascara. Garantia planejada **X4**.
 
-### 28.4 O fragmento que termina em preposicao perde a preposicao
+### 28.4 O fragmento que termina em preposicao perde a preposicao — CONCLUIDO (2026-09-14)
 
 E o defeito numero um do livro e o item de melhor retorno por linha de
 codigo da secao: 1.552 originais terminam em preposicao ou conjuncao porque
@@ -7899,6 +7899,35 @@ preposicoes de um idioma. A alternativa do lance-fantasma (enviar `... after
 ancora a mais na traducao e cai em Q1 e no portao de 28.7. Garantia
 planejada **P7**. Ganho neste livro: ~450 linhas que deixam de ser editadas
 (~3,7 h por livro, a 30 s por linha).
+
+**Feito no mesmo dia.** A tabela tem UMA linha, e a medicao e que decidiu: por
+palavra final do original, a maquina so erra `after` (532 de 680 terminam em
+"depois" sem "de"; 90 em "apos", certo; 52 ja em "depois de"). `with` (354),
+`by`, `to`, `for`, `than`, `due to` saem com a preposicao certa — a lista
+"`em`, `para`, `com`, `contra`" do plano nao tinha nada para corrigir e nao
+entrou. `before` termina um original em 6.500. A excecao adverbial e uma lista
+de quatro (`immediately`, `shortly`, `soon`, `long`; 2 ocorrencias); `right
+after` e `just after` ficam de fora dela porque sao "logo depois de".
+
+O modulo e `prose_fixes.py` (`fix_trailing_preposition`, pura, mesma forma de
+`fix_move_notation`), chamado nos dois caminhos do worker depois dos lances e
+antes de restaurar as anotacoes; o resumo ganha a linha "Preposicoes finais
+repostas", so quando houve. A origem nao declarada ("Detectar") nao desliga a
+regra — o que a decide e a palavra final do original, e `after` so e ingles;
+uma origem declarada que nao seja `en` desliga. Contraprova no banco de dev:
+a funcao muda 530 das 532 linhas na saida da maquina (as 2 sao a excecao), 82
+das de hoje (3 verificadas — as que a revisao deixou passar), nunca uma que
+termina em "depois de" ou "apos", e zero com destino `it`.
+
+**O que ficou de fora:** as 82 linhas ja gravadas. Uma passada sobre o banco e
+o P6 de 28.2, uma ferramenta para todas as normalizacoes — e nao uma por
+regra. Esta dito na SPEC 10.
+
+**O que a verificacao fixou.** `TrailingPrepositionTests` (5 testes) e
+`WorkerTrailingPrepositionTests` (1 teste que percorre o caminho do lote E o
+individual, com o PGN de saida conferido), e sete mutacoes — as cinco da
+funcao e uma por caminho do worker — todas mortas. P7 migrou para a secao 9
+da SPEC.
 
 ### 28.5 O glossario: aplicar com escopo, promover com impacto, sugerir do historico
 

@@ -270,6 +270,7 @@ from tradutor_pgn.settings import (
     update_settings,
 )
 from tradutor_pgn import pgn_utils
+from tradutor_pgn.prose_fixes import fix_trailing_preposition
 from tradutor_pgn.translation_api import split_text_for_translation, translate_text
 from tradutor_pgn import (
     editor_common,
@@ -7903,6 +7904,109 @@ class IndividualFallbackBreakerTests(WorkerFallbackHarness, unittest.TestCase):
         self.assertEqual(len(lotes_vistos), 2 + limite)
         self.assertEqual(len(chamadas), 1 + 3 + limite)
         self.assertTrue(any("[ABORTADO]" in linha for linha in app.logs))
+
+
+class TrailingPrepositionTests(unittest.TestCase):
+    """Garantia P7: o fragmento terminado em preposicao sai com ela.
+
+    Medido no banco de dev (ROADMAP 28.4): 680 originais terminam em `after`,
+    a maquina devolveu "depois" sem "de" em 532, e `'' -> 'de'` e a troca mais
+    frequente da revisao. A regra so age onde o original prova a forma, e
+    nunca inventa.
+    """
+
+    def fix(self, original, translation, source="en", target="pt"):
+        return fix_trailing_preposition(original, translation, source, target)
+
+    def test_after_gets_its_de_back(self):
+        self.assertEqual(
+            self.fix("White is clearly better after", "As brancas estao claramente melhores depois"),
+            ("As brancas estao claramente melhores depois de", 1),
+        )
+
+    def test_capital_and_punctuation_are_preserved(self):
+        self.assertEqual(self.fix("After", "Depois"), ("Depois de", 1))
+        self.assertEqual(self.fix("and after.", "e depois."), ("e depois de.", 1))
+        self.assertEqual(self.fix("(but after)", "(mas depois)"), ("(mas depois de)", 1))
+
+    def test_nothing_to_repair_is_left_alone(self):
+        """"depois de" e "apos" ja estao certos; um original sem `after` nao
+        justifica mexer, por mais que a traducao termine em "depois"."""
+        for original, translation in (
+            ("well after", "bem depois de"),
+            ("well after", "bem apos"),
+            ("and then", "e depois"),
+            ("after the game", "depois da partida"),
+            ("", "depois"),
+            ("after", ""),
+        ):
+            with self.subTest(original=original, translation=translation):
+                self.assertEqual(self.fix(original, translation), (translation, 0))
+
+    def test_an_adverb_before_after_closes_the_sentence(self):
+        """"doesn't lose immediately after" termina a frase: "depois" esta certo.
+        `right after`/`just after` nao sao excecao — sao "logo depois de"."""
+        self.assertEqual(
+            self.fix("doesn't lose immediately after", "nao perde imediatamente depois"),
+            ("nao perde imediatamente depois", 0),
+        )
+        self.assertEqual(
+            self.fix("wins right after", "ganha logo depois"), ("ganha logo depois de", 1)
+        )
+
+    def test_only_the_pair_that_was_measured(self):
+        """A tabela e por destino: para o italiano nao ha regra, e uma origem
+        declarada que nao e ingles nao casa a linha `en`. Origem nao declarada
+        ("Detectar") nao desliga: a palavra `after` so e ingles."""
+        self.assertEqual(self.fix("better after", "meglio dopo", target="it"), ("meglio dopo", 0))
+        self.assertEqual(self.fix("better after", "melhor depois", source="es"), ("melhor depois", 0))
+        self.assertEqual(self.fix("better after", "melhor depois", source=""), ("melhor depois de", 1))
+
+
+class WorkerTrailingPrepositionTests(WorkerFallbackHarness, unittest.TestCase):
+    """O conserto roda nos DOIS caminhos do worker e chega ao banco e ao PGN."""
+
+    PGN = (
+        '[Event "Test"]\n\n'
+        "1. e4 {White is better after} e5 {Black is fine after} 2. Nf3 {ok}\n"
+    )
+    COMMENTS = ["White is better after", "Black is fine after", "ok"]
+
+    def roda(self, tmp_path, alinhado):
+        def translate(text, *_args, **_kwargs):
+            if " ||| " in text:
+                if not alinhado:
+                    return "so uma parte"
+                return " ||| ".join(self.traduz(p) for p in text.split(" ||| "))
+            return self.traduz(text)
+
+        return self.run_worker(tmp_path, translate)
+
+    @staticmethod
+    def traduz(texto):
+        return {
+            "White is better after": "As brancas estao melhores depois",
+            "Black is fine after": "As pretas estao bem depois",
+            "ok": "ok",
+        }[texto]
+
+    def test_batch_and_individual_paths_store_the_repaired_text(self):
+        for alinhado in (True, False):
+            with self.subTest(alinhado=alinhado), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                app, _pgn = self.roda(tmp_path, alinhado)
+                gravadas = self.stored(tmp_path / "cache.db")
+                saida = next(tmp_path.glob("*-BR.pgn")).read_text(encoding="utf-8")
+
+                self.assertEqual(
+                    gravadas["White is better after"], "As brancas estao melhores depois de"
+                )
+                self.assertEqual(gravadas["Black is fine after"], "As pretas estao bem depois de")
+                self.assertIn("{As brancas estao melhores depois de}", saida)
+                self.assertTrue(
+                    any("Preposicoes finais repostas" in l and l.endswith("2") for l in app.logs),
+                    "o resumo conta as duas",
+                )
 
 
 class WorkerTracebackTests(WorkerFallbackHarness, unittest.TestCase):
