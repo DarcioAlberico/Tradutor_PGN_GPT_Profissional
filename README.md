@@ -20,6 +20,11 @@ Instale as dependencias e crie o ambiente virtual:
 uv sync
 ```
 
+O `pyproject.toml` e a fonte das dependencias (o `uv.lock` deriva dele); o
+`requirements.txt` existe para quem usa `pip` e tem de dizer o mesmo. Ate
+2026-09-14 ele dizia mais — o `spylls` do corretor de prosa so estava la —, e
+`uv sync` abria o programa sem corretor, em silencio (ROADMAP 28.1).
+
 Execute a aplicacao:
 
 ```powershell

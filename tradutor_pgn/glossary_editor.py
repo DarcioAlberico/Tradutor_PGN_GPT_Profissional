@@ -1012,7 +1012,7 @@ class GlossaryEditor:
             )
         # O indice de validacao e derivado de `entries`; invalida junto.
         self.state.validation_lookup = None
-        self.file_label.configure(text=f"Arquivo: Substituicoes.txt")
+        self.file_label.configure(text="Arquivo: Substituicoes.txt")
 
     def current_validation_lookup(self):
         if self.state.validation_lookup is None:

@@ -83,6 +83,25 @@ def report_glossary_failure(app, message):
     app.root.after(0, lambda texto=message: messagebox.showerror("Glossário", texto))
 
 
+def report_settings_failure(app, message):
+    """Handler do canal de aviso das configuracoes: leva o aviso a interface.
+
+    Garantia M3. Pode ser chamado da thread que grava o rascunho, entao o
+    `messagebox` vai por `root.after` (garantia C1). A mesma mensagem so abre o
+    dialogo uma vez; as repeticoes ficam no log — um arquivo que o antivirus
+    segura por alguns segundos falharia em varias gravacoes seguidas.
+    """
+    app.log_message(f"[CONFIGURACOES] {message}")
+
+    if getattr(app, "_settings_warning_shown", None) == message:
+        return
+    app._settings_warning_shown = message
+
+    app.root.after(
+        0, lambda texto=message: messagebox.showwarning("Configurações", texto)
+    )
+
+
 def load_interactive_glossary(app):
     """Carrega o glossario da janela principal sem derrubar a inicializacao.
 
@@ -353,7 +372,12 @@ def retry_failed_translation(app):
             "Reprocessar falhas",
             describe_failed_run(record) + "\n\nRemover a lista?",
         ):
-            clear_failed_run()
+            try:
+                clear_failed_run()
+            except OSError:
+                # O canal das configuracoes (M3) ja avisou; um segundo dialogo
+                # pelo relator de callbacks so repetiria a mensagem.
+                pass
         return
 
     if not messagebox.askyesno(

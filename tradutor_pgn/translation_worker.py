@@ -1,5 +1,6 @@
 import os
 import time
+import traceback
 from datetime import datetime
 from tkinter import messagebox
 
@@ -512,15 +513,18 @@ def run_translation(
 
                         parts = None
                         if translated_joined:
-                            # A API respondeu — o disjuntor conta lotes SEM
-                            # resposta, e nao lotes desalinhados. Desalinhamento
-                            # e um problema do conteudo, nao da conexao.
-                            consecutive_failed_batches = 0
                             parts = split_batch_translation(
                                 translated_joined, len(originals)
                             )
 
                         if parts:
+                            # A API respondeu alinhado: o disjuntor zera aqui.
+                            # Desalinhamento e um problema do conteudo, nao da
+                            # conexao — mas quem decide se o lote desalinhado
+                            # estava vivo e o ramo individual, DEPOIS de tentar
+                            # (garantia B4). Zerar antes dele, como era, fazia
+                            # um grupo pequeno morto nunca contar.
+                            consecutive_failed_batches = 0
                             for (original, _masked, tokens), part in zip(
                                 grupo_items, parts
                             ):
@@ -611,7 +615,15 @@ def run_translation(
                                 f"  - Aviso: divisao do lote falhou "
                                 f"({len(originals)} comentarios), traduzindo individualmente."
                             )
-                            for original, masked, tokens in grupo_items:
+                            # Garantia B4: o disjuntor (B3) alcanca este ramo. Sem isto, a
+                            # rede caindo DEPOIS de um desalinhamento custava 3 tentativas
+                            # x 30 s por comentario, para o lote inteiro, sem que nada
+                            # abortasse — o unico caminho fora do alcance do disjuntor
+                            # (ROADMAP 28.1). Tres seguidos sem resposta valem tres lotes
+                            # mortos; um grupo em que algum respondeu zera o contador.
+                            sem_resposta_seguidas = 0
+                            respondidos = 0
+                            for posicao, (original, masked, tokens) in enumerate(grupo_items):
                                 if app.cancel_flag.is_set():
                                     canceled = True
                                     conn.commit()
@@ -630,6 +642,8 @@ def run_translation(
                                 batch_api_time += time.perf_counter() - api_started
                                 batch_api_requests += 1
                                 if translated:
+                                    respondidos += 1
+                                    sem_resposta_seguidas = 0
                                     translation = apply_automatic_substitutions(
                                         translated, automatic_rules
                                     )
@@ -694,9 +708,46 @@ def run_translation(
                                         f"  - [FALHA] Nao foi possivel traduzir: "
                                         f"\"{original[:60]}\""
                                     )
+                                    sem_resposta_seguidas += 1
+                                    limite = MAX_CONSECUTIVE_FAILED_BATCHES
+                                    if sem_resposta_seguidas >= limite:
+                                        # Os que nao foram tentados continuam no
+                                        # idioma original E sao contados (T2/T3):
+                                        # abortar nao e esquecer.
+                                        restantes = len(grupo_items) - posicao - 1
+                                        failed_count += restantes
+                                        app.log_message(
+                                            f"[ABORTADO] {sem_resposta_seguidas} "
+                                            f"comentarios seguidos sem resposta da API "
+                                            f"no modo individual; {restantes} restantes "
+                                            f"do lote ficam no idioma original. "
+                                            f"Verifique a conexao e reprocesse depois."
+                                        )
+                                        aborted_by_api = True
+                                        conn.commit()
+                                        break
                                 wait_seconds = pacer.next_delay()
                                 time.sleep(wait_seconds)
                                 batch_wait_time += wait_seconds
+                            if aborted_by_api:
+                                break
+                            if respondidos:
+                                consecutive_failed_batches = 0
+                            else:
+                                # Um grupo pequeno (1 ou 2) que nao respondeu a
+                                # nada nao chega ao limite acima, mas e um lote
+                                # morto como os outros.
+                                consecutive_failed_batches += 1
+                                limite = MAX_CONSECUTIVE_FAILED_BATCHES
+                                if consecutive_failed_batches >= limite:
+                                    app.log_message(
+                                        f"[ABORTADO] {consecutive_failed_batches} lotes "
+                                        f"seguidos sem resposta da API. Verifique a "
+                                        f"conexao e reprocesse depois."
+                                    )
+                                    aborted_by_api = True
+                                    conn.commit()
+                                    break
 
                         wait_seconds = pacer.next_delay()
                         time.sleep(wait_seconds)
@@ -955,6 +1006,11 @@ def run_translation(
 
     except Exception as e:
         app.log_message(f"[ERRO GERAL] {e}")
+        # O traceback vai para o log, como o relator de callbacks do Tk ja faz
+        # (`window_utils`): so `str(e)` de um `IndexError` no meio de um livro
+        # nao diz em qual das etapas ele nasceu, e o log e o unico artefato que
+        # sobra depois (ROADMAP 28.1).
+        app.log_message(traceback.format_exc().rstrip())
         # A lista de falhas desta execucao, ANTES de a excecao levar tudo. O que
         # existia antes deste registro era pior do que nao ter lista: a da
         # execucao anterior continuava valendo, e "Reprocessar Falhas" reprocessava

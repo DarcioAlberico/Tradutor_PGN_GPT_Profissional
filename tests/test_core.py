@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from collections import Counter
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta
@@ -33,7 +34,6 @@ from tradutor_pgn import (
 from tradutor_pgn.app_config import (
     DATABASE_BACKUP_KEEP_COUNT,
     LANGUAGES,
-    DATABASE_BACKUP_MAX_TOTAL_MB,
     GLOSSARY_BACKUP_KEEP_COUNT,
     LOG_KEEP_COUNT,
     MAX_TRANSLATE_CHARS,
@@ -44,7 +44,6 @@ from tradutor_pgn.database import (
     REVIEW_STATUS_DOUBT,
     REVIEW_STATUS_PENDING,
     REVIEW_STATUS_REJECTED,
-    ORDER_BY_ID,
     ORDER_BY_OCCURRENCE,
     QUALITY_VERSION_KEY,
     QualityReevaluationCanceled,
@@ -210,7 +209,7 @@ from tradutor_pgn.review_quality import (
 )
 from tradutor_pgn import app_config
 from tradutor_pgn.annotation_mask import mask_annotations, restore_annotations
-from tradutor_pgn.background_task import BackgroundTask, TaskCanceled
+from tradutor_pgn.background_task import BackgroundTask
 from tradutor_pgn.chess_notation import (
     PIECE_LETTERS,
     extract_moves,
@@ -272,10 +271,7 @@ from tradutor_pgn.settings import (
 )
 from tradutor_pgn import pgn_utils
 from tradutor_pgn.translation_api import split_text_for_translation, translate_text
-from tradutor_pgn import translation_api
 from tradutor_pgn import (
-    app_actions,
-    db_tools,
     editor_common,
     editor_widgets,
     failed_runs,
@@ -2888,7 +2884,6 @@ class FullTextSearchTests(unittest.TestCase):
     def test_the_index_is_built_for_a_database_that_already_had_rows(self):
         """A migracao popula o indice com o que ja estava no banco."""
         with tempfile.TemporaryDirectory() as tmp:
-            caminho = str(Path(tmp) / "antigo.db")
             conn, cur = self.banco(tmp)
             conn.close()
 
@@ -7152,21 +7147,29 @@ class WorkerFallbackHarness:
         pgn.write_text(self.PGN, encoding="utf-8")
         app = FakeApp(tmp_path / "cache.db")
 
+        # `showerror` TAMBEM: o `except Exception` do worker cai nele, e o
+        # `FakeRoot.after` executa na hora — sem isto, um teste que force o
+        # `[ERRO GERAL]` abre um dialogo modal de verdade e a suite trava em
+        # vez de falhar (a mesma armadilha do `setUp` de TranslationWorkerTests;
+        # custou 40 minutos de suite parada em 2026-09-14).
         originals = (
             translation_worker.translate_text,
             translation_worker.messagebox.showinfo,
             translation_worker.messagebox.showwarning,
+            translation_worker.messagebox.showerror,
         )
         try:
             translation_worker.translate_text = translate
             translation_worker.messagebox.showinfo = lambda *_a, **_k: None
             translation_worker.messagebox.showwarning = lambda *_a, **_k: None
+            translation_worker.messagebox.showerror = lambda *_a, **_k: None
             translation_worker.run_translation(app, str(pgn), "pt", False)
         finally:
             (
                 translation_worker.translate_text,
                 translation_worker.messagebox.showinfo,
                 translation_worker.messagebox.showwarning,
+                translation_worker.messagebox.showerror,
             ) = originals
 
         return app, pgn
@@ -7541,7 +7544,8 @@ class ConcurrentDatabaseAccessTests(unittest.TestCase):
         reproduzido.
         """
         if abrir is None:
-            abrir = lambda caminho: initialize_database(str(caminho))
+            def abrir(caminho):
+                return initialize_database(str(caminho))
 
         pronto = threading.Event()
         solte = threading.Event()
@@ -7767,6 +7771,160 @@ class ApiFailureTests(WorkerFallbackHarness, unittest.TestCase):
             any("INTERROMPIDA" in linha for linha in app.logs),
             "o resumo precisa dizer que a execucao nao terminou normalmente",
         )
+
+
+class IndividualFallbackBreakerTests(WorkerFallbackHarness, unittest.TestCase):
+    """Garantia B4: o disjuntor alcanca o ramo comentario a comentario.
+
+    `consecutive_failed_batches` so era alimentado no ramo "a API nao
+    respondeu". Um lote que RESPONDEU desalinhado caia no fallback individual
+    (B2) — e se a rede morresse ali, cada comentario pagava 3 tentativas x 30 s
+    sem que nada abortasse: o unico caminho fora do alcance de B3 (ROADMAP
+    28.1).
+    """
+
+    def pgn_com(self, n, tamanho=20):
+        pgn = '[Event "Test"]\n\n'
+        comentarios = []
+        for indice in range(n):
+            texto = f"Comment number {indice} " + "x" * tamanho
+            comentarios.append(texto)
+            pgn += f"{indice + 1}. e4 {{{texto}}} "
+        return pgn, comentarios
+
+    def roda(self, tmp_path, pgn_texto, translate):
+        # `run_worker` grava `self.PGN`; o da classe-base tem 3 comentarios,
+        # que e exatamente o limite do disjuntor — indistinguivel do bug.
+        self.PGN = pgn_texto
+        return self.run_worker(tmp_path, translate)
+
+    def test_consecutive_dead_individual_calls_abort_the_run(self):
+        pgn_texto, comentarios = self.pgn_com(8)
+        chamadas = []
+
+        def translate(text, *_args, **_kwargs):
+            chamadas.append(text)
+            if " ||| " in text:
+                return "so uma parte"  # respondeu, mas desalinhado (B2)
+            return None  # e dai a rede morreu
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _pgn = self.roda(tmp_path, pgn_texto, translate)
+            gravadas = self.stored(tmp_path / "cache.db")
+
+        limite = translation_worker.MAX_CONSECUTIVE_FAILED_BATCHES
+        self.assertGreater(len(comentarios), limite + 1)
+        # A do lote, mais `limite` individuais — e nao uma por comentario.
+        self.assertEqual(
+            len(chamadas),
+            1 + limite,
+            f"a API foi chamada {len(chamadas)} vezes; devia parar em {1 + limite}",
+        )
+        self.assertEqual(gravadas, {})
+        abortado = [linha for linha in app.logs if "[ABORTADO]" in linha]
+        self.assertEqual(len(abortado), 1)
+        self.assertIn("modo individual", abortado[0])
+        # T2/T3: os que nao foram tentados sao contados, nao esquecidos.
+        self.assertIn(f"{len(comentarios) - limite} restantes", abortado[0])
+        self.assertTrue(
+            any(f"Comentarios que falharam: {len(comentarios)}" in linha for linha in app.logs),
+            "o resumo conta os nao tentados como falha",
+        )
+        self.assertTrue(any("INTERROMPIDA" in linha for linha in app.logs))
+
+    def test_a_group_that_answered_something_resets_the_counter(self):
+        """Um grupo em que algum comentario respondeu nao e um lote morto."""
+        pgn_texto, comentarios = self.pgn_com(8)
+        chamadas = []
+
+        def translate(text, *_args, **_kwargs):
+            chamadas.append(text)
+            if " ||| " in text:
+                return "so uma parte"
+            # Dois falham, um responde, dois falham, um responde...
+            return None if len(chamadas) % 3 else f"[{text}]"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _pgn = self.roda(tmp_path, pgn_texto, translate)
+            gravadas = self.stored(tmp_path / "cache.db")
+
+        self.assertEqual(len(chamadas), 1 + len(comentarios))
+        self.assertFalse(any("[ABORTADO]" in linha for linha in app.logs))
+        self.assertGreater(len(gravadas), 0)
+
+    def test_small_dead_groups_count_as_dead_batches(self):
+        """Grupos de 2 nunca chegam ao limite de seguidos; contam como lote."""
+        # Comentarios grandes o bastante para caberem dois por lote.
+        pgn_texto, comentarios = self.pgn_com(8, tamanho=BATCH_MAX_CHARS // 2 - 40)
+        chamadas = []
+
+        def translate(text, *_args, **_kwargs):
+            chamadas.append(text)
+            return "so uma parte" if " ||| " in text else None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _pgn = self.roda(tmp_path, pgn_texto, translate)
+
+        limite = translation_worker.MAX_CONSECUTIVE_FAILED_BATCHES
+        lotes = [texto for texto in chamadas if " ||| " in texto]
+        self.assertTrue(all(texto.count(" ||| ") == 1 for texto in lotes), "2 por lote")
+        self.assertEqual(len(lotes), limite, "parou depois de `limite` lotes mortos")
+        self.assertEqual(len(chamadas), limite * 3)
+        self.assertTrue(any("[ABORTADO]" in linha for linha in app.logs))
+
+
+    def test_an_alive_misaligned_group_resets_the_dead_batch_count(self):
+        """Lote morto, lote desalinhado mas vivo, tres mortos: so os tres
+        seguidos contam. Sem o zeramento, o primeiro morto somaria com os dois
+        seguintes e a execucao abortaria um lote antes."""
+        pgn_texto, comentarios = self.pgn_com(10, tamanho=BATCH_MAX_CHARS // 2 - 40)
+        chamadas = []
+        lotes_vistos = []
+
+        def translate(text, *_args, **_kwargs):
+            chamadas.append(text)
+            if " ||| " in text:
+                lotes_vistos.append(text)
+                # O segundo lote responde desalinhado; os outros, nada.
+                return "so uma parte" if len(lotes_vistos) == 2 else None
+            return f"[{text}]"  # os individuais do segundo lote respondem
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app, _pgn = self.roda(tmp_path, pgn_texto, translate)
+            gravadas = self.stored(tmp_path / "cache.db")
+
+        limite = translation_worker.MAX_CONSECUTIVE_FAILED_BATCHES
+        self.assertEqual(len(gravadas), 2, "o lote vivo gravou os seus dois")
+        # 1 morto + (1 + 2 individuais) + `limite` mortos: o vivo zerou a conta.
+        self.assertEqual(len(lotes_vistos), 2 + limite)
+        self.assertEqual(len(chamadas), 1 + 3 + limite)
+        self.assertTrue(any("[ABORTADO]" in linha for linha in app.logs))
+
+
+class WorkerTracebackTests(WorkerFallbackHarness, unittest.TestCase):
+    """O `[ERRO GERAL]` leva o traceback para o log (ROADMAP 28.1).
+
+    So `str(e)` de um `IndexError` no meio de um livro nao diz em qual das
+    etapas ele nasceu, e o log e o unico artefato que sobra depois — o mesmo
+    motivo de o relator de callbacks do Tk gravar o traceback.
+    """
+
+    def test_the_general_error_logs_where_it_came_from(self):
+        def translate(*_args, **_kwargs):
+            raise IndexError("list index out of range")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _pgn = self.run_worker(Path(tmp), translate)
+
+        log = "\n".join(app.logs)
+        self.assertIn("[ERRO GERAL] list index out of range", log)
+        self.assertIn("Traceback (most recent call last)", log)
+        self.assertIn("run_translation", log)
+        self.assertIn("IndexError", log)
 
 
 class FallbackTransactionTests(WorkerFallbackHarness, unittest.TestCase):
@@ -16411,6 +16569,107 @@ class DiffSpansTests(unittest.TestCase):
         self.assertEqual(len(faixas_depois), 5)
 
 
+class SettingsWriteSafetyTests(unittest.TestCase):
+    """Garantia M3: a gravacao nunca sobrescreve um arquivo que nao leu.
+
+    `update_settings` lia com `load_settings`, que devolve `{}` para QUALQUER
+    erro. Um `PermissionError` transitorio — antivirus, indexador, OneDrive
+    tocando o `.json` por uma fracao de segundo — fazia a gravacao seguinte
+    escrever um arquivo novo so com a chave que estava mudando: rascunhos (R4),
+    lista de falhas (T4) e preferencias (M1) sumiam de vez, sem aviso.
+    Reproduzido com a funcao real (ROADMAP 28.1).
+    """
+
+    CONTEUDO = {
+        "editor_drafts": {"chave": {"text": "nao salvo", "base_translation": ""}},
+        "failed_translation": {"files": ["a.pgn"]},
+        "main_window": {"target_language": "pt"},
+    }
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.pasta = Path(tmp.name)
+        self.caminho = self.pasta / "settings.json"
+        self.avisos = []
+        anterior = settings.set_settings_warning_handler(self.avisos.append)
+        self.addCleanup(settings.set_settings_warning_handler, anterior)
+
+    def gravar_es(self):
+        return update_settings(
+            lambda disk: disk.setdefault("main_window", {}).update(
+                {"target_language": "es"}
+            ),
+            str(self.caminho),
+        )
+
+    def test_a_transient_read_error_does_not_wipe_the_file(self):
+        save_settings(self.CONTEUDO, str(self.caminho))
+        alvo = os.path.abspath(self.caminho)
+        real_open = open
+
+        def open_falho(arquivo, *args, **kwargs):
+            modo = str(args[0] if args else kwargs.get("mode", "r"))
+            if os.path.abspath(str(arquivo)) == alvo and modo.startswith("r"):
+                raise PermissionError(13, "arquivo em uso por outro processo")
+            return real_open(arquivo, *args, **kwargs)
+
+        with unittest.mock.patch("tradutor_pgn.settings.open", open_falho, create=True):
+            with self.assertRaises(OSError):
+                self.gravar_es()
+
+        # O arquivo no disco e o de antes, byte a byte no que importa.
+        self.assertEqual(load_settings(str(self.caminho)), self.CONTEUDO)
+        self.assertEqual(len(self.avisos), 1)
+        self.assertIn("descartada", self.avisos[0])
+
+    def test_a_corrupt_file_is_set_aside_and_the_program_carries_on(self):
+        self.caminho.write_text("{invalid", encoding="utf-8")
+
+        self.gravar_es()
+
+        renomeados = list(self.pasta.glob("settings.json.corrompido-*"))
+        self.assertEqual(len(renomeados), 1, "o corrompido tem de ficar ao lado")
+        self.assertEqual(renomeados[0].read_text(encoding="utf-8"), "{invalid")
+        self.assertEqual(
+            load_settings(str(self.caminho)), {"main_window": {"target_language": "es"}}
+        )
+        self.assertEqual(len(self.avisos), 1)
+        self.assertIn(renomeados[0].name, self.avisos[0])
+
+    def test_invalid_bytes_and_a_non_object_count_as_corrupt(self):
+        """Um byte invalido nao e `OSError`; uma lista nao e configuracao."""
+        for bruto in (b"\xff\xfe{}", b"[1, 2]"):
+            with self.subTest(bruto=bruto):
+                for velho in self.pasta.glob("settings.json.corrompido-*"):
+                    velho.unlink()
+                self.caminho.write_bytes(bruto)
+
+                self.gravar_es()
+
+                self.assertEqual(len(list(self.pasta.glob("settings.json.corrompido-*"))), 1)
+                self.assertEqual(
+                    load_settings(str(self.caminho)),
+                    {"main_window": {"target_language": "es"}},
+                )
+
+    def test_a_missing_file_is_created_without_a_warning(self):
+        self.gravar_es()
+
+        self.assertEqual(
+            load_settings(str(self.caminho)), {"main_window": {"target_language": "es"}}
+        )
+        self.assertEqual(self.avisos, [])
+
+    def test_readers_stay_tolerant(self):
+        """Quem LE continua degradando para `{}`: uma janela sem preferencias e
+        melhor do que uma janela que nao abre."""
+        self.caminho.write_text("{invalid", encoding="utf-8")
+
+        self.assertEqual(load_settings(str(self.caminho)), {})
+        self.assertTrue(self.caminho.exists(), "ler nao renomeia nada")
+
+
 class SettingsConcurrencyTests(unittest.TestCase):
     """O rascunho passou a gravar em segundo plano (item 10).
 
@@ -17844,6 +18103,45 @@ class DataDirRuleTests(unittest.TestCase):
                 os.path.abspath(tmp),
                 os.path.abspath(pgn_spellcheck.DEFAULT_SPELLING_PATH),
             )
+
+
+class ProseSpellcheckDependencyTests(unittest.TestCase):
+    """Garantia I8: `spylls` e dependencia declarada, e o build sabe dela.
+
+    Estava so no `requirements.txt`: `uv sync` — o caminho do README — abria o
+    programa sem corretor, e `ProseSpellcheckTests` era pulada por `SkipTest`
+    sem nada ficar vermelho. O `.exe` so levava o corretor porque o
+    interpretador do build tinha o pacote por acaso (ROADMAP 28.1).
+    """
+
+    RAIZ = Path(__file__).resolve().parent.parent
+
+    def test_pyproject_and_lock_declare_spylls(self):
+        import tomllib
+
+        projeto = tomllib.loads((self.RAIZ / "pyproject.toml").read_text(encoding="utf-8"))
+        dependencias = projeto["project"]["dependencies"]
+        self.assertTrue(
+            any(dep.startswith("spylls") for dep in dependencias),
+            f"spylls nao esta em [project].dependencies: {dependencias}",
+        )
+        lock = (self.RAIZ / "uv.lock").read_text(encoding="utf-8")
+        self.assertIn('name = "spylls"', lock, "uv.lock nao resolve spylls")
+
+    def test_the_spec_declares_the_module_the_spellchecker_imports(self):
+        """O nome no `.spec` e o mesmo que `prose_spellcheck` importa."""
+        spec = (self.RAIZ / "PGN_Tradutor_Pro.spec").read_text(encoding="utf-8")
+        fonte = (self.RAIZ / "tradutor_pgn" / "prose_spellcheck.py").read_text(
+            encoding="utf-8"
+        )
+        importado = re.search(r"from (spylls\.[\w.]+) import", fonte)
+        self.assertIsNotNone(importado)
+        self.assertIn(f'hiddenimports += ["{importado.group(1)}"]', spec)
+        self.assertIn("AVISO: `spylls` nao esta instalado", spec)
+
+    def test_the_spellchecker_is_importable_from_the_test_interpreter(self):
+        """Se isto falhar, `ProseSpellcheckTests` esta sendo pulada em silencio."""
+        import spylls.hunspell  # noqa: F401
 
 
 class VersionTests(unittest.TestCase):

@@ -14,7 +14,6 @@ atributos soltos passaria por cima exatamente do que ha para verificar.
 Precisam de display. Onde nao houver, as classes sao puladas.
 """
 
-import os
 import threading
 import time
 import tkinter as tk
@@ -36,8 +35,7 @@ from tradutor_pgn.database import (
     save_translation,
 )
 from tradutor_pgn.review_quality import QUALITY_HEURISTICS_VERSION
-from tradutor_pgn import app_actions, app_config, confirm_dialog, edit_window, settings
-from tradutor_pgn import glossary_editor
+from tradutor_pgn import app_actions, app_config, confirm_dialog, settings
 from tradutor_pgn import main_window
 from tradutor_pgn.backup_retention import is_backup_of_family, prune_log_files
 from tradutor_pgn.failed_runs import load_failed_run, save_failed_run

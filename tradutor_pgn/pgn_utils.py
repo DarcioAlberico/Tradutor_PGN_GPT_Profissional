@@ -591,22 +591,22 @@ def batch_index_groups(texts, max_chars=BATCH_MAX_CHARS):
     length = 0
 
     for index, text in enumerate(texts):
-        l = len(text)
+        tamanho = len(text)
         # Account for separator that will be inserted between items
         extra = _SEP_LEN if current else 0
-        if l > max_chars:
+        if tamanho > max_chars:
             if current:
                 groups.append(current)
             groups.append([index])
             current = []
             length = 0
-        elif length + extra + l > max_chars:
+        elif length + extra + tamanho > max_chars:
             groups.append(current)
             current = [index]
-            length = l
+            length = tamanho
         else:
             current.append(index)
-            length += extra + l
+            length += extra + tamanho
 
     if current:
         groups.append(current)

@@ -1933,6 +1933,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | B1 | `BATCH_MAX_CHARS < MAX_TRANSLATE_CHARS` | Acoplamento fragil entre modulos |
 | B2 | Desalinhamento -> traducao individual | — |
 | B3 | Falha de API nao vira reprocessamento comentario a comentario | Bug: um lote morto custava ~1 h de requisicoes inuteis |
+| B4 | O disjuntor alcanca o ramo comentario a comentario: tres seguidos sem resposta abortam, um grupo pequeno morto conta como lote, e um grupo vivo zera a conta | Bug: depois de um desalinhamento, a rede caida custava 3 x 30 s por comentario sem que B3 disparasse — o unico caminho fora do alcance do disjuntor (ROADMAP 28.1) |
 | W2 | Backoff exponencial, e o ritmo cai ao ver 429 | Risco: intervalo agressivo sem defesa contra limite de taxa |
 | T1 | Nao sobrescrever traducao existente | — |
 | T2 | Falhas contabilizadas e exibidas | Bug: sucesso reportado com PGN bilingue |
@@ -1970,6 +1971,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | F24 | A janela de estatisticas nao aceita edicao, nem por evento virtual, e exporta as tabelas em CSV | Bug: Ctrl+V/X/K/D/O/T/H editavam um relatorio que o docstring declara imutavel; e as tabelas de orcamento so saiam em texto corrido |
 | F25 | Restaurar uma versao do historico pergunta antes, e a janela diz o que mudou entre as duas | Risco: a unica restauracao do programa sem confirmacao, com os dois botoes colados no "Fechar" e nenhum diff pintado |
 | F26 | O historico lista as ALTERACOES, e a versao da traducao automatica e sempre recuperavel | Bug: 90% das linhas abriam em "nenhuma alteracao registrada" e 607 das 889 entradas mostravam o mesmo texto dos dois lados — nao havia como voltar ao que a maquina produziu |
+| F27 | O corretor de prosa marca erro de digitacao, e nunca xadrez | Limite: os erros de digitacao da revisao chegavam ao proximo leitor (ROADMAP 26) |
 | S16 | O dialogo de zerar o glossario conta o que apaga, por tipo, e a semente nao "volta" depois | Bug: anunciava 7.325 regras e apagava 5.910; e zerar deixava a sessao sem sugestao nenhuma e a abertura seguinte com 232 |
 | S17 | O "Teste rápido" do glossario usa a conversao do pipeline, e nao os pares crus | Bug: prioridade descartada, escopo ignorado, `@casa@` inerte e so a primeira ocorrencia trocada — a previa contradizia o banner S9 ao lado dela |
 | S18 | O editor de glossario anda pelo teclado: achar, andar pela lista filtrada e virar pagina | Custo: dois atalhos contra os treze do outro editor, numa janela que existe para varrer 7 mil linhas |
@@ -2011,6 +2013,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | C4 | "Cancelar" e conferido dentro do laco de tentativas, antes de cada uma e antes de cada espera | Bug: `translate_text_chunk` nem recebia o flag; contra um endpoint que pendura a conexao, o clique ficava ate ~93 s sem efeito |
 | M1 | A janela principal reabre no que foi escolhido | Risco: "Detectar" volta sozinho e desliga a correcao de lances sem avisar |
 | M2 | Um BOM no arquivo de configuracoes nao apaga nada | Bug: um caractere invisivel zerava rascunhos, lista de falhas e preferencias |
+| M3 | A gravacao nunca sobrescreve um arquivo que existe e nao pode ser lido; um arquivo invalido e posto de lado (`.corrompido-<data>`) antes de o programa seguir, e os dois casos sao avisados | Bug: um `PermissionError` transitorio na leitura virava `{}`, e a gravacao seguinte apagava rascunhos, lista de falhas e preferencias — o desfecho de M2 por outro caminho (ROADMAP 28.1) |
 | X1 | Anotacoes `[%...]` atravessam a traducao byte a byte, ou o comentario conta como falha | Bug: `[%cal Ra1h8]` virava `[%cal Ta1h8]`; `[%eval +0.35]` quebrado antes da API |
 | X2 | Comentario esvaziado pela limpeza sai do arquivo sem deixar `{}` | Sujeira: o PGN gerado saia pontilhado de `{}` |
 | X3 | Comentarios `;` sao contados e anunciados | Bug de percepcao: PGN so com `;` respondia "nenhum comentario encontrado" |
@@ -2027,6 +2030,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | I4 | Desinstalar preserva a pasta de dados, a menos que o usuario peca o contrario | Risco: desinstalar para reinstalar apagaria o acervo (protegida por `instalador\verificar-ciclo.ps1`) |
 | I5 | A versao tem uma fonte so, e instalar uma mais velha por cima nao acontece em silencio | Bug: tres numeros que nao se falavam (0.2.1 no `pyproject`, 1.0 no TMX, 1.0.0 no instalador) e nenhuma protecao contra voltar no tempo |
 | I6 | A entrega portatil e a instalavel sao o MESMO executavel, e o que as separa e um arquivo ao lado dele | Risco: dois builds seriam duas coisas para testar, e a que ninguem roda quebra primeiro. O marcador nunca entra em `dist\` — o `.iss` empacota a pasta inteira, e ele faria a versao INSTALADA gravar dentro de `Program Files` |
+| I8 | `spylls` e dependencia declarada (`pyproject.toml`, `uv.lock`), e o `.spec` avisa quando o interpretador do build nao o tem | Bug: `uv sync` abria o programa sem corretor e a suite pulava os testes dele em silencio; o `.exe` so levava o corretor por acaso do interpretador (ROADMAP 28.1) |
 | I7 | O log nomeia o MODO, e nao so a pasta de dados | Risco: um `.exe` portatil e um instalado apontado por `PGN_TRADUTOR_DATA` podem gravar na mesma pasta por motivos diferentes, e so o modo explica o que a proxima atualizacao fara com o acervo |
 
 ---
@@ -2266,13 +2270,10 @@ X3). O que resta declarado como limite:
 
 **Fluxo de revisao (o que a secao 19 deixou de fora)**
 
-- **Nao ha corretor ortografico da PROSA traduzida.** O `spelling.ssp` que o
-  programa traz e dicionario de nomes proprios, para as tags; um corretor de
-  verdade precisa de um dicionario hunspell por idioma de destino e de uma
-  dependencia nova, que mudam o `requirements.txt` e o empacotamento. Nao ha
-  esqueleto nem botao desabilitado no lugar: um recurso que parece existir e nao
-  funciona e pior que a ausencia. Os erros de digitacao da revisao continuam
-  chegando ao proximo leitor. (ROADMAP 19.14)
+- **O corretor ortografico da prosa existe desde 2026-08-03** (ROADMAP 26,
+  garantia F27) e cobre um idioma: so `pt_BR` tem dicionario, e a janela diz
+  isso nos outros seis. A dependencia (`spylls`) esta declarada desde
+  2026-09-14 (garantia I8, ROADMAP 28.1).
 - **O status de revisao e a nota nao entram no historico de edicoes.** O
   `comment_history` e do TEXTO — quem mudou a traducao, quando, e para o que. Uma
   linha que foi rejeitada e depois aceita nao deixa rastro dessa ida e volta.
@@ -2345,6 +2346,33 @@ em janela real, headless ou por leitura de codigo, dito la item a item.
   rodape na largura minima, medido (F20); elas sao recibo de uma acao ja
   confirmada em dialogo (V1), e a contagem que fica mostra o resultado. (22.10)
 
+**Revisao de 2026-09-14 (ROADMAP 28) — limites confirmados, ainda sem correcao**
+
+Cada item e comportamento ATUAL, confirmado como a secao 28 descreve, e o
+numero e o do item que o resolve.
+
+- **"Aplicar Automaticas" nao filtra `verified`**: reescreve linhas que o
+  revisor ja aprovou. Promover uma regra a `automatic` e clicar a ferramenta
+  alcanca o acervo inteiro do par. (28.1, 28.5)
+- **O aviso de qualidade ve 359 das 1.677 linhas com defeito detectavel por
+  regra** no banco de dev (25,8 %), e nao ha aviso nem correcao para o
+  defeito mais frequente do livro — o fragmento terminado em `after` que sai
+  "depois" sem "de" (527 linhas; 124 de 125 editadas pelo humano). O aviso
+  tambem nao sabe se a linha ja foi revisada, e por isso reavaliar o banco
+  com heuristicas novas marcaria linhas aprovadas. (28.2, 28.4)
+- **O nome do jogador numa citacao de partida vai cru para a API** e volta
+  traduzido em ~2,5 % das citacoes (E. Can -> "E. Pode"). (28.3)
+- **O lote `|||` alinha por posicao**: `split_batch_translation` so confere
+  o numero de partes. Incidencia medida zero em 6.500 linhas; e risco de
+  desenho. (28.12)
+- **Um backup NOVO restaurado num programa VELHO carimba `user_version`
+  para baixo sem avisar.** Pre-existente; os dois schemas novos da secao 28
+  (execucoes e FEN) tornam o caso mais provavel. (28.6, 28.8)
+- **O programa nao sabe quanto o humano aceita sem editar** — a unica
+  regua que mapeia qualidade de traducao para horas de revisao. Medido a
+  mao no banco de dev: 64 % (504 de 784 decisoes humanas). E a barra do
+  piloto de 28.7, e nao existe em "Estatisticas do BD". (28.7)
+
 **Procedencia (de onde cada traducao veio)**
 
 - **As linhas gravadas antes do schema 7 nao tem procedencia**, e nao vao ganhar
@@ -2402,7 +2430,36 @@ Declaradas aqui para que a secao 9 continue sendo apenas o que os testes ja
 protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
-**Nenhuma pendente.** As nove garantias da revisao de 2026-07-31 — **F12**
+**Pendentes: as da secao 28 do ROADMAP (revisao de 2026-09-14), menos as tres
+de 28.1** — I8, M3 e B4 migraram para a secao 9 em 2026-09-14, com 3, 5 e 4
+testes e nove mutacoes sem sobrevivente. Cada uma das que ficam esta escrita
+como o teste que a fara migrar — "falha sem a correcao" —, e as
+que dependem de medicao no banco de dev dizem qual e o comportamento
+testavel e qual e o numero que fica so no ROADMAP.
+
+| # | Garantia planejada | Item | Como o teste falha sem ela |
+|---|---|---|---|
+| Q4 | `after$` com `depois$`, "Brancas/Pretas" com maiuscula no meio e "sao/sejam melhores" geram aviso, e "ele" para o lado nao gera; as formas novas do `Termos-suspeitos.txt` acusam o par medido | 28.2 | Cada heuristica tem um par (marca, nao marca); a primeira heuristica `en>pt` tem o teste de simetria coluna x tela (Q3) |
+| F28 | "Avisos QA" e "Proximo aviso QA" mostram so pendentes por padrao, e o botao "Reavaliar QA" continua alcancando tudo | 28.2 | Uma linha verificada com aviso nao aparece no filtro nem para o "Proximo aviso"; aparece ao desligar o padrao |
+| P5 | As normalizacoes de prosa (reticencia, numero colado, hifen peca-casa, `U+200B`) so agem onde o original prova a forma, e o hifen so com destino `pt` | 28.2 | Original sem espaco na reticencia -> traducao sem espaco fica como esta; destino `it` -> `cavallo-d5` intacto |
+| P6 | A passada sobre o banco gravado aplica as mesmas normalizacoes com historico, e nunca sobre linha verificada sem escopo explicito | 28.2 | Banco com uma linha pendente e uma verificada: so a pendente muda, e `comment_history` ganha uma entrada |
+| P7 | Um fragmento cujo original termina em preposicao sai com a preposicao do destino, exceto quando ha adverbio antes dela | 28.4 | `"... after"` -> termina em "depois de"; `"... immediately after"` fica como a API devolveu |
+| S19 | "Aplicar Automaticas" tem escopo, e o padrao e "so pendentes" | 28.5 | Linha verificada nao muda no escopo padrao; muda quando o escopo pede |
+| S20 | Promover uma regra a `automatic` mostra quantas linhas pendentes ela alteraria e dez delas, fora da thread do Tk | 28.5 | O dialogo traz o numero e a amostra; a contagem roda por `run_with_progress` (mutacao: chamar direto quebra o teste de thread) |
+| S21 | "Trocas repetidas nesta obra" lista os pares mais frequentes do historico do arquivo e diz se ja ha regra | 28.5 | Historico sintetico com `troca -> qualidade` 5 vezes: o par aparece com "sem regra"; com a regra no glossario, aparece "automatica" |
+| X4 | O nome do jogador numa citacao volta byte a byte, e a sede continua sendo traduzida | 28.3 | Sessao falsa que reescreve o nome dentro do sentinela: o comentario conta como falha; a sede traduzida passa |
+| Z4 | "Descartar as nao revisadas deste arquivo" apaga so linhas sem historico, nao verificadas, sem status, sem nota e cujas ocorrencias sao so desse arquivo, com backup e palavra digitada | 28.6 | Cinco linhas com uma marca cada: sobra exatamente cada uma; a linha reusada por outro arquivo fica |
+| Z5 | Reverter uma execucao apaga so o que ela inseriu e Z4 permite, leva as ocorrencias junto, e "Zerar Traducoes" leva a tabela de execucoes | 28.6 | Execucao com 5 insercoes e uma reusada por outra: 4 somem; `translation_runs` vazia depois do Zerar |
+| T6 | Um provedor estrito nunca grava uma traducao cujo multiconjunto de ancoras difere do original | 28.7 | Provedor falso que devolve `Nf6` para `Nf3`: nada gravado, `failed_count == 1`, PGN com o original |
+| K1 | A chave de API nunca aparece inteira em log, configuracoes ou dialogo | 28.7 | Uma execucao falsa com chave conhecida: o texto inteiro nao esta em nenhum dos tres; `****wxyz` esta |
+| B5 | Um lote JSON e aceito so se cada id aparece exatamente uma vez; senao e desalinhado (B2) | 28.7 | Id repetido, faltando e fora do intervalo: os tres devolvem `None` |
+| O5 | A FEN de uma ocorrencia e a da posicao do comentario, inclusive dentro de variante, atribuida so por texto casado em sequencia e ressincronizada por partida | 28.8 | Comentario dentro de `(...)` tem a FEN da variante; lista esperada com um texto a mais: a partida seguinte volta a casar |
+| F29 | `Alt+1..9` aplicam a sugestao N, `Ctrl+M` marca a linha aberta, e a sugestao selecionada e realcada no texto | 28.9 | Cada bind esta em `KEYBOARD_SHORTCUTS` (F18) e produz o efeito na janela real |
+| S22 | Com o filtro "Duplicadas" ativo, "Excluir as N exibidas" apaga so elas, com backup antes | 28.9 | Glossario com 3 duplicadas e 2 unicas: sobram as 2, existe um backup novo |
+| M4 | Toda opcao do `settings.json` tem um lugar na tela de Configuracoes, e a tela grava por `update_settings` | 28.10 | Um teste enumera as chaves padrao contra os widgets; gravar pela tela nao apaga um rascunho gravado por outra janela |
+| F30 | O painel "Traducoes semelhantes" consulta so o par aberto, numa thread, e descarta o resultado de uma geracao velha | 28.13 | Linha de outro par nao aparece (R9); resultado atrasado nao pinta o painel |
+
+**Ate 2026-09-14 o registro era o seguinte.** As nove garantias da revisao de 2026-07-31 — **F12**
 (22.1), **Q3** (22.2), **F13** (22.3), **F14** (22.4), **F15** (22.5), **F16**
 (22.6), **F17** (22.7), **F18** (22.8) e **F19** (22.9) — migraram para a secao
 9 no mesmo dia, com 5, 6, 8, 6, 5, 11, 5, 13 e 10 testes e nove rodadas de
@@ -2440,10 +2497,11 @@ indice que se reconstroi quando o fonte muda. D1-D7 sao essas afirmacoes, e duas
 delas sao medidas com cronometro e `tracemalloc`, porque em teste de igualdade
 "correto e lento" e indistinguivel de "correto e rapido".
 
-**O item 11 da secao 19 (corretor ortografico de prosa) nao foi feito**, e nao
-declara garantia planejada: ele depende de escolher um dicionario e uma dependencia
-nova, que e decisao de quem mantem o programa e nao um desenho pendente. Esta como
-limite na secao 10.
+**O item 11 da secao 19 (corretor ortografico de prosa) foi feito em
+2026-08-03** (ROADMAP 26, garantia F27), depois de este paragrafo dizer que
+nao seria: a decisao de dicionario e dependencia foi tomada la. O que sobrou
+dele como limite (a dependencia nao declarada) esta na secao 10 e no
+ROADMAP 28.1.
 
 **As garantias do instalador (I1-I4, ROADMAP 21) estao na secao 9**, e duas delas
 sao protegidas por um teste que **nao** fica na suite: `pytest` nao tem como

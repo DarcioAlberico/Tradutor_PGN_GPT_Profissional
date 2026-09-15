@@ -101,7 +101,10 @@ from .settings import (
 from .window_utils import bring_window_to_front, restore_or_maximize
 
 
-ROW_COLOR = ("#f8fafc", "#1f2937")
+# `ROW_COLOR` vem de `editor_common`, como o resto da paleta (22.9). Uma
+# redefinicao local com o mesmo valor sobreviveu ate 2026-09-14 sombreando o
+# import (ruff F811): o dia em que a paleta central mudasse, esta janela
+# ficaria com a cor velha sem erro nenhum (ROADMAP 28.1).
 VERIFIED_ROW_COLOR = ("#d1fae5", "#14532d")
 VERIFIED_ROW_TEXT_COLOR = ("#065f46", "#d1fae5")
 SUGGESTION_COLOR = ("#f8fafc", "#1f2937")

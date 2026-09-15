@@ -10,6 +10,7 @@ from .main_window import setup_main_ui
 from .settings import (
     load_settings,
     read_main_window_settings,
+    set_settings_warning_handler,
     write_main_window_settings,
 )
 from .window_utils import (
@@ -78,6 +79,13 @@ class PGNTranslatorApp:
         self._glossary_error_shown = None
         set_glossary_error_handler(
             lambda message: app_actions.report_glossary_failure(self, message)
+        )
+        # O mesmo desenho para as configuracoes (garantia M3): uma gravacao que
+        # desiste ou um arquivo renomeado por corrupcao precisam ser ditos, e
+        # a primeira gravacao acontece logo abaixo, em `_remember_choices`.
+        self._settings_warning_shown = None
+        set_settings_warning_handler(
+            lambda message: app_actions.report_settings_failure(self, message)
         )
 
         # ANTES da primeira carga do glossario, e essa e a ordem inteira do

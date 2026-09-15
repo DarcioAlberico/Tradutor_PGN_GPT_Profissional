@@ -120,7 +120,7 @@ def _move_pattern(letters):
     letras em que a mais curta tambem levasse a um lance valido — e ai o
     retrocesso escolheria a errada em silencio.
     """
-    pecas = "|".join(sorted((re.escape(l) for l in letters), key=len, reverse=True))
+    pecas = "|".join(sorted((re.escape(letra) for letra in letters), key=len, reverse=True))
     captura = f"[{re.escape(CAPTURE_MARKS)}]"
     return re.compile(
         r"(?<!\w)"

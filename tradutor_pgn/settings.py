@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import threading
 from datetime import datetime
 
@@ -44,6 +45,103 @@ def load_settings(path=None):
     if not isinstance(data, dict):
         return {}
     return data
+
+
+# ============================================================================
+# Canal de aviso das configuracoes (garantia M3)
+#
+# `load_settings` acima e tolerante de proposito: quem LE degrada para `{}`,
+# porque uma janela que nao abre e pior do que uma janela sem preferencias. A
+# GRAVACAO nao pode ter a mesma tolerancia — e o que este canal e a funcao
+# `_read_settings_for_update` separam. Como o canal do glossario (S5), este
+# modulo nao importa Tk: quem registra o handler decide como mostrar.
+# ============================================================================
+
+_settings_warning_handler = None
+
+
+def set_settings_warning_handler(handler):
+    """Registra quem exibe os avisos de gravacao. Devolve o handler anterior."""
+    global _settings_warning_handler
+    previous = _settings_warning_handler
+    _settings_warning_handler = handler
+    return previous
+
+
+def _warn(message):
+    """Publica um aviso. Nunca levanta: o chamador ja esta num caminho de erro."""
+    if _settings_warning_handler is None:
+        if sys.stdout is not None:
+            try:
+                print(f"[CONFIGURACOES] {message}")
+            except Exception:  # pragma: no cover - stdout fechado
+                pass
+        return
+    try:
+        _settings_warning_handler(message)
+    except Exception:  # pragma: no cover - defensivo
+        pass
+
+
+def _read_settings_for_update(path):
+    """A leitura ESTRITA que antecede uma gravacao (garantia M3).
+
+    `update_settings` lia com `load_settings`, que devolve `{}` para qualquer
+    erro — inclusive um `PermissionError` de um antivirus tocando o arquivo por
+    uma fracao de segundo. A gravacao seguinte escrevia por cima um arquivo so
+    com a chave que estava mudando: rascunhos (R4), lista de falhas (T4) e
+    preferencias (M1) sumiam de vez, sem aviso. Reproduzido com a funcao real
+    (ROADMAP 28.1).
+
+    Tres desfechos, e nenhum deles e "fingir que o arquivo nao existe":
+
+    - nao existe: `{}`, e a gravacao cria o arquivo;
+    - existe e nao da para ler (`OSError`): o aviso sai e o `OSError` sobe —
+      todos os chamadores ja o tratam, e desistir de UMA gravacao e barato;
+    - existe e nao e JSON (ou nao e um objeto): e renomeado para
+      `.corrompido-<data>` ao lado, o aviso diz onde ficou, e a gravacao segue
+      com `{}`. Renomear preserva o que der para recuperar a mao; seguir e o
+      que impede o programa de ficar sem gravar preferencia nenhuma ate alguem
+      consertar o arquivo.
+    """
+    # Em bytes, e nao em texto: um byte invalido no meio do arquivo e
+    # "corrompido" (o ramo de baixo), e nao "ilegivel" — decodificar aqui o
+    # confundiria com o `OSError`.
+    try:
+        with open(path, "rb") as file:
+            raw = file.read()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        _warn(
+            f"Nao foi possivel ler {path} ({exc}); esta gravacao foi "
+            f"descartada para nao apagar o que o arquivo ja tem."
+        )
+        raise
+
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        data = None
+
+    if isinstance(data, dict):
+        return data
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    aside = f"{path}.corrompido-{stamp}"
+    try:
+        os.replace(path, aside)
+    except OSError as exc:
+        _warn(
+            f"{path} esta corrompido e nao pode ser renomeado ({exc}); esta "
+            f"gravacao foi descartada."
+        )
+        raise
+    _warn(
+        f"{path} estava corrompido e foi renomeado para {aside}; as "
+        f"configuracoes recomecam vazias. O que der para recuperar esta la."
+    )
+    return {}
 
 
 def save_settings(settings, path=None):
@@ -97,8 +195,13 @@ def update_settings(mutator, path=None):
     a gravacao sao uma coisa so, e desde que o rascunho passou a ser gravado em
     segundo plano ha duas threads chamando isto.
     """
+    if path is None:
+        path = default_settings_path()
+
     with _UPDATE_LOCK:
-        settings = load_settings(path)
+        # A leitura estrita, e nao `load_settings`: aqui `{}` por engano vira
+        # um arquivo novo por cima do velho (garantia M3).
+        settings = _read_settings_for_update(path)
         result = mutator(settings)
         save_settings(settings, path)
     return result

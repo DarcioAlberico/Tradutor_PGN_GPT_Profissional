@@ -31,8 +31,6 @@ from pathlib import Path
 
 from gui_harness import DISPLAY, GuiTestCase
 from tradutor_pgn import (
-    app_actions,
-    db_tools,
     edit_window,
     editor_common,
     editor_widgets,
@@ -41,7 +39,6 @@ from tradutor_pgn import (
     history_window,
     settings,
     stats_window,
-    translation_worker,
     window_utils,
 )
 from tradutor_pgn.database import (
@@ -51,7 +48,6 @@ from tradutor_pgn.database import (
     save_translation,
 )
 from tradutor_pgn.glossario import (
-    glossary_entry_priority,
     load_glossary_entry_details,
     save_glossary_entries,
 )
