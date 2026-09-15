@@ -6,7 +6,7 @@ verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
 **Pendente: a secao 28** (revisao de 2026-09-14), que e plano e nao
-entrega — quinze itens medidos (28.1, 28.2 e 28.4 ja feitos), com a ordem em 28.15 e as garantias planejadas
+entrega — quinze itens medidos (28.1 a 28.4 ja feitos), com a ordem em 28.15 e as garantias planejadas
 na secao 11 da SPEC. Ate ela, o registro estava assim:
 
 **Nada pendente.** O item 19.11 (corretor ortografico de prosa), que era o
@@ -7953,7 +7953,7 @@ the exchange`), nunca regra automatica. Uma medicao de precisao no banco de
 dev nao e um teste da suite: o que migra para a secao 9 e "a heuristica X
 marca Y e nao marca Z", e os numeros ficam aqui.
 
-### 28.3 O nome do jogador vai para a API e volta traduzido
+### 28.3 O nome do jogador vai para a API e volta traduzido — CONCLUIDO (2026-09-14)
 
 Medido: 771 citacoes `A. Sobrenome-B. Sobrenome, Sede Ano` em 770 linhas. A
 maquina traduziu o **nome** em 19 (E. Can -> "E. Pode", K. Lie -> "K.
@@ -7979,6 +7979,53 @@ reais — as anotacoes `[%...]` ficam na borda do comentario, o nome fica
 dentro da prosa, e um sentinela engolido transforma "nome errado" em
 "comentario falhou" (T2/T3), que e pior. Se a taxa passar de 1 %, o item
 vira aviso QA em vez de mascara. Garantia planejada **X4**.
+
+**Feito no mesmo dia, e a medicao nao aconteceu — o desenho mudou para nao
+precisar dela.** A tentativa: 200 comentarios reais com citacao, nomes
+mascarados, enviados pelas funcoes reais do pipeline em 10 lotes, no ritmo
+do `RequestPacer`. O endpoint respondeu `429` e continuou respondendo `429`
+por mais de uma hora, a uma requisicao de uma linha — nao ha como medir
+sobrevivencia de sentinela contra um servidor que nao responde, e isso
+proprio e um dado: esta na SPEC 10, em "Rede".
+
+O que tirou a medicao do caminho critico foi trocar a consequencia de um
+sentinela de nome engolido. A mascara de anotacoes (X1) tem de virar falha,
+porque uma anotacao corrompida nao pode ser gravada; um nome que a maquina
+traduziu e o defeito que existia ANTES do item, e e menor do que um
+comentario inteiro no idioma original. Entao o worker, quando a restauracao
+falha e havia nome na mascara, **reenvia o comentario sozinho, com as
+anotacoes ainda mascaradas e os nomes crus** (`resend_without_names`), e so
+uma anotacao que ainda falte nessa segunda volta e falha. O custo de um
+sentinela engolido passou de "comentario perdido" para "uma requisicao a
+mais e o comportamento anterior" — e o resumo conta ("Comentarios
+reenviados sem a mascara de nomes: N"), que e a medicao que faltava, feita
+pela proxima execucao real. Se N passar de 1 % dos comentarios com citacao,
+a decisao registrada acima continua valendo: vira aviso QA.
+
+O padrao (`PLAYER_PAIR_RE`, em `annotation_mask`): inicial de uma ou duas
+letras, ponto, espaco opcional, sobrenome com uma particula opcional ("N. De
+Firmian", "L. Van Wely"), hifen, o segundo nome, e **a virgula logo depois**
+— e ela que separa uma citacao de qualquer outro par com hifen ("compare G.
+Sax-G. Mohr for details" nao e mascarado). Medido no banco de dev: casa as
+821 citacoes e zero falso positivo. Os nomes entram na MESMA lista de tokens
+das anotacoes e voltam pela mesma restauracao verificada — nao ha um segundo
+mecanismo. A sede nao e mascarada, como decidido acima; a tabela de exonimos
+ficou de fora: e regra do glossario do USUARIO, e o `Substituicoes.txt` dele
+esta com edicoes proprias fora do repositorio — nao e este item que mexe la.
+
+As tres etapas entre a resposta da API e a restauracao (regras automaticas,
+lances, prosa) viraram uma funcao local do worker (`acabar`), porque passaram
+a existir em tres lugares: os dois caminhos e o reenvio.
+
+**O que a verificacao fixou.** `PlayerNameMaskTests` (5) e
+`WorkerPlayerNameTests` (5: o nome nunca chega a API e volta byte a byte; o
+sentinela engolido custa uma segunda requisicao com o nome cru; sem anotacao
+a segunda volta e o comportamento antigo e e gravada; com anotacao que ainda
+falta, e falha; uma anotacao engolida NAO ganha segunda chance). Oito
+mutacoes, uma sobrevivente na primeira passada — o teste do falso positivo
+usava um par sem iniciais, que nao casaria de qualquer jeito (padrao 4 da
+memoria de testes: o exemplo nao exercita a regra) — e ganhou "compare G.
+Sax-G. Mohr for details". X4 migrou para a secao 9 da SPEC.
 
 ### 28.4 O fragmento que termina em preposicao perde a preposicao — CONCLUIDO (2026-09-14)
 

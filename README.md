@@ -396,7 +396,12 @@ e 28.4). Quatro consertos, todos guiados pelo comentario original:
   o `after` adverbial ("immediately after").
 
 Medido no banco de desenvolvimento, sao 731 linhas de 6.500 na saida da
-maquina. O resumo da execucao conta os consertos. **"Consertar Prosa"**, em
+maquina. O resumo da execucao conta os consertos. E o par de nomes de uma
+citacao de partida (`G. Sax-G. Mohr, Maribor 2000`) atravessa a API mascarado,
+como as anotacoes `[%...]`: a maquina traduzia o nome em 19 de 821 citacoes
+("E. Can" -> "E. Pode"). A sede continua sendo traduzida. Um sentinela de nome
+que a maquina engula custa uma segunda requisicao sem a mascara, e o resumo
+conta quantas foram (ROADMAP 28.3). **"Consertar Prosa"**, em
 Ferramentas, aplica os mesmos consertos as traducoes **pendentes** ja gravadas
 do par selecionado — com backup, previa e historico; uma traducao verificada
 nunca e tocada por ele.

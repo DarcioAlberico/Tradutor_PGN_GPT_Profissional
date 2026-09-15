@@ -209,7 +209,11 @@ from tradutor_pgn.review_quality import (
     summarize_quality_warnings,
 )
 from tradutor_pgn import app_config
-from tradutor_pgn.annotation_mask import mask_annotations, restore_annotations
+from tradutor_pgn.annotation_mask import (
+    has_player_name_tokens,
+    mask_annotations,
+    restore_annotations,
+)
 from tradutor_pgn.background_task import BackgroundTask
 from tradutor_pgn.chess_notation import (
     PIECE_LETTERS,
@@ -8311,6 +8315,153 @@ class PendingOnlyQaFilterTests(unittest.TestCase):
         self.assertEqual(find_first_quality_warning(rows)[0], 0)
         self.assertEqual(find_first_quality_warning(rows, include_verified=False)[0], 1)
         self.assertIsNone(find_first_quality_warning([verificada], include_verified=False))
+
+
+class PlayerNameMaskTests(unittest.TestCase):
+    """Garantia X4: o par de nomes de uma citacao atravessa a API mascarado.
+
+    Medido no banco de dev (ROADMAP 28.3): 821 citacoes, 19 com o NOME
+    traduzido ("E. Can" -> "E. Pode", "K. Lie" -> "K. Mentira"). A sede fica de
+    fora da mascara — o revisor a traduz em um terco das verificadas.
+    """
+
+    def test_the_pair_is_masked_and_the_venue_is_not(self):
+        masked, tokens = mask_annotations("and White resigned in G. Sax-G. Mohr, Maribor 2000.")
+        self.assertEqual(masked, "and White resigned in \u27e60\u27e7, Maribor 2000.")
+        self.assertEqual(tokens, ["G. Sax-G. Mohr"])
+
+    def test_particles_and_two_letter_initials_are_part_of_the_name(self):
+        for texto, nome in (
+            ("was N. De Firmian-S. Kudrin, USA 1999, and now", "N. De Firmian-S. Kudrin"),
+            ("in L. Van Wely-Ju. Polgar, Wijk aan Zee 2001", "L. Van Wely-Ju. Polgar"),
+            ("V. Anand-G. Kasparov, PCA World Ch match (Game 9)", "V. Anand-G. Kasparov"),
+        ):
+            with self.subTest(texto=texto):
+                self.assertEqual(mask_annotations(texto)[1], [nome])
+
+    def test_other_hyphens_are_left_alone(self):
+        """Casa-peca, lance de-para e um par de nomes sem a virgula de citacao."""
+        for texto in (
+            "the e7-pawn and the h2-h4 push",
+            "a Sicilian-Dragon setup",
+            "see Kasparov-Karpov for details",
+            # iniciais e hifen, mas sem a virgula que faz a citacao
+            "compare G. Sax-G. Mohr for details",
+        ):
+            with self.subTest(texto=texto):
+                self.assertEqual(mask_annotations(texto), (texto, []))
+
+    def test_names_and_annotations_share_the_verified_restoration(self):
+        masked, tokens = mask_annotations("G. Sax-G. Mohr, Maribor 2000 [%clk 0:01]")
+        self.assertEqual(tokens, ["[%clk 0:01]", "G. Sax-G. Mohr"])
+        self.assertEqual(
+            restore_annotations("\u27e61\u27e7, Maribor 2000 \u27e60\u27e7", tokens),
+            ("G. Sax-G. Mohr, Maribor 2000 [%clk 0:01]", True),
+        )
+        self.assertFalse(restore_annotations(", Maribor 2000 \u27e60\u27e7", tokens)[1])
+
+    def test_the_name_half_can_be_switched_off(self):
+        self.assertEqual(mask_annotations("G. Sax-G. Mohr, Maribor 2000 [%clk 0:01]", player_names=False)[1], ["[%clk 0:01]"])
+        self.assertTrue(has_player_name_tokens(["[%clk 0:01]", "G. Sax-G. Mohr"]))
+        self.assertFalse(has_player_name_tokens(["[%clk 0:01]"]))
+        self.assertFalse(has_player_name_tokens([]))
+
+
+class WorkerPlayerNameTests(WorkerFallbackHarness, unittest.TestCase):
+    """X4 no worker: o nome nunca vai a API e sempre volta byte a byte; um
+    sentinela de nome engolido custa uma segunda requisicao sem a mascara de
+    nomes, e so depois dela o comentario conta como falha."""
+
+    PGN = '[Event "Test"]\n\n1. e4 {and White resigned in G. Sax-G. Mohr, Maribor 2000.} *\n'
+    COMMENTS = ["and White resigned in G. Sax-G. Mohr, Maribor 2000."]
+
+    def test_the_name_never_reaches_the_api_and_comes_back_intact(self):
+        enviados = []
+
+        def translate(text, *_a, **_k):
+            enviados.append(text)
+            return text.replace("and White resigned in", "e as brancas abandonaram em")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _pgn = self.run_worker(Path(tmp), translate)
+            gravadas = self.stored(Path(tmp) / "cache.db")
+
+        self.assertEqual(len(enviados), 1)
+        self.assertNotIn("Sax", enviados[0])
+        self.assertIn("\u27e60\u27e7, Maribor 2000", enviados[0])
+        self.assertEqual(gravadas[self.COMMENTS[0]], "e as brancas abandonaram em G. Sax-G. Mohr, Maribor 2000.")
+        self.assertFalse(any("reenviados" in l for l in app.logs))
+
+    def test_a_swallowed_name_sentinel_is_resent_without_the_mask(self):
+        enviados = []
+
+        def translate(text, *_a, **_k):
+            enviados.append(text)
+            if "\u27e6" in text:
+                return "e as brancas abandonaram em , Maribor 2000."  # o sentinela sumiu
+            return "e as brancas abandonaram em G. Sax-G. Mohr, Maribor 2000."
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _pgn = self.run_worker(Path(tmp), translate)
+            gravadas = self.stored(Path(tmp) / "cache.db")
+
+        self.assertEqual(len(enviados), 2, "uma segunda requisicao, sozinha")
+        self.assertIn("G. Sax-G. Mohr", enviados[1], "a segunda vai com o nome cru")
+        self.assertNotIn("\u27e6", enviados[1])
+        self.assertEqual(gravadas[self.COMMENTS[0]], "e as brancas abandonaram em G. Sax-G. Mohr, Maribor 2000.")
+        self.assertTrue(any("reenviados sem a mascara de nomes: 1" in l for l in app.logs))
+        self.assertTrue(any("Comentarios que falharam: 0" in l for l in app.logs))
+
+    def test_the_second_try_is_the_old_behaviour_and_is_stored(self):
+        """Sem anotacao no comentario, a segunda tentativa e a traducao crua de
+        antes da mascara: o que a maquina devolver e gravado — que e o defeito
+        que existia antes de 28.3, e menor do que um comentario no original."""
+        def translate(text, *_a, **_k):
+            return "e as brancas abandonaram em , Maribor 2000."
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _pgn = self.run_worker(Path(tmp), translate)
+            gravadas = self.stored(Path(tmp) / "cache.db")
+
+        self.assertEqual(gravadas[self.COMMENTS[0]], "e as brancas abandonaram em , Maribor 2000.")
+        self.assertTrue(any("reenviados sem a mascara de nomes: 1" in l for l in app.logs))
+
+    def test_failing_twice_with_an_annotation_is_a_failure(self):
+        """Com anotacao junto, a segunda tentativa ainda e verificada (X1): se
+        a anotacao tambem nao volta, e falha, e nada e gravado."""
+        self.PGN = '[Event "Test"]\n\n1. e4 {resigned in G. Sax-G. Mohr, Maribor 2000 [%clk 0:01]} *\n'
+        self.COMMENTS = ["resigned in G. Sax-G. Mohr, Maribor 2000 [%clk 0:01]"]
+        enviados = []
+
+        def translate(text, *_a, **_k):
+            enviados.append(text)
+            return "abandonou em , Maribor 2000"  # engoliu os dois sentinelas
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _pgn = self.run_worker(Path(tmp), translate)
+            gravadas = self.stored(Path(tmp) / "cache.db")
+
+        self.assertEqual(len(enviados), 2)
+        self.assertEqual(gravadas, {})
+        self.assertTrue(any("[FALHA]" in l and "nomes" in l for l in app.logs))
+        self.assertTrue(any("Comentarios que falharam: 1" in l for l in app.logs))
+
+    def test_a_swallowed_annotation_is_not_resent(self):
+        """A segunda chance e dos NOMES: uma anotacao [%...] engolida continua
+        sendo falha na hora (X1), sem gastar requisicao."""
+        self.PGN = '[Event "Test"]\n\n1. e4 {Best was Nxe5 [%clk 0:05:30]} *\n'
+        self.COMMENTS = ["Best was Nxe5 [%clk 0:05:30]"]
+        enviados = []
+
+        def translate(text, *_a, **_k):
+            enviados.append(text)
+            return "Melhor era Cxe5"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _pgn = self.run_worker(Path(tmp), translate)
+
+        self.assertEqual(len(enviados), 1)
+        self.assertTrue(any("Comentarios que falharam: 1" in l for l in app.logs))
 
 
 class WorkerTrailingPrepositionTests(WorkerFallbackHarness, unittest.TestCase):

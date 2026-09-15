@@ -2021,6 +2021,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | M3 | A gravacao nunca sobrescreve um arquivo que existe e nao pode ser lido; um arquivo invalido e posto de lado (`.corrompido-<data>`) antes de o programa seguir, e os dois casos sao avisados | Bug: um `PermissionError` transitorio na leitura virava `{}`, e a gravacao seguinte apagava rascunhos, lista de falhas e preferencias — o desfecho de M2 por outro caminho (ROADMAP 28.1) |
 | X1 | Anotacoes `[%...]` atravessam a traducao byte a byte, ou o comentario conta como falha | Bug: `[%cal Ra1h8]` virava `[%cal Ta1h8]`; `[%eval +0.35]` quebrado antes da API |
 | X2 | Comentario esvaziado pela limpeza sai do arquivo sem deixar `{}` | Sujeira: o PGN gerado saia pontilhado de `{}` |
+| X4 | O par de nomes de uma citacao de partida (`G. Sax-G. Mohr,`) atravessa a API mascarado pelo mesmo sentinela de X1 e volta byte a byte; a sede continua sendo traduzida; um sentinela de nome engolido custa UMA segunda requisicao sem a mascara de nomes, e so uma anotacao que ainda falte ai e falha | Bug: a maquina traduzia o nome em 19 de 821 citacoes ("E. Can" -> "E. Pode", "K. Lie" -> "K. Mentira", "J. Hammer" -> "J. Martelo") (ROADMAP 28.3) |
 | X3 | Comentarios `;` sao contados e anunciados | Bug de percepcao: PGN so com `;` respondia "nenhum comentario encontrado" |
 | D1 | O PGN traduzido e escrito numa passada, sem uma segunda copia dele na memoria | Perf: 15 mil comentarios em 3,2 MB custavam 26,9 s de copia; o custo cresce com o produto |
 | D2 | Cancelar interrompe a gravacao do PGN, e sem deixar arquivo pela metade | Bug: a fase nao olhava o `cancel_flag`, e "Cancelar" ficava sem efeito visivel |
@@ -2145,7 +2146,13 @@ X3). O que resta declarado como limite:
 
 **Rede**
 
-- Depende de um endpoint nao oficial, sujeito a bloqueio por volume.
+- Depende de um endpoint nao oficial, sujeito a bloqueio por volume. **Medido
+  em 2026-09-14**: uma medicao de 200 comentarios em 10 lotes, no ritmo do
+  proprio pipeline, encontrou (ou provocou) um `429` que durou mais de uma
+  hora — o `RequestPacer` desacelera, mas nao ha o que fazer alem de esperar.
+  A medicao do ROADMAP 28.3 ficou por isso para a proxima execucao real, que
+  a faz sozinha: o resumo conta os comentarios reenviados sem a mascara de
+  nomes.
 - **"Cancelar" nao alcanca o retry em andamento**: o laco de tres tentativas
   nao olha o `cancel_flag`, e contra um endpoint que pendura a conexao o clique
   pode esperar ~93 s por chunk (3 x 30 s de timeout + as esperas). Reproduzido
@@ -2366,8 +2373,6 @@ numero e o do item que o resolve.
   28.4), e "Consertar Prosa" (P6) alcanca as linhas ja gravadas, menos as
   verificadas: 3 no banco de dev, que a revisao aprovou com o defeito e a
   ferramenta nao toca por desenho.
-- **O nome do jogador numa citacao de partida vai cru para a API** e volta
-  traduzido em ~2,5 % das citacoes (E. Can -> "E. Pode"). (28.3)
 - **O lote `|||` alinha por posicao**: `split_batch_translation` so confere
   o numero de partes. Incidencia medida zero em 6.500 linhas; e risco de
   desenho. (28.12)
@@ -2437,13 +2442,14 @@ protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
 **Pendentes: as da secao 28 do ROADMAP (revisao de 2026-09-14), menos as tres
-de 28.1, a de 28.4 e as quatro de 28.2** — I8, M3 e B4 migraram
+de 28.1, a de 28.4, as quatro de 28.2 e a de 28.3** — I8, M3 e B4 migraram
 para a secao 9 em 2026-09-14, com 3, 5 e 4 testes e nove mutacoes sem
 sobrevivente; P7 no mesmo dia, com 6 testes e sete mutacoes; P5 e P6 no
 mesmo dia, com 8 e 5 testes e doze mutacoes (duas sobreviveram a primeira
 passada e viraram teste — as duas do padrao "o cenario cai numa guarda
 vizinha"); Q4 e F28 no mesmo dia, com 9 + 3 testes headless, 2 de janela e
-onze mutacoes (uma sobrevivente era um lookbehind redundante, que saiu). Cada uma das que ficam esta escrita
+onze mutacoes (uma sobrevivente era um lookbehind redundante, que saiu);
+X4 no mesmo dia, com 11 testes e oito mutacoes. Cada uma das que ficam esta escrita
 como o teste que a fara migrar — "falha sem a correcao" —, e as
 que dependem de medicao no banco de dev dizem qual e o comportamento
 testavel e qual e o numero que fica so no ROADMAP.
@@ -2453,7 +2459,6 @@ testavel e qual e o numero que fica so no ROADMAP.
 | S19 | "Aplicar Automaticas" tem escopo, e o padrao e "so pendentes" | 28.5 | Linha verificada nao muda no escopo padrao; muda quando o escopo pede |
 | S20 | Promover uma regra a `automatic` mostra quantas linhas pendentes ela alteraria e dez delas, fora da thread do Tk | 28.5 | O dialogo traz o numero e a amostra; a contagem roda por `run_with_progress` (mutacao: chamar direto quebra o teste de thread) |
 | S21 | "Trocas repetidas nesta obra" lista os pares mais frequentes do historico do arquivo e diz se ja ha regra | 28.5 | Historico sintetico com `troca -> qualidade` 5 vezes: o par aparece com "sem regra"; com a regra no glossario, aparece "automatica" |
-| X4 | O nome do jogador numa citacao volta byte a byte, e a sede continua sendo traduzida | 28.3 | Sessao falsa que reescreve o nome dentro do sentinela: o comentario conta como falha; a sede traduzida passa |
 | Z4 | "Descartar as nao revisadas deste arquivo" apaga so linhas sem historico, nao verificadas, sem status, sem nota e cujas ocorrencias sao so desse arquivo, com backup e palavra digitada | 28.6 | Cinco linhas com uma marca cada: sobra exatamente cada uma; a linha reusada por outro arquivo fica |
 | Z5 | Reverter uma execucao apaga so o que ela inseriu e Z4 permite, leva as ocorrencias junto, e "Zerar Traducoes" leva a tabela de execucoes | 28.6 | Execucao com 5 insercoes e uma reusada por outra: 4 somem; `translation_runs` vazia depois do Zerar |
 | T6 | Um provedor estrito nunca grava uma traducao cujo multiconjunto de ancoras difere do original | 28.7 | Provedor falso que devolve `Nf6` para `Nf3`: nada gravado, `failed_count == 1`, PGN com o original |

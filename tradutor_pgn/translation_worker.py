@@ -6,7 +6,11 @@ from tkinter import messagebox
 
 import requests
 
-from .annotation_mask import mask_annotations, restore_annotations
+from .annotation_mask import (
+    has_player_name_tokens,
+    mask_annotations,
+    restore_annotations,
+)
 from .chess_notation import fix_move_notation, supports_notation
 from .database import (
     SOURCE_LANGUAGE_UNKNOWN,
@@ -348,6 +352,7 @@ def run_translation(
         translated_count = 0
         move_fixes = 0
         prose_fixes = 0
+        names_resent = 0
         filled_empty_count = 0
         cache_count = 0
         cleaned_empty_count = 0
@@ -376,6 +381,53 @@ def run_translation(
             if pause_started is None:
                 return 0.0
             return time.perf_counter() - pause_started
+
+        def acabar(translated, original):
+            """As tres etapas entre a resposta da API e a restauracao."""
+            translation = apply_automatic_substitutions(translated, automatic_rules)
+            translation, corrigidos = fix_move_notation(
+                original, translation, source_language, target_language
+            )
+            translation, consertos = normalize_prose(
+                original, translation, source_language, target_language
+            )
+            return translation, corrigidos, consertos
+
+        def resend_without_names(original, tokens):
+            """Segunda tentativa quando um sentinela de NOME nao voltou (X4).
+
+            A mascara de nomes e a de anotacoes usam a mesma restauracao
+            verificada, mas o custo de falhar e diferente: uma anotacao
+            corrompida nao pode ser gravada, enquanto um nome que a maquina
+            traduziu e o defeito que existia ANTES da mascara — e menor do que
+            um comentario inteiro no idioma original. Entao, se os tokens que
+            faltaram eram so nomes, o comentario e reenviado sozinho, com as
+            anotacoes ainda mascaradas e os nomes crus. O que volta passa pela
+            mesma restauracao; se ainda falhar, ai e falha (T2/T3).
+
+            Devolve `(traducao, corrigidos, consertos)` ou `None`. Custa uma
+            requisicao, e so acontece quando ha nome na mascara.
+            """
+            if not has_player_name_tokens(tokens):
+                return None
+            cleaned = clean_comment_for_translation(original, cleanup_rules)
+            masked, annotation_only = mask_annotations(cleaned, player_names=False)
+            translated = translate_text(
+                masked,
+                target_language,
+                app.log_message,
+                app.cancel_flag,
+                session=http_session,
+                pacer=pacer,
+                source_language=source_language,
+            )
+            if not translated:
+                return None
+            translation, corrigidos, consertos = acabar(translated, original)
+            translation, intactas = restore_annotations(translation, annotation_only)
+            if not intactas:
+                return None
+            return translation, corrigidos, consertos
 
         for pgn_index, pgn_file in enumerate(pgn_files, start=1):
             if app.cancel_flag.is_set():
@@ -530,41 +582,39 @@ def run_translation(
                             for (original, _masked, tokens), part in zip(
                                 grupo_items, parts
                             ):
-                                translation = apply_automatic_substitutions(
-                                    part, automatic_rules
+                                # Regras automaticas, correcao de lances e
+                                # normalizacoes de prosa, nessa ordem, depois da
+                                # API e ANTES de gravar: o que vai para o banco e
+                                # para o PGN e o mesmo texto (P3, P5, P7).
+                                translation, corrigidos, consertos = acabar(
+                                    part, original
                                 )
-                                # Depois das regras automaticas e ANTES de
-                                # gravar: o que vai para o banco e para o PGN e o
-                                # mesmo texto, entao corrigir aqui cobre os dois
-                                # de uma vez.
-                                translation, corrigidos = fix_move_notation(
-                                    original, translation, source_language, target_language
-                                )
-                                # Depois dos lances e antes de restaurar as
-                                # anotacoes, como o fix acima: o que vai para o
-                                # banco e para o PGN e o mesmo texto (P5, P7).
-                                translation, consertos = normalize_prose(
-                                    original, translation, source_language, target_language
-                                )
-                                prose_fixes += consertos
                                 # A restauracao e o ULTIMO passo, e e verificada:
                                 # se a traducao nao devolveu cada sentinela
                                 # exatamente uma vez, gravar seria guardar uma
                                 # anotacao corrompida com cara de certa. O
                                 # comentario conta como falha e fica no idioma
-                                # original (T2/T3).
+                                # original (T2/T3) — depois de uma segunda
+                                # chance sem a mascara de nomes (X4).
                                 translation, intactas = restore_annotations(
                                     translation, tokens
                                 )
                                 if not intactas:
-                                    failed_count += 1
-                                    failed_files.add(pgn_file)
-                                    app.log_message(
-                                        f"  - [FALHA] Anotacoes [%...] nao voltaram "
-                                        f"intactas da traducao: \"{original[:60]}\""
-                                    )
-                                    continue
+                                    segunda = resend_without_names(original, tokens)
+                                    if segunda is None:
+                                        failed_count += 1
+                                        failed_files.add(pgn_file)
+                                        app.log_message(
+                                            f"  - [FALHA] Anotacoes [%...] ou nomes "
+                                            f"nao voltaram intactos da traducao: "
+                                            f"\"{original[:60]}\""
+                                        )
+                                        continue
+                                    translation, corrigidos, consertos = segunda
+                                    names_resent += 1
+                                    batch_api_requests += 1
                                 move_fixes += corrigidos
+                                prose_fixes += consertos
                                 app.translation_cache[original] = translation
                                 translated_map[original] = translation
                                 save_status = save_translation(
@@ -653,19 +703,9 @@ def run_translation(
                                 if translated:
                                     respondidos += 1
                                     sem_resposta_seguidas = 0
-                                    translation = apply_automatic_substitutions(
-                                        translated, automatic_rules
+                                    translation, corrigidos, consertos = acabar(
+                                        translated, original
                                     )
-                                    translation, corrigidos = fix_move_notation(
-                                        original,
-                                        translation,
-                                        source_language,
-                                        target_language,
-                                    )
-                                    translation, consertos = normalize_prose(
-                                        original, translation, source_language, target_language
-                                    )
-                                    prose_fixes += consertos
                                     # A mesma verificacao do caminho do lote, e
                                     # nao por zelo: uma correcao que so
                                     # existisse num dos dois daria uma execucao
@@ -676,18 +716,24 @@ def run_translation(
                                         translation, tokens
                                     )
                                     if not intactas:
-                                        failed_count += 1
-                                        failed_files.add(pgn_file)
-                                        app.log_message(
-                                            f"  - [FALHA] Anotacoes [%...] nao "
-                                            f"voltaram intactas da traducao: "
-                                            f"\"{original[:60]}\""
-                                        )
-                                        wait_seconds = pacer.next_delay()
-                                        time.sleep(wait_seconds)
-                                        batch_wait_time += wait_seconds
-                                        continue
+                                        segunda = resend_without_names(original, tokens)
+                                        if segunda is None:
+                                            failed_count += 1
+                                            failed_files.add(pgn_file)
+                                            app.log_message(
+                                                f"  - [FALHA] Anotacoes [%...] ou nomes "
+                                                f"nao voltaram intactos da traducao: "
+                                                f"\"{original[:60]}\""
+                                            )
+                                            wait_seconds = pacer.next_delay()
+                                            time.sleep(wait_seconds)
+                                            batch_wait_time += wait_seconds
+                                            continue
+                                        translation, corrigidos, consertos = segunda
+                                        names_resent += 1
+                                        batch_api_requests += 1
                                     move_fixes += corrigidos
+                                    prose_fixes += consertos
                                     app.translation_cache[original] = translation
                                     translated_map[original] = translation
                                     save_status = save_translation(
@@ -915,6 +961,13 @@ def run_translation(
         app.log_message(f"Arquivos PGN traduzidos gerados: {generated_files}")
         if corrige_lances:
             app.log_message(f"Lances com a letra da peca corrigida: {move_fixes}")
+        if names_resent:
+            # Nomes de jogador que a maquina engoliu junto com o sentinela e
+            # que voltaram sem mascara numa segunda requisicao (X4). So quando
+            # houve — e o numero que diz se a mascara esta custando caro.
+            app.log_message(
+                f"Comentarios reenviados sem a mascara de nomes: {names_resent}"
+            )
         if prose_fixes:
             # So quando houve: parte dos consertos e de um par de idiomas, e um
             # "0" fixo faria quem traduz para o italiano procurar o que nao ha.
