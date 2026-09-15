@@ -27,6 +27,7 @@ from tradutor_pgn import (
     glossario,
     glossary_editor,
     history_window,
+    repeated_edits_window,
     stats_window,
     translation_worker,
 )
@@ -58,12 +59,46 @@ DIALOG_MODULES = (
     db_tools,
     app_actions,
     history_window,
+    repeated_edits_window,
     stats_window,
     translation_worker,
 )
 
 
 _UNSET = object()
+
+
+def cancel_pending_after(root):
+    """Cancela todo `after` pendente da interpretacao, sem levantar.
+
+    As janelas agendam trabalho com `after` (levantar a janela, restaurar a
+    posicao do divisor, o proprio `update_log`). Destruir sem cancelar deixa
+    esses callbacks dispararem no vazio e o Tk imprime "invalid command name" no
+    meio da saida da suite — barulho que esconderia uma falha de verdade.
+
+    **O `after_cancel` do tkinter nao serve sozinho.** Antes de cancelar ele
+    tenta apagar o comando registrado, e le o script com
+    `splitlist(...)[0]`: quando o script e uma LISTA Tcl de varias palavras — o
+    que acontece quando alguem agenda com argumentos —, esse `[0]` e uma tupla e
+    o `deletecommand` levanta `TypeError`, **antes** de o timer ser cancelado.
+    Um `except tk.TclError` nao pega isso, e a suite ganhava um erro de
+    desmontagem numa classe que nao tinha nada a ver com o assunto.
+
+    O `after cancel` em Tcl puro nao passa por nada disso, e e o que de fato
+    para o callback; o comando orfao morre com a interpretacao.
+    """
+    try:
+        pendentes = root.tk.eval("after info").split()
+    except tk.TclError:
+        return
+    for after_id in pendentes:
+        try:
+            root.after_cancel(after_id)
+        except (tk.TclError, TypeError):
+            try:
+                root.tk.call("after", "cancel", after_id)
+            except tk.TclError:
+                pass
 
 
 class SilentDialogs:
@@ -206,19 +241,7 @@ class GuiTestCase(unittest.TestCase):
             os.environ[app_paths.DATA_DIR_ENV] = dados
 
     def _destroy_root(self):
-        # As janelas agendam trabalho com `after` (levantar a janela, restaurar a
-        # posicao do divisor, o proprio `update_log`). Destruir sem cancelar
-        # deixa esses callbacks dispararem no vazio e o Tk imprime
-        # "invalid command name" no meio da saida da suite — barulho que
-        # esconderia uma falha de verdade.
-        try:
-            for after_id in self.root.tk.eval("after info").split():
-                try:
-                    self.root.after_cancel(after_id)
-                except tk.TclError:
-                    pass
-        except tk.TclError:
-            pass
+        cancel_pending_after(self.root)
 
         try:
             self.root.destroy()

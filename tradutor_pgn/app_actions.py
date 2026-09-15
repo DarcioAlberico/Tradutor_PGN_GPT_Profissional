@@ -513,6 +513,7 @@ def reset_buttons(app):
     app.pause_button.configure(state="disabled")
     app.resume_button.configure(state="disabled")
     app.cancel_button.configure(state="disabled")
+    refresh_last_run_buttons(app)
     log_handle = getattr(app, "_log_file_handle", None)
     if log_handle is not None:
         log_path = getattr(app, "_log_file_path", None)
@@ -523,6 +524,86 @@ def reset_buttons(app):
         app._log_file_handle = None
         if log_path:
             app.log_queue.put(f"Log salvo em: {log_path}")
+
+
+def refresh_last_run_buttons(app):
+    """"Revisar pendentes" e "Abrir pasta" acordam quando ha uma execucao a rever.
+
+    Chamado com os outros botoes no fim de cada execucao: e o worker quem grava
+    `app.last_run`, e so grava quando alguma posicao foi registrada — sem isso o
+    filtro do editor nao conhece o arquivo e nao haveria o que abrir.
+    """
+    ultima = getattr(app, "last_run", None)
+    estado = "normal" if ultima and ultima.get("files") else "disabled"
+    app.review_run_button.configure(state=estado)
+    app.open_folder_button.configure(state=estado)
+
+
+def review_last_run(app):
+    """Abre o editor no arquivo que acabou de ser traduzido, em "Pendentes".
+
+    E a porta de entrada do dia (ROADMAP 28.10): traduzir e revisar sao o mesmo
+    fluxo, e ate aqui o segundo passo exigia abrir o editor, achar o arquivo no
+    seletor e trocar o status. O destino e o DA EXECUCAO, e nao o que o radio
+    marca agora — o usuario pode ter mudado o radio depois, e a revisao e do
+    que foi gravado. Com mais de um arquivo abre no primeiro; os outros estao no
+    seletor, e o log diz isso.
+    """
+    ultima = getattr(app, "last_run", None)
+    if not ultima or not ultima.get("files"):
+        messagebox.showinfo(
+            "Revisar pendentes",
+            "Nenhuma execução registrou posições ainda. Traduza um arquivo primeiro.",
+        )
+        return None
+    arquivos = ultima["files"]
+    if len(arquivos) > 1:
+        app.log_message(
+            f"Revisar pendentes: abrindo {os.path.basename(arquivos[0])}; os outros "
+            f"{len(arquivos) - 1} arquivo(s) da execução estão no seletor \"Arquivo\"."
+        )
+    return open_translation_editor(
+        app,
+        source_file=arquivos[0],
+        status_filter="Pendentes",
+        target_language=ultima.get("target_language"),
+    )
+
+
+def open_last_run_folder(app):
+    """Abre no Explorer a pasta do PGN gerado (ou do de origem, se nada saiu).
+
+    O PGN traduzido nasce ao lado do original (`translated_output_path`), entao
+    as duas pastas sao quase sempre a mesma; a do gerado vem primeiro porque e
+    ele que o usuario vai abrir no ChessBase.
+    """
+    ultima = getattr(app, "last_run", None)
+    if not ultima or not ultima.get("files"):
+        messagebox.showinfo(
+            "Abrir pasta", "Nenhuma execução registrou arquivos ainda."
+        )
+        return None
+    caminhos = ultima.get("generated") or ultima["files"]
+    pasta = os.path.dirname(caminhos[0])
+    try:
+        open_path_in_explorer(pasta)
+    except OSError as exc:
+        messagebox.showerror("Abrir pasta", f"Não foi possível abrir a pasta:\n{pasta}\n\n{exc}")
+        return None
+    return pasta
+
+
+def open_path_in_explorer(path):
+    """`os.startfile` no Windows; `xdg-open`/`open` fora dele. Separado para o
+    teste substituir — abrir o Explorer de verdade numa suite e roubar o foco."""
+    if hasattr(os, "startfile"):
+        os.startfile(path)  # noqa: S606 - caminho de pasta, nao comando
+        return
+    import subprocess
+    import sys
+
+    abridor = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([abridor, path])
 
 
 def show_db_stats(app):

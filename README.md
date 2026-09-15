@@ -327,12 +327,30 @@ O que o revisor ganhou para aguentar um livro inteiro:
 - **previa com diff pintado** em "Aplicar todas": as faixas trocadas aparecem
   destacadas nos dois lados, com a contagem de trechos alterados. O historico da
   linha usa a mesma pintura, e diz em quantos trechos cada versao mexeu;
-- **`F1` (ou o "?" do rodape) lista os atalhos e os gestos de mouse.** Sao vinte
-  atalhos e tres gestos, e nenhum deles aparece no rotulo de um botao:
-  `Ctrl+Shift+Enter` verifica e ja vai para a proxima, `Ctrl+PageUp/PageDown`
-  viram pagina, `Ctrl+roda` e `Ctrl+±` mudam o tamanho da fonte, duplo clique
-  numa sugestao a aplica, e o rodape "Lido em:" abre a lista de todas as
-  posicoes em que aquele comentario aparece.
+- **`Alt+1` a `Alt+9` aplicam a sugestao daquele numero** — o numero esta no
+  proprio botao da sugestao, ate a nona. Clicar numa sugestao agora tambem
+  **realca no texto o trecho que ela vai trocar**, que ate aqui so o "Aplicar
+  todas" mostrava;
+- **`Ctrl+M` marca a linha aberta para o lote**, sem tirar a mao do teclado; a
+  caixa da lista acompanha;
+- **`F1` (ou o "?" do rodape) lista os atalhos e os gestos de mouse.** Sao 22
+  atalhos (30 teclas) e tres gestos, e nenhum deles aparece no rotulo de um
+  botao: `Ctrl+Shift+Enter` verifica e ja vai para a proxima,
+  `Ctrl+PageUp/PageDown` viram pagina, `Ctrl+roda` e `Ctrl+±` mudam o tamanho
+  da fonte, duplo clique numa sugestao a aplica, e o rodape "Lido em:" abre a
+  lista de todas as posicoes em que aquele comentario aparece.
+
+## Da traducao para a revisao, sem procurar nada
+
+Durante a execucao, o texto sob a barra de progresso diz onde ela esta:
+`Arquivo 2/5 · Lote 37/125 · 2.410/6.500 · ~3 min`. A estimativa e uma regra de
+tres sobre o que ja passou — o `~` esta la por isso.
+
+Terminada, dois botoes na fileira dos controles: **"Revisar pendentes"** abre o editor
+ja no arquivo que acabou de ser traduzido, no filtro "Pendentes" e no idioma
+daquela execucao (e nao no que o radio marca agora); **"Abrir pasta"** abre a
+pasta do PGN gerado. Com varios arquivos, o editor abre no primeiro — os outros
+estao no seletor "Arquivo".
 
 ## Contagem de palavras, estatisticas e TMX
 
@@ -373,6 +391,15 @@ traducao serve a varias posicoes, quantas sao: editar ali muda todas.
 "Estatisticas do BD" passou a mostrar **progresso por obra**: posicoes,
 comentarios distintos, verificadas com porcentagem, pendentes e avisos QA por
 arquivo.
+
+Sob o seletor ha duas ferramentas que falam da obra escolhida. **Trocas
+repetidas** lista o que a revisao mais trocou nas linhas daquele arquivo e
+oferece criar a regra automatica (ver "Glossario"). **Descartar nao revisadas**
+apaga as traducoes daquele arquivo que ninguem tocou — nao verificadas, sem
+status, sem nota, sem historico e sem uso em outro arquivo — para o livro poder
+ser traduzido de novo, por outro motor ou depois de uma correcao no glossario.
+Como "Zerar Traducoes", faz o backup antes de perguntar e exige a palavra
+digitada; o dialogo diz quantas linhas vao e onde esta o backup.
 
 As traducoes gravadas antes desta versao nao tem procedencia — ela nao esta em
 lugar nenhum do banco, e nada e inventado para elas. Elas aparecem em "Todos os
@@ -470,6 +497,8 @@ mao.
 - `tradutor_pgn/pgn_spellcheck.py`: normalizacao opcional de metadados PGN com `spelling.ssp`.
 - `tradutor_pgn/prose_spellcheck.py`: corretor ortografico da PROSA traduzida, com o filtro que separa erro de digitacao de notacao, nome proprio e terminologia do glossario.
 - `tradutor_pgn/pgn_utils.py`: leitura, escrita, encoding e manipulacao de arquivos PGN.
+- `tradutor_pgn/repeated_edits.py`: o ranking puro das trocas `antes -> depois` que a revisao mais fez num arquivo, e se ja ha regra do glossario para cada uma.
+- `tradutor_pgn/repeated_edits_window.py`: a subjanela "Trocas repetidas nesta obra" do editor, que cria a regra automatica e a aplica as pendentes do arquivo.
 - `tradutor_pgn/review_quality.py`: avisos de qualidade das traducoes, genericos e de xadrez (lance perdido, anotacao rompida, NAG, terminologia), com a versao das heuristicas que decide quando reavaliar o banco.
 - `tradutor_pgn/settings.py`: preferencias da interface e rascunhos de edicao.
 - `tradutor_pgn/translation_api.py`: chamadas de traducao e divisao de comentarios longos.

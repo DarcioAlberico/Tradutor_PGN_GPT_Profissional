@@ -84,6 +84,42 @@ e o padrao dele, "Detectar", e justamente o valor que deixa as duas desligadas.
 Resetando a cada abertura, esquecer um clique custa uma execucao inteira
 traduzida no escuro, e nada denuncia isso depois: o PGN gerado parece pronto.
 
+**Garantia M5 — a barra diz onde a execucao esta, e o fim dela abre a
+revisao.** Sob a barra de progresso ficam o texto dela e os dois botoes da
+execucao (ROADMAP 28.10).
+
+O texto e "Arquivo 2/5 · Lote 37/125 · 2.410/6.500 · ~3 min". O "Arquivo" so
+aparece com mais de um — num livro de um capitulo e ruido — e a estimativa so
+com pelo menos um comentario feito E pelo menos um faltando: no comeco nao ha
+de onde tirar a conta, no fim ela e zero. O `~` e a honestidade da conta, que e
+uma regra de tres sobre o que ja passou e fica otimista quando o cache responde
+por muitos. Terminada a execucao o texto diz "Concluída" ou fica vazio, pela
+mesma razao que a barra vai a 100 % ou a 0 (T3): um sinal congelado no meio
+continua dizendo "estou trabalhando" depois do dialogo.
+
+**"Revisar pendentes"** abre o editor de traducoes no arquivo que acabou de ser
+traduzido, com o status "Pendentes" e o destino DA EXECUCAO — o radio da janela
+pode ter mudado depois dela, e a revisao e do que foi gravado. Os arquivos
+oferecidos sao os que tiveram POSICOES registradas: sao os unicos que o filtro
+do editor conhece, e oferecer outro seria abrir a lista inteira fingindo que e
+a obra. Com mais de um, abre no primeiro e o log diz que os outros estao no
+seletor. **"Abrir pasta"** abre a do PGN gerado — e ele que vai para o
+ChessBase — e cai na do original quando nenhum saiu.
+
+Os tres — o texto e os dois botoes — moram na FILEIRA dos botoes de execucao, e
+nao numa linha propria: a janela principal nao tem folga vertical, o log e o
+ultimo a receber espaco, e uma fileira nova de 32 px o derrubava de 33 px para
+1 px, com o fim dele deixando de ser alcancavel (F23). Sao empacotados por
+ultimo e a direita, pela regra de F20: `pack` nao desenha o que sobra, e numa
+janela estreita quem some tem de ser o atalho para a revisao, nunca o
+"Cancelar".
+
+Os dois botoes nascem desabilitados e sao reavaliados em `reset_buttons`, que
+roda no fim de TODA execucao. Uma execucao com falhas ou interrompida pelo disjuntor
+tambem conta: o que foi traduzido esta no banco e e o que ha para revisar. So o
+cancelamento nao registra nada, e ai a ultima execucao completa continua
+valendo.
+
 **Garantia M2 — um BOM no arquivo de configuracoes nao apaga nada.** A leitura e
 `utf-8-sig` e a gravacao e `utf-8`: aceita-se o BOM, nao se escreve um. O arquivo
 e JSON editavel a mao, e o Bloco de Notas do Windows grava UTF-8 com BOM — lido
@@ -360,8 +396,8 @@ nunca chama esse caminho.
 
 **Garantia T5 — nenhuma ferramenta de escrita em massa roda durante uma
 traducao.** "Restaurar BD", "Importar CSV", "Aplicar Automaticas", "Corrigir
-Lances", "Zerar Traducoes" e "Zerar Glossario" recusam com uma mensagem enquanto
-o worker esta ativo. A pior era a restauracao: substituir o banco enquanto o
+Lances", "Zerar Traducoes", "Zerar Glossario" e, no editor, "Descartar nao
+revisadas" recusam com uma mensagem enquanto o worker esta ativo. A pior era a restauracao: substituir o banco enquanto o
 worker grava produz um arquivo que nao e nem o backup nem a execucao, com o cache
 em memoria apontando para linhas que ja nao existem.
 
@@ -735,7 +771,37 @@ sobrevivente passaria a apontar para a PRIMEIRA traducao gravada depois do
 zeramento — o comentario errado, no arquivo certo, sem nada acusando na tela. A
 tabela e derrubada com as outras e recriada vazia pela migracao.
 
-Nenhuma das duas roda com uma traducao em andamento — e nenhuma das outras
+**Garantia Z4 — "Descartar nao revisadas" apaga so a linha que nenhum humano
+tocou, e so deste arquivo.** E a terceira ferramenta destrutiva, e a unica com
+alvo menor do que o banco: mora no editor de traducoes, sob o seletor de
+arquivo, em vermelho, e joga fora o que um motor deixou num livro para que ele
+possa ser traduzido de novo — a rede de seguranca do ROADMAP 28.6 para trocar
+de motor (28.7). Uma linha do arquivo e poupada por qualquer uma de cinco
+marcas: `verified = 1`; `review_status` preenchido; nota preenchida; qualquer
+entrada em `comment_history`; uma ocorrencia em OUTRO arquivo. Status e nota
+sao clausulas proprias porque **nao gravam historico** (secao 10): so o
+historico deixaria passar a linha que o revisor rejeitou sem editar. A
+clausula do outro arquivo existe porque a linha inserida ao traduzir o livro
+A e reaproveitada pelo livro B tem ocorrencias de B, e apaga-la encurtaria a
+obra de B (O3). O historico e QUALQUER historico, inclusive o das ferramentas
+de escrita em massa — o criterio erra para o lado de apagar menos. O par e o
+da tela (S19): o destino da janela e a origem do filtro.
+
+Contar e apagar usam o MESMO `WHERE` (`_unreviewed_file_rows_query`), pela
+razao da correcao de lances: dois criterios discordam, e aqui a discordancia
+seria o dialogo prometer um numero e o banco perder outro. As ocorrencias das
+linhas apagadas vao junto, por `DELETE` explicito — `PRAGMA foreign_keys`
+nunca e ligado, e o `ON DELETE CASCADE` da tabela e inerte —, e os ids sao
+colhidos antes do primeiro `DELETE`, porque apagar as ocorrencias primeiro
+esvaziaria a clausula "tem ocorrencia neste arquivo" do segundo. Segue Z1, Z2
+e Z3 passo a passo: backup antes da pergunta com o caminho nela, palavra
+digitada, sem cancelamento no meio, cache em memoria limpo. Sem arquivo
+escolhido o botao fica desabilitado — para o banco inteiro existe "Zerar
+Traducoes", com o nome que diz o que faz. Depois, a lista do editor e refeita
+do zero e o menu de arquivos tambem: um capitulo cujas linhas eram todas da
+maquina deixa de ser uma obra e cai em "Todos os arquivos".
+
+Nenhuma das tres roda com uma traducao em andamento — e nenhuma das outras
 ferramentas de escrita em massa tambem (garantia T5, secao 3.4).
 
 ---
@@ -1033,6 +1099,18 @@ Se a entrada nao existir mais como estava, **nada e gravado** e o usuario e
 avisado. Escrever na posicao antiga sobrescreveria a entrada vizinha em
 silencio.
 
+**Garantia S20 — gravar como `automatic` mede o impacto antes.** Quando o
+"Salvar" ou o "Salvar como nova" criam um comportamento automatico novo — entrada
+nova com o tipo, sugestao promovida, ou automatica cujo texto mudou —, o editor
+conta, fora da thread do Tk, quantas traducoes PENDENTES do escopo de idioma da
+regra ela alteraria, mostra ate dez pela saida real do pipeline (`@casa@`
+expandido, caixa herdada e tudo) e so grava no "sim". Recusar deixa o
+formulario sujo, que e o estado verdadeiro; uma medicao que falha nao grava.
+Salvar de novo uma automatica igual (so prioridade ou escopo) nao pergunta: nao
+ha impacto novo a mostrar. E o mecanismo que a revisao de terminologia pediu —
+nao aplicar em massa sem ver — e foi ele que mostrou que `Black esta -> as
+pretas estao` sai "As pretas estao" no meio da frase (ROADMAP 28.5).
+
 **Garantia S7 — entradas nao tem espaco nas pontas.** Padrao e substituicao sao
 normalizados na gravacao. Um espaco no fim do padrao e consumido pelo casamento
 mas nao devolvido pela substituicao, colando duas palavras:
@@ -1118,6 +1196,28 @@ antigo e sai da lista na troca) e volta para a primeira pagina — a pagina 40 d
 par anterior nao quer dizer nada no novo. Com um filtro de origem ativo,
 "Aplicar automaticas" fica restrito a ele: reescrever tambem as linhas das outras
 linguas seria uma alteracao em massa que o usuario nao pediu nem consegue ver.
+
+**Garantia S19 — "Aplicar automaticas" reescreve o que a lista mostra, e as
+verificadas so quando o escopo pede.** O arquivo do filtro entra pela mesma
+regra da origem, e as linhas verificadas ficam de fora por padrao — na janela
+principal sempre, e no editor salvo no filtro "Verificadas", o unico em que a
+lista as mostra; ali a ferramenta pergunta (sim = pendentes e verificadas; nao
+= so pendentes; cancelar = nada) antes de varrer. O dialogo de confirmacao
+nomeia o escopo inteiro. Antes, promover uma regra na linha 500 e clicar a
+ferramenta reescrevia as 499 que o revisor ja tinha aprovado (ROADMAP 28.5).
+
+**Garantia S21 — "Trocas repetidas nesta obra" diz o que a revisao mais trocou
+neste arquivo e se ja ha regra.** Ao lado do seletor de arquivo, habilitado so
+com um arquivo escolhido. Lista os pares `antes -> depois` mais frequentes das
+edicoes HUMANAS (`edit`, `edit_verify`, com mudanca de texto) das linhas do
+arquivo e do par, por diff de tokens e so blocos de troca — insercao pura nao e
+regra de nada. A coluna "regra" e decidida pela substituicao do pipeline sobre
+o texto de antes: "sugestao" quando produz o que o revisor escreveu, "sugestao
+(produz 'X')" quando produz outra coisa, "sugestao (nao altera o texto)" quando
+casa e nao muda nada, "sem regra". "Criar automatica e aplicar" passa pela previa
+de S20, grava a regra com o escopo do par do editor e aplica com S19 so essa
+regra e so esse arquivo. A janela e modeless e fixa arquivo e par na abertura,
+como o historico fixa o id (R3).
 
 **Garantia O3 — com um arquivo escolhido, a lista e a obra em ordem de
 leitura.** Um terceiro seletor, "Arquivo", lista as obras do par (as que tem
@@ -1242,6 +1342,27 @@ substituicao desloca as faixas da primeira, e a previa mostra o texto depois de
 todas. E por palavra, e nao por caractere — `torre` -> `Torre` como um `T` trocado
 no meio de uma palavra pintada de igual nao e o que o revisor precisa ver.
 
+**Garantia F29 — a sugestao tem numero, a selecionada se ve no texto, e a
+linha se marca pelo teclado.** Tres gestos que custavam a mao no mouse no meio
+da digitacao (ROADMAP 28.9):
+
+- **`Alt+1` a `Alt+9` aplicam a sugestao N**, e o numero fica no ROTULO do
+  botao — um atalho que so existe na lista do "?" e um atalho que ninguem usa
+  (F18). Da decima em diante nao ha numero, porque nao existe `Alt+10` e um
+  "10." sem tecla seria a promessa errada. `Alt+N` sem a sugestao N diz isso;
+  um gesto que acontece e nao responde parece travamento.
+- **A sugestao selecionada e realcada no texto**, no PRIMEIRO casamento e so
+  nele — que e exatamente o que "Aplicar selecionada" troca. Ate aqui so
+  "Aplicar todas" tinha previa (F11). A tag fica acima de `glossary_hit` e de
+  `find_match` e abaixo de `find_current`: a sugestao escolhida e a intencao
+  mais recente, mas a ocorrencia atual da busca continua sendo o unico lugar em
+  que a tecla seguinte vai agir. Sendo Tk puro, ela e repintada na troca de
+  tema junto com as outras (F18).
+- **`Ctrl+M` marca (ou desmarca) a linha ABERTA para o lote**, pelo id, e a
+  caixa da lista acompanha na mesma chamada — as duas sao a mesma marca. A
+  caixa tem 32 px, e nao os 24 padrao: e o unico alvo de clique da lista que
+  nao e o botao inteiro.
+
 **Garantia F10 — `verified` e `review_status` andam em lockstep.** Uma linha nao
 verificada pode estar **rejeitada** ou **em duvida**, com uma nota do revisor:
 "pendente/verificada" nao expressa "voltar aqui com o autor". `verified` continua
@@ -1349,8 +1470,11 @@ eram invisiveis, e a correcao de cada uma tem uma regra propria:
 
 - **Os atalhos tem uma lista**, aberta por `F1` ou pelo botao "?" do
   rodape — os dois, porque um atalho para descobrir atalhos so serve a quem ja
-  os descobriu. Eram treze quando a garantia nasceu; sao vinte desde 22.11. A
-  lista e uma tabela com a sequencia do Tk ao lado do rotulo, e dois testes a
+  os descobriu. Eram treze quando a garantia nasceu; sao 22 rotulos e 30 teclas
+  desde 28.9. A
+  lista e uma tabela com a sequencia do Tk ao lado do rotulo — um rotulo pode
+  cobrir varias teclas ("Alt+1 a Alt+9", F29), e ai a sequencia e uma tupla e
+  cada tecla dela e uma promessa. Dois testes a
   comparam com os binds reais **nos dois sentidos**: um atalho ligado e nao
   listado falha tanto quanto um listado e nao ligado. E o que impede a lista de
   virar documentacao errada. O `Ctrl+B` era o unico recurso do programa sem
@@ -1966,6 +2090,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | F16 | Uma mensagem de status nao e apagada pelo timer da anterior, e o tempo de tela cresce com o texto | Bug: duas mensagens em menos de 1,5 s davam meio segundo a segunda; e a frase de 73 caracteres tinha o tempo de "Salvo" |
 | F17 | Nenhum campo depende do placeholder para ser identificado | Bug: o CustomTkinter nao mostra placeholder em campo com `textvariable`, e o buscar-e-substituir eram dois campos anonimos lado a lado |
 | F18 | Os atalhos aparecem na janela, o foco tem borda, o "B" ligado se ve nos dois temas e a troca de tema repinta o Tk puro | Bug: treze atalhos so no fonte (um deles sem nenhum caminho de descoberta), foco invisivel, "B" ligado igual ao desligado no escuro, e meia janela no tema antigo |
+| F29 | `Alt+1` a `Alt+9` aplicam a sugestao N (numerada no proprio botao ate a nona), `Ctrl+M` marca a linha aberta e a caixa da lista acompanha, e a sugestao selecionada e realcada no trecho que "Aplicar selecionada" vai trocar — o primeiro, e so ele | Custo: aplicar uma sugestao exigia a mao no mouse no meio da digitacao, e so "Aplicar todas" tinha previa (ROADMAP 28.9) |
 | F19 | As cores de rotulo passam 4,5:1 nos dois temas, e o status de revisao aparece em palavras | Bug: as quatro cores semanticas reprovavam (o ambar dos avisos a 1,55:1), e rejeitada/em-duvida era so a cor de uma borda |
 | F20 | Cada rotulo de acao carrega o objeto dela, a largura minima da janela e a SOMA dos minimos dos paineis, e nada e desenhado fora da faixa em que vive | Bug: tres botoes "Limpar" e quatro "Página"; e a 1120 px o painel de sugestoes ficava com 109 dos 300 que declara, dois botoes do lote saiam da barra e o campo de pagina media 11 px |
 | F21 | Toda acao repetida do fluxo tem atalho, a nota do revisor e gravada como o texto, e o clique numa linha poe o foco onde se vai digitar | Custo: em "Todas" eram dois acordes por linha; a nota digitada era descartada em silencio ao navegar; e "Verificar" em lote voltava ao topo da pagina |
@@ -1979,6 +2104,9 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | S16 | O dialogo de zerar o glossario conta o que apaga, por tipo, e a semente nao "volta" depois | Bug: anunciava 7.325 regras e apagava 5.910; e zerar deixava a sessao sem sugestao nenhuma e a abertura seguinte com 232 |
 | S17 | O "Teste rápido" do glossario usa a conversao do pipeline, e nao os pares crus | Bug: prioridade descartada, escopo ignorado, `@casa@` inerte e so a primeira ocorrencia trocada — a previa contradizia o banner S9 ao lado dela |
 | S18 | O editor de glossario anda pelo teclado: achar, andar pela lista filtrada e virar pagina | Custo: dois atalhos contra os treze do outro editor, numa janela que existe para varrer 7 mil linhas |
+| S19 | "Aplicar Automaticas" tem escopo — par, arquivo do filtro e "so pendentes" por padrao; a verificada so entra quando o escopo pede, e o editor so pede no filtro "Verificadas", depois de perguntar | Bug: a consulta nao filtrava `verified`, e promover uma regra na linha 500 reescrevia as 499 aprovadas — 9 das 39 alteraveis no banco de dev (ROADMAP 28.5) |
+| S20 | Gravar uma regra como `automatic` (nova, promovida ou com o texto mudado) mede antes quantas pendentes do escopo dela mudariam, mostra dez pela saida real do pipeline, fora da thread do Tk, e so grava no "sim" — medicao que falha nao grava | Risco: a memoria da revisao de terminologia pediu "nao aplicar em massa sem ver"; `Black esta -> as pretas estao` sai "As pretas estao" e so a previa mostra (ROADMAP 28.5) |
+| S21 | "Trocas repetidas nesta obra" lista os pares `antes -> depois` mais frequentes das edicoes humanas do arquivo, diz se ja ha regra pelo que a regra PRODUZ (cobre / produz outra coisa / nao altera / sem regra), e "Criar automatica e aplicar" passa por S20 e aplica com S19 so a regra e so o arquivo | Custo: 94 `o jogo -> a partida` e 63 `Brancas -> brancas` digitados um a um, o segundo com uma regra inerte no glossario (ROADMAP 28.5) |
 | P3 | As letras dos lances vem do original, numa passagem so | Bug: `Rd1` (Torre) traduzido como `Rd1` (Rei) |
 | P4 | A correcao alcanca tambem o que ja estava gravado | Limite: P3 so valia para traducao nova, e 4.144 linhas ficariam erradas |
 | S1 | Matches disjuntos | Bug: `"de de de"` -> `"dede"` |
@@ -2012,12 +2140,14 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | Z1 | O backup vem antes da pergunta, e o caminho dele aparece nela | Risco: a unica volta atras depender de o que vem depois do "Apagar" |
 | Z2 | Apagar exige a palavra digitada, e o botao parece inerte ate la | Risco: "Sim" a um pixel do "Nao" para 201 mil traducoes |
 | Z3 | Zerar um nao toca no outro, e leva junto historico, indice e cache | Risco: o cache em memoria reviver o que foi apagado |
+| Z4 | "Descartar nao revisadas" apaga so as linhas do arquivo do filtro sem historico, nao verificadas, sem status, sem nota e cujas ocorrencias sao so desse arquivo, no par da tela, com backup antes da pergunta e palavra digitada; as ocorrencias vao junto, o cache e limpo e a lista e o menu de arquivos sao refeitos | Risco: trocar de motor (28.7) sem poder jogar fora o que o motor velho deixou num livro sem perder uma linha revisada (ROADMAP 28.6) |
 | N1 | So as cinco tags mudam; lances, variantes e comentarios saem identicos | Risco: a lista de tags vivia em dois lugares |
 | C1 | Trabalho pesado roda fora da thread do Tk, e a resposta volta nela | Bug: "Aplicar automaticas" segurava a janela por 38 s |
 | C3 | Nenhuma transacao de escrita atravessa uma chamada de rede, e um lock vira mensagem | Bug: worker travava o "Salvar" do editor por um lote inteiro |
 | C4 | "Cancelar" e conferido dentro do laco de tentativas, antes de cada uma e antes de cada espera | Bug: `translate_text_chunk` nem recebia o flag; contra um endpoint que pendura a conexao, o clique ficava ate ~93 s sem efeito |
 | M1 | A janela principal reabre no que foi escolhido | Risco: "Detectar" volta sozinho e desliga a correcao de lances sem avisar |
 | M2 | Um BOM no arquivo de configuracoes nao apaga nada | Bug: um caractere invisivel zerava rascunhos, lista de falhas e preferencias |
+| M5 | A barra de progresso diz onde a execucao esta (arquivo, lote, comentarios e uma estimativa), e no fim "Revisar pendentes" abre o editor no arquivo traduzido, em "Pendentes" e no destino DA EXECUCAO, enquanto "Abrir pasta" abre a do PGN gerado — os tres na fileira dos botoes, sem custar altura ao log | Custo: traduzir e revisar sao o mesmo fluxo, e o segundo passo exigia abrir o editor, achar o arquivo no seletor e trocar o status; e a barra nao dizia quanto faltava (ROADMAP 28.10) |
 | M3 | A gravacao nunca sobrescreve um arquivo que existe e nao pode ser lido; um arquivo invalido e posto de lado (`.corrompido-<data>`) antes de o programa seguir, e os dois casos sao avisados | Bug: um `PermissionError` transitorio na leitura virava `{}`, e a gravacao seguinte apagava rascunhos, lista de falhas e preferencias — o desfecho de M2 por outro caminho (ROADMAP 28.1) |
 | X1 | Anotacoes `[%...]` atravessam a traducao byte a byte, ou o comentario conta como falha | Bug: `[%cal Ra1h8]` virava `[%cal Ta1h8]`; `[%eval +0.35]` quebrado antes da API |
 | X2 | Comentario esvaziado pela limpeza sai do arquivo sem deixar `{}` | Sujeira: o PGN gerado saia pontilhado de `{}` |
@@ -2361,9 +2491,11 @@ em janela real, headless ou por leitura de codigo, dito la item a item.
 Cada item e comportamento ATUAL, confirmado como a secao 28 descreve, e o
 numero e o do item que o resolve.
 
-- **"Aplicar Automaticas" nao filtra `verified`**: reescreve linhas que o
-  revisor ja aprovou. Promover uma regra a `automatic` e clicar a ferramenta
-  alcanca o acervo inteiro do par. (28.1, 28.5)
+- **"Aplicar Automaticas" nao filtrava `verified`** e reescrevia linhas que o
+  revisor ja tinha aprovado — resolvido em 28.5 (S19). Fica um limite menor: a
+  previa da ferramenta nao conta quantas verificadas ficaram de fora, porque
+  conta-las custaria a varredura completa que o escopo "so pendentes" existe
+  para evitar; quem quer alcanca-las usa o filtro "Verificadas" do editor.
 - **O aviso de qualidade ve 1.254 das 1.677 linhas com defeito detectavel por
   regra** na saida da maquina do banco de dev (a versao 1 via 359). O que
   sobra e o que nao tem regra segura: `game` -> "jogo" (74 % de precisao
@@ -2442,30 +2574,36 @@ protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
 **Pendentes: as da secao 28 do ROADMAP (revisao de 2026-09-14), menos as tres
-de 28.1, a de 28.4, as quatro de 28.2 e a de 28.3** — I8, M3 e B4 migraram
+de 28.1, a de 28.4, as quatro de 28.2, a de 28.3, as tres de 28.5, a
+primeira de 28.6, F29 (28.9) e M5 (28.10)** — I8, M3 e B4 migraram
 para a secao 9 em 2026-09-14, com 3, 5 e 4 testes e nove mutacoes sem
 sobrevivente; P7 no mesmo dia, com 6 testes e sete mutacoes; P5 e P6 no
 mesmo dia, com 8 e 5 testes e doze mutacoes (duas sobreviveram a primeira
 passada e viraram teste — as duas do padrao "o cenario cai numa guarda
 vizinha"); Q4 e F28 no mesmo dia, com 9 + 3 testes headless, 2 de janela e
 onze mutacoes (uma sobrevivente era um lookbehind redundante, que saiu);
-X4 no mesmo dia, com 11 testes e oito mutacoes. Cada uma das que ficam esta escrita
+X4 no mesmo dia, com 11 testes e oito mutacoes; S19, S20 e S21 no mesmo
+dia, com 29 testes headless, 20 de janela e 27 mutacoes (duas sobreviveram a
+primeira passada, as duas do padrao "o cenario nao exercita a clausula", e
+morreram com o cenario certo); Z4 em 2026-09-15, com 13 testes headless, 9 de
+janela e 13 mutacoes (uma sobreviveu a primeira passada — a clausula
+`verified`, que o cenario nao exercitava porque verificar pela janela grava
+historico; a linha importada ja verificada e o cenario certo); F29 e M5 no
+mesmo dia, com 12 + 13 testes headless, 30 de janela e 33 mutacoes (tres
+sobreviveram a primeira passada, todas de cenario: o arquivo ilegivel na
+releitura, o destino da execucao contra um radio ja trocado, e a ordem
+feito/total — que no fim da execucao sao o mesmo numero). Cada uma das que ficam esta escrita
 como o teste que a fara migrar — "falha sem a correcao" —, e as
 que dependem de medicao no banco de dev dizem qual e o comportamento
 testavel e qual e o numero que fica so no ROADMAP.
 
 | # | Garantia planejada | Item | Como o teste falha sem ela |
 |---|---|---|---|
-| S19 | "Aplicar Automaticas" tem escopo, e o padrao e "so pendentes" | 28.5 | Linha verificada nao muda no escopo padrao; muda quando o escopo pede |
-| S20 | Promover uma regra a `automatic` mostra quantas linhas pendentes ela alteraria e dez delas, fora da thread do Tk | 28.5 | O dialogo traz o numero e a amostra; a contagem roda por `run_with_progress` (mutacao: chamar direto quebra o teste de thread) |
-| S21 | "Trocas repetidas nesta obra" lista os pares mais frequentes do historico do arquivo e diz se ja ha regra | 28.5 | Historico sintetico com `troca -> qualidade` 5 vezes: o par aparece com "sem regra"; com a regra no glossario, aparece "automatica" |
-| Z4 | "Descartar as nao revisadas deste arquivo" apaga so linhas sem historico, nao verificadas, sem status, sem nota e cujas ocorrencias sao so desse arquivo, com backup e palavra digitada | 28.6 | Cinco linhas com uma marca cada: sobra exatamente cada uma; a linha reusada por outro arquivo fica |
 | Z5 | Reverter uma execucao apaga so o que ela inseriu e Z4 permite, leva as ocorrencias junto, e "Zerar Traducoes" leva a tabela de execucoes | 28.6 | Execucao com 5 insercoes e uma reusada por outra: 4 somem; `translation_runs` vazia depois do Zerar |
 | T6 | Um provedor estrito nunca grava uma traducao cujo multiconjunto de ancoras difere do original | 28.7 | Provedor falso que devolve `Nf6` para `Nf3`: nada gravado, `failed_count == 1`, PGN com o original |
 | K1 | A chave de API nunca aparece inteira em log, configuracoes ou dialogo | 28.7 | Uma execucao falsa com chave conhecida: o texto inteiro nao esta em nenhum dos tres; `****wxyz` esta |
 | B5 | Um lote JSON e aceito so se cada id aparece exatamente uma vez; senao e desalinhado (B2) | 28.7 | Id repetido, faltando e fora do intervalo: os tres devolvem `None` |
 | O5 | A FEN de uma ocorrencia e a da posicao do comentario, inclusive dentro de variante, atribuida so por texto casado em sequencia e ressincronizada por partida | 28.8 | Comentario dentro de `(...)` tem a FEN da variante; lista esperada com um texto a mais: a partida seguinte volta a casar |
-| F29 | `Alt+1..9` aplicam a sugestao N, `Ctrl+M` marca a linha aberta, e a sugestao selecionada e realcada no texto | 28.9 | Cada bind esta em `KEYBOARD_SHORTCUTS` (F18) e produz o efeito na janela real |
 | S22 | Com o filtro "Duplicadas" ativo, "Excluir as N exibidas" apaga so elas, com backup antes | 28.9 | Glossario com 3 duplicadas e 2 unicas: sobram as 2, existe um backup novo |
 | M4 | Toda opcao do `settings.json` tem um lugar na tela de Configuracoes, e a tela grava por `update_settings` | 28.10 | Um teste enumera as chaves padrao contra os widgets; gravar pela tela nao apaga um rascunho gravado por outra janela |
 | F30 | O painel "Traducoes semelhantes" consulta so o par aberto, numa thread, e descarta o resultado de uma geracao velha | 28.13 | Linha de outro par nao aparece (R9); resultado atrasado nao pinta o painel |

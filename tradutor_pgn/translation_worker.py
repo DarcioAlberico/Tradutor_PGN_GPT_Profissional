@@ -57,6 +57,54 @@ from .translation_api import RequestPacer, translate_text
 MAX_CONSECUTIVE_FAILED_BATCHES = 3
 
 
+def format_eta(seconds):
+    """`~40 s`, `~3 min`, `~1 h 20 min`: uma estimativa, e com cara de estimativa."""
+    if seconds is None:
+        return ""
+    if seconds < 60:
+        return f"~{max(1, int(round(seconds)))} s"
+    minutos = int(round(seconds / 60))
+    if minutos < 60:
+        return f"~{max(1, minutos)} min"
+    horas, resto = divmod(minutos, 60)
+    return f"~{horas} h {resto} min" if resto else f"~{horas} h"
+
+
+def format_progress_status(
+    file_index, file_count, batch_index, batch_count, processed, total, elapsed
+):
+    """O texto ao lado da barra (ROADMAP 28.10): "Arquivo 2/5 · Lote 37/125 · 2.410/6.500 · ~1 min".
+
+    Puro, para o teste nao precisar de worker. O "Arquivo" so aparece com mais
+    de um arquivo — num livro de um capitulo ele e ruido. O tempo restante e uma
+    regra de tres sobre o que ja foi processado, e por isso so aparece com pelo
+    menos um comentario feito e falta de pelo menos um: no comeco nao ha de onde
+    tirar a conta, e no fim ela e zero. O cache faz a conta otimista (um acerto
+    custa milissegundos) — e uma estimativa, e o `~` diz isso.
+    """
+    partes = []
+    if file_count > 1:
+        partes.append(f"Arquivo {file_index}/{file_count}")
+    partes.append(f"Lote {batch_index}/{batch_count}")
+    partes.append(f"{processed:,}/{total:,}".replace(",", "."))
+    restante = total - processed
+    if processed > 0 and restante > 0 and elapsed > 0:
+        partes.append(format_eta(elapsed / processed * restante))
+    return " \u00b7 ".join(partes)
+
+
+def set_progress_text(app, text):
+    """Poe `text` ao lado da barra, na thread do Tk.
+
+    `getattr` porque o worker e chamado com apps de teste que tem `progress` e
+    nao tem o rotulo — o rotulo e cosmetico, a barra nao.
+    """
+    rotulo = getattr(app, "progress_label", None)
+    if rotulo is None:
+        return
+    app.root.after(0, lambda t=text: rotulo.configure(text=t))
+
+
 def _first_pass(app, pgn_files):
     """Le so o que a adocao (P2) e a carga de cache precisam: os TEXTOS.
 
@@ -360,6 +408,16 @@ def run_translation(
         consecutive_failed_batches = 0
         aborted_by_api = False
 
+        # Onde a execucao esta, para o texto da barra (ROADMAP 28.10). Um dict e
+        # nao variaveis do laco: `update_progress` e uma closure, e ler o
+        # `batch_idx` do laco de dentro dela e contar com a ordem de definicao.
+        progresso = {"arquivo": 0, "arquivos": len(pgn_files), "lote": 0, "lotes": 0}
+        run_started = time.perf_counter()
+        # Os arquivos cujas posicoes foram gravadas: sao os que o editor sabe
+        # filtrar, e por isso os que "Revisar as pendentes desta execucao" abre.
+        arquivos_revisaveis = []
+        arquivos_gerados = []
+
         def update_progress():
             # Sobre os DISTINTOS, e nao sobre o total: com a deduplicacao do lote
             # (ROADMAP 20.3) um comentario repetido e processado uma vez, e um
@@ -371,6 +429,18 @@ def run_translation(
                 else 0
             )
             app.root.after(0, lambda v=value: app.progress.set(v / 100))
+            set_progress_text(
+                app,
+                format_progress_status(
+                    progresso["arquivo"],
+                    progresso["arquivos"],
+                    progresso["lote"],
+                    progresso["lotes"],
+                    processed_comments,
+                    total_distintos,
+                    time.perf_counter() - run_started,
+                ),
+            )
 
         def wait_if_paused():
             pause_started = None
@@ -459,8 +529,11 @@ def run_translation(
 
             batches = create_comment_batches(comments)
             translated_map = {}
+            progresso["arquivo"] = pgn_index
+            progresso["lotes"] = len(batches)
 
             for batch_idx, batch in enumerate(batches, start=1):
+                progresso["lote"] = batch_idx
                 batch_started = time.perf_counter()
                 batch_api_time = 0.0
                 batch_wait_time = 0.0
@@ -903,6 +976,8 @@ def run_translation(
                     cursor, pgn_file, posicoes, ids_por_texto
                 )
                 conn.commit()
+                if gravadas:
+                    arquivos_revisaveis.append(os.path.abspath(pgn_file))
                 sufixo = (
                     f" ({sem_linha} sem traducao no banco)" if sem_linha else ""
                 )
@@ -937,6 +1012,7 @@ def run_translation(
                     cancel_flag=app.cancel_flag,
                 ):
                     generated_files += 1
+                    arquivos_gerados.append(os.path.abspath(output_pgn))
                     app.log_message(f"  - Arquivo traduzido gerado: {output_pgn}")
 
         conn.commit()
@@ -1013,6 +1089,21 @@ def run_translation(
         # Com o disjuntor a execucao passa por aqui tambem (`aborted_by_api`), e
         # ai o `finally` a devolve ao repouso — nada foi concluido.
         completed = not aborted_by_api
+
+        # O que a janela principal precisa para "Revisar as pendentes desta
+        # execucao" e "Abrir pasta" (ROADMAP 28.10): os arquivos com posicoes
+        # gravadas — os unicos que o filtro do editor conhece — e os gerados.
+        # Registrado mesmo interrompida pelo disjuntor ou com falhas: o que foi
+        # traduzido esta no banco e e exatamente o que ha para revisar. So o
+        # cancelamento nao chega aqui (`return` no laco), e ai a ultima execucao
+        # completa continua valendo.
+        if arquivos_revisaveis:
+            app.last_run = {
+                "files": list(arquivos_revisaveis),
+                "generated": list(arquivos_gerados),
+                "target_language": target_language,
+                "completed": completed,
+            }
 
         if not canceled:
             # A linha dos lances so aparece quando houve o que corrigir: uma
@@ -1111,6 +1202,7 @@ def run_translation(
         # sempre, e era o unico sinal na tela que continuava mentindo depois do
         # dialogo de aviso.
         app.root.after(0, lambda v=1.0 if completed else 0.0: app.progress.set(v))
+        set_progress_text(app, "Concluída" if completed else "")
 
         app.is_processing = False
         app.pause_flag.clear()

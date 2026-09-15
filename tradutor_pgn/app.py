@@ -65,6 +65,10 @@ class PGNTranslatorApp:
         self.source_language = tk.StringVar(value=escolhas["source_language"])
         self.process_subdirs = tk.BooleanVar(value=escolhas["process_subdirs"])
         self.is_processing = False
+        # A ultima execucao que gravou posicoes: `{"files", "generated",
+        # "target_language", "completed"}`, escrita pelo worker e lida por
+        # "Revisar pendentes"/"Abrir pasta" (ROADMAP 28.10). `None` ate la.
+        self.last_run = None
         self.log_queue = queue.Queue()
 
         # Antes de qualquer coisa que possa falhar: sob `pythonw` nao ha console,
@@ -229,6 +233,12 @@ class PGNTranslatorApp:
 
     def _reset_buttons(self):
         app_actions.reset_buttons(self)
+
+    def review_last_run(self):
+        app_actions.review_last_run(self)
+
+    def open_last_run_folder(self):
+        app_actions.open_last_run_folder(self)
 
     # ============================
     #   FERRAMENTAS DO BANCO

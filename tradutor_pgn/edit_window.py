@@ -39,7 +39,11 @@ from .database import (
     set_translation_verified_by_id,
     update_translation_by_id,
 )
-from .db_tools import apply_automatic_rules_to_database, export_translations_to_csv
+from .db_tools import (
+    apply_automatic_rules_to_database,
+    discard_unreviewed_translations,
+    export_translations_to_csv,
+)
 from .editor_text import diff_spans, find_text_ranges, replace_all_text
 from .glossario import (
     add_to_glossary,
@@ -53,6 +57,8 @@ from .glossario import (
     versioned_rules,
 )
 from .editor_common import (
+    DESTRUCTIVE_COLOR,
+    DESTRUCTIVE_HOVER_COLOR,
     ERROR_TEXT_COLOR,
     MUTED_TEXT_COLOR,
     OK_TEXT_COLOR,
@@ -80,6 +86,7 @@ from .editor_widgets import (
 )
 from .glossary_editor import open_glossary_editor
 from .history_window import HistoryWindow
+from .repeated_edits_window import RepeatedEditsWindow
 from . import prose_spellcheck
 from .review_quality import (
     QUALITY_REPORT_HEADERS,
@@ -237,6 +244,14 @@ PROPAGATION_PREVIEW_LIMIT = 8
 # A sequencia do Tk vai junto de proposito: e ela que um teste compara com os
 # binds reais da janela, e e o que impede a lista de envelhecer sozinha. Sem
 # isso, esta tabela seria documentacao — a especie que fica errada em silencio.
+# Quantas sugestoes tem tecla propria: `Alt+1` a `Alt+9` (ROADMAP 28.9). Nove
+# porque e o que cabe numa fileira de digitos sem `Alt+10`.
+ALT_SUGGESTION_KEYS = 9
+# O lado da caixa de marcar da lista, em px (ROADMAP 28.9, item 3).
+ROW_CHECKBOX_SIZE = 32
+
+# Cada item e `(rotulo, sequencia, descricao)`; a sequencia pode ser UMA string
+# ou uma tupla delas quando um rotulo cobre varias teclas ("Alt+1 a Alt+9").
 KEYBOARD_SHORTCUTS = (
     (
         "Navegar",
@@ -270,6 +285,12 @@ KEYBOARD_SHORTCUTS = (
             ("Ctrl+Z", "<Control-z>", "Desfazer"),
             ("Ctrl+Y", "<Control-y>", "Refazer"),
             ("Ctrl+B", "<Control-b>", "Negrito no trecho selecionado da tradução"),
+            (
+                "Alt+1 a Alt+9",
+                tuple(f"<Alt-Key-{n}>" for n in range(1, 10)),
+                "Aplicar a sugestão de número N do painel",
+            ),
+            ("Ctrl+M", "<Control-m>", "Marcar (ou desmarcar) a linha aberta para o lote"),
         ),
     ),
     (
@@ -607,8 +628,14 @@ class TranslationEditor:
     e o que tornou este passo viavel.
     """
 
-    def __init__(self, app):
+    def __init__(self, app, source_file=None, status_filter=None, target_language=None):
+        """`source_file`/`status_filter`/`target_language` abrem a janela ja
+        filtrada — o "Revisar as pendentes desta execucao" da janela principal
+        (ROADMAP 28.10). Sem eles, a janela abre como da ultima vez, que e o que
+        sempre fez."""
         self.app = app
+        self.initial_target_language = target_language
+        self.initial_status_filter = status_filter
         self.build_state()
         self.build_list_pane()
         self.build_editor_pane()
@@ -622,7 +649,9 @@ class TranslationEditor:
         # Antes da primeira pagina: o filtro por arquivo participa da consulta que
         # a carrega, e restaurar a escolha depois faria a janela abrir na lista
         # inteira e recarregar em seguida.
-        self.refresh_file_filter(restore=self.editor_settings.get("file_filter"))
+        self.refresh_file_filter(
+            restore=source_file or self.editor_settings.get("file_filter")
+        )
         self.load_first_page()
 
     def read_theme_colors(self):
@@ -651,6 +680,12 @@ class TranslationEditor:
         self.find_bg = "#334155" if escuro else "#fde68a"
         self.find_fg = "#f8fafc" if escuro else "#111827"
         self.current_find_bg = "#ea580c" if escuro else "#fb923c"
+        # Onde a sugestao SELECIONADA vai bater (ROADMAP 28.9, item 2): o azul
+        # do botao selecionado no painel, para o trecho no texto e o item na
+        # lista serem visivelmente a mesma coisa. Branco sobre ele da 5,2:1 no
+        # claro e 6,7:1 no escuro — os mesmos pares da linha selecionada.
+        self.selected_hit_bg = "#1d4ed8" if escuro else "#2563eb"
+        self.selected_hit_fg = "#ffffff"
         # Texto ESCURO sobre o laranja, nos dois temas (ROADMAP 22.9). Era branco,
         # e branco sobre laranja da 2,3:1 no claro e 3,6:1 no escuro — as duas
         # reprovadas. `#111827` da 7,8:1 e 5,0:1. Quem muda e a cor do TEXTO, e nao
@@ -703,6 +738,11 @@ class TranslationEditor:
                 "find_match", background=self.find_bg, foreground=self.find_fg
             )
             texto.tag_configure(
+                "glossary_selected",
+                background=self.selected_hit_bg,
+                foreground=self.selected_hit_fg,
+            )
+            texto.tag_configure(
                 "find_current",
                 background=self.current_find_bg,
                 foreground=self.current_find_fg,
@@ -740,7 +780,7 @@ class TranslationEditor:
         # O destino comeca no que a janela principal tem selecionado — que e o
         # que esta janela sempre fez — mas deixa de estar preso a ele: o seletor
         # abaixo permite trocar sem fechar o editor.
-        self.lang = self.app.target_language.get()
+        self.lang = self.initial_target_language or self.app.target_language.get()
 
         self.win = ctk.CTkToplevel(self.app.root)
         self.win.title(f"Editar traduções ({self.lang})")
@@ -942,7 +982,9 @@ class TranslationEditor:
             self.list_frame,
             values=list(STATUS_FILTER_LABELS),
         )
-        saved_status = self.editor_settings.get("status_filter", "Todas")
+        saved_status = self.initial_status_filter or self.editor_settings.get(
+            "status_filter", "Todas"
+        )
         if saved_status not in STATUS_FILTER_LABELS:
             saved_status = "Todas"
         self.status_segment.set(saved_status)
@@ -1047,7 +1089,35 @@ class TranslationEditor:
         )
         self.file_menu.set(FILE_FILTER_ALL)
         self.file_menu.grid(
-            row=1, column=1, columnspan=3, sticky="ew", padx=(6, 0), pady=(6, 0)
+            row=1, column=1, columnspan=2, sticky="ew", padx=(6, 0), pady=(6, 0)
+        )
+        # Ao lado do arquivo porque e DELE que a ferramenta fala: os pares que a
+        # revisao mais trocou nas linhas desta obra (garantia S21, ROADMAP 28.5).
+        # Desabilitado em "Todos os arquivos" — sem obra nao ha "nesta obra" —, e
+        # `refresh_repeated_edits_button` acompanha o filtro a cada recarga.
+        self.btn_repeated_edits = ctk.CTkButton(
+            self.language_bar,
+            text="Trocas repetidas",
+            width=120,
+            state="disabled",
+        )
+        self.btn_repeated_edits.grid(row=1, column=3, sticky="e", padx=(6, 0), pady=(6, 0))
+        # A rede de seguranca do ROADMAP 28.6 (garantia Z4), tambem sob o
+        # arquivo, porque tambem fala DELE: joga fora o que a maquina deixou
+        # neste livro e nenhum humano tocou. Em vermelho, como os "Zerar" da
+        # janela principal — a palavra digitada e a defesa, a cor e o aviso.
+        # Numa linha propria: ao lado de "Trocas repetidas" os dois esmagariam
+        # o menu na faixa de 320 px.
+        self.btn_discard_unreviewed = ctk.CTkButton(
+            self.language_bar,
+            text="Descartar não revisadas",
+            width=170,
+            state="disabled",
+            fg_color=DESTRUCTIVE_COLOR,
+            hover_color=DESTRUCTIVE_HOVER_COLOR,
+        )
+        self.btn_discard_unreviewed.grid(
+            row=2, column=1, columnspan=3, sticky="e", padx=(6, 0), pady=(6, 0)
         )
 
         ctk.CTkLabel(self.language_bar, text="Origem").grid(row=0, column=0, sticky="w")
@@ -1321,6 +1391,17 @@ class TranslationEditor:
             background=self.find_bg,
             foreground=self.find_fg,
         )
+        # Acima de `glossary_hit` e de `find_match`, abaixo de `find_current`:
+        # a sugestao que o revisor acabou de escolher e a intencao mais recente,
+        # mas a ocorrencia ATUAL da busca continua sendo o unico lugar em que a
+        # tecla seguinte vai agir (ROADMAP 28.9, item 2). A ordem de criacao e a
+        # prioridade, e `highlight_find_ranges` ainda levanta `find_current`.
+        text.tag_configure(
+            "glossary_selected",
+            background=self.selected_hit_bg,
+            foreground=self.selected_hit_fg,
+            font=self.body_bold_font,
+        )
         text.tag_configure(
             "find_current",
             background=self.current_find_bg,
@@ -1554,6 +1635,8 @@ class TranslationEditor:
         self.btn_export_qa.configure(command=self.export_quality_report)
         self.btn_apply_auto.configure(command=self.apply_automatic_rules_for_current_language)
         self.btn_history.configure(command=self.open_history_window)
+        self.btn_repeated_edits.configure(command=self.open_repeated_edits_window)
+        self.btn_discard_unreviewed.configure(command=self.discard_unreviewed_in_file)
         self.status_segment.configure(command=lambda _value: self.toggle_filter())
         # Trocar o modo refaz a busca na hora: deixar o resultado antigo na tela
         # com o seletor novo faria a lista mentir sobre o que esta mostrando.
@@ -1632,6 +1715,16 @@ class TranslationEditor:
         self.win.bind("<Alt-Right>", self.next_shortcut)
         self.win.bind("<F3>", self.find_next_in_translation)
         self.win.bind("<F7>", self.next_quality_warning_shortcut)
+        # `Alt+1..9` e `Ctrl+M` (ROADMAP 28.9, itens 1 e 3). O `Text` do Tk
+        # liga `<Alt-KeyPress>` e `<Control-KeyPress>` a nada, entao os dois
+        # chegam a janela sem inserir caractere — conferido em `text.tcl`.
+        for numero in range(1, ALT_SUGGESTION_KEYS + 1):
+            self.win.bind(
+                f"<Alt-Key-{numero}>",
+                lambda _event, n=numero: self.apply_suggestion_number(n),
+            )
+        self.win.bind("<Control-m>", self.toggle_current_row_selection)
+        self.win.bind("<Control-M>", self.toggle_current_row_selection)
         # F1 e o "?" do rodape: os dois unicos caminhos de descoberta dos treze
         # atalhos (garantia F18, ROADMAP 22.8).
         self.win.bind("<F1>", self.open_shortcuts_window)
@@ -2969,10 +3062,15 @@ class TranslationEditor:
         quadro.columnconfigure(1, weight=1)
 
         marcada = tk.BooleanVar(master=self.win, value=row[0] in self.state.selected_ids)
+        # 32 px, e nao os 24 padrao (ROADMAP 28.9, item 3): a caixa e o unico
+        # alvo de clique da lista que nao e o botao inteiro, e 24 px ao lado de
+        # uma linha de 64 e o alvo que se erra.
         marca = ctk.CTkCheckBox(
             quadro,
             text="",
-            width=24,
+            width=ROW_CHECKBOX_SIZE,
+            checkbox_width=ROW_CHECKBOX_SIZE,
+            checkbox_height=ROW_CHECKBOX_SIZE,
             variable=marcada,
             command=lambda i=index: self.toggle_row_selection(i),
         )
@@ -3171,6 +3269,18 @@ class TranslationEditor:
             "page": self.state.page_index,
         }
         self.render_rows()
+        self.refresh_repeated_edits_button()
+
+    def refresh_repeated_edits_button(self):
+        """Os dois botoes "desta obra" so com um arquivo escolhido.
+
+        "Trocas repetidas" porque a lista e por obra; "Descartar nao revisadas"
+        porque sem arquivo o alvo seria o banco inteiro — e para isso existe
+        "Zerar Traducoes", com o nome que diz o que faz.
+        """
+        estado = "normal" if self.selected_source_file() else "disabled"
+        self.btn_repeated_edits.configure(state=estado)
+        self.btn_discard_unreviewed.configure(state=estado)
 
     def get_index(self):
         return self.state.selected_index
@@ -4195,6 +4305,68 @@ class TranslationEditor:
         # aberta (garantia R3).
         return HistoryWindow(self, self.current["id"], self.current["orig"])
 
+    def open_repeated_edits_window(self):
+        """Abre "Trocas repetidas nesta obra" para o arquivo do filtro (S21).
+
+        O arquivo e o par sao fixados AQUI, como o id no historico: a janela e
+        modeless e fala de uma obra; trocar o filtro por baixo dela nao pode
+        mudar o assunto dela.
+        """
+        arquivo = self.selected_source_file()
+        if not arquivo:
+            self.show_message("Escolha um arquivo no filtro \"Arquivo\"")
+            return None
+        self.save_changes()
+        return RepeatedEditsWindow(
+            self, arquivo, self.lang, self.selected_source_language()
+        )
+
+    def discard_unreviewed_in_file(self):
+        """"Descartar nao revisadas": joga fora o que a maquina deixou nesta obra (Z4).
+
+        O escopo e o que a tela mostra, pela regra de S19: o arquivo do filtro,
+        o destino da janela e a origem do filtro. O criterio do que e "nao
+        revisada" mora no banco (`_unreviewed_file_rows_query`); aqui ficam a
+        guarda T5 — e uma escrita em massa, e o worker pode estar gravando neste
+        mesmo arquivo — e o que a janela faz depois: a lista e refeita do zero,
+        porque as linhas que ela mostrava podem nao existir mais, e o menu de
+        arquivos tambem, porque o arquivo pode ter ficado sem ocorrencia nenhuma.
+        """
+        arquivo = self.selected_source_file()
+        if not arquivo:
+            self.show_message("Escolha um arquivo no filtro \"Arquivo\"")
+            return
+        if getattr(self.app, "is_processing", False):
+            messagebox.showinfo(
+                "Descartar não revisadas",
+                "Há uma tradução em andamento. Aguarde ou cancele antes de "
+                "descartar traduções.",
+                parent=self.win,
+            )
+            return
+        self.save_changes()
+
+        def concluido(apagadas):
+            if not apagadas or not self.win.winfo_exists():
+                return
+            self.remember_position()
+            self.refresh_file_filter()
+            self.state.page_index = 0
+            self.clear_current()
+            self.reload_rows()
+            if self.state.rows:
+                self.select_index(0)
+            self.show_message(f"{apagadas} traducao(oes) descartada(s)")
+
+        discard_unreviewed_translations(
+            self.app,
+            arquivo,
+            self.lang,
+            source_language=self.selected_source_language(),
+            parent=self.win,
+            on_finish=concluido,
+        )
+
     def undo_translation(self):
         try:
             self.trans_text.edit_undo()
@@ -4324,14 +4496,47 @@ class TranslationEditor:
         # Restrito ao mesmo filtro que a lista mostra: com "Origem: Espanhol"
         # ativo, o usuario esta olhando as traducoes vindas do espanhol, e
         # reescrever tambem as das outras linguas seria uma alteracao em massa
-        # que ele nao pediu nem consegue ver na tela.
+        # que ele nao pediu nem consegue ver na tela. O ARQUIVO entra pela mesma
+        # regra (garantia S19): com "cap03.pgn" escolhido, e o capitulo 3 que
+        # esta na tela.
+        #
+        # As VERIFICADAS ficam de fora por padrao, e so entram quando o filtro
+        # de status e "Verificadas" — que e o unico momento em que a lista as
+        # mostra — e mesmo ai depois de perguntar. Antes desta versao a
+        # ferramenta reescrevia toda linha aprovada do par sem dizer nada.
+        include_verified = self.ask_to_include_verified()
+        if include_verified is None:
+            return
         apply_automatic_rules_to_database(
             self.app,
             target_language=self.lang,
             parent=self.win,
             on_finish=concluido,
             source_language=self.selected_source_language(),
+            source_file=self.selected_source_file(),
+            include_verified=include_verified,
         )
+
+    def ask_to_include_verified(self):
+        """`True`/`False` = incluir ou nao as verificadas; `None` = desistiu.
+
+        Pergunta SO quando a lista esta no filtro "Verificadas": fora dele as
+        verificadas nem aparecem, e a resposta e "nao" sem pergunta (S19).
+        """
+        if self.status_segment.get() != "Verificadas":
+            return False
+        resposta = messagebox.askyesnocancel(
+            "Aplicar autom\u00e1ticas",
+            (
+                "A lista est\u00e1 no filtro \"Verificadas\".\n\n"
+                "Incluir as tradu\u00e7\u00f5es J\u00c1 VERIFICADAS nesta aplica\u00e7\u00e3o?\n"
+                "Sim = pendentes e verificadas; N\u00e3o = s\u00f3 as pendentes."
+            ),
+            parent=self.win,
+        )
+        if resposta is None:
+            return None
+        return bool(resposta)
 
     def select_suggestion(self, index):
         old = self.state.selected_suggestion
@@ -4346,6 +4551,30 @@ class TranslationEditor:
             self.suggestion_buttons[index].configure(
                 fg_color=SUGGESTION_SELECTED_COLOR,
                 text_color=SELECTED_ROW_TEXT_COLOR,
+            )
+        self.highlight_selected_suggestion()
+
+    def highlight_selected_suggestion(self):
+        """Realca no texto o trecho que a sugestao selecionada vai trocar.
+
+        So "Aplicar todas" tinha previa (F11); "Aplicar selecionada" trocava um
+        trecho que o revisor tinha de achar com os olhos (ROADMAP 28.9, item 2).
+        E o PRIMEIRO casamento, e so ele, porque e exatamente o que `apply_one`
+        troca (`count=1`): pintar todos prometeria uma substituicao que o botao
+        nao faz. Aplicada, a sugestao seguinte — ou a mesma, no casamento
+        seguinte — e escolhida de novo e o realce acompanha.
+        """
+        self.trans_text.tag_remove("glossary_selected", "1.0", tk.END)
+        index = self.state.selected_suggestion
+        if index is None or not (0 <= index < len(self.current_suggestions)):
+            return
+        orig, _new = self.current_suggestions[index]
+        text = self.trans_text.get("1.0", tk.END)
+        for start, end in find_glossary_matches(text, orig)[:1]:
+            self.trans_text.tag_add(
+                "glossary_selected",
+                self.text_index_for_offset(start),
+                self.text_index_for_offset(end),
             )
 
     def delete_suggestion_from_glossary(self, orig, new):
@@ -4379,6 +4608,7 @@ class TranslationEditor:
         text = self.trans_text.get("1.0", tk.END)
         self.current_suggestions = find_glossary_suggestions(text, self.glossary)
         self.highlight_glossary_hits()
+        self.highlight_selected_suggestion()
 
         if not self.current_suggestions:
             ctk.CTkLabel(self.suggestions_frame, text="Nenhuma sugestão.").pack(
@@ -4387,9 +4617,13 @@ class TranslationEditor:
             return
 
         for index, (orig, new) in enumerate(self.current_suggestions):
+            # O numero e o atalho (`Alt+N`, ROADMAP 28.9, item 1): um atalho
+            # que so existe no dialogo do "?" e um atalho que ninguem usa (F18).
+            # So ate 9 — nao ha `Alt+10`, e um "10." sem tecla mentiria.
+            numero = f"{index + 1}. " if index < ALT_SUGGESTION_KEYS else ""
             btn = ctk.CTkButton(
                 self.suggestions_frame,
-                text=f'"{preview(orig, 45)}" -> "{preview(new, 45)}"',
+                text=f'{numero}"{preview(orig, 45)}" -> "{preview(new, 45)}"',
                 anchor="w",
                 fg_color=SUGGESTION_COLOR,
                 text_color=SUGGESTION_TEXT_COLOR,
@@ -4417,6 +4651,41 @@ class TranslationEditor:
         """Seleciona a sugestao e a aplica — o duplo clique (ROADMAP 22.11)."""
         self.select_suggestion(index)
         self.apply_one()
+        return "break"
+
+    def apply_suggestion_number(self, number):
+        """`Alt+N` aplica a sugestao N do painel, sem mouse (ROADMAP 28.9, item 1).
+
+        O duplo clique ja era um gesto, mas exigia a mao no mouse no meio da
+        digitacao. Sem a sugestao N a tecla diz isso em vez de nao fazer nada —
+        pela regra de T5: um gesto que acontece e nao responde parece travamento.
+        """
+        index = number - 1
+        if not (0 <= index < len(self.current_suggestions)):
+            self.show_message(f"Não há sugestão {number}")
+            return "break"
+        return self.apply_suggestion_at(index)
+
+    def toggle_current_row_selection(self, _event=None):
+        """`Ctrl+M` marca (ou desmarca) a linha ABERTA para o lote (28.9, item 3).
+
+        A caixa da lista continua sendo o gesto de mouse; este e o de teclado,
+        para quem esta na traducao e decide que esta linha vai junto com as
+        outras para "Verificar"/"Exportar". Pelo id, como `toggle_row_selection`,
+        e a caixa da lista e sincronizada — as duas sao a mesma marca.
+        """
+        row_id = self.current["id"]
+        if not row_id:
+            self.show_message("Selecione uma tradução")
+            return "break"
+        if row_id in self.state.selected_ids:
+            self.state.selected_ids.discard(row_id)
+            self.show_message("Linha desmarcada")
+        else:
+            self.state.selected_ids.add(row_id)
+            self.show_message("Linha marcada para o lote")
+        self.sync_row_checkboxes()
+        self.update_selection_controls()
         return "break"
 
     def apply_glossary_pair_with_cursor(self, text, orig, new, count=0):
@@ -4786,10 +5055,17 @@ class TranslationEditor:
         self.win.destroy()
 
 
-def open_translation_editor(app):
+def open_translation_editor(app, source_file=None, status_filter=None, target_language=None):
     """Abre a janela de edicao de traducoes.
 
     Continua sendo uma funcao porque e assim que o resto do programa chama, e
-    porque quem abre a janela nao tem o que fazer com a instancia.
+    porque quem abre a janela nao tem o que fazer com a instancia. Os tres
+    opcionais sao a porta de entrada do dia (ROADMAP 28.10): o arquivo que
+    acabou de ser traduzido, "Pendentes", e o destino daquela execucao.
     """
-    return TranslationEditor(app)
+    return TranslationEditor(
+        app,
+        source_file=source_file,
+        status_filter=status_filter,
+        target_language=target_language,
+    )

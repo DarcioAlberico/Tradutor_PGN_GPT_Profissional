@@ -22,7 +22,9 @@ from .database import (
     apply_automatic_translation_updates,
     apply_move_notation_updates,
     clear_all_translations,
+    count_unreviewed_file_translations,
     count_words_by_pair,
+    discard_unreviewed_file_translations,
     fetch_export_rows,
     fetch_review_rows,
     get_daily_review_activity,
@@ -46,10 +48,14 @@ from .glossario import (
     GLOSSARY_RULE_SUGGESTION,
     apply_automatic_substitutions,
     create_glossary_backup,
+    filter_glossary_entries_by_type,
+    glossary_entry_pair,
+    glossary_entry_scope,
     load_automatic_substitutions,
     load_glossary_entry_details,
     load_interactive_substitutions,
     save_glossary_entries,
+    scope_languages,
 )
 from .review_quality import QUALITY_HEURISTICS_VERSION, summarize_quality_warnings
 from .stats_window import StatsWindow
@@ -834,6 +840,8 @@ def analyze_database_automatic_rules(
     progress_callback=None,
     should_cancel=None,
     source_language=None,
+    only_pending=False,
+    source_file=None,
 ):
     if automatic_rules is None:
         automatic_rules = load_automatic_substitutions(
@@ -850,6 +858,8 @@ def analyze_database_automatic_rules(
             progress_callback=progress_callback,
             should_cancel=should_cancel,
             source_language=source_language,
+            only_pending=only_pending,
+            source_file=source_file,
         )
     finally:
         conn.close()
@@ -864,6 +874,8 @@ def apply_database_automatic_rules(
     progress_callback=None,
     should_cancel=None,
     source_language=None,
+    only_pending=False,
+    source_file=None,
 ):
     if automatic_rules is None:
         automatic_rules = load_automatic_substitutions(
@@ -884,6 +896,8 @@ def apply_database_automatic_rules(
             progress_callback=progress_callback,
             should_cancel=should_cancel,
             source_language=source_language,
+            only_pending=only_pending,
+            source_file=source_file,
         )
         conn.commit()
     except Exception:
@@ -899,17 +913,25 @@ def apply_database_automatic_rules(
     return stats
 
 
-def format_automatic_rules_scope(target_language, source_language=None):
+def format_automatic_rules_scope(
+    target_language, source_language=None, source_file=None, include_verified=False
+):
     """O escopo, em texto, para o dialogo de confirmacao.
 
     Nomeia a ORIGEM tambem quando ha filtro dela: confirmar "vou alterar 12.000
     traducoes do idioma pt" enquanto a janela mostra so as vindas do espanhol
-    daria um numero que nao bate com nada na tela.
+    daria um numero que nao bate com nada na tela. O ARQUIVO e as VERIFICADAS
+    entram pela mesma razao (garantia S19): o escopo padrao deixa as verificadas
+    de fora, e o dialogo diz isso em vez de deixar o usuario supor.
     """
     destino = f"idioma atual ({target_language})" if target_language else "todos os idiomas"
-    if source_language is None:
-        return destino
-    return f"{destino}, origem {language_label(source_language)}"
+    partes = [destino]
+    if source_language is not None:
+        partes.append(f"origem {language_label(source_language)}")
+    if source_file:
+        partes.append(f"arquivo {os.path.basename(source_file) or source_file}")
+    partes.append("pendentes e verificadas" if include_verified else "s\u00f3 pendentes")
+    return ", ".join(partes)
 
 
 def _preview_line(value, limit=90):
@@ -939,10 +961,15 @@ def format_automatic_rule_examples(examples, max_items=5):
     return "\n".join(lines)
 
 
-def _format_automatic_preview(target_language, preview, source_language=None):
+def _format_automatic_preview(
+    target_language, preview, source_language=None, source_file=None, include_verified=False
+):
+    escopo = format_automatic_rules_scope(
+        target_language, source_language, source_file, include_verified
+    )
     return (
         "Aplicar regras automaticas nas traducoes existentes?\n\n"
-        f"Escopo: {format_automatic_rules_scope(target_language, source_language)}\n"
+        f"Escopo: {escopo}\n"
         f"Regras automaticas: {preview['rules']}\n"
         f"Traducoes analisadas: {preview['scanned']}\n"
         f"Traducoes que serao alteradas: {preview['changed']}\n\n"
@@ -951,10 +978,15 @@ def _format_automatic_preview(target_language, preview, source_language=None):
     )
 
 
-def _format_automatic_result(target_language, stats, source_language=None):
+def _format_automatic_result(
+    target_language, stats, source_language=None, source_file=None, include_verified=False
+):
+    escopo = format_automatic_rules_scope(
+        target_language, source_language, source_file, include_verified
+    )
     return (
         "Regras automaticas aplicadas com sucesso.\n\n"
-        f"Escopo: {format_automatic_rules_scope(target_language, source_language)}\n"
+        f"Escopo: {escopo}\n"
         f"Regras automaticas: {stats['rules']}\n"
         f"Traducoes analisadas: {stats['scanned']}\n"
         f"Traducoes alteradas: {stats['changed']}\n"
@@ -969,6 +1001,9 @@ def apply_automatic_rules_to_database(
     parent=None,
     on_finish=None,
     source_language=None,
+    source_file=None,
+    include_verified=False,
+    automatic_rules=None,
 ):
     """Aplica as regras automaticas, com previa, backup e confirmacao.
 
@@ -980,8 +1015,19 @@ def apply_automatic_rules_to_database(
     na thread principal quando tudo termina — com `None` se o usuario cancelou,
     se nao havia regras ou se nada mudou. Quem chama sem `on_finish` (a janela
     principal) so quer disparar a operacao e nao precisa do resultado.
+
+    **O escopo padrao e "so pendentes"** (garantia S19, ROADMAP 28.5). A
+    ferramenta reescrevia tambem as linhas que o revisor ja tinha aprovado, e
+    promover uma regra na linha 500 desfazia a revisao das 499 anteriores. A
+    linha verificada so entra com `include_verified=True`, e quem passa isso
+    tem de ter perguntado antes. `source_file` restringe as linhas com
+    ocorrencia naquele arquivo — o escopo que o editor mostra na tela.
+
+    `automatic_rules` permite aplicar UMA regra recem-criada (a de "Trocas
+    repetidas") em vez de todas as do glossario.
     """
     janela = parent if parent is not None else app.root
+    only_pending = not include_verified
 
     def falhou(erro):
         messagebox.showerror(
@@ -1001,13 +1047,14 @@ def apply_automatic_rules_to_database(
         if on_finish is not None:
             on_finish(None)
 
-    try:
-        automatic_rules = load_automatic_substitutions(
-            source_language=source_language, target_language=target_language
-        )
-    except Exception as exc:
-        falhou(exc)
-        return None
+    if automatic_rules is None:
+        try:
+            automatic_rules = load_automatic_substitutions(
+                source_language=source_language, target_language=target_language
+            )
+        except Exception as exc:
+            falhou(exc)
+            return None
 
     if not automatic_rules:
         messagebox.showinfo(
@@ -1028,6 +1075,8 @@ def apply_automatic_rules_to_database(
                 progress_callback=task.report,
                 should_cancel=task.cancelado,
                 source_language=source_language,
+                only_pending=only_pending,
+                source_file=source_file,
             )
 
         def aplicado(stats):
@@ -1035,7 +1084,9 @@ def apply_automatic_rules_to_database(
                 app.translation_cache.clear()
             messagebox.showinfo(
                 "Substituicoes automaticas",
-                _format_automatic_result(target_language, stats, source_language),
+                _format_automatic_result(
+                    target_language, stats, source_language, source_file, include_verified
+                ),
                 parent=parent,
             )
             if on_finish is not None:
@@ -1056,11 +1107,14 @@ def apply_automatic_rules_to_database(
 
     def analisado(preview):
         if preview["changed"] == 0:
+            escopo = format_automatic_rules_scope(
+                target_language, source_language, source_file, include_verified
+            )
             messagebox.showinfo(
                 "Substituicoes automaticas",
                 (
                     "Nenhuma traducao existente precisa ser atualizada.\n\n"
-                    f"Escopo: {format_automatic_rules_scope(target_language, source_language)}\n"
+                    f"Escopo: {escopo}\n"
                     f"Regras automaticas: {preview['rules']}\n"
                     f"Traducoes analisadas: {preview['scanned']}"
                 ),
@@ -1072,7 +1126,9 @@ def apply_automatic_rules_to_database(
 
         if not messagebox.askyesno(
             "Substituicoes automaticas",
-            _format_automatic_preview(target_language, preview, source_language),
+            _format_automatic_preview(
+                target_language, preview, source_language, source_file, include_verified
+            ),
             parent=parent,
         ):
             if on_finish is not None:
@@ -1089,6 +1145,8 @@ def apply_automatic_rules_to_database(
             progress_callback=task.report,
             should_cancel=task.cancelado,
             source_language=source_language,
+            only_pending=only_pending,
+            source_file=source_file,
         )
 
     run_with_progress(
@@ -1101,6 +1159,120 @@ def apply_automatic_rules_to_database(
         message="Analisando as traducoes existentes...",
     )
     return None
+
+
+def automatic_rule_scan_scope(entry):
+    """`(origem, destino)` das linhas que uma regra alcanca, pelo escopo dela.
+
+    Escopo `en>pt` -> so as linhas desse par; `pt` -> todo destino `pt`; `*` ->
+    o banco inteiro. `None` e "sem filtro" nos dois lugares, que e o que
+    `_automatic_rules_query` entende por "todas".
+    """
+    origem, destino = scope_languages(glossary_entry_scope(entry))
+    return (origem or None), (destino or None)
+
+
+def format_promotion_preview(entry, preview, max_items=10):
+    """O texto do dialogo "Promover a automática?" (garantia S20).
+
+    Traz o NUMERO e a AMOSTRA — e o que o item existe para dar: a memoria da
+    revisao de terminologia pediu "nao aplicar em massa sem ver", e a revisao
+    critica mostrou o que a palavra inteira faria (`Black esta bem` -> `as
+    pretas esta bem`). Dez exemplos e o que cabe num dialogo e o que basta para
+    ver a regra errar.
+    """
+    orig, new = glossary_entry_pair(entry)
+    if preview["changed"] == 0:
+        efeito = (
+            "Esta regra n\u00e3o alteraria nenhuma tradu\u00e7\u00e3o pendente "
+            f"({preview['scanned']} analisadas)."
+        )
+    else:
+        efeito = (
+            f"Esta regra alteraria {preview['changed']} tradu\u00e7\u00e3o(\u00f5es) "
+            f"pendente(s) de {preview['scanned']} analisadas."
+        )
+    partes = [
+        f"Promover {orig!r} -> {new!r} a autom\u00e1tica?",
+        "",
+        efeito,
+    ]
+    exemplos = format_automatic_rule_examples(preview.get("examples", []), max_items)
+    if exemplos:
+        partes.extend(["", exemplos])
+    partes.extend(
+        [
+            "",
+            "Uma regra autom\u00e1tica \u00e9 aplicada a toda tradu\u00e7\u00e3o nova "
+            "sem confirma\u00e7\u00e3o. As linhas verificadas n\u00e3o entram nesta "
+            "contagem nem em \"Aplicar Automaticas\".",
+        ]
+    )
+    return "\n".join(partes)
+
+
+def preview_automatic_rule_impact(app, entry, parent=None, on_decision=None):
+    """Mostra o impacto de promover `entry` a `automatic` e pergunta (S20).
+
+    `entry` e a entrada detalhada `(orig, new, tipo, prioridade, escopo)` como o
+    formulario a gravaria. A contagem e a MESMA varredura de "Aplicar
+    Automaticas" (`analyze_automatic_translation_updates`, so pendentes, com a
+    regra sozinha e o `@casa@` expandido), e roda por `run_with_progress`: a
+    varredura parecida de 2.7 segurou a interface por 38 s.
+
+    `on_decision(True)` quando o usuario confirmou; `on_decision(False)` quando
+    recusou, cancelou a varredura ou ela falhou. Falhar NAO promove: uma regra
+    automatica reescreve sem perguntar, e "nao consegui medir" nao e licenca.
+    """
+    janela = parent if parent is not None else app.root
+
+    def decidir(promover):
+        if on_decision is not None:
+            on_decision(bool(promover))
+
+    def falhou(erro):
+        messagebox.showerror(
+            "Promover a autom\u00e1tica",
+            f"N\u00e3o foi poss\u00edvel medir o impacto da regra:\n{erro}",
+            parent=parent,
+        )
+        decidir(False)
+
+    def cancelado(_valor=None):
+        decidir(False)
+
+    regras = filter_glossary_entries_by_type([entry], GLOSSARY_RULE_AUTOMATIC)
+    origem, destino = automatic_rule_scan_scope(entry)
+
+    def analisar(task):
+        return analyze_database_automatic_rules(
+            app.output_db,
+            target_language=destino,
+            automatic_rules=regras,
+            progress_callback=task.report,
+            should_cancel=task.cancelado,
+            source_language=origem,
+            only_pending=True,
+        )
+
+    def analisado(preview):
+        decidir(
+            messagebox.askyesno(
+                "Promover a autom\u00e1tica",
+                format_promotion_preview(entry, preview),
+                parent=parent,
+            )
+        )
+
+    run_with_progress(
+        janela,
+        "Promover a autom\u00e1tica",
+        _cancelable(analisar),
+        on_success=analisado,
+        on_error=falhou,
+        on_cancel=cancelado,
+        message="Medindo quantas tradu\u00e7\u00f5es pendentes a regra alteraria...",
+    )
 
 
 def format_quality_stats(summary, indent=""):
@@ -1779,6 +1951,143 @@ def reset_translations(app, on_finish=None):
         on_success=pronto,
         on_error=falhou,
         message="Apagando as traducoes (nao interrompa)...",
+        allow_cancel=False,
+    )
+
+
+def _count_unreviewed_in_file(db_path, source_file, target_language, source_language):
+    """Quantas linhas o descarte apagaria, para a pergunta dizer o que sera perdido."""
+    conn = None
+    try:
+        conn = initialize_database(db_path)
+        return count_unreviewed_file_translations(
+            conn.cursor(), source_file, target_language, source_language
+        )
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def discard_unreviewed_translations(
+    app,
+    source_file,
+    target_language,
+    source_language=None,
+    parent=None,
+    on_finish=None,
+):
+    """"Descartar as nao revisadas deste arquivo", apos backup e palavra digitada.
+
+    A rede de seguranca do ROADMAP 28.6 (garantia Z4): o que um motor deixou
+    num livro e que ninguem tocou pode ser jogado fora para traduzir de novo,
+    sem perder uma linha revisada. O criterio e um so e mora em
+    `database._unreviewed_file_rows_query`; aqui e a orquestracao, que segue
+    "Zerar Traducoes" passo a passo — **o backup antes da pergunta** (Z1), a
+    palavra digitada (Z2), sem cancelamento no meio, o cache em memoria limpo.
+
+    `on_finish(apagadas)` chega na thread do Tk; `None` quando nao havia o que
+    apagar, o usuario desistiu ou deu erro. `parent` e a janela do editor, para
+    os dialogos nao cairem atras dela.
+    """
+    janela = parent if parent is not None else app.root
+    nome = os.path.basename(source_file) or source_file
+    titulo = "Descartar não revisadas"
+
+    falhou, _cancelado = _database_task_callbacks(
+        app, titulo, "Erro ao descartar as traducoes nao revisadas:", on_finish
+    )
+
+    total = _count_unreviewed_in_file(
+        app.output_db, source_file, target_language, source_language
+    )
+    if total == 0:
+        messagebox.showinfo(
+            titulo,
+            (
+                f"Não há o que descartar em {nome}: toda tradução "
+                "deste arquivo foi verificada, tem status ou nota, foi editada "
+                "ou é usada por outro arquivo."
+            ),
+            parent=parent,
+        )
+        if on_finish is not None:
+            on_finish(None)
+        return
+
+    quantas = "um numero desconhecido de" if total is None else f"{total:,}".replace(",", ".")
+
+    try:
+        backup_path = create_database_backup(app.output_db)
+    except Exception as exc:
+        falhou(exc)
+        return
+
+    confirmado = ask_typed_confirmation(
+        janela,
+        titulo,
+        (
+            f"Isto apaga {quantas} tradução(ões) de {nome} "
+            f"({language_label(target_language)}).\n\n"
+            "Ficam de fora as verificadas, as com status ou nota, as que têm "
+            "histórico de edição e as que outro arquivo também usa. "
+            "As ocorrências dessas linhas neste arquivo vão junto.\n\n"
+            "Um backup acabou de ser criado em:\n"
+            f"{backup_path}\n\n"
+            "É por ele que dá para voltar atrás."
+        ),
+    )
+    if not confirmado:
+        app.log_message(
+            f"Descarte das nao revisadas de {nome} cancelado. "
+            f"O backup criado ficou em: {backup_path}"
+        )
+        if on_finish is not None:
+            on_finish(None)
+        return
+
+    def trabalho(task):
+        task.report(0, 1)
+        conn = initialize_database(app.output_db)
+        try:
+            apagadas = discard_unreviewed_file_translations(
+                conn.cursor(), source_file, target_language, source_language
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        task.report(1, 1)
+        return apagadas
+
+    def pronto(apagadas):
+        if hasattr(app, "translation_cache"):
+            # Pela razao de "Zerar Traducoes": o cache em memoria tem
+            # precedencia sobre o banco, e deixado como estava a proxima
+            # execucao reaproveitaria o que acabou de ser descartado.
+            app.translation_cache.clear()
+        app.log_message(
+            f"Descartadas {apagadas} traducao(oes) nao revisadas de {nome}. "
+            f"Backup em: {backup_path}"
+        )
+        messagebox.showinfo(
+            titulo,
+            (
+                f"{apagadas} tradução(ões) de {nome} descartada(s).\n\n"
+                f"O backup anterior está em:\n{backup_path}"
+            ),
+            parent=parent,
+        )
+        if on_finish is not None:
+            on_finish(apagadas)
+
+    run_with_progress(
+        janela,
+        titulo,
+        trabalho,
+        on_success=pronto,
+        on_error=falhou,
+        message="Descartando as traducoes nao revisadas (nao interrompa)...",
         allow_cancel=False,
     )
 

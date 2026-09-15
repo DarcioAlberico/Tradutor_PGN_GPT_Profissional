@@ -42,6 +42,7 @@ from .glossario import (
     update_glossary_entry_by_entry,
     validate_glossary_entry,
 )
+from .db_tools import preview_automatic_rule_impact
 from .settings import load_settings
 from .editor_common import (
     ERROR_TEXT_COLOR,
@@ -1305,51 +1306,102 @@ class GlossaryEditor:
             self.show_message("Corrija os campos obrigatórios", ERROR_COLOR)
             return
 
-        try:
-            if self.state.selected_index is None:
-                result = add_glossary_entry(
-                    orig, new, rule_type=rule_type, priority=priority, scope=scope
-                )
-                self.load_rows_from_file()
-                self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
-                self.show_message(
-                    "Entrada adicionada"
-                    if result["status"] == "inserted"
-                    else "Entrada já existia",
-                    OK_COLOR if result["status"] == "inserted" else WARNING_COLOR,
-                )
-            else:
-                # Pelo estado exibido, nao pela posicao guardada: o arquivo pode
-                # ter mudado por fora desde que esta entrada foi selecionada, e
-                # ai o indice aponta para a vizinha (garantia S6).
-                result = update_glossary_entry_by_entry(
-                    self.current_baseline_entry(),
-                    orig,
-                    new,
-                    rule_type=rule_type,
-                    index_hint=self.state.selected_index,
-                    priority=priority,
-                    scope=scope,
-                )
-                self.load_rows_from_file()
-                if result is None:
-                    self.report_entry_vanished()
-                    return
-                self.state.selected_index = result["index"]
-                self.show_message("Entrada salva")
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Erro ao salvar glossário:\n{exc}", parent=self.win)
-            return
+        def gravar():
+            try:
+                if self.state.selected_index is None:
+                    result = add_glossary_entry(
+                        orig, new, rule_type=rule_type, priority=priority, scope=scope
+                    )
+                    self.load_rows_from_file()
+                    self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
+                    self.show_message(
+                        "Entrada adicionada"
+                        if result["status"] == "inserted"
+                        else "Entrada já existia",
+                        OK_COLOR if result["status"] == "inserted" else WARNING_COLOR,
+                    )
+                else:
+                    # Pelo estado exibido, nao pela posicao guardada: o arquivo pode
+                    # ter mudado por fora desde que esta entrada foi selecionada, e
+                    # ai o indice aponta para a vizinha (garantia S6).
+                    result = update_glossary_entry_by_entry(
+                        self.current_baseline_entry(),
+                        orig,
+                        new,
+                        rule_type=rule_type,
+                        index_hint=self.state.selected_index,
+                        priority=priority,
+                        scope=scope,
+                    )
+                    self.load_rows_from_file()
+                    if result is None:
+                        self.report_entry_vanished()
+                        return
+                    self.state.selected_index = result["index"]
+                    self.show_message("Entrada salva")
+            except Exception as exc:
+                messagebox.showerror("Erro", f"Erro ao salvar glossário:\n{exc}", parent=self.win)
+                return
 
-        self.set_form_baseline(orig, new, rule_type, priority, scope)
-        self.set_dirty(False)
-        self.update_app_glossary()
-        self.apply_filter()
-        if (
-            self.state.selected_index is not None
-            and self.state.selected_index < len(self.state.entries)
-        ):
-            self.select_entry(self.state.selected_index)
+            self.set_form_baseline(orig, new, rule_type, priority, scope)
+            self.set_dirty(False)
+            self.update_app_glossary()
+            self.apply_filter()
+            if (
+                self.state.selected_index is not None
+                and self.state.selected_index < len(self.state.entries)
+            ):
+                self.select_entry(self.state.selected_index)
+
+        self.confirm_promotion_then(orig, new, rule_type, priority, scope, gravar)
+
+    def promotes_to_automatic(self, orig, new, rule_type):
+        """Gravar este formulario cria um comportamento automatico NOVO?
+
+        Sim quando o tipo e `automatic` e a linha de base nao era esta mesma
+        regra automatica: uma entrada nova, uma sugestao promovida, ou uma
+        automatica cujo texto mudou (que e outra regra com o mesmo tipo).
+        Salvar de novo uma automatica que nao mudou nao pergunta nada — nao ha
+        impacto novo a mostrar.
+        """
+        if rule_type != GLOSSARY_RULE_AUTOMATIC:
+            return False
+        base = self.form_baseline
+        return not (
+            base["type"] == GLOSSARY_RULE_AUTOMATIC
+            and (base["orig"], base["new"]) == (orig, new)
+        )
+
+    def confirm_promotion_then(self, orig, new, rule_type, priority, scope, gravar):
+        """Grava direto, ou mede o impacto e grava so se o usuario confirmar.
+
+        E a garantia S20 (ROADMAP 28.5): promover a `automatic` mostra antes
+        quantas traducoes pendentes a regra alteraria e dez delas. A medicao
+        roda fora da thread do Tk, entao `gravar` e uma continuacao e nao um
+        `return` — e enquanto ela roda o formulario continua sujo, que e o
+        estado verdadeiro: nada foi gravado ainda.
+        """
+        if not self.promotes_to_automatic(orig, new, rule_type):
+            gravar()
+            return
+        self.measure_promotion_then(orig, new, rule_type, priority, scope, gravar)
+
+    def measure_promotion_then(self, orig, new, rule_type, priority, scope, gravar):
+        """A medicao de S20 sem a pergunta "e promocao?" — quem chama ja sabe."""
+        def decidido(promover):
+            if not self.win.winfo_exists():
+                return
+            if promover:
+                gravar()
+            else:
+                self.show_message("Promoção cancelada; nada foi gravado", WARNING_COLOR)
+
+        preview_automatic_rule_impact(
+            self.app,
+            (orig, new, rule_type, priority, scope),
+            parent=self.win,
+            on_decision=decidido,
+        )
 
     def save_as_new(self):
         orig, new = self.current_pair()
@@ -1367,29 +1419,39 @@ class GlossaryEditor:
             self.show_message("Corrija os campos obrigatórios", ERROR_COLOR)
             return
 
-        try:
-            result = add_glossary_entry(
-                orig, new, rule_type=rule_type, priority=priority, scope=scope
-            )
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Erro ao salvar nova entrada:\n{exc}", parent=self.win)
-            return
+        def gravar():
+            try:
+                result = add_glossary_entry(
+                    orig, new, rule_type=rule_type, priority=priority, scope=scope
+                )
+            except Exception as exc:
+                messagebox.showerror(
+                    "Erro", f"Erro ao salvar nova entrada:\n{exc}", parent=self.win
+                )
+                return
 
-        self.load_rows_from_file()
-        if result["status"] == "unchanged":
-            self.show_message("Entrada já existia", WARNING_COLOR)
+            self.load_rows_from_file()
+            if result["status"] == "unchanged":
+                self.show_message("Entrada já existia", WARNING_COLOR)
+            else:
+                self.show_message("Nova entrada salva")
+            # Vale para os dois casos: a entrada existente e a recem inserida sao
+            # localizadas do mesmo jeito. `len(entries) - 1` so acertava porque a
+            # insercao acrescenta no fim, e errava quando ela nao acontecia.
+            self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
+            self.set_form_baseline(orig, new, rule_type, priority, scope)
+            self.set_dirty(False)
+            self.update_app_glossary()
+            self.apply_filter()
+            if self.state.selected_index is not None:
+                self.select_entry(self.state.selected_index)
+
+        # "Salvar como nova" sempre cria uma entrada, entao uma automatica aqui e
+        # sempre uma regra automatica nova — a linha de base nao conta.
+        if rule_type == GLOSSARY_RULE_AUTOMATIC:
+            self.measure_promotion_then(orig, new, rule_type, priority, scope, gravar)
         else:
-            self.show_message("Nova entrada salva")
-        # Vale para os dois casos: a entrada existente e a recem inserida sao
-        # localizadas do mesmo jeito. `len(entries) - 1` so acertava porque a
-        # insercao acrescenta no fim, e errava quando ela nao acontecia.
-        self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
-        self.set_form_baseline(orig, new, rule_type, priority, scope)
-        self.set_dirty(False)
-        self.update_app_glossary()
-        self.apply_filter()
-        if self.state.selected_index is not None:
-            self.select_entry(self.state.selected_index)
+            gravar()
 
     def delete_current(self):
         index = self.state.selected_index

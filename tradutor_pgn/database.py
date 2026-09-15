@@ -2236,6 +2236,48 @@ def machine_translation_for(cursor, comment_id):
     return None if atual is None else (atual[0] or "")
 
 
+# As acoes do historico que um HUMANO produziu digitando: sao as unicas que
+# dizem "o revisor trocou isto por aquilo". As outras — regras automaticas,
+# correcao de lances, prosa, CSV, restauracao — sao o programa, e contar o que o
+# programa trocou como "o que a revisao trocou" sugeriria ao usuario a regra que
+# ele ja tem.
+HUMAN_EDIT_ACTIONS = ("edit", "edit_verify")
+
+
+def fetch_file_edit_events(cursor, source_file, target_language, source_language=None):
+    """`[(comment_id, antes, depois)]` das edicoes humanas das linhas de um arquivo.
+
+    Alimenta "Trocas repetidas nesta obra" (garantia S21, ROADMAP 28.5). Uma
+    entrada por evento, e nao por linha: uma linha editada duas vezes foi
+    corrigida duas vezes, e as duas trocas contam. So as que mudaram o texto —
+    as outras sao verificacoes gravadas como edicao (ver `HISTORY_TEXT_CHANGED`).
+
+    O par e o do editor: o arquivo pode ter sido traduzido para mais de um
+    destino, e a troca `Black -> as pretas` nao e sugestao para o italiano.
+    """
+    marcadores = ", ".join("?" for _acao in HUMAN_EDIT_ACTIONS)
+    clauses = [
+        "c.target_language = ?",
+        f"h.action IN ({marcadores})",
+        "COALESCE(h.previous_translation, '') <> COALESCE(h.new_translation, '')",
+        f"c.id IN (SELECT comment_id FROM {OCCURRENCES_TABLE} WHERE source_file = ?)",
+    ]
+    params = [target_language, *HUMAN_EDIT_ACTIONS, source_file]
+    if source_language is not None:
+        clauses.append("c.source_language = ?")
+        params.append(source_language)
+    return cursor.execute(
+        f"""
+        SELECT h.comment_id, h.previous_translation, h.new_translation
+        FROM comment_history h
+        JOIN comments c ON c.id = h.comment_id
+        WHERE {" AND ".join(clauses)}
+        ORDER BY h.id
+        """,
+        params,
+    ).fetchall()
+
+
 def update_translation_by_id(
     cursor,
     comment_id,
@@ -2694,11 +2736,124 @@ def clear_all_translations(conn):
     return total
 
 
+def _unreviewed_file_rows_query(source_file, target_language, source_language=None):
+    """O `WHERE` da "linha que nenhum humano tocou" de um arquivo, num lugar so.
+
+    Contar e apagar usam a MESMA clausula, pela razao de `_automatic_rules_query`:
+    dois criterios em dois lugares nao quebram, eles discordam — e aqui a
+    discordancia seria o dialogo prometer um numero e o banco perder outro.
+
+    As cinco marcas que poupam uma linha (garantia Z4, ROADMAP 28.6):
+
+    - `verified = 1` — o revisor aprovou;
+    - `review_status` preenchido — rejeitou ou pos em duvida;
+    - nota preenchida — escreveu por que;
+    - qualquer entrada em `comment_history` — editou, restaurou, verificou e
+      voltou a pendente, ou uma ferramenta de escrita em massa passou por ela;
+    - uma ocorrencia em OUTRO arquivo — a linha foi inserida ao traduzir este
+      livro e reaproveitada por outro; apaga-la encurtaria a obra do outro.
+
+    Status e nota entram como clausulas proprias porque **nao gravam historico**
+    (SPEC 10): so o historico deixaria passar a linha que o revisor rejeitou
+    sem editar. O par de idiomas e o da tela do editor, pela regra de S19: o
+    que o usuario nao ve nao e apagado por ele.
+    """
+    clauses = [
+        "c.target_language = ?",
+        "COALESCE(c.verified, 0) = 0",
+        "COALESCE(c.review_status, '') = ''",
+        "COALESCE(c.reviewer_note, '') = ''",
+        f"c.id IN (SELECT comment_id FROM {OCCURRENCES_TABLE} WHERE source_file = ?)",
+        (
+            f"NOT EXISTS (SELECT 1 FROM {OCCURRENCES_TABLE} o2"
+            " WHERE o2.comment_id = c.id AND o2.source_file <> ?)"
+        ),
+        "NOT EXISTS (SELECT 1 FROM comment_history h WHERE h.comment_id = c.id)",
+    ]
+    params = [target_language, source_file, source_file]
+    if source_language is not None:
+        clauses.append("c.source_language = ?")
+        params.append(source_language)
+    return " AND ".join(clauses), params
+
+
+def count_unreviewed_file_translations(
+    cursor, source_file, target_language, source_language=None
+):
+    """Quantas linhas "Descartar as nao revisadas deste arquivo" apagaria."""
+    where_sql, params = _unreviewed_file_rows_query(
+        source_file, target_language, source_language
+    )
+    return cursor.execute(
+        f"SELECT COUNT(*) FROM comments c WHERE {where_sql}", params
+    ).fetchone()[0]
+
+
+def discard_unreviewed_file_translations(
+    cursor, source_file, target_language, source_language=None
+):
+    """Apaga as linhas de um arquivo que nenhum humano tocou. Devolve quantas.
+
+    E a rede de seguranca do ROADMAP 28.6 (garantia Z4): traduzir um livro com
+    um motor novo, olhar, e poder jogar fora o que ele deixou sem perder uma
+    linha revisada. O criterio e o de `_unreviewed_file_rows_query`.
+
+    As ocorrencias vao junto e sao apagadas EXPLICITAMENTE: `PRAGMA
+    foreign_keys` nunca e ligado, entao o `ON DELETE CASCADE` da tabela e
+    inerte. Uma ocorrencia orfa nao aponta para linha nenhuma (o id apagado nao
+    volta sem `DROP TABLE`), mas continua contando como posicao do arquivo em
+    toda consulta que nao faz `JOIN` com `comments` — o livro pareceria maior do
+    que e, e "Reverter execucao" (Z5) herdaria lixo que ninguem consegue ver.
+
+    Os ids sao colhidos ANTES de apagar, e nao por subconsulta em cada `DELETE`:
+    a primeira remocao (ocorrencias) esvaziaria a clausula "tem ocorrencia
+    neste arquivo" da segunda, e nenhum comentario sairia. Em lotes de
+    `CACHE_LOOKUP_CHUNK` pelo mesmo limite de parametros de sempre.
+
+    Nao ha `VACUUM`: sao centenas de linhas de um livro, e nao o banco inteiro.
+    """
+    where_sql, params = _unreviewed_file_rows_query(
+        source_file, target_language, source_language
+    )
+    ids = [
+        linha[0]
+        for linha in cursor.execute(
+            f"SELECT c.id FROM comments c WHERE {where_sql}", params
+        ).fetchall()
+    ]
+    for inicio in range(0, len(ids), CACHE_LOOKUP_CHUNK):
+        lote = ids[inicio:inicio + CACHE_LOOKUP_CHUNK]
+        marcadores = ", ".join("?" for _id in lote)
+        cursor.execute(
+            f"DELETE FROM {OCCURRENCES_TABLE} WHERE comment_id IN ({marcadores})",
+            lote,
+        )
+        cursor.execute(f"DELETE FROM comments WHERE id IN ({marcadores})", lote)
+    return len(ids)
+
+
 class AutomaticRulesCanceled(Exception):
     """A varredura das regras automaticas foi interrompida pelo usuario."""
 
 
-def _automatic_rules_query(target_language, source_language=None):
+def _automatic_rules_query(
+    target_language, source_language=None, only_pending=False, source_file=None
+):
+    """O `WHERE` das linhas que as regras automaticas alcancam, num lugar so.
+
+    A previa e a aplicacao usam o mesmo criterio pela razao de
+    `_move_notation_where`: dois criterios em dois lugares nao quebram — eles
+    discordam.
+
+    `only_pending` restringe a `verified = 0` (garantia S19, ROADMAP 28.5). A
+    consulta nao filtrava por `verified`, e "Aplicar Automaticas" reescrevia as
+    linhas que o revisor ja tinha aprovado — 9 das 39 que as regras de hoje
+    alterariam no banco de dev. A linha aprovada so entra quando o escopo pede.
+
+    `source_file` restringe as linhas com ocorrencia gravada naquele arquivo,
+    pelo mesmo `IN` do filtro do editor (ROADMAP 18: `EXISTS` custava 831 ms
+    por pagina contra 1,6 ms).
+    """
     clauses = [
         "translated_comment IS NOT NULL",
         "translated_comment <> ''",
@@ -2712,6 +2867,14 @@ def _automatic_rules_query(target_language, source_language=None):
     if source_language is not None:
         clauses.append("source_language = ?")
         params.append(source_language)
+    if only_pending:
+        clauses.append("verified = 0")
+    if source_file:
+        clauses.append(
+            f"id IN (SELECT comment_id FROM {OCCURRENCES_TABLE}"
+            f" WHERE source_file = ?)"
+        )
+        params.append(source_file)
     return " AND ".join(clauses), params
 
 
@@ -2722,6 +2885,8 @@ def _iter_automatic_rule_rows(
     should_cancel=None,
     progress_every=2000,
     source_language=None,
+    only_pending=False,
+    source_file=None,
 ):
     """Itera as linhas candidatas SEM materializar a tabela.
 
@@ -2734,7 +2899,9 @@ def _iter_automatic_rule_rows(
     interface nao precisa de 195 mil atualizacoes, e cada uma custa um
     `root.after`.
     """
-    where_sql, params = _automatic_rules_query(target_language, source_language)
+    where_sql, params = _automatic_rules_query(
+        target_language, source_language, only_pending, source_file
+    )
     total = cursor.execute(
         f"SELECT COUNT(*) FROM comments WHERE {where_sql}", params
     ).fetchone()[0]
@@ -2784,6 +2951,8 @@ def analyze_automatic_translation_updates(
     progress_callback=None,
     should_cancel=None,
     source_language=None,
+    only_pending=False,
+    source_file=None,
 ):
     if not automatic_rules:
         return _empty_automatic_stats(target_language)
@@ -2804,6 +2973,8 @@ def analyze_automatic_translation_updates(
         progress_callback=progress_callback,
         should_cancel=should_cancel,
         source_language=source_language,
+        only_pending=only_pending,
+        source_file=source_file,
     ):
         scanned += 1
         updated_translation = apply_substitutions(translation, automatic_rules)
@@ -2839,6 +3010,8 @@ def apply_automatic_translation_updates(
     progress_callback=None,
     should_cancel=None,
     source_language=None,
+    only_pending=False,
+    source_file=None,
 ):
     """Aplica as regras automaticas numa unica passagem.
 
@@ -2878,6 +3051,8 @@ def apply_automatic_translation_updates(
             progress_callback=progress_callback,
             should_cancel=should_cancel,
             source_language=source_language,
+            only_pending=only_pending,
+            source_file=source_file,
         )
     ):
         scanned += 1

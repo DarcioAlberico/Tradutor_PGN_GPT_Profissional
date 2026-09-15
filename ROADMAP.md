@@ -6,7 +6,7 @@ verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
 **Pendente: a secao 28** (revisao de 2026-09-14), que e plano e nao
-entrega — quinze itens medidos (28.1 a 28.4 ja feitos), com a ordem em 28.15 e as garantias planejadas
+entrega — quinze itens medidos (28.1 a 28.5 ja feitos), com a ordem em 28.15 e as garantias planejadas
 na secao 11 da SPEC. Ate ela, o registro estava assim:
 
 **Nada pendente.** O item 19.11 (corretor ortografico de prosa), que era o
@@ -8080,7 +8080,7 @@ individual, com o PGN de saida conferido), e sete mutacoes — as cinco da
 funcao e uma por caminho do worker — todas mortas. P7 migrou para a secao 9
 da SPEC.
 
-### 28.5 O glossario: aplicar com escopo, promover com impacto, sugerir do historico
+### 28.5 O glossario: aplicar com escopo, promover com impacto, sugerir do historico — CONCLUIDO (2026-09-14)
 
 Tres coisas, em ordem de dependencia:
 
@@ -8117,7 +8117,115 @@ automaticas em massa. Medido: as 399 automaticas de hoje, aplicadas sobre a
 saida da maquina das linhas editadas, deixam 232 iguais a revisao, 517 mais
 perto e **60 mais longe**.
 
-### 28.6 Descartar o que a maquina deixou, e reverter uma execucao
+**Feito no mesmo dia, e quatro coisas sairam diferentes do plano acima.**
+
+- **O escopo nao e um dialogo de escolha: e o que a tela mostra.** O
+  plano dizia "so pendentes" e "so este arquivo" como opcoes. A ferramenta
+  do editor ja seguia o filtro de origem pela regra "reescrever o que o
+  usuario nao ve e alteracao que ele nao pediu", e o arquivo entrou pela
+  mesma regra: com "cap03.pgn" escolhido, e o capitulo 3 que e reescrito.
+  As verificadas ficam de fora SEMPRE, na janela principal e no editor, com
+  uma excecao: no filtro "Verificadas" — o unico em que a lista as mostra
+  — o editor pergunta (sim/nao/cancelar) se elas entram. O dialogo de
+  confirmacao nomeia o escopo inteiro ("idioma atual (pt), origem Ingles,
+  arquivo cap01.pgn, so pendentes"), e o `WHERE` e um so
+  (`_automatic_rules_query`) para a previa e a aplicacao, pela razao que a
+  correcao de lances ja tinha escrito: dois criterios nao quebram, eles
+  discordam. Medido no banco de dev: as 903 regras automaticas do par
+  (399 linhas do arquivo, com `@casa@` expandido) alterariam 39 das 6.500
+  linhas, **9 delas verificadas** — e o tamanho do bug do 28.1 item 6 na
+  amostra; a varredura completa custa 5,7 s.
+- **A promocao nao tem botao proprio: e o "Salvar" com o tipo
+  "Automatica".** A previa (`preview_automatic_rule_impact`, em
+  `db_tools`) roda quando gravar cria um comportamento automatico NOVO —
+  entrada nova, sugestao promovida, ou automatica cujo texto mudou; salvar
+  de novo uma automatica igual (prioridade, escopo) nao pergunta nada,
+  porque nao ha impacto novo a mostrar. E a MESMA varredura de "Aplicar
+  Automaticas", com a regra sozinha, `@casa@` expandido, so pendentes e no
+  escopo de idioma da regra (`en>pt` varre o par; `pt` varre o destino;
+  `*` varre tudo), por `run_with_progress`. O dialogo traz o numero, dez
+  exemplos e a frase "as verificadas nao entram nesta contagem nem em
+  Aplicar Automaticas". Recusar nao grava e o formulario continua sujo;
+  uma medicao que FALHA tambem nao grava — "nao consegui medir" nao e
+  licenca para uma regra que reescreve sem perguntar. E a previa
+  mostrou uma coisa que o plano nao sabia: as promocoes multipalavra
+  recomendadas acima, `Black esta` -> `as pretas estao`, saem **"As
+  pretas estao"** no meio da frase, porque a substituicao herda a caixa do
+  texto casado (`case_adjusted_replacement`) e `Black` comeca em
+  maiuscula. A regra nao e viavel como esta escrita; a previa e
+  exatamente onde isso aparece antes de virar 399 linhas.
+- **"Trocas repetidas nesta obra" mora no editor de TRADUCOES, ao lado do
+  seletor de arquivo**, e nao no de glossario: o assunto e a obra, e o
+  seletor que diz qual e a obra esta la. O botao so habilita com um
+  arquivo escolhido. A janela e modeless (a lista do editor continua
+  clicavel, e "Ver exemplo" a usa pelo `jump_to_id` do "Ir para ID"), e o
+  arquivo e o par sao fixados na abertura, como o id no historico. A conta
+  (`repeated_edits.py`, puro) e um diff por TOKEN de cada edicao humana
+  (`edit`/`edit_verify` com mudanca de texto — as acoes do programa ficam
+  de fora, senao a ferramenta sugeriria ao usuario a regra que ele ja tem)
+  e conta so os blocos `replace`: insercao pura (`'' -> 'de'`, a troca mais
+  frequente da revisao) nao e regra de nada, porque regra precisa de um
+  texto para casar. Duas contagens por par, ocorrencias e linhas
+  distintas. A coluna "regra" nao compara strings: aplica cada regra
+  candidata com `apply_substitution` — a do pipeline — ao texto de antes
+  e le o que sai. Isso deu tres estados que o plano nao previa e que o
+  banco de dev tem: **"sugestao"** quando a regra produz exatamente o que
+  o revisor escreveu (`o jogo -> a partida`, 94 vezes); **"sugestao
+  (produz 'As pretas')"** quando ela dispara e produz outra coisa
+  (`Black -> as pretas`, 73 vezes — a mesma caixa herdada de cima);
+  **"sugestao (nao altera o texto)"** quando ela casa e nao muda nada —
+  `Brancas -> brancas` esta no glossario do usuario e e inerte, porque a
+  substituicao recapitaliza o que ela mesma baixou; foram 63 edicoes a
+  mao para uma regra que existe. "Criar automatica e aplicar" e a previa
+  de S20 (com escopo `origem>destino` do editor, ou so o destino em
+  "Todos"), a gravacao no glossario, o aviso ao editor pelo mesmo canal do
+  editor de glossario, e "Aplicar Automaticas" restrito a esta regra e a
+  este arquivo (S19). Medido: 3.736 edicoes humanas com mudanca de texto
+  no unico arquivo com ocorrencias, 2.011 pares distintos, 0,04 s a
+  consulta e 0,21 s o ranking; dos 40 listados, 27 sem regra, 12 com
+  sugestao e 1 com automatica (`cheque -> xeque`, 27 edicoes que a regra
+  nao alcancou — e o que "Aplicar Automaticas" alcanca).
+- **A promocao em massa das regras multipalavra NAO foi feita**, pelo
+  achado da caixa acima e porque o `Substituicoes.txt` do usuario esta
+  com edicoes proprias fora do repositorio (o mesmo motivo do 28.3): as
+  regras entram pela ferramenta nova, uma a uma, vendo o impacto. `Dragao
+  Acelerado -> Dragao Acelerada` continua valendo como recomendacao.
+
+**O que a verificacao fixou.** Em `test_core.py`:
+`AutomaticRulesScopeTests` (9: o banco sem pedir nada continua varrendo
+tudo; `only_pending` poupa a verificada na previa E na aplicacao; o arquivo
+restringe; um arquivo desconhecido casa zero; a ferramenta por padrao muda
+so as pendentes e o dialogo diz "so pendentes"; alcanca as verificadas so
+com `include_verified`; nomeia o arquivo e fica dentro dele; regras
+explicitas nao carregam o glossario; o texto do escopo),
+`PromotionPreviewTests` (7: numero e amostra com a saida real do pipeline;
+a conta passa por `run_with_progress`; recusar; regra sem escopo varre
+tudo; regra que nao muda nada ainda pergunta; medicao que falha nao
+promove; `@casa@` expandido), `RepeatedEditsTests` (11) e
+`FileEditEventsTests` (2). Em `test_editor_windows.py`:
+`AutomaticRulesScopeInTheEditorTests` (5: padrao sem arquivo nem
+verificadas e sem pergunta; o arquivo viaja; em "Verificadas" pergunta, e
+sim/nao/cancelar fazem o que dizem), `GlossaryPromotionPreviewTests` (6:
+promover mede e grava no sim; recusar nao grava e o formulario fica sujo;
+automatica inalterada nao mede; texto mudado mede; sugestao nunca mede;
+"Salvar como nova" mede) e `RepeatedEditsWindowTests` (9: botao
+desabilitado sem arquivo; sem arquivo o metodo explica; o botao cabe
+inteiro na faixa de 320 px e nao esmaga o menu; a lista traz par, contagem
+e "sem regra"; com a regra diz "automatica" e desabilita o criar; arquivo
+sem edicao diz por que esta vazio; "Ver exemplo" posiciona o editor; criar
+mede, grava com escopo `en>pt`, avisa o editor e oferece aplicar SO esta
+regra SO neste arquivo; recusar a medicao nao grava). 49 testes. **27
+mutacoes**, duas sobreviventes na primeira passada e uma com trecho
+ambiguo: as duas eram o padrao 4 da memoria de testes (o cenario nao
+exercitava a clausula — `update_translation_by_id` nao grava historico
+quando nem texto nem status mudam, entao "edicao sem mudanca de texto"
+nunca existiu no banco do teste; e todas as linhas do teste tinham a mesma
+origem, entao o filtro de origem nunca decidia nada), e o trecho ambiguo
+era o padrao 5 (`if only_pending:` existe duas vezes em `database.py`).
+Cenarios corrigidos, as tres morreram. S19, S20 e S21 migraram para a
+secao 9 da SPEC.
+
+### 28.6 Descartar o que a maquina deixou, e reverter uma execucao — Z4 CONCLUIDO (2026-09-15); Z5 e plano
 
 O 18.7 explicou por que "reverter a execucao de ontem" ficou de fora. As
 duas revisoes criticas concordaram numa coisa: 90 % do valor e a rede de
@@ -8147,6 +8255,59 @@ ocorrencias sao apagadas explicitamente; "Zerar Traducoes" passa a derrubar
 por cima migra com `inserted_run_id` nulo, e so linhas gravadas depois sao
 reversiveis (o mesmo texto de O2). Lista das ultimas 30 execucoes em
 "Estatisticas do BD" (relatorio, F24). Garantia planejada **Z5**.
+
+**Z4 feito em 2026-09-15, e tres coisas sairam diferentes do plano.**
+
+- **Mora no editor de traducoes, sob o seletor de arquivo, e nao em
+  "Ferramentas".** Pela regra que pos "Trocas repetidas" ali: o assunto e a
+  obra, e o seletor que diz qual e a obra esta la. O botao so habilita com
+  um arquivo escolhido — sem arquivo o alvo seria o banco inteiro, e para
+  isso existe "Zerar Traducoes", com o nome que diz o que faz. Em vermelho,
+  com o mesmo par de cores dos dois "Zerar", que por isso saiu de
+  `main_window` para a paleta central (`editor_common`). Linha propria sob
+  o menu: ao lado de "Trocas repetidas" os dois esmagariam o menu na faixa
+  de 320 px, e a medicao de S21 (o botao inteiro na faixa minima, o menu com
+  pelo menos 100 px) foi repetida para ele.
+- **O par entra no criterio.** O plano falava so no arquivo; a ferramenta
+  segue S19 e apaga so o destino da janela e a origem do filtro — o que o
+  usuario nao ve nao e apagado por ele. O `WHERE` e um so para contar e
+  apagar (`_unreviewed_file_rows_query`), e os ids sao colhidos antes do
+  primeiro `DELETE`: apagar as ocorrencias primeiro esvaziaria a clausula
+  "tem ocorrencia neste arquivo" do segundo, e nenhum comentario sairia —
+  o teste que faz isso e o das ocorrencias orfas. Em lotes de 900 pelo
+  limite de parametros de sempre, e um teste com 905 linhas confere que o
+  segundo lote existe.
+- **Depois de apagar, a janela refaz o menu de arquivos, e nao so a lista.**
+  Um capitulo cujas linhas eram todas da maquina deixa de ter ocorrencia
+  nenhuma e deixa de ser uma obra; sem refazer o menu ele continuaria
+  escolhido, apontando para uma lista vazia sem explicacao — o desfecho que
+  `refresh_file_filter` existe para impedir. O historico que poupa a linha
+  e QUALQUER historico, inclusive o de "Corrigir Lances" e "Consertar
+  Prosa": o criterio erra para o lado de apagar menos, e o caso que importa
+  (28.7: traduzir, olhar, descartar) nao passa por ferramenta nenhuma.
+
+**O que a verificacao fixou.** Em `test_core.py`:
+`DiscardUnreviewedRowsTests` (8: o cenario da SPEC — cinco marcas, sobra
+exatamente cada uma; a reusada fica com as duas ocorrencias; as ocorrencias
+das apagadas vao junto e o filtro do editor ve as cinco que ficaram; a
+verificada por importacao, sem historico, fica pela clausula `verified`; a
+verificada e devolvida a pendente fica pelo historico; o outro arquivo nao e
+tocado; o par da tela decide; 905 linhas somem inteiras) e
+`DiscardUnreviewedToolTests` (5: backup antes da pergunta e nomeado nela; a
+pergunta diz o arquivo e o numero; "nao" deixa banco e cache; "sim" apaga so
+as duas nao revisadas, limpa o cache e devolve 2; nada a descartar = nem
+pergunta nem backup, e o aviso nomeia o arquivo). Em `test_editor_windows.py`:
+`DiscardUnreviewedInTheEditorTests` (9: desabilitado sem arquivo; vermelho
+como os "Zerar"; sem arquivo o metodo explica; arquivo, par e janela viajam;
+T5 recusa durante a traducao; capitulo todo da maquina sai do menu e a lista
+recomeca em "Todos"; uma linha poupada mantem o arquivo no menu; nada
+apagado deixa a lista como estava; o botao cabe na faixa de 320 px). 22
+testes. **13 mutacoes**, uma sobrevivente na primeira passada: tirar a
+clausula `verified` nao derrubava nada, porque verificar pela janela grava
+historico e a linha caia na clausula vizinha (padrao 4 da memoria de
+testes); a linha importada ja verificada, sem historico, e o cenario que a
+clausula decide sozinha — escrito, a mutacao morreu. Z4 migrou para a secao
+9 da SPEC (secao 4, ao lado de Z1-Z3 e O4). **Z5 continua plano.**
 
 ### 28.7 O modelo de linguagem: primeiro o piloto, depois o provedor
 
@@ -8294,7 +8455,7 @@ oferecendo desligar, e um `tk.Canvas` de 8 x 24 px com glifos Unicode num
 quadro colapsavel do painel de sugestoes (F20: cabe nos 300 px). Garantia
 planejada **O5**.
 
-### 28.9 O editor: o que ainda custa gestos
+### 28.9 O editor: o que ainda custa gestos — itens 1 a 3 CONCLUIDOS (2026-09-15)
 
 A varredura de UX leu o `edit_window.py` inteiro e concluiu que os cinco
 gestos mais repetidos (abrir, editar, salvar e verificar, avancar, aplicar
@@ -8335,7 +8496,48 @@ Todo bind novo entra em `KEYBOARD_SHORTCUTS`, senao o teste de F18 fica
 vermelho — e uma garantia existente que o item toca. Garantias planejadas
 **F29** (1 a 3) e **S22** (5).
 
-### 28.10 A janela principal e as configuracoes
+**Itens 1 a 3 feitos em 2026-09-15 (F29), com tres coisas diferentes do
+plano.**
+
+- **O numero da sugestao entrou no ROTULO do botao**, e nao so na lista do
+  "?". `Alt+3` so serve a quem sabe que aquela e a terceira, e contar
+  botoes com o dedo e mais lento do que o duplo clique que o atalho vem
+  substituir. Da decima em diante nao ha numero: nao existe `Alt+10`, e um
+  "10." sem tecla seria a promessa que F18 existe para impedir. `Alt+N` sem
+  a sugestao N diz "Não há sugestão N" em vez de nao fazer nada — a mesma
+  regra de T5, um gesto que acontece e nao responde parece travamento.
+- **O realce e do PRIMEIRO casamento, e so dele.** O plano dizia "os
+  trechos da sugestao selecionada"; `apply_one` troca `count=1`, e pintar
+  todos prometeria uma substituicao que o botao nao faz. A tag nova
+  (`glossary_selected`) fica **acima** de `glossary_hit` e de `find_match`
+  e **abaixo** de `find_current`: a sugestao escolhida e a intencao mais
+  recente, mas a ocorrencia atual da busca continua sendo o unico lugar
+  onde a tecla seguinte vai agir. Como e Tk puro, ela entrou tambem em
+  `apply_theme_colors` — senao ficaria com a cor do tema da abertura
+  (F18), que e o defeito que 22.8 veio consertar.
+- **`Ctrl+M` marca a linha ABERTA, e a caixa da lista acompanha.** Pelo id,
+  como `toggle_row_selection`, e com `sync_row_checkboxes` logo depois: as
+  duas sao a mesma marca, e a caixa que nao acompanha e a divergencia que
+  R6 descreve noutro lugar. Sem linha aberta ele explica. A caixa passou de
+  24 para 32 px (`ROW_CHECKBOX_SIZE`), com `checkbox_width`/`checkbox_height`
+  e nao so `width` — o `width` do `CTkCheckBox` e a largura do widget, e
+  sozinho nao aumenta o alvo.
+
+**O que a verificacao fixou.** Em `test_editor_windows.py`,
+`KeyboardSuggestionAndBatchTests` (14: `Alt+N` aplica a enesima; as nove
+teclas estao ligadas; `Alt+7` sem a setima explica; os botoes trazem "1." e
+"2."; a decima nao traz numero; selecionar realca so o casamento que
+`apply_one` troca, com os acertos comuns intactos; trocar a selecao move o
+realce; recarregar as sugestoes limpa; a ordem das quatro tags; a repintura
+do tema alcanca a tag nova; `Ctrl+M` marca e a caixa acompanha; de novo
+desmarca; sem linha aberta explica; `Ctrl+M` de dentro do texto chega a
+janela sem inserir nada; a caixa tem 32 px). A tabela `KEYBOARD_SHORTCUTS`
+passou a aceitar uma TUPLA de sequencias num rotulo so ("Alt+1 a Alt+9"), e
+os dois testes de F18 — todo listado esta ligado, todo ligado esta listado —
+continuam sendo a conferencia. **10 mutacoes, nenhuma sobrevivente.** Os
+itens 4 a 6 e o 5 (S22) continuam plano.
+
+### 28.10 A janela principal e as configuracoes — progresso e "Revisar pendentes" CONCLUIDOS (2026-09-15)
 
 - **O menu do rascunho foi cortado.** `tk.Menu` no Windows tem a barra
   desenhada pelo sistema, sem tema (F18 ficaria falsa no tema escuro), e
@@ -8361,6 +8563,88 @@ vermelho — e uma garantia existente que o item toca. Garantias planejadas
   uma vez ao construir e precisam repintar. Garantia planejada **M4** (toda
   opcao do JSON tem um lugar na tela, e a tela grava por `update_settings`
   — testavel enumerando as chaves contra os widgets).
+
+**Os dois primeiros feitos em 2026-09-15 (M5). Tres decisoes que o plano
+nao tinha.**
+
+- **"Revisar pendentes" abre o arquivo que TEM POSICOES, e no destino da
+  EXECUCAO.** O worker grava `app.last_run` (`files`, `generated`,
+  `target_language`, `completed`) e so lista os arquivos cujas posicoes
+  foram registradas: sao os unicos que o filtro do editor conhece, e
+  oferecer um arquivo que o seletor nao tem seria abrir a lista inteira
+  fingindo que e a obra. O destino e o da execucao porque o radio pode ter
+  mudado depois dela — a revisao e do que foi gravado. Com mais de um
+  arquivo, abre no primeiro e o log diz onde estao os outros (no seletor).
+  O `TranslationEditor` ganhou tres opcionais (`source_file`,
+  `status_filter`, `target_language`) aplicados ANTES da primeira pagina,
+  pela mesma razao que o filtro por arquivo ja era restaurado ali: depois,
+  a janela abriria na lista inteira e recarregaria em seguida.
+- **Os dois botoes e o texto da barra nao ganharam linha propria: eles
+  entraram na FILEIRA que ja existia**, a do "Iniciar/Pausar/Cancelar". O
+  plano dizia "ao lado da barra", e a medicao mostrou o preco: a janela
+  principal nao tem folga vertical nenhuma — o log e o ultimo a receber
+  espaco —, e uma fileira nova de 32 px derrubava o log de **33 px para
+  1 px**, com o fim dele deixando de ser alcancavel (F23 vermelha). E a
+  familia "correto e nao cabe na tela" do 22.10, agora na vertical. Na
+  fileira dos botoes o custo e zero, e a ordem de empacotamento segue a
+  regra de la: os tres novos sao empacotados por ULTIMO e a direita, entao
+  numa janela estreita quem some e o atalho para a revisao, e nunca o
+  "Cancelar". Dois testes guardam isto: o log continua com mais de 24 px e
+  com o fim alcancavel, e na largura MINIMA os quatro botoes de execucao
+  cabem inteiros.
+- **Os dois botoes acordam em `reset_buttons`.** E o
+  metodo que roda no fim de TODA execucao (inclusive a que falhou e a que o
+  disjuntor interrompeu), entao e o unico lugar em que o estado deles nao
+  pode ficar para tras. Nascem desabilitados: antes da primeira execucao
+  nao ha o que revisar nem que pasta abrir. "Abrir pasta" prefere a do PGN
+  gerado — e ele que vai para o ChessBase —, e cai na do original quando
+  nenhum saiu. Uma execucao interrompida pelo disjuntor ou com falhas
+  TAMBEM e registrada: o que foi traduzido esta no banco e e exatamente o
+  que ha para revisar; so o cancelamento nao chega la, e ai a ultima
+  execucao completa continua valendo.
+- **O texto da barra e uma funcao pura** (`format_progress_status`), e nao
+  um `f-string` dentro do laco: assim ele e conferido sem worker. "Arquivo
+  2/5 · Lote 37/125 · 2.410/6.500 · ~3 min"; o "Arquivo" so aparece com
+  mais de um (num livro de um capitulo e ruido), e a estimativa so com pelo
+  menos um comentario feito E pelo menos um faltando — no comeco nao ha de
+  onde tirar a conta e no fim ela e zero. O `~` e a honestidade da conta: o
+  cache faz um comentario custar milissegundos e a media vira otimista. No
+  fim a barra escreve "Concluída" ou nada, pelo mesmo motivo que ela ja ia
+  a 100 % ou a 0 — o texto congelado no meio era o ultimo sinal da tela que
+  continuava mentindo depois do dialogo.
+
+**O que a verificacao fixou.** Em `test_core.py`: `ProgressStatusTests` (7:
+a linha completa; um arquivo so esconde o "Arquivo"; sem estimativa antes do
+primeiro e depois do ultimo; a regra de tres; as unidades do `~`; o canal do
+rotulo tolera um app sem rotulo e escreve pela thread do Tk) e
+`LastRunRecordTests` (5: a execucao completa e registrada com arquivos,
+gerados e destino; o rotulo passa por "Lote 1/1 · 1/2" e termina em
+"Concluída"; cancelar antes do primeiro arquivo deixa o registro anterior;
+um arquivo que nao pode ser relido nao registra nada; um PGN sem comentario
+tambem nao). Em `test_main_window.py`, `LastRunEntryPointTests` (10:
+nascem desabilitados; uma execucao os acorda; `reset_buttons` os mantem em
+dia; revisar abre no arquivo, em "Pendentes" e no destino da execucao
+contra um radio ja trocado; com varios abre no primeiro e diz; sem execucao
+explica; a pasta preferida e a do gerado, e a do original quando nao ha;
+uma pasta que nao abre avisa; o rotulo nasce vazio sob a barra). Em
+`test_main_window.py`, `HarnessTeardownTests` (2, e o assunto e a suite):
+`tkinter.after_cancel` le o script do `after` com `splitlist(...)[0]` para
+apagar o comando ANTES de cancelar o timer; quando o script e uma lista Tcl
+de varias palavras — alguem agendou com argumentos — esse `[0]` e uma tupla
+e o `deletecommand` levanta `TypeError`, que o `except tk.TclError` da
+desmontagem nao pegava. O sintoma era um erro numa classe sem relacao com o
+assunto, so na suite COMPLETA, e o timer continuava vivo; a correcao cai no
+`after cancel` de Tcl puro, que e o que de fato para o callback. Em
+`test_editor_windows.py`, `EditorOpenedOnARunTests` (6: sem argumentos abre
+como sempre; os tres valores chegam; o destino da execucao vence o radio; a
+primeira pagina ja obedece; status desconhecido cai em "Todas"; arquivo que
+nao existe mais cai em "Todos os arquivos"). 28 testes. **23 mutacoes**,
+tres sobreviventes na primeira passada: o registro sem arquivo revisavel
+(o cenario que faltava e o arquivo ilegivel na releitura — o `except` que
+ja existia), o destino da execucao contra o radio (o cenario tinha os dois
+iguais, padrao 4 da memoria de testes) e a ordem feito/total no rotulo (so
+visivel a meio caminho, porque no fim os dois numeros sao o mesmo). Os tres
+cenarios escritos, as tres morreram. **As configuracoes continuam plano.**
 
 ### 28.11 Engenharia
 

@@ -9,10 +9,9 @@ from .app_config import (
     AUTO_SOURCE_LABEL,
     LANGUAGES,
 )
-
-# Vermelho das acoes destrutivas, em par claro/escuro como o resto do tema.
-DESTRUCTIVE_COLOR = ("#b91c1c", "#7f1d1d")
-DESTRUCTIVE_HOVER_COLOR = ("#991b1b", "#991b1b")
+# O vermelho das acoes destrutivas vive na paleta central: o editor de traducoes
+# tem uma acao dessas tambem ("Descartar nao revisadas"), e as duas sao a mesma cor.
+from .editor_common import DESTRUCTIVE_COLOR, DESTRUCTIVE_HOVER_COLOR
 
 
 def grid_button_row(parent, button_specs, columns=3):
@@ -202,6 +201,38 @@ def setup_main_ui(app):
         command=app.retry_failed_translation,
     )
     app.retry_button.pack(side=tk.LEFT, padx=6)
+
+    # A DIREITA da mesma fileira: o texto da barra e a porta de entrada do dia
+    # (ROADMAP 28.10).
+    # Empacotados por ULTIMO e `side=RIGHT`, porque `pack` atende quem chega
+    # primeiro e nao desenha o que sobrar (22.10): numa janela estreita quem
+    # tem de sumir e o atalho para a revisao, e nunca o "Cancelar".
+    #
+    # Os dois nascem desabilitados e acordam quando uma execucao grava
+    # posicoes; quem decide e `refresh_last_run_buttons`, no fim de cada uma.
+    app.open_folder_button = ctk.CTkButton(
+        btns_line,
+        text="Abrir pasta",
+        width=100,
+        state="disabled",
+        command=app.open_last_run_folder,
+    )
+    app.open_folder_button.pack(side=tk.RIGHT, padx=(6, 0))
+    app.review_run_button = ctk.CTkButton(
+        btns_line,
+        text="Revisar pendentes",
+        width=140,
+        state="disabled",
+        command=app.review_last_run,
+    )
+    app.review_run_button.pack(side=tk.RIGHT, padx=(8, 0))
+    # O texto da barra, a esquerda dos dois: "Lote 37/125 · 2.410/6.500 ·
+    # ~1 min". Nesta fileira, e nao sob a barra, porque uma linha nova custaria
+    # 32 px que esta janela nao tem — o log e o ultimo a receber espaco, e a
+    # medicao mostrou que ele caia de 33 px para 1 px (a familia "correto e nao
+    # cabe na tela" do 22.10). Aqui nao custa pixel nenhum: a fileira ja existe.
+    app.progress_label = ctk.CTkLabel(btns_line, text="", anchor="e")
+    app.progress_label.pack(side=tk.RIGHT, padx=(8, 0))
 
     tools_section, tools_frame = create_section(main_frame, "Ferramentas")
     tools_section.pack(fill=tk.X, pady=(0, 8))

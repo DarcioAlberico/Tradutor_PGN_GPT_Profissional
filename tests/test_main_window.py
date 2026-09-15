@@ -14,6 +14,7 @@ atributos soltos passaria por cima exatamente do que ha para verificar.
 Precisam de display. Onde nao houver, as classes sao puladas.
 """
 
+import os
 import threading
 import time
 import tkinter as tk
@@ -24,6 +25,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 
+import gui_harness
 from gui_harness import GuiTestCase
 from tradutor_pgn import app as app_module
 from tradutor_pgn import db_tools
@@ -1163,6 +1165,197 @@ class RememberedChoicesTests(MainWindowTestCase):
 # ===========================================================================
 # Secao 17 — nenhuma escrita em massa roda durante uma traducao
 # ===========================================================================
+
+
+class HarnessTeardownTests(GuiTestCase):
+    """A desmontagem da suite nao pode quebrar por causa de um `after` pendente.
+
+    `tkinter.after_cancel` le o script do `after` com `splitlist(...)[0]` para
+    apagar o comando antes de cancelar. Quando o script e uma LISTA Tcl de
+    varias palavras — alguem agendou com argumentos —, esse `[0]` e uma tupla e
+    o `deletecommand` levanta `TypeError` **antes** de o timer ser cancelado.
+    Um `except tk.TclError` nao pega isso: a suite completa ganhava um erro de
+    desmontagem numa classe que nao tinha nada a ver com o assunto, e o timer
+    ficava vivo.
+    """
+
+    def test_an_after_with_a_list_script_is_cancelled_and_does_not_raise(self):
+        self.root.tk.eval('after 60000 [list puts "a b"]')
+        self.assertTrue(self.root.tk.eval("after info").split())
+
+        gui_harness.cancel_pending_after(self.root)
+
+        self.assertEqual(self.root.tk.eval("after info").split(), [])
+
+    def test_the_ordinary_after_is_cancelled_too(self):
+        self.root.after(60000, lambda: None)
+
+        gui_harness.cancel_pending_after(self.root)
+
+        self.assertEqual(self.root.tk.eval("after info").split(), [])
+
+
+class LastRunEntryPointTests(MainWindowTestCase):
+    """A porta de entrada do dia (ROADMAP 28.10): "Revisar pendentes" e "Abrir pasta".
+
+    Traduzir e revisar sao o mesmo fluxo, e o segundo passo exigia abrir o
+    editor, achar o arquivo no seletor e trocar o status. Os dois botoes vivem
+    sob a barra de progresso, nascem desabilitados e acordam quando uma
+    execucao grava posicoes.
+    """
+
+    def com_execucao(self, arquivos=("C:/obras/cap01.pgn",), gerados=None, idioma="pt"):
+        self.app.last_run = {
+            "files": [os.path.abspath(a) for a in arquivos],
+            "generated": [os.path.abspath(g) for g in (gerados or ())],
+            "target_language": idioma,
+            "completed": True,
+        }
+        app_actions.refresh_last_run_buttons(self.app)
+        self.pump()
+
+    def test_both_buttons_start_disabled(self):
+        self.assertEqual(self.app.review_run_button.cget("state"), "disabled")
+        self.assertEqual(self.app.open_folder_button.cget("state"), "disabled")
+
+    def test_a_run_wakes_them_up(self):
+        self.com_execucao()
+        self.assertEqual(self.app.review_run_button.cget("state"), "normal")
+        self.assertEqual(self.app.open_folder_button.cget("state"), "normal")
+
+    def test_resetting_the_buttons_keeps_them_in_sync(self):
+        """`reset_buttons` roda no fim de toda execucao: e o momento certo."""
+        self.app.last_run = None
+        app_actions.reset_buttons(self.app)
+        self.pump()
+        self.assertEqual(self.app.review_run_button.cget("state"), "disabled")
+
+        self.app.last_run = {"files": ["x"], "generated": [], "target_language": "pt"}
+        app_actions.reset_buttons(self.app)
+        self.pump()
+        self.assertEqual(self.app.review_run_button.cget("state"), "normal")
+
+    def test_reviewing_opens_the_editor_on_the_file_pending_and_the_run_target(self):
+        chamadas = []
+        self.patch(
+            app_actions, "open_translation_editor",
+            lambda app, **kwargs: chamadas.append(kwargs),
+        )
+        # O radio mudou depois da execucao: o que vale e o destino DA EXECUCAO.
+        self.app.target_language.set("it")
+        self.com_execucao(idioma="pt")
+
+        self.button("Revisar pendentes").invoke()
+        self.pump()
+
+        self.assertEqual(chamadas, [{
+            "source_file": os.path.abspath("C:/obras/cap01.pgn"),
+            "status_filter": "Pendentes",
+            "target_language": "pt",
+        }])
+
+    def test_with_several_files_it_opens_the_first_and_says_so(self):
+        chamadas = []
+        self.patch(
+            app_actions, "open_translation_editor",
+            lambda app, **kwargs: chamadas.append(kwargs),
+        )
+        self.com_execucao(arquivos=("C:/obras/cap01.pgn", "C:/obras/cap02.pgn"))
+
+        self.button("Revisar pendentes").invoke()
+        self.pump()
+
+        self.assertEqual(chamadas[0]["source_file"], os.path.abspath("C:/obras/cap01.pgn"))
+        texto = self.log()
+        self.assertIn("cap01.pgn", texto)
+        self.assertIn("1 arquivo(s)", texto)
+
+    def test_reviewing_without_a_run_explains_instead_of_opening(self):
+        chamadas = []
+        self.patch(
+            app_actions, "open_translation_editor",
+            lambda app, **kwargs: chamadas.append(kwargs),
+        )
+        self.app.last_run = None
+
+        self.assertIsNone(app_actions.review_last_run(self.app))
+        self.assertEqual(chamadas, [])
+        self.assertEqual(len(self.dialogs.messages("info")), 1)
+
+    def test_opening_the_folder_prefers_the_generated_file(self):
+        abertas = []
+        self.patch(app_actions, "open_path_in_explorer", abertas.append)
+        self.com_execucao(
+            arquivos=("C:/obras/cap01.pgn",), gerados=("C:/saida/cap01-BR.pgn",)
+        )
+
+        self.button("Abrir pasta").invoke()
+        self.pump()
+
+        self.assertEqual(abertas, [os.path.dirname(os.path.abspath("C:/saida/cap01-BR.pgn"))])
+
+    def test_without_a_generated_file_it_opens_the_source_folder(self):
+        abertas = []
+        self.patch(app_actions, "open_path_in_explorer", abertas.append)
+        self.com_execucao(arquivos=("C:/obras/cap01.pgn",))
+
+        self.button("Abrir pasta").invoke()
+        self.pump()
+
+        self.assertEqual(abertas, [os.path.dirname(os.path.abspath("C:/obras/cap01.pgn"))])
+
+    def test_a_folder_that_will_not_open_says_so(self):
+        def falhar(_path):
+            raise OSError("pasta sumiu")
+
+        self.patch(app_actions, "open_path_in_explorer", falhar)
+        self.com_execucao()
+
+        self.assertIsNone(app_actions.open_last_run_folder(self.app))
+        self.assertEqual(len(self.dialogs.messages("error")), 1)
+        self.assertIn("pasta sumiu", self.dialogs.messages("error")[0])
+
+    def test_the_progress_label_starts_empty_beside_the_run_buttons(self):
+        self.assertEqual(self.app.progress_label.cget("text"), "")
+        self.assertEqual(self.app.progress_label.winfo_manager(), "pack")
+        self.assertIs(self.app.progress_label.master, self.app.retry_button.master)
+
+    def test_the_new_controls_cost_the_log_no_height(self):
+        """A familia "correto e nao cabe na tela" (22.10), medida onde doi.
+
+        A janela principal nao tem folga vertical: o log e o ultimo a receber
+        espaco, e uma fileira propria para estes controles o derrubava de 33 px
+        para 1 px. Eles moram na fileira dos botoes, que ja existia — entao o
+        fim do log continua alcancavel, que e o que F23 protege.
+        """
+        for numero in range(80):
+            self.app.log_message(f"linha {numero}")
+        app_actions.update_log(self.app)
+        self.pump()
+        self.app.log_text.see(tk.END)
+        self.pump()
+
+        self.assertGreater(self.app.log_text.winfo_height(), 24)
+        self.assertTrue(app_actions.log_is_at_the_end(self.app.log_text))
+
+    def test_at_the_minimum_width_the_run_controls_do_not_push_cancel_out(self):
+        """`pack` nao desenha o que sobra: quem tem de sumir e o atalho, nunca o
+        "Cancelar"."""
+        self.app.root.geometry(f"{app_module.MAIN_MIN_WIDTH}x{app_module.MAIN_MIN_HEIGHT}")
+        self.pump()
+        self.pump()
+        fileira = self.app.retry_button.master
+        for botao in (
+            self.app.start_button,
+            self.app.pause_button,
+            self.app.resume_button,
+            self.app.cancel_button,
+        ):
+            fim = botao.winfo_x() + botao.winfo_width()
+            self.assertLessEqual(
+                fim, fileira.winfo_width(),
+                f"{botao.cget('text')} termina em {fim} numa fileira de {fileira.winfo_width()}",
+            )
 
 
 class MassWriteGuardTests(MainWindowTestCase):
