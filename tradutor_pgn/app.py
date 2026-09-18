@@ -64,6 +64,10 @@ class PGNTranslatorApp:
         self.target_language = tk.StringVar(value=escolhas["target_language"])
         self.source_language = tk.StringVar(value=escolhas["source_language"])
         self.process_subdirs = tk.BooleanVar(value=escolhas["process_subdirs"])
+        # O motor da ultima execucao (ROADMAP 28.7): o que o dialogo do
+        # "Iniciar tradução" oferece pre-selecionado. So vale com chave; sem
+        # ela o dialogo nem aparece e o Google e o motor.
+        self.translation_provider = escolhas["translation_provider"]
         self.is_processing = False
         # A ultima execucao que gravou posicoes: `{"files", "generated",
         # "target_language", "completed"}`, escrita pelo worker e lida por

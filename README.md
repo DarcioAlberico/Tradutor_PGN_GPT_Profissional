@@ -515,6 +515,34 @@ cancelamento (~25 s em 200 mil traducoes, uma vez). O botao **Reavaliar QA** faz
 mesmo na hora — para quem cancelou, ou para quem editou o `Termos-suspeitos.txt` a
 mao.
 
+## Traduzir com um modelo de linguagem (Claude, ChatGPT, DeepSeek)
+
+O motor de sempre e o Google, sem chave e sem custo. Desde o ROADMAP 28.7 da
+para traduzir com um modelo de linguagem, que sabe xadrez e recebe o seu
+glossario antes de traduzir: no piloto de 200 comentarios, o Claude deixou 1
+aviso de qualidade contra 30 do Google, sem perder um lance nem uma anotacao.
+Custa dinheiro — da ordem de US$ 25 por livro de 7.500 comentarios com o
+`claude-opus-5` — e por isso nunca e ligado sozinho.
+
+1. Em **Configurações**, secao "Modelos de linguagem", cole a chave de API do
+   provedor (Claude/Anthropic, ChatGPT/OpenAI ou DeepSeek) e, se quiser, troque
+   o nome do modelo pelo que o console do provedor oferece. A chave vai para
+   `chaves-api.json` na pasta de dados, cifrada com o DPAPI do Windows (so esta
+   conta, nesta maquina); nunca aparece inteira em tela ou log. Uma variavel
+   de ambiente (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`) tem
+   precedencia sobre o arquivo.
+2. Para o Claude e preciso o SDK: `uv sync --extra llm`. ChatGPT e DeepSeek
+   nao precisam de nada.
+3. Com pelo menos uma chave gravada, **Iniciar tradução** (e **Reprocessar
+   falhas**) pergunta qual motor usar — Google ou um dos modelos —, com o da
+   execucao anterior pre-selecionado. Sem chave nenhuma, nao pergunta.
+
+Tudo o mais e igual: o lote, a mascara das anotacoes, o glossario, a
+correcao de lances, o aviso de qualidade e o **Reverter execução** — que e a
+rede de seguranca para experimentar um motor novo e jogar fora o que ele
+deixou. A execucao fica registrada com `provedor:modelo`, e o fim do log diz
+quantas requisicoes e tokens o modelo gastou.
+
 ## Arquivos principais
 
 - `PGN_Tradutor_Pro.py`: ponto de entrada da aplicacao.
@@ -540,6 +568,10 @@ mao.
 - `tradutor_pgn/glossario.py`: leitura e aplicacao do glossario.
 - `tradutor_pgn/glossary_editor.py`: janela dedicada para manter o glossario persistente.
 - `tradutor_pgn/history_window.py`: subjanela com o historico de alteracoes de uma traducao.
+- `tradutor_pgn/llm_prompt.py`: o prompt, o lote JSON numerado e a validacao por id dos modelos de linguagem — o mesmo texto do piloto e do programa.
+- `tradutor_pgn/llm_providers.py`: os tres provedores de modelo (Claude pelo SDK da Anthropic; ChatGPT e DeepSeek pelo `chat/completions`) na costura de lote do worker.
+- `tradutor_pgn/api_keys.py`: as chaves de API, num arquivo proprio cifrado com o DPAPI, com a mascara `****wxyz` que log e tela mostram.
+- `tradutor_pgn/provider_dialog.py`: o dialogo "Motor de tradução" do Iniciar tradução.
 - `tradutor_pgn/main_window.py`: montagem da janela principal.
 - `tradutor_pgn/pgn_spellcheck.py`: normalizacao opcional de metadados PGN com `spelling.ssp`.
 - `tradutor_pgn/prose_spellcheck.py`: corretor ortografico da PROSA traduzida, com o filtro que separa erro de digitacao de notacao, nome proprio e terminologia do glossario.

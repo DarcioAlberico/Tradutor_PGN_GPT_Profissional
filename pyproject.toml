@@ -20,6 +20,11 @@ dependencies = [
 #   uv sync --extra tabuleiro   /   python -m pip install chess
 [project.optional-dependencies]
 tabuleiro = ["chess>=1.11"]
+# O SDK da Anthropic, para o motor Claude (ROADMAP 28.7). ChatGPT e DeepSeek
+# falam por `requests` e nao precisam de nada. Opcional pelo mesmo motivo do
+# tabuleiro: quem so usa o Google nao o carrega, e o `.exe` so o leva se o
+# ambiente do build o tiver.
+llm = ["anthropic>=1.0"]
 
 # So para desenvolver e para o CI: a suite roda com `pytest` (tambem roda com
 # `unittest`, mas o CI quer o `-q` e o resumo dele) e o lint com `ruff`. O `uv
@@ -36,6 +41,9 @@ files = [
     "tradutor_pgn/translation_api.py",
     "tradutor_pgn/database.py",
     "tradutor_pgn/word_count.py",
+    "tradutor_pgn/api_keys.py",
+    "tradutor_pgn/llm_prompt.py",
+    "tradutor_pgn/llm_providers.py",
 ]
 python_version = "3.10"
 ignore_missing_imports = true

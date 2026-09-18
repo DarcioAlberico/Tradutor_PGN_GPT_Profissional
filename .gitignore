@@ -11,6 +11,9 @@ __pycache__/
 *.db-wal
 *.db-shm
 pgn_tradutor_pro_settings.json
+# As chaves de API (ROADMAP 28.7): cifradas, mas nunca no repositorio.
+chaves-api.json
+chaves-api.json.tmp
 traducoes.db-journal
 backups/
 logs/

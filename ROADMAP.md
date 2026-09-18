@@ -8370,7 +8370,7 @@ execucao estava em outro ARQUIVO, e a clausula vizinha a poupava — o
 cenario e a execucao anterior do MESMO livro) e "a mais recente" (o teste
 tinha uma execucao so). Os tres cenarios escritos, as tres morreram.
 
-### 28.7 O modelo de linguagem: primeiro o piloto, depois o provedor
+### 28.7 O modelo de linguagem: primeiro o piloto, depois o provedor — o piloto RODOU (2026-09-15); os TRES provedores e o dialogo do motor FEITOS (2026-09-16); a leitura cega continua devida
 
 O motor e o endpoint `gtx` nao oficial do Google, e so ele
 (`translation_api.py`). O projeto se chama "GPT" e nao ha modelo de linguagem
@@ -8465,6 +8465,147 @@ divergente), **K1** (a chave nunca aparece inteira em log, settings ou
 dialogo — testavel por amostra nos tres) e **B5** (lote JSON: cada id
 exatamente uma vez, ou o lote e desalinhado). E o maior item da secao:
 provedor, configuracao, chave, dialogo de custo, ponte C1 e testes.
+
+**O script do passo 0 existe: `ferramentas/piloto_llm.py`** (2026-09-15),
+cinco subcomandos — `amostrar`, `traduzir`, `avaliar`, `folha`, `apurar` —
+e 23 testes das partes puras mais o fluxo inteiro de `traduzir` com um
+cliente falso (`tests/test_piloto_llm.py`). So a chamada de rede fica sem
+teste. A saida vai para `piloto/`, fora do repositorio: a amostra sao 200
+comentarios do livro, obra protegida. O que ja foi medido SEM chave:
+
+- **A amostra e mais dura do que o banco.** Das 200 linhas, 188 foram
+  julgadas por humano (a preferencia do sorteio) e o Google foi aceito sem
+  editar em **68 delas — 36 %**, contra os 64 % do banco inteiro. E o
+  esperado: os tres estratos sao os que a revisao mais edita, e a barra dos
+  80 % foi posta contra os 64 %. A comparacao que decide e PAREADA, linha
+  a linha, na leitura cega — o modelo tem de bater o Google nas mesmas
+  linhas, e nao a media do banco.
+- **O Google "de hoje" nao e o de agosto.** O texto gravado e o que a
+  maquina produziu antes de `normalize_prose` existir: 87 das 200 linhas
+  tem aviso QA, 63 delas o `after` -> `depois` sem `de`. Passado pelo
+  pipeline de hoje (`google-hoje`, so a normalizacao de prosa), sobram 30
+  avisos e **37 das 120 linhas editadas pelo humano ficam identicas ao que
+  ele escreveu** — eram 2. E a medida do que 28.4 e 28.2 camada 2 valem
+  neste livro, e e contra esse Google que a folha cega compara.
+- **Contexto de lances: 198 das 200 linhas** encontradas no PGN, apesar do
+  arquivo so com `
+` e do `K.Shiven` que a extracao separa em `K. Shiven`
+  — o casamento aceita qualquer espaco (ou nenhum) entre palavras.
+- Ancoras de lance: zero divergencias no Google. E o numero contra o qual o
+  portao do modelo tem de dar zero tambem.
+
+Decisoes de desenho do script que o provedor herda se o piloto passar:
+bloco de sistema em duas partes com `cache_control` (regras duras + letras
+das pecas + terminologia da semente; e as 903 `automatic` do par com
+`@casa@` expandido, ~30 mil caracteres — acima do prefixo minimo de cache);
+lote de 20 itens em JSON numerado por `output_config.format` com esquema
+estrito; `antes`/`depois` com o lance vizinho; sugestoes casadas no texto do
+lote (ate 80, `@casa@` de fora); mascara X1 antes e `restore_annotations`
+depois, com sentinela engolido contando como falha do item; regras
+automaticas e `fix_move_notation` depois da API; o que faltou no lote e
+reenviado sozinho uma vez (B1/B2); `normalize_prose` e RODADA mas so
+CONTADA — "em quantos itens ela mudaria algo" e a pergunta de 28.2 camada 2
+sobre um modelo instruido. Precos de `PRECOS` sao os da referencia da API em
+2026-06 e a fatura e que confirma.
+
+**O piloto rodou em 2026-09-15 com `claude-opus-5`** (a chave entrou como
+variavel de ambiente; o script nunca a imprime). O que a avaliacao
+AUTOMATICA mediu, nas mesmas 200 linhas, contra os dois Googles:
+
+| motor | com aviso QA | ancora divergente | iguais ao humano (das 120 editadas) |
+|---|---|---|---|
+| google (gravado em agosto) | 87 | 0 | 2 |
+| google-hoje (`normalize_prose`) | 30 | 0 | 37 |
+| claude-opus-5 | **1** | 0 | 20 |
+
+- **Os avisos quase somem: 87 -> 30 -> 1.** O unico e "Traducao igual ao
+  original" numa citacao — um modelo instruido nao produz o `depois` sem
+  `de`, o `Brancas` no meio da frase nem a terminologia fora do glossario. A
+  pergunta de 28.2 camada 2 ("em quantos itens `normalize_prose` mudaria
+  algo") deu **1 em 200**: os artefatos sao mesmo do `gtx`.
+- **Zero divergencia de ancora, zero sentinela perdido** (53 itens
+  mascarados), zero lote cortado por `max_tokens`, zero reenvio individual,
+  zero lance que `fix_move_notation` ainda precisou corrigir. O portao T6 nao
+  teve o que pegar.
+- **"Iguais ao humano" cai de 37 para 20**, e isso NAO e o numero que decide:
+  o modelo escreve diferente do revisor sem escrever errado, e a similaridade
+  media (0,83 contra 0,93) mede a mesma coisa. So a leitura cega diz se a
+  linha diferente e aceitavel sem editar — e a regua dos 80 % e essa.
+- **Custo e mecanica**: 10 requisicoes de 20 itens, 257 s no total (26 s por
+  lote), 36.844 tokens de entrada (13.190 lidos do cache — 36 %; o bloco de
+  sistema cacheou como o desenho previa) e 21.823 de saida: 184 e 109 por
+  linha. **US$ 0,67 pelas 200 linhas**, que extrapola para **US$ 25 a 30 por
+  livro de 7.500** — acima da estimativa de US$ 8 a 12, porque a saida em
+  portugues custa 5x a entrada e o desenho tinha subestimado o tamanho dela.
+  Continua fora da variavel de decisao: sao 40 a 70 horas de revisao.
+
+**A leitura cega continua sendo sua** — `piloto/folha-cega-claude-opus-5.csv`
+e `python ferramentas/piloto_llm.py apurar` — e continua decidindo 28.5 item
+3 e se o modelo vira o motor PADRAO de alguem. O que mudou em 2026-09-16 e
+que o provedor foi construido ANTES do numero, por pedido: o usuario quis
+entrar com as chaves do Claude, do ChatGPT e do DeepSeek em Configuracoes e
+escolher o motor a cada "Iniciar tradução". A rede de seguranca ja existia
+(Z4/Z5), e o custo de uma execucao e o de um livro, nao o de um desenho.
+
+**Feito em 2026-09-16 — o que foi construido, e o que o desenho acima
+previa e nao foi.**
+
+- **Tres provedores, dois protocolos** (`llm_providers.py`): Claude pela API
+  da Anthropic com o SDK (`output_config` com o esquema do lote,
+  `cache_control` nos blocos de sistema — a chamada que o piloto provou);
+  ChatGPT e DeepSeek pelo `chat/completions` com `requests`
+  (`response_format: json_object`; a OpenAI pede `max_completion_tokens`, a
+  DeepSeek `max_tokens`). O SDK e o extra `llm` do `pyproject` (o CI o
+  instala); sem ele o Claude e recusado antes de a execucao comecar. Os
+  nomes dos modelos sao campos livres com padrao (`claude-opus-5`, `gpt-5`,
+  `deepseek-chat`): os provedores trocam de modelo mais depressa do que o
+  programa lanca versao, e a tela diz onde conferir. **Conferido com uma
+  requisicao real ao Claude** pelo codigo de produto: dois comentarios com
+  sentinela e a regra `rook -> torre`, resposta alinhada, sentinela intacto,
+  1.357 tokens lidos do cache.
+- **A costura e a do Google, e essa e a decisao central.** O desenho pedia
+  uma interface `TranslationProvider` com B2/B3/W2/C4 como contratos; o que
+  se fez e menor e mais seguro: o worker tem UMA porta (`traduzir`), o
+  provedor de modelo recebe o mesmo texto com ` ||| `, manda o JSON numerado,
+  confere cada id (B5) e devolve o texto juntado na ORDEM DOS IDS; o id que
+  faltou volta VAZIO, e `misaligned_batch_part` passou a acusar a parte
+  vazia em qualquer tamanho (antes o piso de 40 caracteres a deixava passar
+  — um Google que devolvesse vazio para `", and"` gravava vazio). Nada do
+  pipeline mudou de lugar, e os 70 pontos de teste que substituem
+  `translate_text` continuam valendo porque a porta resolve o nome na
+  chamada. O que NAO se ganhou com isso: o contexto de lances
+  (`antes`/`depois`) do piloto, que a costura de texto nao carrega; o
+  prompt aceita os campos vazios.
+- **O prompt e o do piloto** (`llm_prompt.py`, importado pelos dois):
+  generalizado para qualquer par (`PIECE_LETTERS` da origem e do destino;
+  par fora da tabela recebe "mantenha a notacao"; origem vazia e "o idioma
+  do original"), com a instrucao do JSON no texto para os provedores sem
+  esquema. Regras `automatic` do par no bloco de sistema e sugestoes que
+  casam no lote (ate 80), como no piloto.
+- **Chaves (K1)**: `api_keys.py`, arquivo `chaves-api.json` na pasta de
+  dados, DPAPI por `ctypes` (`CryptProtectData`, sem dialogo), variavel de
+  ambiente vence, `mask_api_key` = `****wxyz`. A tela nunca le a chave para
+  o campo; o placeholder diz o estado. Fora do Windows o arquivo diz
+  `"cifra": "nenhuma"` (o CI headless roda nos dois). Um 401 e fatal para a
+  execucao — o provedor para de chamar e o disjuntor encerra.
+- **A tela** ganhou a secao "Modelos de linguagem" (chave + modelo por
+  provedor, "apagar" como caixa a parte) e o corpo virou rolavel: cinco
+  secoes requerem ~1.000 px, e a tela de um notebook nao tem isso; os
+  botoes ficam fora do rolo. **O dialogo** "Motor de tradução" (M6) aparece
+  so com chave, sempre com chave, tambem no "Reprocessar falhas", com o
+  motor da execucao anterior pre-selecionado e o provedor sem chave
+  desligado e dito. A execucao grava `provedor:modelo` (Z5).
+- **Nao feito, e dito na SPEC 3.8**: o portao estrito de ancoras (T6); a
+  estimativa de custo antes de iniciar (o log mostra tokens no fim); os
+  `fallbacks` de recusa da Anthropic (zero recusas em 200 linhas);
+  `logging`. **Custo medido por linha** no piloto: US$ 0,0034 com o Opus —
+  ~US$ 25 por livro de 7.500.
+- Testes: 27 headless em `test_llm.py` (chaves, prompt, os dois protocolos
+  com sessao/cliente falsos, 401, 429 com retentativa, cancelamento), 4 do
+  worker (provedor responde tudo e assina a execucao; parte vazia reenviada
+  sozinha; provedor indisponivel aborta antes da primeira linha; Google
+  continua o padrao) e 7 de janela (tela e dialogo). Mutacao: tirar a regra
+  da parte vazia derruba dois testes.
 
 ### 28.8 O tabuleiro — CONCLUIDO (2026-09-15)
 

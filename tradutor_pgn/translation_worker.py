@@ -33,6 +33,7 @@ from .glossario import (
     clean_comment_for_translation,
     load_automatic_substitutions,
     load_cleanup_substitutions,
+    load_interactive_substitutions,
 )
 from .pgn_utils import (
     BATCH_MAX_CHARS,
@@ -54,10 +55,12 @@ from itertools import chain
 
 from .app_config import TRANSLATION_REQUEST_DELAY_SECONDS  # noqa: F401 (compat)
 from .failed_runs import build_failed_run_record, save_failed_run
+from .llm_providers import GOOGLE_PROVIDER, build_translator, model_setting_key
 from .pgn_positions import chess_available, compute_comment_fens
 from .settings import (
     load_settings,
     read_board_settings,
+    read_llm_settings,
     read_output_settings,
 )
 from .translation_api import TRANSLATION_PROVIDER, RequestPacer, translate_text
@@ -187,8 +190,15 @@ def run_translation(
     process_subdirs,
     only_files=None,
     source_language=SOURCE_LANGUAGE_UNKNOWN,
+    provider=GOOGLE_PROVIDER,
 ):
     """Traduz os comentarios dos PGN de `source_path`.
+
+    `provider` e o motor (ROADMAP 28.7): `"google"` e o de sempre; um id de
+    `llm_providers.PROVIDERS` monta um `LLMTranslator` com a chave do usuario
+    e o prompt do par, e TODAS as chamadas a API desta execucao passam por
+    ele — pela mesma costura de lote ` ||| ` do Google, de modo que B1/B2/B3,
+    a mascara X1 e o que vem depois dela nao sabem qual motor respondeu.
 
     `only_files` restringe a execucao a uma lista explicita, que e como o
     "Reprocessar falhas" reaproveita esta funcao inteira em vez de duplicar o
@@ -288,7 +298,45 @@ def run_translation(
         if automatic_rules:
             app.log_message(f"Regras automaticas carregadas: {len(automatic_rules)}")
 
-        provider_name = TRANSLATION_PROVIDER
+        # O motor. Sem chave ou sem SDK a execucao nem comeca — o dialogo ja
+        # recusou antes (M1) —, mas a guarda fica: uma chave apagada entre o
+        # dialogo e este ponto nao pode virar uma execucao no Google sem aviso.
+        llm = None
+        if provider != GOOGLE_PROVIDER:
+            modelos = read_llm_settings(load_settings())
+            try:
+                llm = build_translator(
+                    provider,
+                    modelos.get(model_setting_key(provider), ""),
+                    source_language,
+                    target_language,
+                    automatic_rules,
+                    load_interactive_substitutions(
+                        source_language=source_language, target_language=target_language
+                    ),
+                )
+            except (ValueError, LookupError, ImportError) as exc:
+                app.log_message(f"[ERRO] Motor {provider!r} indisponivel: {exc}")
+                aborted_by_api = True
+                return
+            app.log_message(llm.describe())
+        provider_name = llm.run_label if llm is not None else TRANSLATION_PROVIDER
+
+        def traduzir(texto):
+            """UMA porta para a API, seja qual for o motor. `translate_text` e
+            resolvido na chamada, e nao no import, para os testes que o
+            substituem continuarem valendo."""
+            if llm is not None:
+                return llm.translate(texto, target_language, app.log_message, app.cancel_flag)
+            return translate_text(
+                texto,
+                target_language,
+                app.log_message,
+                app.cancel_flag,
+                session=http_session,
+                pacer=pacer,
+                source_language=source_language,
+            )
 
         if only_files is None:
             pgn_files, skipped_generated = collect_pgn_files(source_path, process_subdirs)
@@ -535,15 +583,7 @@ def run_translation(
                 return None
             cleaned = clean_comment_for_translation(original, cleanup_rules)
             masked, annotation_only = mask_annotations(cleaned, player_names=False)
-            translated = translate_text(
-                masked,
-                target_language,
-                app.log_message,
-                app.cancel_flag,
-                session=http_session,
-                pacer=pacer,
-                source_language=source_language,
-            )
+            translated = traduzir(masked)
             if not translated:
                 return None
             translation, corrigidos, consertos = acabar(translated, original)
@@ -679,15 +719,7 @@ def run_translation(
                         joined = join_comments_for_batch(masked_texts)
 
                         api_started = time.perf_counter()
-                        translated_joined = translate_text(
-                            joined,
-                            target_language,
-                            app.log_message,
-                            app.cancel_flag,
-                            session=http_session,
-                            pacer=pacer,
-                            source_language=source_language,
-                        )
+                        translated_joined = traduzir(joined)
                         batch_api_time += time.perf_counter() - api_started
                         batch_api_requests += 1
 
@@ -831,15 +863,7 @@ def run_translation(
                                     app.log_message("Traducao cancelada pelo usuario.")
                                     return
                                 api_started = time.perf_counter()
-                                translated = translate_text(
-                                    masked,
-                                    target_language,
-                                    app.log_message,
-                                    app.cancel_flag,
-                                    session=http_session,
-                                    pacer=pacer,
-                                    source_language=source_language,
-                                )
+                                translated = traduzir(masked)
                                 batch_api_time += time.perf_counter() - api_started
                                 batch_api_requests += 1
                                 if translated:
@@ -1119,6 +1143,10 @@ def run_translation(
         app.log_message(f"Traducoes reutilizadas do cache: {cache_count}")
         app.log_message(f"Comentarios que falharam: {failed_count}")
         app.log_message(f"Arquivos PGN traduzidos gerados: {generated_files}")
+        if llm is not None:
+            # O que o modelo custou, em tokens: a fatura e do provedor, mas o
+            # numero que a explica fica no log da execucao.
+            app.log_message(f"{llm.spec.label} ({llm.model}): {llm.usage.summary()}")
         if corrige_lances:
             app.log_message(f"Lances com a letra da peca corrigida: {move_fixes}")
         if names_resent:

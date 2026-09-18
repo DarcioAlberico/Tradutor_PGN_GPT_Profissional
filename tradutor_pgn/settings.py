@@ -357,11 +357,21 @@ def read_output_settings(settings):
 
 MAIN_WINDOW_KEY = "main_window"
 
+# Os motores que o dialogo do "Iniciar tradução" oferece (ROADMAP 28.7).
+# "google" e o de sempre; os outros sao os ids de `llm_providers.PROVIDERS`,
+# escritos aqui tambem para o arquivo validar sem importar a camada de rede.
+TRANSLATION_PROVIDER_GOOGLE = "google"
+TRANSLATION_PROVIDER_IDS = (TRANSLATION_PROVIDER_GOOGLE, "anthropic", "openai", "deepseek")
+
 MAIN_WINDOW_DEFAULTS = {
     "source_language": "",
     "target_language": "pt",
     "process_subdirs": True,
     "source_path": "",
+    # O motor escolhido no ultimo "Iniciar tradução" — o que o dialogo oferece
+    # pre-selecionado na proxima vez. Nunca decide sozinho: sem chave para ele,
+    # o dialogo cai no Google e diz por que (garantia M1, ROADMAP 28.7).
+    "translation_provider": TRANSLATION_PROVIDER_GOOGLE,
     # Tamanho e posicao (ROADMAP 22.12). Vazio quer dizer "nunca foi gravado", e
     # ai a janela maximiza — que e o que ela sempre fez, e o certo para a
     # primeira abertura. Os dois editores ja lembravam a geometria deles; a
@@ -418,6 +428,10 @@ def read_main_window_settings(settings, known_languages):
     if isinstance(geometria, str):
         valores["geometry"] = geometria
 
+    motor = guardado.get("translation_provider")
+    if isinstance(motor, str) and motor in TRANSLATION_PROVIDER_IDS:
+        valores["translation_provider"] = motor
+
     return valores
 
 
@@ -454,5 +468,32 @@ def read_board_settings(settings):
     valores = dict(BOARD_DEFAULTS)
     if isinstance(guardado, dict) and isinstance(guardado.get("fen"), bool):
         valores["fen"] = guardado["fen"]
+    return valores
+
+
+LLM_KEY = "llm"
+
+# O modelo de cada provedor de linguagem (ROADMAP 28.7). Os nomes sao os que
+# cada API aceita; o campo e livre porque os provedores trocam de modelo mais
+# depressa do que este programa lanca versao — quem acompanha o nome e o
+# usuario, e a tela diz onde conferir. As chaves NAO ficam aqui: vivem em
+# `api_keys` (arquivo proprio, cifrado), e a tela as trata como campo a parte.
+LLM_DEFAULTS = {
+    "anthropic_model": "claude-opus-5",
+    "openai_model": "gpt-5",
+    "deepseek_model": "deepseek-chat",
+}
+
+
+def read_llm_settings(settings):
+    """Os modelos gravados; um campo vazio ou de outro tipo volta ao padrao."""
+    guardado = settings.get(LLM_KEY)
+    valores = dict(LLM_DEFAULTS)
+    if not isinstance(guardado, dict):
+        return valores
+    for chave in LLM_DEFAULTS:
+        modelo = guardado.get(chave)
+        if isinstance(modelo, str) and modelo.strip():
+            valores[chave] = modelo.strip()
     return valores
 

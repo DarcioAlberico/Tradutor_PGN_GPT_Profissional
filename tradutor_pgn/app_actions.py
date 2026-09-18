@@ -34,7 +34,14 @@ from .failed_runs import (
 from .glossario import load_interactive_substitutions, report_glossary_error
 from .glossary_editor import open_glossary_editor
 from .pgn_spellcheck import normalize_pgn_metadata_path
-from .settings import write_main_window_settings
+from .llm_providers import (
+    GOOGLE_PROVIDER,
+    PROVIDERS,
+    anthropic_sdk_available,
+    configured_providers,
+)
+from .provider_dialog import ask_translation_provider
+from .settings import load_settings, read_llm_settings, write_main_window_settings
 from .translation_worker import run_translation
 
 
@@ -295,6 +302,10 @@ def start_translation(app):
         messagebox.showerror("Erro", "O caminho informado não existe.")
         return
 
+    provider = choose_translation_provider(app)
+    if provider is None:
+        return
+
     _begin_translation_run(app)
 
     target_language = app.target_language.get()
@@ -303,9 +314,47 @@ def start_translation(app):
     threading.Thread(
         target=run_translation,
         args=(app, source_path, target_language, process_subdirs),
-        kwargs={"source_language": app.source_language.get()},
+        kwargs={"source_language": app.source_language.get(), "provider": provider},
         daemon=True,
     ).start()
+
+
+def choose_translation_provider(app):
+    """Google ou um modelo de linguagem? `None` quando o usuario cancelou.
+
+    Sem chave configurada nao ha pergunta: o Google e o unico motor. Com
+    chave, o dialogo aparece SEMPRE (ROADMAP 28.7) — o motor da ultima
+    execucao vem pre-selecionado, e a escolha e lembrada em `main_window`.
+    Um provedor escolhido cujo SDK falta e recusado ANTES de a execucao
+    comecar, com a instrucao de instalar: nunca trocar de motor em silencio
+    (garantia M1).
+    """
+    configurados = configured_providers()
+    if not configurados:
+        return GOOGLE_PROVIDER
+    settings = load_settings()
+    lembrado = getattr(app, "translation_provider", GOOGLE_PROVIDER)
+    escolhido = ask_translation_provider(
+        app, configurados, read_llm_settings(settings), lembrado
+    )
+    if escolhido is None:
+        return None
+    spec = PROVIDERS.get(escolhido)
+    if spec is not None and spec.kind == "anthropic" and not anthropic_sdk_available():
+        messagebox.showerror(
+            "Motor de tradução",
+            f"O pacote 'anthropic' não está instalado, e sem ele o {spec.label} "
+            f"não pode ser usado.\n\nInstale com:\n    uv sync --extra llm\n\n"
+            f"A tradução não foi iniciada.",
+        )
+        return None
+    if escolhido != lembrado:
+        app.translation_provider = escolhido
+        try:
+            write_main_window_settings({"translation_provider": escolhido})
+        except OSError:
+            pass
+    return escolhido
 
 
 def _begin_translation_run(app):
@@ -404,11 +453,15 @@ def retry_failed_translation(app):
             f"{origem or 'detectar'}"
         )
 
+    provider = choose_translation_provider(app)
+    if provider is None:
+        return
+
     _begin_translation_run(app)
     threading.Thread(
         target=run_translation,
         args=(app, presentes[0], idioma, False),
-        kwargs={"only_files": presentes, "source_language": origem},
+        kwargs={"only_files": presentes, "source_language": origem, "provider": provider},
         daemon=True,
     ).start()
 

@@ -122,6 +122,23 @@ tambem conta: o que foi traduzido esta no banco e e o que ha para revisar. So o
 cancelamento nao registra nada, e ai a ultima execucao completa continua
 valendo.
 
+
+**Garantia M6 — o motor e escolhido a cada "Iniciar tradução", e nunca em
+silencio.** Com pelo menos uma chave de API configurada (secao 3.8), o clique
+abre o dialogo "Motor de tradução": Google (o de sempre, gratuito) e cada
+provedor de modelo de linguagem com o modelo que a tela de Configuracoes
+gravou; um provedor SEM chave aparece desligado e diz "sem chave —
+Configurações", em vez de sumir. O escolhido na execucao anterior vem
+pre-selecionado — e so isso: nada e escolhido por ninguem, e Cancelar nao
+comeca nada. Sem chave nenhuma o dialogo nao aparece, porque o Google e o
+unico motor e a pergunta seria um clique por nada. "Reprocessar falhas"
+pergunta do mesmo jeito. Um provedor cujo pacote falta (o `anthropic`, para
+o Claude) e recusado ANTES de a execucao comecar, com a instrucao de
+instalar; e uma chave apagada entre o dialogo e o worker aborta a execucao
+com `[ERRO]` no log — o motor nunca troca sozinho (a licao de M1). A escolha
+fica em `main_window.translation_provider` e o registro da execucao (Z5)
+grava `provedor:modelo`, entao "Reverter execucao" sabe de quem foi.
+
 **Garantia M2 — um BOM no arquivo de configuracoes nao apaga nada.** A leitura e
 `utf-8-sig` e a gravacao e `utf-8`: aceita-se o BOM, nao se escreve um. O arquivo
 e JSON editavel a mao, e o Bloco de Notas do Windows grava UTF-8 com BOM — lido
@@ -778,7 +795,52 @@ interrompidas, deixam o banco incompleto. Oferecer um botao que nao pode ser
 honrado seria pior do que nao oferecer, porque o usuario clicaria achando que
 parou. A confirmacao avisa disso antes de comecar, e ela e a hora de desistir.
 
----
+### 3.8 Motores de traducao: o Google e os modelos de linguagem
+
+O motor de sempre e o endpoint `gtx` do Google, sem chave e sem custo
+(`translation_api`). Desde o ROADMAP 28.7 ha tres provedores de modelo de
+linguagem — **Claude** (API da Anthropic, pelo SDK `anthropic`, extra `llm`),
+**ChatGPT** (OpenAI) e **DeepSeek**, os dois ultimos pelo mesmo protocolo
+`chat/completions`, por `requests` — e a escolha e feita a cada execucao (M6).
+O piloto (ROADMAP 28.7, passo 0) mediu o que se ganha: nas mesmas 200 linhas,
+o Claude deixou **1 aviso QA contra 30 do Google de hoje**, zero divergencia de
+ancora, zero sentinela perdido, por US$ 0,67; a leitura cega do usuario ainda
+decide se a linha diferente e aceitavel sem editar.
+
+**A costura e a do Google, de proposito.** O worker nao sabe qual motor
+respondeu: monta o lote com ` ||| ` (B1), chama UMA funcao, divide e confere
+a resposta (B2, B5), aplica a mascara X1 antes e as regras automaticas, a
+correcao de lances (P3) e a prosa (P5) depois, conta falhas (T2/T3) e desarma
+pelo disjuntor (B3/B4) — tudo igual. O provedor de modelo (`llm_providers`)
+so troca o que vai no fio: um JSON numerado no lugar do texto corrido, um
+bloco de sistema FIXO com as regras duras, as letras das pecas do par
+(`PIECE_LETTERS`, a mesma fonte de P3), a terminologia da semente e as regras
+`automatic` do par (no Anthropic com `cache_control`: no piloto, 36 % da
+entrada veio do cache), e as sugestoes do glossario que CASAM no texto do lote
+(ate 80). O prompt mora em `llm_prompt` e e o MESMO que o piloto usa — uma
+mudanca de prompt e medida pelo piloto antes de valer aqui.
+
+**Garantia K1 — a chave de API nunca aparece inteira em log, configuracoes
+ou dialogo.** As chaves ficam em `chaves-api.json` na pasta de dados, fora
+do `settings.json` (que e JSON editado a mao, vai para backup e ja foi aberto
+no Bloco de Notas), cifradas com o DPAPI do Windows por `ctypes` — so esta
+conta, nesta maquina; fora do Windows o arquivo diz `"cifra": "nenhuma"` e
+guarda base64. Uma variavel de ambiente (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`) vence o arquivo. A tela de
+Configuracoes nunca LE a chave para o campo: o campo nasce vazio, o
+placeholder diz o estado ("não configurada", "gravada ****wxyz", "do
+ambiente", "ilegível nesta máquina"), o que se digita e gravado e sai do
+campo, e "apagar" e uma caixa a parte. O log da execucao mostra
+`chave ****wxyz` e o resumo de tokens; o dialogo mostra o modelo. Um 401 e
+FATAL para a execucao: o provedor para de chamar a API, cada lote volta
+`None` e o disjuntor (B3) encerra com o motivo no log — insistir seria pagar
+por requisicoes que ninguem vai atender.
+
+**O que nao esta feito, e esta dito**: o portao estrito de ancoras (T6, ainda
+na secao 11) — hoje a correcao de lances (P3) troca a letra e o QA (Q4) avisa
+o lance que sumiu, mas um lance REESCRITO pelo modelo nao e recusado antes de
+gravar; a estimativa de custo antes de iniciar; e os `fallbacks` de recusa da
+API da Anthropic (o piloto nao teve nenhuma em 200 linhas).
 
 ## 4. Zerar o banco e zerar o glossario
 
@@ -2206,6 +2268,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | B2 | Desalinhamento -> traducao individual: contagem de partes errada, ou parte com razao de tamanho em palavras fora de `[0,3; 3,0]` contra o texto enviado (originais de 40 caracteres ou mais) | Risco de desenho: o lote `\|\|\|` alinhava so por posicao (ROADMAP 28.12) |
 | B3 | Falha de API nao vira reprocessamento comentario a comentario | Bug: um lote morto custava ~1 h de requisicoes inuteis |
 | B4 | O disjuntor alcanca o ramo comentario a comentario: tres seguidos sem resposta abortam, um grupo pequeno morto conta como lote, e um grupo vivo zera a conta | Bug: depois de um desalinhamento, a rede caida custava 3 x 30 s por comentario sem que B3 disparasse — o unico caminho fora do alcance do disjuntor (ROADMAP 28.1) |
+| B5 | Um lote JSON dos modelos de linguagem e aceito so se cada id aparece exatamente uma vez; o id que faltou volta como parte VAZIA, que B2 acusa em qualquer tamanho; a resposta embaralhada sai na ordem dos ids | Risco: a razao de tamanho de B2 nao ve a troca de ordem entre partes parecidas; so os ids resolvem (ROADMAP 28.7) |
 | W2 | Backoff exponencial, e o ritmo cai ao ver 429 | Risco: intervalo agressivo sem defesa contra limite de taxa |
 | T1 | Nao sobrescrever traducao existente | — |
 | T2 | Falhas contabilizadas e exibidas | Bug: sucesso reportado com PGN bilingue |
@@ -2300,6 +2363,8 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | M1 | A janela principal reabre no que foi escolhido | Risco: "Detectar" volta sozinho e desliga a correcao de lances sem avisar |
 | M2 | Um BOM no arquivo de configuracoes nao apaga nada | Bug: um caractere invisivel zerava rascunhos, lista de falhas e preferencias |
 | M5 | A barra de progresso diz onde a execucao esta (arquivo, lote, comentarios e uma estimativa), e no fim "Revisar pendentes" abre o editor no arquivo traduzido, em "Pendentes" e no destino DA EXECUCAO, enquanto "Abrir pasta" abre a do PGN gerado — os tres na fileira dos botoes, sem custar altura ao log | Custo: traduzir e revisar sao o mesmo fluxo, e o segundo passo exigia abrir o editor, achar o arquivo no seletor e trocar o status; e a barra nao dizia quanto faltava (ROADMAP 28.10) |
+| M6 | Com chave configurada, "Iniciar tradução" e "Reprocessar falhas" perguntam o motor SEMPRE (Google ou um modelo, o da ultima execucao pre-selecionado; provedor sem chave desligado e dito); sem chave nao perguntam; Cancelar nao comeca; SDK ausente e recusado antes; a execucao grava `provedor:modelo` | Risco: trocar de motor em silencio — a licao de M1 — numa execucao que custa dinheiro (ROADMAP 28.7) |
+| K1 | A chave de API nunca aparece inteira em log, configuracoes ou dialogo: vive em `chaves-api.json` cifrada (DPAPI), a tela nunca a le para o campo, o log ve `****wxyz`; a variavel de ambiente vence; um 401 para as chamadas da execucao | Risco: uma chave paga em texto claro num JSON que vai para backup e para o Bloco de Notas (ROADMAP 28.7) |
 | M3 | A gravacao nunca sobrescreve um arquivo que existe e nao pode ser lido; um arquivo invalido e posto de lado (`.corrompido-<data>`) antes de o programa seguir, e os dois casos sao avisados | Bug: um `PermissionError` transitorio na leitura virava `{}`, e a gravacao seguinte apagava rascunhos, lista de falhas e preferencias — o desfecho de M2 por outro caminho (ROADMAP 28.1) |
 | X1 | Anotacoes `[%...]` atravessam a traducao byte a byte, ou o comentario conta como falha | Bug: `[%cal Ra1h8]` virava `[%cal Ta1h8]`; `[%eval +0.35]` quebrado antes da API |
 | X2 | Comentario esvaziado pela limpeza sai do arquivo sem deixar `{}` | Sujeira: o PGN gerado saia pontilhado de `{}` |
@@ -2440,6 +2505,29 @@ X3). O que resta declarado como limite:
   pode esperar ~93 s por chunk (3 x 30 s de timeout + as esperas). Reproduzido
   com sessao falsa: cancelado na primeira tentativa, as tres rodaram.
   (ROADMAP 22.13)
+
+**Modelos de linguagem (secao 3.8)**
+
+- **O texto do livro vai para o provedor escolhido, sob os termos dele.** O
+  `gtx` nao tem contrato nenhum; a Anthropic, a OpenAI e a DeepSeek tem cada
+  uma a sua politica de retencao e de uso, e o programa nao a conhece nem a
+  escolhe — quem cola a chave aceita a do provedor. Uma obra protegida e uma
+  decisao de quem traduz, nao do programa.
+- **A chave cifrada com DPAPI nao viaja**: um `.exe` portatil levado a outra
+  maquina, ou outra conta de usuario, le "ilegível nesta máquina" e pede a
+  chave de novo. Fora do Windows o arquivo guarda base64 e diz isso.
+- **Os nomes dos modelos sao os que o provedor aceita HOJE**; o campo e livre
+  e um nome que deixou de existir e um 404 que aborta a execucao com o
+  motivo no log — a tela nao consulta a lista de modelos do provedor.
+- **"Cancelar" nao alcanca a requisicao em voo** do modelo (ate 120 s de
+  `timeout`; o SDK da Anthropic ainda tenta 429 e 5xx duas vezes sozinho);
+  vale entre lotes e entre tentativas dos provedores por `requests`.
+- **Nao ha estimativa de custo antes de iniciar**: o log diz no fim quantos
+  tokens a execucao gastou; a fatura e do provedor. O piloto mediu US$ 0,0034
+  por linha com o `claude-opus-5` — ~US$ 25 por livro de 7.500.
+- **O portao estrito de ancoras (T6) nao existe**: um lance que o modelo
+  reescreva em vez de traduzir passa por P3 (que so troca letra) e e o QA
+  (Q4) que avisa depois de gravado.
 
 **Idioma de origem**
 
@@ -2749,7 +2837,11 @@ historico; a linha importada ja verificada e o cenario certo); F29 e M5 no
 mesmo dia, com 12 + 13 testes headless, 30 de janela e 33 mutacoes (tres
 sobreviveram a primeira passada, todas de cenario: o arquivo ilegivel na
 releitura, o destino da execucao contra um radio ja trocado, e a ordem
-feito/total — que no fim da execucao sao o mesmo numero). Cada uma das que ficam esta escrita
+feito/total — que no fim da execucao sao o mesmo numero); K1 e B5 em
+2026-09-16, com o provedor de 28.7 (27 testes headless em `test_llm.py`, 4 do
+worker, 7 de janela), mais M6, que nao estava planejada e nasceu do pedido de
+escolher o motor a cada execucao; T6 fica, porque o portao estrito de ancoras
+nao foi feito (secao 3.8 diz o que existe no lugar). Cada uma das que ficam esta escrita
 como o teste que a fara migrar — "falha sem a correcao" —, e as
 que dependem de medicao no banco de dev dizem qual e o comportamento
 testavel e qual e o numero que fica so no ROADMAP.
@@ -2757,8 +2849,6 @@ testavel e qual e o numero que fica so no ROADMAP.
 | # | Garantia planejada | Item | Como o teste falha sem ela |
 |---|---|---|---|
 | T6 | Um provedor estrito nunca grava uma traducao cujo multiconjunto de ancoras difere do original | 28.7 | Provedor falso que devolve `Nf6` para `Nf3`: nada gravado, `failed_count == 1`, PGN com o original |
-| K1 | A chave de API nunca aparece inteira em log, configuracoes ou dialogo | 28.7 | Uma execucao falsa com chave conhecida: o texto inteiro nao esta em nenhum dos tres; `****wxyz` esta |
-| B5 | Um lote JSON e aceito so se cada id aparece exatamente uma vez; senao e desalinhado (B2) | 28.7 | Id repetido, faltando e fora do intervalo: os tres devolvem `None` |
 | M4 | Toda opcao do `settings.json` tem um lugar na tela de Configuracoes, e a tela grava por `update_settings` | 28.10 | Um teste enumera as chaves padrao contra os widgets; gravar pela tela nao apaga um rascunho gravado por outra janela |
 
 **Ate 2026-09-14 o registro era o seguinte.** As nove garantias da revisao de 2026-07-31 — **F12**
