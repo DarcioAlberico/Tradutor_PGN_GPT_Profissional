@@ -34,5 +34,11 @@ dist/
 # (`instalador\PGN_Tradutor_Pro.iss`) e versionada; o `.exe` gerado, nao.
 instalador/saida/
 
+# Saida do piloto do modelo de linguagem (ROADMAP 28.7, passo 0): a amostra
+# traz 200 comentarios do livro de dev — obra protegida — e as traducoes,
+# folhas e gabaritos saem dela. So o script (`ferramentas/piloto_llm.py`) e
+# versionado; os numeros que decidem vao para o ROADMAP.
+piloto/
+
 # Configuracao do PyCharm: e de quem usa, nao do projeto.
 .idea/

@@ -545,6 +545,39 @@ rede de seguranca para experimentar um motor novo e jogar fora o que ele
 deixou. A execucao fica registrada com `provedor:modelo`, e o fim do log diz
 quantas requisicoes e tokens o modelo gastou.
 
+## Piloto do modelo de linguagem
+
+O piloto e o que mede se um modelo vale, antes de gastar um livro nele
+(ROADMAP 28.7). E um script fora do programa,
+`ferramentas/piloto_llm.py`, que roda da raiz do projeto e escreve tudo em
+`piloto/` (fora do repositorio — a amostra e texto do livro):
+
+```bash
+python ferramentas/piloto_llm.py amostrar
+```
+
+sorteia 200 comentarios do banco de dev (100 fragmentos terminados em
+preposicao, 50 longos, 50 com citacao de partida), de preferencia entre os que
+um humano ja julgou. Depois, com `pip install anthropic` e `ANTHROPIC_API_KEY`
+no ambiente:
+
+```bash
+python ferramentas/piloto_llm.py traduzir --modelo claude-opus-5
+```
+
+```bash
+python ferramentas/piloto_llm.py avaliar
+```
+
+```bash
+python ferramentas/piloto_llm.py folha --modelo claude-opus-5
+```
+
+`avaliar` compara Google e modelo pelos detectores de qualidade, pelas ancoras
+de lance e pelo texto que o revisor deixou; `folha` gera a planilha de leitura
+cega (A e B sorteados, sem dizer quem e quem) e `apurar` le a planilha
+preenchida e diz a taxa de "aceito sem editar" de cada motor. A barra e 80 %.
+
 ## Arquivos principais
 
 - `PGN_Tradutor_Pro.py`: ponto de entrada da aplicacao.
@@ -579,6 +612,7 @@ quantas requisicoes e tokens o modelo gastou.
 - `tradutor_pgn/pgn_spellcheck.py`: normalizacao opcional de metadados PGN com `spelling.ssp`.
 - `tradutor_pgn/prose_spellcheck.py`: corretor ortografico da PROSA traduzida, com o filtro que separa erro de digitacao de notacao, nome proprio e terminologia do glossario.
 - `tradutor_pgn/pgn_utils.py`: leitura, escrita, encoding e manipulacao de arquivos PGN.
+- `ferramentas/piloto_llm.py`: o piloto do modelo de linguagem (ROADMAP 28.7, passo 0) — amostra estratificada, traducao em lotes JSON pela API da Anthropic (com o prompt de `llm_prompt`), avaliacao automatica e folha de leitura cega.
 - `tradutor_pgn/repeated_edits.py`: o ranking puro das trocas `antes -> depois` que a revisao mais fez num arquivo, e se ja ha regra do glossario para cada uma.
 - `tradutor_pgn/repeated_edits_window.py`: a subjanela "Trocas repetidas nesta obra" do editor, que cria a regra automatica e a aplica as pendentes do arquivo.
 - `tradutor_pgn/review_quality.py`: avisos de qualidade das traducoes, genericos e de xadrez (lance perdido, anotacao rompida, NAG, terminologia), com a versao das heuristicas que decide quando reavaliar o banco.
