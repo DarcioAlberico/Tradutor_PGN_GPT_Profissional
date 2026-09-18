@@ -30,3 +30,6 @@ dist/
 # Saida do compilador do instalador (Inno Setup). A receita
 # (`instalador\PGN_Tradutor_Pro.iss`) e versionada; o `.exe` gerado, nao.
 instalador/saida/
+
+# Configuracao do PyCharm: e de quem usa, nao do projeto.
+.idea/

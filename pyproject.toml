@@ -13,11 +13,39 @@ dependencies = [
     "spylls>=0.1.7",
 ]
 
+# So para desenvolver e para o CI: a suite roda com `pytest` (tambem roda com
+# `unittest`, mas o CI quer o `-q` e o resumo dele) e o lint com `ruff`. O `uv
+# sync` instala o grupo `dev` por padrao; o `.exe` nao os leva.
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10", "types-requests"]
+
+# Tipos (ROADMAP 28.11): comecando por `translation_api` e `database`, nao
+# bloqueante. So os modulos listados sao conferidos; os outros entram quando
+# ganharem anotacoes, e `ignore_missing_imports` cobre o customtkinter e o
+# chess, que nao trazem stubs.
+[tool.mypy]
+files = [
+    "tradutor_pgn/translation_api.py",
+    "tradutor_pgn/database.py",
+    "tradutor_pgn/word_count.py",
+]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+# So os modulos listados: anotados inteiros, e cada funcao nova neles tem de
+# chegar anotada. O resto do pacote e seguido para resolver tipos, sem ser cobrado.
+follow_imports = "silent"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
 [tool.uv]
 package = false
 
 [tool.ruff.lint]
-# O que ja rodava por padrao (E4, E7, E9, F), agora escrito. E741 (`l` como
-# nome de variavel) fica permitido so nos testes, onde sobraram 15 lacos
-# `for l in ...` que nao valem uma rodada de renomeacao.
+# O que rodava por padrao ate o ruff 0.15 (E4, E7, E9, F), agora ESCRITO: o
+# 0.16 trocou o conjunto padrao por um bem maior (BLE, DTZ, RUF, S, I...) e o
+# `uv sync` de um CI novo o instalaria — 272 apontamentos que ninguem pediu,
+# de uma vez. E741 (`l` como nome de variavel) fica permitido so nos testes,
+# onde sobraram 15 lacos `for l in ...` que nao valem uma rodada de renomeacao.
+select = ["E4", "E7", "E9", "F"]
 per-file-ignores = { "tests/*" = ["E741"] }

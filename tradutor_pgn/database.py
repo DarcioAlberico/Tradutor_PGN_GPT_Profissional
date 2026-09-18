@@ -1,9 +1,29 @@
+from __future__ import annotations
+
+import json
 import os
 import re
 import sqlite3
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from typing import Any
 
 from .review_quality import QUALITY_HEURISTICS_VERSION, evaluate_translation_quality
-from .word_count import add_word_counts, count_words, total_word_counts
+from .word_count import WordCounts, add_word_counts, count_words, total_word_counts
+
+# Os tipos que este modulo devolve e recebe, pelo que eles SAO aqui (ROADMAP
+# 28.11, tipos). Uma linha do SQLite e uma tupla de qualquer coisa — o driver
+# nao sabe mais que isso, e fingir que sabe seria mentir para o `mypy`. Os
+# `WHERE` montados por partes devolvem `(sql, params)`; as ferramentas em massa
+# devolvem um dicionario de contagens com exemplos, e o progresso e o
+# cancelamento chegam como chamaveis, pela mesma razao de `LogMessage` na API:
+# o que importa e a forma, nao a classe.
+Row = tuple[Any, ...]
+SqlParams = list[Any]
+WhereClause = tuple[str, SqlParams]
+ProgressCallback = Callable[[int, int], object]
+ShouldCancel = Callable[[], bool]
+Stats = dict[str, Any]
+RunRecord = dict[str, Any]
 
 
 # Incrementar sempre que o schema mudar. Enquanto o PRAGMA user_version do
@@ -87,7 +107,7 @@ LIKE_MATCH_SQL = (
 )
 
 
-def escape_like_pattern(text):
+def escape_like_pattern(text: str) -> str:
     """Neutraliza os curingas do `LIKE` no texto digitado pelo usuario.
 
     `%` e `_` sao curingas, e sem isto o campo de busca era uma linguagem de
@@ -105,7 +125,7 @@ def escape_like_pattern(text):
     return text
 
 
-def open_database(db_path):
+def open_database(db_path: str) -> sqlite3.Connection:
     """Abre `db_path` no modo que o uso concorrente exige (garantia C3).
 
     O editor de traducoes e o worker usam o MESMO arquivo, cada um com sua
@@ -152,11 +172,11 @@ def open_database(db_path):
 
 
 def quality_warning_flag(
-    original,
-    translated,
-    source_language=None,
-    target_language=None,
-):
+    original: str | None,
+    translated: str | None,
+    source_language: str | None = None,
+    target_language: str | None = None,
+) -> int:
     """1 se a traducao tem algum aviso de qualidade, 0 caso contrario.
 
     Materializado na coluna `quality_warning` para que contar e paginar por
@@ -193,7 +213,7 @@ ORDER_BY_ID = "id"
 ORDER_BY_OCCURRENCE = "occurrence"
 
 
-def get_db_metadata(conn, key):
+def get_db_metadata(conn: sqlite3.Connection, key: str) -> str | None:
     """Valor da marca, ou `None`. Tolera o banco antes da migracao 6."""
     try:
         row = conn.execute(
@@ -204,7 +224,7 @@ def get_db_metadata(conn, key):
     return row[0] if row else None
 
 
-def set_db_metadata(conn, key, value):
+def set_db_metadata(conn: sqlite3.Connection, key: str, value: object) -> None:
     conn.execute(
         f"""
         INSERT INTO {DB_METADATA_TABLE} (key, value)
@@ -215,7 +235,7 @@ def set_db_metadata(conn, key, value):
     )
 
 
-def get_quality_heuristics_version(conn):
+def get_quality_heuristics_version(conn: sqlite3.Connection) -> int:
     """A versao das heuristicas com que este banco foi avaliado.
 
     Zero quando a marca nao existe, e zero e a resposta certa: um banco gravado
@@ -224,17 +244,19 @@ def get_quality_heuristics_version(conn):
     respostas pedem a mesma acao — reavaliar.
     """
     valor = get_db_metadata(conn, QUALITY_VERSION_KEY)
+    if valor is None:
+        return 0
     try:
         return int(valor)
-    except (TypeError, ValueError):
+    except ValueError:
         return 0
 
 
-def quality_heuristics_are_current(conn):
+def quality_heuristics_are_current(conn: sqlite3.Connection) -> bool:
     return get_quality_heuristics_version(conn) == QUALITY_HEURISTICS_VERSION
 
 
-def initialize_database(db_path):
+def initialize_database(db_path: str) -> sqlite3.Connection:
     """Abre a conexao garantindo que o schema esteja atualizado.
 
     E chamada em muitos pontos da interface (um clique de linha, um save, uma
@@ -264,7 +286,7 @@ def initialize_database(db_path):
         raise
 
 
-def fts5_available(conn):
+def fts5_available(conn: sqlite3.Connection) -> bool:
     """O SQLite desta instalacao foi compilado com FTS5?
 
     E um modulo opcional. Sem ele a busca por termos nao existe, e o programa
@@ -283,7 +305,7 @@ def fts5_available(conn):
     return True
 
 
-def fts_index_ready(cursor):
+def fts_index_ready(cursor: sqlite3.Cursor) -> bool:
     """O indice de busca existe neste banco?
 
     Separado de `fts5_available` porque as duas coisas falham por motivos
@@ -302,7 +324,7 @@ def fts_index_ready(cursor):
     return row is not None
 
 
-def _create_fts_index(conn):
+def _create_fts_index(conn: sqlite3.Connection) -> None:
     """Cria o indice de busca e os gatilhos que o mantem em dia.
 
     `content='comments'` faz do indice um "external content": ele guarda so os
@@ -426,7 +448,7 @@ _OCCURRENCES_TABLE_SQL = f"""
 """
 
 
-def _create_occurrences_table(conn):
+def _create_occurrences_table(conn: sqlite3.Connection) -> None:
     """A tabela de ocorrencias e os indices dela (ROADMAP 18).
 
     **Nao ha backfill, e nao e esquecimento.** Uma ocorrencia diz em que arquivo,
@@ -463,7 +485,7 @@ def _create_occurrences_table(conn):
     """)
 
 
-def _add_source_language_column(conn):
+def _add_source_language_column(conn: sqlite3.Connection) -> None:
     """Acrescenta `source_language` e poe o idioma de origem na chave.
 
     Nao da para fazer isso com um `ALTER TABLE` sozinho. A coluna nova ate
@@ -525,7 +547,7 @@ def _add_source_language_column(conn):
 _LEGACY_DECIMAL_SPACING_RE = re.compile(r"(?<=\d)\. (?=\d)")
 
 
-def _collapse_decimal_cache_keys(conn):
+def _collapse_decimal_cache_keys(conn: sqlite3.Connection) -> int:
     """Reachata as chaves gravadas pelo achatamento antigo: `0. 35` -> `0.35`.
 
     Roda UMA vez, na migracao 4 -> 5. Nao pode rodar de novo porque o espaco
@@ -589,7 +611,7 @@ def _collapse_decimal_cache_keys(conn):
     return changed
 
 
-def _migrate_database(conn, from_version=0):
+def _migrate_database(conn: sqlite3.Connection, from_version: int = 0) -> sqlite3.Connection:
     cursor = conn.cursor()
 
     # Num banco novo isto ja cria o schema final; num que existe e um no-op, e
@@ -749,7 +771,7 @@ def _migrate_database(conn, from_version=0):
     return conn
 
 
-def backfill_quality_warnings(conn, batch_size=5000):
+def backfill_quality_warnings(conn: sqlite3.Connection, batch_size: int = 5000) -> int:
     """Preenche `quality_warning` nas linhas que ainda estao com NULL.
 
     So roda no upgrade de schema; depois disso a coluna e mantida em cada
@@ -799,11 +821,11 @@ class QualityReevaluationCanceled(Exception):
 
 
 def reevaluate_quality_warnings(
-    conn,
-    batch_size=2000,
-    progress_callback=None,
-    should_cancel=None,
-):
+    conn: sqlite3.Connection,
+    batch_size: int = 2000,
+    progress_callback: ProgressCallback | None = None,
+    should_cancel: ShouldCancel | None = None,
+) -> dict[str, int]:
     """Recalcula `quality_warning` em TODAS as linhas (garantia Q2).
 
     E o mecanismo que a garantia R6 passa a exigir quando as heuristicas mudam:
@@ -850,7 +872,7 @@ def reevaluate_quality_warnings(
         # Paginado por `id > ?`, e nao por OFFSET: o editor pode estar gravando
         # no mesmo banco, e um OFFSET sobre uma tabela que muda pula ou repete
         # linhas. Aqui a chave e estavel.
-        atualizacoes = []
+        atualizacoes: list[tuple[int, int]] = []
         for row_id, original, translated, source, target, antigo in rows:
             scanned += 1
             novo = quality_warning_flag(original, translated, source, target)
@@ -911,11 +933,11 @@ CACHE_RATIO_CHECK_MINIMUM = 2 * CACHE_LOOKUP_CHUNK
 
 
 def _full_load_is_cheaper(
-    cursor,
-    target_language,
-    quantos,
-    source_language=SOURCE_LANGUAGE_UNKNOWN,
-):
+    cursor: sqlite3.Cursor,
+    target_language: str,
+    quantos: int,
+    source_language: str = SOURCE_LANGUAGE_UNKNOWN,
+) -> bool:
     """A carga completa compensa para este numero de comentarios?
 
     Errar aqui nao produz resultado errado — as duas cargas devolvem o mesmo
@@ -939,12 +961,12 @@ def _full_load_is_cheaper(
 
 
 def adopt_unknown_source_language(
-    cursor,
-    target_language,
-    source_language,
-    comments,
-    chunk_size=None,
-):
+    cursor: sqlite3.Cursor,
+    target_language: str,
+    source_language: str | None,
+    comments: Iterable[str] | None,
+    chunk_size: int | None = None,
+) -> int:
     """Rotula com `source_language` as linhas destes comentarios que ainda nao tem um.
 
     Existe porque o idioma de origem entrou na chave da tabela, e sem isto a
@@ -1007,11 +1029,11 @@ def adopt_unknown_source_language(
 
 
 def load_translation_cache(
-    cursor,
-    target_language,
-    comments=None,
-    source_language=SOURCE_LANGUAGE_UNKNOWN,
-):
+    cursor: sqlite3.Cursor,
+    target_language: str,
+    comments: Iterable[str] | None = None,
+    source_language: str = SOURCE_LANGUAGE_UNKNOWN,
+) -> dict[str, str]:
     """Traducoes ja gravadas do par de idiomas, como `{original: traduzido}`.
 
     `comments` restringe a carga aos comentarios que a execucao vai de fato
@@ -1061,7 +1083,7 @@ def load_translation_cache(
     if _full_load_is_cheaper(cursor, target_language, len(procurados), source_language):
         return load_translation_cache(cursor, target_language, source_language=source_language)
 
-    cache = {}
+    cache: dict[str, str] = {}
     for inicio in range(0, len(procurados), CACHE_LOOKUP_CHUNK):
         lote = procurados[inicio:inicio + CACHE_LOOKUP_CHUNK]
         marcadores = ",".join("?" * len(lote))
@@ -1177,11 +1199,11 @@ def save_translation(
     return "unchanged"
 
 def resolve_comment_ids(
-    cursor,
-    target_language,
-    comments,
-    source_language=SOURCE_LANGUAGE_UNKNOWN,
-):
+    cursor: sqlite3.Cursor,
+    target_language: str,
+    comments: Iterable[str] | None,
+    source_language: str | None = SOURCE_LANGUAGE_UNKNOWN,
+) -> dict[str, int]:
     """`{original: id}` das linhas que existem no par, para estes comentarios.
 
     E o que falta entre a extracao e a tabela de ocorrencias: o worker sabe o
@@ -1199,7 +1221,7 @@ def resolve_comment_ids(
     if not procurados:
         return {}
 
-    encontrados = {}
+    encontrados: dict[str, int] = {}
     for inicio in range(0, len(procurados), CACHE_LOOKUP_CHUNK):
         lote = procurados[inicio:inicio + CACHE_LOOKUP_CHUNK]
         marcadores = ",".join("?" * len(lote))
@@ -1287,7 +1309,7 @@ def list_occurrence_files(cursor, target_language, source_language=None):
     obras para escolher, nao um ranking.
     """
     clauses = ["c.target_language = ?"]
-    params = [target_language]
+    params: SqlParams = [target_language]
     if source_language is not None:
         clauses.append("c.source_language = ?")
         params.append(source_language)
@@ -1305,7 +1327,12 @@ def list_occurrence_files(cursor, target_language, source_language=None):
     ).fetchall()
 
 
-def fetch_comment_occurrences(cursor, comment_id, limit=3, preferred_file=None):
+def fetch_comment_occurrences(
+    cursor: sqlite3.Cursor,
+    comment_id: int,
+    limit: int | None = 3,
+    preferred_file: str | None = None,
+) -> tuple[list[Row], int]:
     """`(lista, total)` das ocorrencias de um comentario, na ordem de leitura.
 
     A lista vem cortada em `limit` e o total vem inteiro, de proposito: o editor
@@ -1349,7 +1376,7 @@ def fetch_comment_occurrences(cursor, comment_id, limit=3, preferred_file=None):
     return linhas, total
 
 
-def get_file_progress(cursor):
+def get_file_progress(cursor: sqlite3.Cursor) -> list[tuple[str, int, int, int, int, int]]:
     """Progresso por obra: `[(arquivo, posicoes, comentarios, verificadas, pendentes, avisos)]`.
 
     O `DISTINCT` na subconsulta e o que torna o numero honesto. Somar `verified`
@@ -1403,7 +1430,11 @@ class WordCountCanceled(Exception):
 WORD_COUNT_CHUNK = 5000
 
 
-def count_words_by_pair(cursor, progress_callback=None, should_cancel=None):
+def count_words_by_pair(
+    cursor: sqlite3.Cursor,
+    progress_callback: ProgressCallback | None = None,
+    should_cancel: ShouldCancel | None = None,
+) -> tuple[dict[tuple[str, str], WordCounts], WordCounts]:
     """`{(origem, destino): contagens}` de palavras, mais o total.
 
     Devolve `(por_par, total)`. As contagens sao as de `word_count`: linhas,
@@ -1425,7 +1456,7 @@ def count_words_by_pair(cursor, progress_callback=None, should_cancel=None):
     if progress_callback is not None:
         progress_callback(0, total_linhas)
 
-    por_par = {}
+    por_par: dict[tuple[str, str], WordCounts] = {}
     lidas = 0
     linhas = cursor.execute(
         """
@@ -1450,7 +1481,7 @@ def count_words_by_pair(cursor, progress_callback=None, should_cancel=None):
     return por_par, total_word_counts(por_par)
 
 
-def get_daily_review_activity(cursor, limit=14):
+def get_daily_review_activity(cursor: sqlite3.Cursor, limit: int = 14) -> list[tuple[str, int, int]]:
     """`[(dia, edicoes, palavras)]` do historico, do mais recente para tras.
 
     E a produtividade que `comment_history` ja permitia calcular sem esquema novo
@@ -1473,7 +1504,7 @@ def get_daily_review_activity(cursor, limit=14):
         """
     ).fetchall()
 
-    por_dia = {}
+    por_dia: dict[str, tuple[int, int]] = {}
     for dia, texto in linhas:
         if dia is None:
             continue
@@ -1484,7 +1515,7 @@ def get_daily_review_activity(cursor, limit=14):
     return [(dia, edicoes, palavras) for dia, (edicoes, palavras) in ordenado[:limit]]
 
 
-def get_database_stats(cursor):
+def get_database_stats(cursor: sqlite3.Cursor) -> Stats:
     total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
 
     # Agrupado pelo PAR, e nao so pelo destino: com a origem gravada, "12.000
@@ -1522,7 +1553,7 @@ def get_database_stats(cursor):
     }
 
 
-def fetch_export_rows(cursor, only_ids=None):
+def fetch_export_rows(cursor: sqlite3.Cursor, only_ids: Iterable[int] | None = None) -> sqlite3.Cursor:
     """Cursor das linhas do CSV — deliberadamente NAO materializado.
 
     O `fetchall` que estava aqui construia uma lista com o banco inteiro antes
@@ -1560,7 +1591,8 @@ def fetch_export_rows(cursor, only_ids=None):
             ORDER BY id
         """)
 
-    marcadores = ",".join("?" * len(only_ids))
+    ids = list(only_ids)
+    marcadores = ",".join("?" * len(ids))
     return cursor.execute(
         f"""
         SELECT
@@ -1579,20 +1611,20 @@ def fetch_export_rows(cursor, only_ids=None):
         WHERE id IN ({marcadores})
         ORDER BY id
         """,
-        list(only_ids),
+        ids,
     )
 
 
 def _review_where(
-    target_language,
-    only_unverified=False,
-    search_text="",
-    status_filter=None,
-    search_mode=SEARCH_MODE_SUBSTRING,
-    cursor=None,
-    source_language=None,
-    source_file=None,
-):
+    target_language: str,
+    only_unverified: bool = False,
+    search_text: str | None = "",
+    status_filter: str | None = None,
+    search_mode: str = SEARCH_MODE_SUBSTRING,
+    cursor: sqlite3.Cursor | None = None,
+    source_language: str | None = None,
+    source_file: str | None = None,
+) -> WhereClause:
     """Monta o `WHERE` compartilhado por contagem, paginacao e offset.
 
     `search_mode` decide COMO a busca filtra, e as duas formas existem por
@@ -1637,7 +1669,7 @@ def _review_where(
     O `EXISTS` foi a primeira escrita aqui, e a medicao e que o derrubou.
     """
     clauses = ["target_language = ?"]
-    params = [target_language]
+    params: SqlParams = [target_language]
 
     if source_language is not None:
         clauses.append("source_language = ?")
@@ -1703,7 +1735,7 @@ _OCCURRENCE_RANK_SQL = (
 )
 
 
-def reads_in_occurrence_order(order, source_file):
+def reads_in_occurrence_order(order: str | None, source_file: str | None) -> bool:
     """A ordem de leitura vale? Ela exige o arquivo, e nao e capricho.
 
     Sem arquivo escolhido, "a proxima linha da obra" nao existe: o mesmo
@@ -1718,7 +1750,7 @@ def reads_in_occurrence_order(order, source_file):
     return order == ORDER_BY_OCCURRENCE and bool(source_file)
 
 
-def _review_order(order=None, source_file=None):
+def _review_order(order: str | None = None, source_file: str | None = None) -> WhereClause:
     """O `ORDER BY` da lista e os parametros dele.
 
     Paginar por `LIMIT/OFFSET` exige uma ordem TOTAL: duas linhas com a mesma
@@ -1739,16 +1771,16 @@ def _review_order(order=None, source_file=None):
 
 
 def fetch_review_rows(
-    cursor,
-    target_language,
-    only_unverified=False,
-    search_text="",
-    status_filter=None,
-    search_mode=SEARCH_MODE_SUBSTRING,
-    source_language=None,
-    source_file=None,
-    order=None,
-):
+    cursor: sqlite3.Cursor,
+    target_language: str,
+    only_unverified: bool = False,
+    search_text: str | None = "",
+    status_filter: str | None = None,
+    search_mode: str = SEARCH_MODE_SUBSTRING,
+    source_language: str | None = None,
+    source_file: str | None = None,
+    order: str | None = None,
+) -> list[Row]:
     """As linhas do editor, com o par de idiomas e o aviso de qualidade no fim.
 
     No fim de proposito, e nao no meio: o editor le as sete primeiras posicoes em
@@ -1797,15 +1829,15 @@ def fetch_review_rows(
 
 
 def count_review_rows(
-    cursor,
-    target_language,
-    only_unverified=False,
-    search_text="",
-    status_filter=None,
-    search_mode=SEARCH_MODE_SUBSTRING,
-    source_language=None,
-    source_file=None,
-):
+    cursor: sqlite3.Cursor,
+    target_language: str,
+    only_unverified: bool = False,
+    search_text: str | None = "",
+    status_filter: str | None = None,
+    search_mode: str = SEARCH_MODE_SUBSTRING,
+    source_language: str | None = None,
+    source_file: str | None = None,
+) -> int:
     where_sql, params = _review_where(
         target_language,
         only_unverified,
@@ -1824,13 +1856,13 @@ def count_review_rows(
 
 
 def review_status_counts_query(
-    target_language,
-    search_text="",
-    search_mode=SEARCH_MODE_SUBSTRING,
-    source_language=None,
-    source_file=None,
-    cursor=None,
-):
+    target_language: str,
+    search_text: str | None = "",
+    search_mode: str = SEARCH_MODE_SUBSTRING,
+    source_language: str | None = None,
+    source_file: str | None = None,
+    cursor: sqlite3.Cursor | None = None,
+) -> WhereClause:
     """`(sql, params)` do resumo por status.
 
     Separada da execucao para que o teste do PLANO possa perguntar pelo mesmo
@@ -1872,13 +1904,13 @@ def review_status_counts_query(
 
 
 def get_review_status_counts(
-    cursor,
-    target_language,
-    search_text="",
-    search_mode=SEARCH_MODE_SUBSTRING,
-    source_language=None,
-    source_file=None,
-):
+    cursor: sqlite3.Cursor,
+    target_language: str,
+    search_text: str | None = "",
+    search_mode: str = SEARCH_MODE_SUBSTRING,
+    source_language: str | None = None,
+    source_file: str | None = None,
+) -> dict[str, int]:
     sql, params = review_status_counts_query(
         target_language,
         search_text=search_text,
@@ -1922,7 +1954,11 @@ STATUS_COUNT_KEYS = {
 }
 
 
-def count_from_status_counts(status_counts, status_filter=None, only_unverified=False):
+def count_from_status_counts(
+    status_counts: dict[str, int],
+    status_filter: str | None = None,
+    only_unverified: bool = False,
+) -> int | None:
     """O total do filtro, tirado do resumo ja calculado.
 
     Devolve `None` quando o resumo nao cobre o filtro pedido, para o chamador
@@ -1938,15 +1974,15 @@ def count_from_status_counts(status_counts, status_filter=None, only_unverified=
 
 
 def fetch_review_row_ids(
-    cursor,
-    target_language,
-    only_unverified=False,
-    search_text="",
-    status_filter=None,
-    search_mode=SEARCH_MODE_SUBSTRING,
-    source_language=None,
-    source_file=None,
-):
+    cursor: sqlite3.Cursor,
+    target_language: str,
+    only_unverified: bool = False,
+    search_text: str | None = "",
+    status_filter: str | None = None,
+    search_mode: str = SEARCH_MODE_SUBSTRING,
+    source_language: str | None = None,
+    source_file: str | None = None,
+) -> list[int]:
     """So os ids das linhas do filtro — todas, sem paginacao (ROADMAP 22.11).
 
     Existe para o "Marcar tudo" da selecao em lote. A barra so sabia marcar a
@@ -1978,18 +2014,18 @@ def fetch_review_row_ids(
 
 
 def fetch_review_rows_page(
-    cursor,
-    target_language,
-    only_unverified=False,
-    limit=100,
-    offset=0,
-    search_text="",
-    status_filter=None,
-    search_mode=SEARCH_MODE_SUBSTRING,
-    source_language=None,
-    source_file=None,
-    order=None,
-):
+    cursor: sqlite3.Cursor,
+    target_language: str,
+    only_unverified: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+    search_text: str | None = "",
+    status_filter: str | None = None,
+    search_mode: str = SEARCH_MODE_SUBSTRING,
+    source_language: str | None = None,
+    source_file: str | None = None,
+    order: str | None = None,
+) -> list[Row]:
     where_sql, params = _review_where(
         target_language,
         only_unverified,
@@ -2021,17 +2057,17 @@ def fetch_review_rows_page(
 
 
 def get_review_row_offset(
-    cursor,
-    target_language,
-    comment_id,
-    only_unverified=False,
-    search_text="",
-    status_filter=None,
-    search_mode=SEARCH_MODE_SUBSTRING,
-    source_language=None,
-    source_file=None,
-    order=None,
-):
+    cursor: sqlite3.Cursor,
+    target_language: str,
+    comment_id: int,
+    only_unverified: bool = False,
+    search_text: str | None = "",
+    status_filter: str | None = None,
+    search_mode: str = SEARCH_MODE_SUBSTRING,
+    source_language: str | None = None,
+    source_file: str | None = None,
+    order: str | None = None,
+) -> int | None:
     """A posicao da linha NA LISTA FILTRADA, ou `None` se ela nao esta nela.
 
     "Posicao" depende da ordem, e essa e a parte que nao da para esquecer: em
@@ -2080,7 +2116,7 @@ def get_review_row_offset(
     """, params + [source_file, comment_id, source_file, comment_id]).fetchone()[0]
 
 
-def fetch_translation_by_id(cursor, comment_id):
+def fetch_translation_by_id(cursor: sqlite3.Cursor, comment_id: int) -> Row | None:
     # O par de idiomas vem no fim de proposito: quem le esta linha o faz por
     # posicao em varios pontos do editor, e acrescentar no meio deslocaria todos.
     return cursor.execute("""
@@ -2098,14 +2134,14 @@ def fetch_translation_by_id(cursor, comment_id):
 
 
 def record_comment_history(
-    cursor,
-    comment_id,
-    action,
-    previous_translation,
-    new_translation,
-    previous_verified,
-    new_verified,
-):
+    cursor: sqlite3.Cursor,
+    comment_id: int,
+    action: str,
+    previous_translation: str | None,
+    new_translation: str | None,
+    previous_verified: int,
+    new_verified: int,
+) -> int | None:
     cursor.execute(
         """
         INSERT INTO comment_history (
@@ -2145,7 +2181,12 @@ HISTORY_TEXT_CHANGED = (
 )
 
 
-def fetch_comment_history(cursor, comment_id, limit=50, only_text_changes=True):
+def fetch_comment_history(
+    cursor: sqlite3.Cursor,
+    comment_id: int,
+    limit: int = 50,
+    only_text_changes: bool = True,
+) -> list[Row]:
     """As versoes desta linha, da mais recente para tras.
 
     `only_text_changes=True` e o padrao porque e o que a janela pergunta. O filtro
@@ -2178,7 +2219,7 @@ def fetch_comment_history(cursor, comment_id, limit=50, only_text_changes=True):
     ).fetchall()
 
 
-def count_comment_history(cursor, comment_id):
+def count_comment_history(cursor: sqlite3.Cursor, comment_id: int) -> tuple[int, int]:
     """`(com_mudanca, sem_mudanca)` do historico desta linha.
 
     Duas contagens numa passada so: a janela precisa das duas — uma para saber se
@@ -2198,7 +2239,7 @@ def count_comment_history(cursor, comment_id):
     return com, sem
 
 
-def machine_translation_for(cursor, comment_id):
+def machine_translation_for(cursor: sqlite3.Cursor, comment_id: int) -> str | None:
     """O texto que a traducao automatica produziu para esta linha.
 
     **Derivado, e nao gravado** (ROADMAP 23.1). O `INSERT` do pipeline e o unico
@@ -2244,7 +2285,12 @@ def machine_translation_for(cursor, comment_id):
 HUMAN_EDIT_ACTIONS = ("edit", "edit_verify")
 
 
-def fetch_file_edit_events(cursor, source_file, target_language, source_language=None):
+def fetch_file_edit_events(
+    cursor: sqlite3.Cursor,
+    source_file: str,
+    target_language: str,
+    source_language: str | None = None,
+) -> list[Row]:
     """`[(comment_id, antes, depois)]` das edicoes humanas das linhas de um arquivo.
 
     Alimenta "Trocas repetidas nesta obra" (garantia S21, ROADMAP 28.5). Uma
@@ -2262,7 +2308,7 @@ def fetch_file_edit_events(cursor, source_file, target_language, source_language
         "COALESCE(h.previous_translation, '') <> COALESCE(h.new_translation, '')",
         f"c.id IN (SELECT comment_id FROM {OCCURRENCES_TABLE} WHERE source_file = ?)",
     ]
-    params = [target_language, *HUMAN_EDIT_ACTIONS, source_file]
+    params: SqlParams = [target_language, *HUMAN_EDIT_ACTIONS, source_file]
     if source_language is not None:
         clauses.append("c.source_language = ?")
         params.append(source_language)
@@ -2279,12 +2325,12 @@ def fetch_file_edit_events(cursor, source_file, target_language, source_language
 
 
 def update_translation_by_id(
-    cursor,
-    comment_id,
-    translated_comment,
-    mark_verified=False,
-    history_action=None,
-):
+    cursor: sqlite3.Cursor,
+    comment_id: int,
+    translated_comment: str,
+    mark_verified: bool = False,
+    history_action: str | None = None,
+) -> int:
     # O par de idiomas entra na leitura que esta funcao ja fazia. Sem ele, o
     # `quality_warning_flag` daqui avaliaria a terminologia como se o par fosse
     # desconhecido e a exibicao a avaliaria com o par da linha: a coluna
@@ -2364,7 +2410,9 @@ def update_translation_by_id(
     return changed_rows
 
 
-def overwrite_translation_by_id(cursor, comment_id, translated_comment, verified=False):
+def overwrite_translation_by_id(
+    cursor: sqlite3.Cursor, comment_id: int, translated_comment: str, verified: bool = False
+) -> int:
     """Sobrescreve uma traducao JA PREENCHIDA. E a excecao explicita a T1.
 
     `save_translation` nunca sobrescreve (garantia T1), e esse e o padrao certo
@@ -2458,7 +2506,9 @@ def overwrite_translation_by_id(cursor, comment_id, translated_comment, verified
     return changed_rows
 
 
-def set_translation_verified_by_id(cursor, comment_id, verified=True):
+def set_translation_verified_by_id(
+    cursor: sqlite3.Cursor, comment_id: int, verified: bool = True
+) -> int:
     existing = cursor.execute(
         """
         SELECT translated_comment, verified
@@ -2506,7 +2556,9 @@ def set_translation_verified_by_id(cursor, comment_id, verified=True):
     return changed_rows
 
 
-def set_review_status_by_id(cursor, comment_id, status, note=None):
+def set_review_status_by_id(
+    cursor: sqlite3.Cursor, comment_id: int, status: str, note: str | None = None
+) -> int:
     """Marca a linha como rejeitada, em duvida ou pendente. `1` se mudou algo.
 
     `note` a `None` deixa a nota como esta; uma string a substitui (inclusive por
@@ -2555,7 +2607,7 @@ def set_review_status_by_id(cursor, comment_id, status, note=None):
     return cursor.rowcount
 
 
-def fetch_review_status_by_id(cursor, comment_id):
+def fetch_review_status_by_id(cursor: sqlite3.Cursor, comment_id: int) -> tuple[str, str]:
     """`(status, nota)` da linha, ou `("", "")` se ela nao existe."""
     linha = cursor.execute(
         "SELECT review_status, reviewer_note FROM comments WHERE id = ?",
@@ -2566,7 +2618,9 @@ def fetch_review_status_by_id(cursor, comment_id):
     return (linha[0] or REVIEW_STATUS_PENDING), (linha[1] or "")
 
 
-def _exact_translation_matches(cursor, comment_id, exclude_self=False):
+def _exact_translation_matches(
+    cursor: sqlite3.Cursor, comment_id: int, exclude_self: bool = False
+) -> tuple[str | None, list[Row]]:
     """`(traducao, [(id, original)])` — a base da previa e da escrita.
 
     As duas leem daqui de proposito: se a previa e a gravacao montassem a
@@ -2605,7 +2659,7 @@ def _exact_translation_matches(cursor, comment_id, exclude_self=False):
         "translated_comment = ?",
         "verified <> 1",
     ]
-    params = [target_language, source_language, translation]
+    params: SqlParams = [target_language, source_language, translation]
     if exclude_self:
         clauses.append("id <> ?")
         params.append(comment_id)
@@ -2622,7 +2676,7 @@ def _exact_translation_matches(cursor, comment_id, exclude_self=False):
     return translation, rows
 
 
-def fetch_exact_translation_match_candidates(cursor, comment_id):
+def fetch_exact_translation_match_candidates(cursor: sqlite3.Cursor, comment_id: int) -> list[Row]:
     """As OUTRAS linhas que a verificacao em massa marcaria, com o original de cada.
 
     Existe para que a propagacao possa ser mostrada antes de acontecer (garantia
@@ -2644,7 +2698,9 @@ def fetch_exact_translation_match_candidates(cursor, comment_id):
     return rows
 
 
-def set_exact_translation_matches_verified(cursor, comment_id, only_ids=None):
+def set_exact_translation_matches_verified(
+    cursor: sqlite3.Cursor, comment_id: int, only_ids: Iterable[int] | None = None
+) -> int:
     """Marca como verificadas as linhas do par com a MESMA traducao.
 
     `only_ids` restringe a propagacao ao subconjunto que o usuario aprovou na
@@ -2688,7 +2744,7 @@ def set_exact_translation_matches_verified(cursor, comment_id, only_ids=None):
     return changed_rows
 
 
-def clear_all_translations(conn):
+def clear_all_translations(conn: sqlite3.Connection) -> int:
     """Esvazia o banco de traducoes e devolve quantas linhas havia.
 
     Derruba as tabelas e deixa a migracao reconstrui-las, em vez de um
@@ -2736,7 +2792,9 @@ def clear_all_translations(conn):
     return total
 
 
-def _unreviewed_file_rows_query(source_file, target_language, source_language=None):
+def _unreviewed_file_rows_query(
+    source_file: str, target_language: str, source_language: str | None = None
+) -> WhereClause:
     """O `WHERE` da "linha que nenhum humano tocou" de um arquivo, num lugar so.
 
     Contar e apagar usam a MESMA clausula, pela razao de `_automatic_rules_query`:
@@ -2770,7 +2828,7 @@ def _unreviewed_file_rows_query(source_file, target_language, source_language=No
         ),
         "NOT EXISTS (SELECT 1 FROM comment_history h WHERE h.comment_id = c.id)",
     ]
-    params = [target_language, source_file, source_file]
+    params: SqlParams = [target_language, source_file, source_file]
     if source_language is not None:
         clauses.append("c.source_language = ?")
         params.append(source_language)
@@ -2778,8 +2836,11 @@ def _unreviewed_file_rows_query(source_file, target_language, source_language=No
 
 
 def count_unreviewed_file_translations(
-    cursor, source_file, target_language, source_language=None
-):
+    cursor: sqlite3.Cursor,
+    source_file: str,
+    target_language: str,
+    source_language: str | None = None,
+) -> int:
     """Quantas linhas "Descartar as nao revisadas deste arquivo" apagaria."""
     where_sql, params = _unreviewed_file_rows_query(
         source_file, target_language, source_language
@@ -2790,8 +2851,11 @@ def count_unreviewed_file_translations(
 
 
 def discard_unreviewed_file_translations(
-    cursor, source_file, target_language, source_language=None
-):
+    cursor: sqlite3.Cursor,
+    source_file: str,
+    target_language: str,
+    source_language: str | None = None,
+) -> int:
     """Apaga as linhas de um arquivo que nenhum humano tocou. Devolve quantas.
 
     E a rede de seguranca do ROADMAP 28.6 (garantia Z4): traduzir um livro com
@@ -2837,8 +2901,11 @@ class AutomaticRulesCanceled(Exception):
 
 
 def _automatic_rules_query(
-    target_language, source_language=None, only_pending=False, source_file=None
-):
+    target_language: str | None,
+    source_language: str | None = None,
+    only_pending: bool = False,
+    source_file: str | None = None,
+) -> WhereClause:
     """O `WHERE` das linhas que as regras automaticas alcancam, num lugar so.
 
     A previa e a aplicacao usam o mesmo criterio pela razao de
@@ -2858,7 +2925,7 @@ def _automatic_rules_query(
         "translated_comment IS NOT NULL",
         "translated_comment <> ''",
     ]
-    params = []
+    params: SqlParams = []
     if target_language:
         clauses.append("target_language = ?")
         params.append(target_language)
@@ -2879,15 +2946,15 @@ def _automatic_rules_query(
 
 
 def _iter_automatic_rule_rows(
-    cursor,
-    target_language,
-    progress_callback=None,
-    should_cancel=None,
-    progress_every=2000,
-    source_language=None,
-    only_pending=False,
-    source_file=None,
-):
+    cursor: sqlite3.Cursor,
+    target_language: str | None,
+    progress_callback: ProgressCallback | None = None,
+    should_cancel: ShouldCancel | None = None,
+    progress_every: int = 2000,
+    source_language: str | None = None,
+    only_pending: bool = False,
+    source_file: str | None = None,
+) -> Iterator[Row]:
     """Itera as linhas candidatas SEM materializar a tabela.
 
     O `fetchall` anterior trazia 195.603 linhas de texto de uma vez — 80 MB de
@@ -2931,7 +2998,7 @@ def _iter_automatic_rule_rows(
         progress_callback(total, total)
 
 
-def _empty_automatic_stats(target_language, rules=0):
+def _empty_automatic_stats(target_language: str | None, rules: int = 0) -> Stats:
     return {
         "rules": rules,
         "scanned": 0,
@@ -2943,23 +3010,23 @@ def _empty_automatic_stats(target_language, rules=0):
 
 
 def analyze_automatic_translation_updates(
-    cursor,
-    automatic_rules,
-    apply_substitutions,
-    target_language=None,
-    sample_limit=10,
-    progress_callback=None,
-    should_cancel=None,
-    source_language=None,
-    only_pending=False,
-    source_file=None,
-):
+    cursor: sqlite3.Cursor,
+    automatic_rules: Sequence[Any],
+    apply_substitutions: Callable[[str, Sequence[Any]], str],
+    target_language: str | None = None,
+    sample_limit: int = 10,
+    progress_callback: ProgressCallback | None = None,
+    should_cancel: ShouldCancel | None = None,
+    source_language: str | None = None,
+    only_pending: bool = False,
+    source_file: str | None = None,
+) -> Stats:
     if not automatic_rules:
         return _empty_automatic_stats(target_language)
 
     scanned = 0
     changed = 0
-    examples = []
+    examples: list[dict[str, Any]] = []
     for (
         comment_id,
         original,
@@ -3002,17 +3069,17 @@ def analyze_automatic_translation_updates(
 
 
 def apply_automatic_translation_updates(
-    cursor,
-    automatic_rules,
-    apply_substitutions,
-    target_language=None,
-    sample_limit=10,
-    progress_callback=None,
-    should_cancel=None,
-    source_language=None,
-    only_pending=False,
-    source_file=None,
-):
+    cursor: sqlite3.Cursor,
+    automatic_rules: Sequence[Any],
+    apply_substitutions: Callable[[str, Sequence[Any]], str],
+    target_language: str | None = None,
+    sample_limit: int = 10,
+    progress_callback: ProgressCallback | None = None,
+    should_cancel: ShouldCancel | None = None,
+    source_language: str | None = None,
+    only_pending: bool = False,
+    source_file: str | None = None,
+) -> Stats:
     """Aplica as regras automaticas numa unica passagem.
 
     Antes, a primeira linha desta funcao era uma chamada a
@@ -3035,7 +3102,7 @@ def apply_automatic_translation_updates(
     write_cursor = cursor.connection.cursor()
     scanned = 0
     changed = 0
-    examples = []
+    examples: list[dict[str, Any]] = []
 
     for (
         comment_id,
@@ -3114,7 +3181,14 @@ class MoveNotationCanceled(Exception):
     """A varredura da correcao de lances foi interrompida pelo usuario."""
 
 
-def _move_notation_where(source_language, include_unknown, only_pending=False):
+# `fix_notation(original, traduzido, origem, destino) -> (texto, quantos)`: a
+# funcao injetada para o modulo continuar sem saber de xadrez.
+FixNotation = Callable[[str, str, str, str], tuple[str, int]]
+
+
+def _move_notation_where(
+    source_language: str, include_unknown: bool, only_pending: bool = False
+) -> WhereClause:
     """O `WHERE` das linhas em escopo, num lugar so.
 
     A previa e a aplicacao PRECISAM usar o mesmo criterio, e a primeira versao
@@ -3140,7 +3214,7 @@ def _move_notation_where(source_language, include_unknown, only_pending=False):
     ]
     if only_pending:
         clauses.append("verified = 0")
-    params = [None]  # o destino, preenchido por quem chama
+    params: SqlParams = [None]  # o destino, preenchido por quem chama
     if include_unknown:
         clauses.insert(1, "source_language IN (?, ?)")
         params.extend([source_language, SOURCE_LANGUAGE_UNKNOWN])
@@ -3151,8 +3225,12 @@ def _move_notation_where(source_language, include_unknown, only_pending=False):
 
 
 def _move_notation_rows(
-    cursor, source_language, target_language, include_unknown, only_pending=False
-):
+    cursor: sqlite3.Cursor,
+    source_language: str,
+    target_language: str,
+    include_unknown: bool,
+    only_pending: bool = False,
+) -> sqlite3.Cursor:
     """As linhas em escopo que tem texto dos dois lados para comparar."""
     where_sql, params = _move_notation_where(
         source_language, include_unknown, only_pending
@@ -3170,8 +3248,12 @@ def _move_notation_rows(
 
 
 def _move_notation_total(
-    cursor, source_language, target_language, include_unknown, only_pending=False
-):
+    cursor: sqlite3.Cursor,
+    source_language: str,
+    target_language: str,
+    include_unknown: bool,
+    only_pending: bool = False,
+) -> int:
     where_sql, params = _move_notation_where(
         source_language, include_unknown, only_pending
     )
@@ -3181,7 +3263,9 @@ def _move_notation_total(
     ).fetchone()[0]
 
 
-def count_adoptable_unknown_source(cursor, target_language, source_language):
+def count_adoptable_unknown_source(
+    cursor: sqlite3.Cursor, target_language: str, source_language: str | None
+) -> int:
     """Quantas linhas `adopt_unknown_source_language` de fato rotularia.
 
     Existe para a previa poder dizer o numero antes do "Sim". Rotular e a parte
@@ -3218,7 +3302,9 @@ def count_adoptable_unknown_source(cursor, target_language, source_language):
     ).fetchone()[0]
 
 
-def _empty_move_notation_stats(source_language, target_language, labeled=0):
+def _empty_move_notation_stats(
+    source_language: str, target_language: str, labeled: int = 0
+) -> Stats:
     return {
         "source_language": source_language,
         "target_language": target_language,
@@ -3231,17 +3317,17 @@ def _empty_move_notation_stats(source_language, target_language, labeled=0):
 
 
 def analyze_move_notation_updates(
-    cursor,
-    source_language,
-    target_language,
-    fix_notation,
-    sample_limit=10,
-    progress_callback=None,
-    should_cancel=None,
-    progress_every=2000,
-    include_unknown=True,
-    only_pending=False,
-):
+    cursor: sqlite3.Cursor,
+    source_language: str,
+    target_language: str,
+    fix_notation: FixNotation,
+    sample_limit: int = 10,
+    progress_callback: ProgressCallback | None = None,
+    should_cancel: ShouldCancel | None = None,
+    progress_every: int = 2000,
+    include_unknown: bool = True,
+    only_pending: bool = False,
+) -> Stats:
     """Previa da correcao de lances: quantas linhas mudam, e alguns exemplos.
 
     Serve tambem a passada de prosa (P6): a diferenca esta na funcao injetada
@@ -3300,18 +3386,18 @@ def analyze_move_notation_updates(
 
 
 def apply_move_notation_updates(
-    cursor,
-    source_language,
-    target_language,
-    fix_notation,
-    sample_limit=10,
-    progress_callback=None,
-    should_cancel=None,
-    progress_every=2000,
-    include_unknown=True,
-    only_pending=False,
-    history_action="move_notation",
-):
+    cursor: sqlite3.Cursor,
+    source_language: str,
+    target_language: str,
+    fix_notation: FixNotation,
+    sample_limit: int = 10,
+    progress_callback: ProgressCallback | None = None,
+    should_cancel: ShouldCancel | None = None,
+    progress_every: int = 2000,
+    include_unknown: bool = True,
+    only_pending: bool = False,
+    history_action: str = "move_notation",
+) -> Stats:
     """Aplica a correcao de lances nas traducoes ja gravadas do par.
 
     Com `only_pending=True` e `history_action="prose_fix"` e a passada de prosa

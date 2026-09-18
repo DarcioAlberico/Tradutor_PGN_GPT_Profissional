@@ -1,6 +1,9 @@
-import re
+from __future__ import annotations
+
 import random
+import re
 import time
+from typing import Callable, Protocol
 
 import requests
 
@@ -30,8 +33,20 @@ RETRY_MAX_SECONDS = 20.0
 # precisam se espalhar em proporcao a espera, senao voltam juntas.
 RETRY_JITTER = (0.5, 1.5)
 
+# Os dois "objetos" que o worker entrega a camada de rede, pelo que eles FAZEM
+# e nao pelo que sao (ROADMAP 28.11, tipos): qualquer coisa que se chame com
+# uma string serve de log, e qualquer coisa com `is_set()` serve de flag — o
+# `threading.Event` do app e o `SimpleNamespace` dos testes.
+LogMessage = Callable[[str], object]
 
-def retry_delay_seconds(attempt, status_code=None, jitter=None):
+
+class CancelFlag(Protocol):
+    def is_set(self) -> bool: ...
+
+
+def retry_delay_seconds(
+    attempt: int, status_code: int | None = None, jitter: float | None = None
+) -> float:
     """Espera antes da tentativa seguinte, exponencial e com jitter.
 
     `attempt` comeca em 1. `jitter` aceita um fator fixo, para teste.
@@ -57,13 +72,13 @@ class RequestPacer:
 
     def __init__(
         self,
-        base_range=TRANSLATION_REQUEST_DELAY_SECONDS,
-        first_multiplier=PACE_FIRST_MULTIPLIER,
-        growth=PACE_GROWTH,
-        maximum=PACE_MAX_MULTIPLIER,
-        decay=PACE_DECAY,
-        clean_streak=PACE_CLEAN_STREAK,
-    ):
+        base_range: tuple[float, float] = TRANSLATION_REQUEST_DELAY_SECONDS,
+        first_multiplier: float = PACE_FIRST_MULTIPLIER,
+        growth: float = PACE_GROWTH,
+        maximum: float = PACE_MAX_MULTIPLIER,
+        decay: float = PACE_DECAY,
+        clean_streak: int = PACE_CLEAN_STREAK,
+    ) -> None:
         self.base_range = base_range
         self.first_multiplier = first_multiplier
         self.growth = growth
@@ -74,14 +89,14 @@ class RequestPacer:
         self.clean_run = 0
         self.rate_limited = 0
 
-    def record_rate_limited(self):
+    def record_rate_limited(self) -> None:
         """A API reclamou do ritmo: desacelera e zera a sequencia limpa."""
         self.rate_limited += 1
         self.clean_run = 0
         alvo = max(self.multiplier * self.growth, self.first_multiplier)
         self.multiplier = min(alvo, self.maximum)
 
-    def record_success(self):
+    def record_success(self) -> None:
         """Uma requisicao passou. So acelera depois de uma sequencia limpa."""
         if self.multiplier <= 1.0:
             return
@@ -90,11 +105,11 @@ class RequestPacer:
             self.clean_run = 0
             self.multiplier = max(1.0, self.multiplier * self.decay)
 
-    def next_delay(self):
+    def next_delay(self) -> float:
         return random.uniform(*self.base_range) * self.multiplier
 
 
-def split_text_for_translation(text: str, max_chars=MAX_TRANSLATE_CHARS):
+def split_text_for_translation(text: str, max_chars: int = MAX_TRANSLATE_CHARS) -> list[str]:
     if len(text) <= max_chars:
         return [text]
 
@@ -132,12 +147,12 @@ def split_text_for_translation(text: str, max_chars=MAX_TRANSLATE_CHARS):
 def translate_text_chunk(
     text: str,
     target_language: str,
-    log_message=None,
-    session=None,
-    pacer=None,
-    source_language="",
-    cancel_flag=None,
-):
+    log_message: LogMessage | None = None,
+    session: requests.Session | None = None,
+    pacer: RequestPacer | None = None,
+    source_language: str = "",
+    cancel_flag: CancelFlag | None = None,
+) -> str | None:
     """Traduz um trecho. `source_language` vazio mantem o `sl=auto` de sempre.
 
     Declarar o idioma de origem nao e so metadado: `sl=auto` faz o endpoint
@@ -162,7 +177,7 @@ def translate_text_chunk(
     Devolve `None` ao cancelar, que e o que os chamadores ja tratam como "nao
     traduziu": para eles, cancelado e falha sao o mesmo caminho.
     """
-    def cancelado():
+    def cancelado() -> bool:
         return cancel_flag is not None and cancel_flag.is_set()
 
     if cancelado():
@@ -231,12 +246,12 @@ def translate_text_chunk(
 def translate_text(
     text: str,
     target_language: str,
-    log_message=None,
-    cancel_flag=None,
-    session=None,
-    pacer=None,
-    source_language="",
-):
+    log_message: LogMessage | None = None,
+    cancel_flag: CancelFlag | None = None,
+    session: requests.Session | None = None,
+    pacer: RequestPacer | None = None,
+    source_language: str = "",
+) -> str | None:
     chunks = split_text_for_translation(text)
     if len(chunks) > 1 and log_message:
         log_message(f"Comentario longo dividido em {len(chunks)} partes.")
