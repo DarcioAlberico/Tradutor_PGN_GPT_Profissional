@@ -45,6 +45,7 @@ files = [
     "tradutor_pgn/llm_prompt.py",
     "tradutor_pgn/llm_providers.py",
     "tradutor_pgn/llm_costs.py",
+    "tradutor_pgn/app_log.py",
 ]
 python_version = "3.10"
 ignore_missing_imports = true

@@ -4,7 +4,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
-from . import __version__, app_actions, app_paths, first_run
+from . import __version__, app_actions, app_log, app_paths, first_run
 from .app_config import LANGUAGE_NAMES
 from .editor_common import window_safe_geometry
 from .glossario import set_glossary_error_handler
@@ -84,6 +84,10 @@ class PGNTranslatorApp:
         # "Revisar pendentes"/"Abrir pasta" (ROADMAP 28.10). `None` ate la.
         self.last_run = None
         self.log_queue = queue.Queue()
+        # O `logging` do programa aponta para esta fila e para o arquivo da
+        # execucao (ROADMAP 28.11); as bibliotecas de terceiros entram nele a
+        # partir de WARNING.
+        app_log.install(self)
 
         # Antes de qualquer coisa que possa falhar: sob `pythonw` nao ha console,
         # entao sem isto um erro em callback do Tk desaparece sem deixar rastro e

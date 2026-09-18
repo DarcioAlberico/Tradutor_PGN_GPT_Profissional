@@ -66,7 +66,7 @@ toca.
 | `glossario.db` (`source_path`, `source_hash`) | De qual arquivo ele veio: caminho relativo ao proprio banco e hash do conteudo | — |
 | `pgn_tradutor_pro_settings.json` | Estado da UI e rascunhos de edicao | Nao |
 | `backups/` | Copias automaticas do glossario e do banco, com retencao (S8) | Nao |
-| `logs/` | Log por execucao de traducao (`traducao-<carimbo>.log`), com retencao | Nao |
+| `logs/` | Log por execucao de traducao (`traducao-<carimbo>.log`, `[HH:MM:SS] texto`; pelo `logging`, com o que as bibliotecas avisam a partir de WARNING — ROADMAP 28.11), com retencao | Nao |
 | `spelling_ssp/spelling.ssp` | Dicionario de nomes proprios do "Normalizar PGN" — dado de PROGRAMA, vai dentro do pacote | Sim |
 | `spelling.db` (na pasta de dados) | Indice SQLite derivado dele, construido na primeira normalizacao (D6). Fica com os dados porque e escrita: na pasta do programa, um `Program Files` o barraria e a normalizacao ficaria no caminho lento para sempre | Nao |
 | `tradutor_pgn/Substituicoes-inicial.txt` (no pacote) | Copia do glossario feita no build; a primeira execucao a instala na pasta de dados quando nao ha glossario la | — |

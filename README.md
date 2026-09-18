@@ -617,6 +617,7 @@ preenchida e diz a taxa de "aceito sem editar" de cada motor. A barra e 80 %.
 - `tradutor_pgn/`: pacote Python com os modulos da aplicacao.
 - `tradutor_pgn/app.py`: classe principal e estado da aplicacao.
 - `tradutor_pgn/app_actions.py`: acoes da interface, controle da traducao e atalhos para ferramentas.
+- `tradutor_pgn/app_log.py`: o log pelo `logging` — a porta `log_message`, o nivel pelo prefixo, a fila do widget, o arquivo da execucao e os avisos das bibliotecas.
 - `tradutor_pgn/app_config.py`: constantes compartilhadas do projeto.
 - `tradutor_pgn/background_task.py`: executa operacoes longas fora da thread da interface, com progresso e cancelamento.
 - `tradutor_pgn/backup_retention.py`: politica de retencao de `backups/` e `logs/`, com a decisao separada da remocao.

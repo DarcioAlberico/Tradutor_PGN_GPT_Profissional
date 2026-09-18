@@ -9104,7 +9104,7 @@ aplicado; tema antes de gravar; substituir a secao em vez de mesclar; sem
 tema na abertura; zero recusado; gancho do glossario que fica; controle sem
 registro; tema sem validar).
 
-### 28.11 Engenharia — CI, divisao dos testes, fachada do db_tools e os tipos de `database.py` CONCLUIDOS (2026-09-16); logging fica
+### 28.11 Engenharia — CONCLUIDO (CI, divisao dos testes, fachada do db_tools e tipos em 2026-09-16; logging em 2026-09-18)
 
 Zero horas de revisao por livro; fica no fim da ordem e nao compete com os
 itens de produto. **Depende de 28.1 item 1**: um CI com `uv sync` sem
@@ -9207,7 +9207,22 @@ itens de produto. **Depende de 28.1 item 1**: um CI com `uv sync` sem
   que ja rodava por padrao, agora escrito" e nao escrevia o `select`; agora
   escreve (`E4`, `E7`, `E9`, `F`). Sem isso o primeiro CI teria falhado no
   lint por uma mudanca de ferramenta, nao de codigo.
-- **Nao feito**: `logging` no lugar da fila (nao urgente, como dito acima).
+- **`logging`, feito em 2026-09-18 — e a fila continua.** `app_log.py`: o
+  logger `tradutor_pgn` com um `Handler` que leva cada registro a fila do
+  widget (a ponte de thread de sempre, C1) e ao arquivo da execucao, no
+  mesmo `[HH:MM:SS] texto`; `app.log_message` continua sendo a porta de
+  todo modulo e de todo teste, e por dentro vira `LOGGER.log(nivel, texto)`
+  com o nivel INFERIDO do prefixo que o programa ja escreve (`[ERRO`,
+  `[ABORTADO]` = erro; `[FALHA]`, `[AVISO]`, `ATENCAO` = aviso) — ninguem
+  trocou uma chamada. O que se ganhou: nivel por mensagem e `assertLogs`;
+  um handler so, com lock, onde duas threads podiam escrever o arquivo ao
+  mesmo tempo; e **o que as bibliotecas dizem** — o SDK da Anthropic e o
+  `requests` avisam de retentativas e erros pelo `logging`, e antes ninguem
+  ouvia; a partir de WARNING entram no log como `[AVISO] anthropic._base_client:
+  ...`, com o nome de quem falou. Um app por vez: `install` tira o handler
+  do app anterior (a suite de janelas cria um por teste). 9 testes headless
+  em `test_log.py`, 8 mutacoes mortas; os testes de janela do log passaram
+  sem mudar uma linha.
 
 ### 28.12 O lote `|||` alinha por posicao, e so por posicao — CONCLUIDO (2026-09-15)
 

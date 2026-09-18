@@ -5,7 +5,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from . import app_paths
+from . import app_log, app_paths
 from .backup_retention import (
     prune_database_backups,
     prune_glossary_backups,
@@ -230,15 +230,9 @@ def select_directory(app):
 
 
 def log_message(app, message: str):
-    app.log_queue.put(message)
-    log_handle = getattr(app, "_log_file_handle", None)
-    if log_handle is not None:
-        try:
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            log_handle.write(f"[{timestamp}] {message}\n")
-            log_handle.flush()
-        except OSError:
-            pass
+    """A porta do log: pelo `logging` (ROADMAP 28.11), que leva a mensagem a
+    fila do widget e ao arquivo da execucao do `app` instalado — este."""
+    app_log.log(message)
 
 
 def log_is_at_the_end(log_text):
