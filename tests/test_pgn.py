@@ -469,6 +469,56 @@ class PgnUtilsTests(unittest.TestCase):
             self.assertEqual(skipped, 1)
 
 
+class MoveContextTests(unittest.TestCase):
+    """O lance anterior e o seguinte de cada comentario, para o modelo de
+    linguagem (ROADMAP 28.7): a metade barata da extracao continua barata."""
+
+    PGN = (
+        '[Event "T"]\n\n'
+        "1. e4 {First} {Best was Bc4} {Second} e5 2. Nf3 {after} Nc6 (2... Nf6 {alt Bc4 here}) "
+        "3. Bb5 {Ruy} a6 {Diagram} 4. Ba4 {Diagram} Nf6 5. O-O {castled} 1-0\n"
+    )
+
+    def test_the_neighbours_are_the_moves_outside_the_braces(self):
+        contextos = pgn_utils.extract_comment_contexts(self.PGN)
+        self.assertEqual(contextos["First"], ("1. e4", "e5"))
+        self.assertEqual(contextos["after"], ("2. Nf3", "Nc6"))
+        self.assertEqual(contextos["Ruy"], ("3. Bb5", "a6"))
+        self.assertEqual(contextos["castled"], ("5. O-O", ""), "o ultimo antes do resultado")
+
+    def test_a_move_quoted_inside_a_neighbouring_comment_is_not_context(self):
+        """`{Best was Bc4}` cita um lance; os comentarios ao lado nao o herdam —
+        e os tres seguidos anotam o MESMO `1. e4`, que o terceiro tem de ver."""
+        contextos = pgn_utils.extract_comment_contexts(self.PGN)
+        self.assertEqual(contextos["First"], ("1. e4", "e5"))
+        self.assertEqual(contextos["Best was Bc4"], ("1. e4", "e5"))
+        self.assertEqual(contextos["Second"], ("1. e4", "e5"))
+        self.assertEqual(contextos["alt Bc4 here"], ("2... Nf6", "3. Bb5"))
+
+    def test_a_comment_longer_than_the_window_is_cut_at_its_brace(self):
+        """O vizinho de 200 caracteres nao cabe na janela de 80: o pedaco dele
+        que sobra — com o `Bc4` que cita — e cortado na chave, dos dois lados."""
+        longo = "x" * 150
+        pgn = f"1. e4 {{{longo} Best was Bc4 here}} {{Next}} {{Then Nf3 wins {longo}}} e5 *"
+        contextos = pgn_utils.extract_comment_contexts(pgn)
+        self.assertEqual(contextos["Next"], ("", ""), "o lance de verdade esta fora da janela")
+
+    def test_the_first_occurrence_of_a_repeated_comment_wins(self):
+        contextos = pgn_utils.extract_comment_contexts(self.PGN)
+        self.assertEqual(contextos["Diagram"], ("a6", "4. Ba4"))
+
+    def test_the_window_stops_at_the_braces_and_empty_when_no_move(self):
+        self.assertEqual(pgn_utils.move_context("{x} {y}", 4, 7), ("", ""))
+        self.assertEqual(pgn_utils.extract_comment_contexts(""), {})
+
+    def test_the_texts_come_with_contexts_only_when_asked(self):
+        so_textos = pgn_utils.extract_comment_texts(self.PGN)
+        self.assertNotIn("contexts", so_textos)
+        com = pgn_utils.extract_comment_texts(self.PGN, with_contexts=True)
+        self.assertEqual(com["comments"], so_textos["comments"])
+        self.assertEqual(set(com["contexts"]), set(so_textos["comments"]))
+
+
 class EncodingTests(unittest.TestCase):
     def test_python_sources_do_not_contain_common_mojibake(self):
         project_root = Path(__file__).resolve().parents[1]

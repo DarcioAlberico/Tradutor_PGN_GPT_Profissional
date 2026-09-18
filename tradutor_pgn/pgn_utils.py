@@ -440,8 +440,57 @@ def comment_reading_context(content: str, spans):
 
 _COMMENT_RE = re.compile(r'\{(.*?)\}', re.DOTALL)
 
+# Um lance como esta escrito no PGN, com o numero quando o tem (`12. Nf3`,
+# `12...Nf6`, `O-O`, `exd5+`): e o contexto de leitura que o modelo de
+# linguagem recebe (ROADMAP 28.7) — o mesmo padrao do piloto, que mediu 198
+# de 200 comentarios com contexto.
+_CONTEXT_MOVE_RE = re.compile(
+    r"(?:\d+\.(?:\.\.)?\s*)?(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?|O-O(?:-O)?)[+#!?]*"
+)
+CONTEXT_WINDOW = 80
 
-def extract_comment_texts(content: str):
+
+def move_context(content: str, start: int, end: int):
+    """`(antes, depois)`: o ultimo lance antes de `start` e o primeiro depois de `end`.
+
+    So o que esta FORA de chaves: os comentarios inteiros dentro da janela de
+    80 caracteres sao apagados antes de procurar — um lance citado num
+    comentario vizinho ("Best was Bc4") nao e o lance do arquivo —, e o que
+    sobra de um comentario que comeca antes da janela (ou acaba depois dela)
+    e cortado no `}` (no `{`). Apagar, e nao cortar na chave: dois
+    comentarios seguidos anotam o MESMO lance, e o segundo tem de ve-lo.
+    Vazio quando nao ha lance na janela (o primeiro comentario de uma
+    partida, o ultimo antes do resultado).
+    """
+    antes = _COMMENT_RE.sub(" ", content[max(0, start - CONTEXT_WINDOW):start])
+    antes = antes.rsplit("}", 1)[-1]
+    depois = _COMMENT_RE.sub(" ", content[end:end + CONTEXT_WINDOW])
+    depois = depois.split("{", 1)[0]
+    lances_antes = _CONTEXT_MOVE_RE.findall(antes)
+    lances_depois = _CONTEXT_MOVE_RE.findall(depois)
+    return (
+        lances_antes[-1].strip() if lances_antes else "",
+        lances_depois[0].strip() if lances_depois else "",
+    )
+
+
+def extract_comment_contexts(content: str):
+    """`{texto: (antes, depois)}` da PRIMEIRA ocorrencia de cada comentario distinto.
+
+    A primeira, porque e uma por texto que o worker traduz (ROADMAP 20.3): o
+    "Diagram" repetido cem vezes ganha o contexto de onde apareceu primeiro, e
+    e o unico que a API ve. Custa ~20 bytes por comentario, lidos na mesma
+    passada que extrai o texto — nao exige segurar o PGN pela fase da API.
+    """
+    contextos = {}
+    for m in _COMMENT_RE.finditer(content):
+        texto = flatten_comment(m.group(1))
+        if texto and texto not in contextos:
+            contextos[texto] = move_context(content, m.start(), m.end())
+    return contextos
+
+
+def extract_comment_texts(content: str, with_contexts: bool = False):
     """So os TEXTOS dos comentarios e a contagem de `;`. A metade barata.
 
     A primeira passada da execucao precisa apenas disto: quantos comentarios ha
@@ -454,13 +503,18 @@ def extract_comment_texts(content: str):
     completa nas duas passadas, que custaria a parte cara duas vezes por arquivo.
     """
     textos = [flatten_comment(m.group(1)) for m in _COMMENT_RE.finditer(content)]
-    return {
+    info = {
         "comments": [texto for texto in textos if texto],
         "semicolon_comments": count_semicolon_comments(content),
     }
+    if with_contexts:
+        # So quando um modelo de linguagem vai usar (ROADMAP 28.7): o Google
+        # nao recebe contexto, e a primeira passada continua a metade barata.
+        info["contexts"] = extract_comment_contexts(content)
+    return info
 
 
-def extract_comment_texts_from_file(pgn_file: str, log_message=None):
+def extract_comment_texts_from_file(pgn_file: str, log_message=None, with_contexts=False):
     """Le o PGN e devolve so os textos. Ver `extract_comment_texts`.
 
     A codificacao e anunciada aqui, e nao na segunda passada: e o momento em que
@@ -472,7 +526,7 @@ def extract_comment_texts_from_file(pgn_file: str, log_message=None):
         if log_message:
             log_message(f"Arquivo: {os.path.basename(pgn_file)} | Codificacao detectada: {enc}")
 
-        return extract_comment_texts(content)
+        return extract_comment_texts(content, with_contexts=with_contexts)
 
     except Exception as e:
         if log_message:

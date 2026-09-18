@@ -82,6 +82,7 @@ from tradutor_pgn.llm_prompt import (  # noqa: E402
     validar_lote,  # noqa: F401 - idem
 )
 from tradutor_pgn import llm_prompt  # noqa: E402
+from tradutor_pgn.pgn_utils import move_context  # noqa: E402
 from tradutor_pgn.prose_fixes import normalize_prose  # noqa: E402
 from tradutor_pgn.review_quality import evaluate_translation_quality  # noqa: E402
 
@@ -106,10 +107,6 @@ LONGO_MINIMO = 250
 ESTRATOS = (("preposicao", 100), ("citacao", 50), ("longo", 50))
 
 # Um lance no PGN, para o contexto de leitura: "23.Nf3", "23...Bxe4", "O-O".
-LANCE_RE = re.compile(
-    r"(?:\d+\.(?:\.\.)?\s*)?(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?|O-O(?:-O)?)[+#!?]*"
-)
-
 # Precos por milhao de tokens (US$), da tabela da referencia da API em
 # 2026-06. Leitura de cache a 10 % da entrada e escrita a 125 %, a conferir na
 # fatura — o piloto existe para calibrar chutes como este.
@@ -198,11 +195,13 @@ def sortear_estratificado(linhas, estratos=ESTRATOS, semente=SEMENTE_SORTEIO):
 def contexto_de_leitura(conteudo_pgn, original):
     """`(lance_anterior, lance_seguinte)` em volta do comentario no PGN.
 
-    E o contexto que 28.7 quer dar ao modelo: ~20 bytes por lado, lidos do
-    proprio arquivo. O original foi extraido por `flatten_comment`, que
-    normaliza espacos E insere um espaco depois de `.!?` seguido de letra
-    (`K.Shiven` -> `K. Shiven`), entao entre duas palavras do original pode
-    haver no arquivo qualquer espaco em branco — ou nenhum.
+    E o contexto que 28.7 da ao modelo, pelo MESMO `move_context` do produto
+    (`pgn_utils`): o piloto mede o que o worker manda, e nao uma variante. O
+    que e so daqui e achar o comentario pelo texto: o original veio do banco,
+    extraido por `flatten_comment`, que normaliza espacos E insere um espaco
+    depois de `.!?` seguido de letra (`K.Shiven` -> `K. Shiven`), entao entre
+    duas palavras do original pode haver no arquivo qualquer espaco em branco
+    — ou nenhum.
     """
     if not conteudo_pgn or not original:
         return "", ""
@@ -210,12 +209,7 @@ def contexto_de_leitura(conteudo_pgn, original):
     achado = re.search(padrao, conteudo_pgn)
     if achado is None:
         return "", ""
-    antes = conteudo_pgn[max(0, achado.start() - 80):achado.start()]
-    depois = conteudo_pgn[achado.end():achado.end() + 80]
-    lances_antes = LANCE_RE.findall(antes)
-    lances_depois = LANCE_RE.findall(depois)
-    return (lances_antes[-1].strip() if lances_antes else "",
-            lances_depois[0].strip() if lances_depois else "")
+    return move_context(conteudo_pgn, achado.start(), achado.end())
 
 
 def amostrar(args):

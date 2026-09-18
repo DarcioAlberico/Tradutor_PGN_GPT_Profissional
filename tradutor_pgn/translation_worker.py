@@ -155,12 +155,15 @@ def confirm_on_main_thread(app, ask):
     return resposta["valor"]
 
 
-def _first_pass(app, pgn_files):
+def _first_pass(app, pgn_files, with_contexts=False):
     """Le so o que a adocao (P2) e a carga de cache precisam: os TEXTOS.
 
-    Devolve `{"total", "distintos", "semicolon", "por_arquivo"}`, ou `None` se o
-    usuario cancelou no meio. `por_arquivo` e `{caminho: [textos distintos]}`, na
-    ordem em que os comentarios aparecem no arquivo.
+    Devolve `{"total", "distintos", "semicolon", "por_arquivo", "contextos"}`,
+    ou `None` se o usuario cancelou no meio. `por_arquivo` e
+    `{caminho: [textos distintos]}`, na ordem em que os comentarios aparecem
+    no arquivo. `contextos` e `{texto: (lance anterior, lance seguinte)}` da
+    primeira ocorrencia de cada texto, so com `with_contexts` — e o que o
+    modelo de linguagem recebe (ROADMAP 28.7); o Google nao usa e nao paga.
 
     **O que fica guardado sao os textos, e nada mais** (ROADMAP 20.4). Antes,
     `info_by_file` guardava o resultado COMPLETO da extracao de todos os PGN —
@@ -183,14 +186,19 @@ def _first_pass(app, pgn_files):
     total_distintos = 0
     total_semicolon = 0
     por_arquivo = {}
+    contextos = {}
 
     for pgn_file in pgn_files:
         if app.cancel_flag.is_set():
             app.log_message("Traducao cancelada antes da extracao completa.")
             return None
 
-        info = extract_comment_texts_from_file(pgn_file, app.log_message)
+        info = extract_comment_texts_from_file(
+            pgn_file, app.log_message, with_contexts=with_contexts
+        )
         total_comments += len(info["comments"])
+        for texto, contexto in (info.get("contexts") or {}).items():
+            contextos.setdefault(texto, contexto)
         # `dict.fromkeys` preservando a ordem: o mesmo comentario repetido no
         # arquivo — "Diagram", "(D)", a legenda de cada figura — era enviado
         # tantas vezes quantas aparecia, porque o cache so aprende a traducao
@@ -214,6 +222,7 @@ def _first_pass(app, pgn_files):
         "distintos": total_distintos,
         "semicolon": total_semicolon,
         "por_arquivo": por_arquivo,
+        "contextos": contextos,
     }
 
 
@@ -359,12 +368,16 @@ def run_translation(
             app.log_message(llm.describe())
         provider_name = llm.run_label if llm is not None else TRANSLATION_PROVIDER
 
-        def traduzir(texto):
+        def traduzir(texto, contextos=None):
             """UMA porta para a API, seja qual for o motor. `translate_text` e
             resolvido na chamada, e nao no import, para os testes que o
-            substituem continuarem valendo."""
+            substituem continuarem valendo. `contextos` — o lance anterior e o
+            seguinte de cada parte — so o modelo de linguagem recebe."""
             if llm is not None:
-                return llm.translate(texto, target_language, app.log_message, app.cancel_flag)
+                return llm.translate(
+                    texto, target_language, app.log_message, app.cancel_flag,
+                    contexts=contextos,
+                )
             return translate_text(
                 texto,
                 target_language,
@@ -418,11 +431,15 @@ def run_translation(
                 "opcao em Configuracoes para nao ver este aviso."
             )
 
-        primeira = _first_pass(app, pgn_files)
+        primeira = _first_pass(app, pgn_files, with_contexts=llm is not None)
         if primeira is None:
             canceled = True
             return
         total_comments = primeira["total"]
+        # O contexto de leitura de cada comentario, para o modelo (ROADMAP
+        # 28.7): e o que o piloto tinha — 198 de 200 com contexto — e o worker
+        # nao mandava. Vazio com o Google, que nao o usa.
+        contextos_de_leitura = primeira["contextos"]
         # O denominador do progresso, e o numero de comentarios que a execucao de
         # fato traduz: um comentario repetido no proprio arquivo e processado uma
         # vez so (ROADMAP 20.3).
@@ -622,6 +639,10 @@ def run_translation(
                 return 0.0
             return time.perf_counter() - pause_started
 
+        def contexto_de(original):
+            """`(lance anterior, lance seguinte)` do comentario, ou vazios."""
+            return contextos_de_leitura.get(original, ("", ""))
+
         def acabar(translated, original):
             """As tres etapas entre a resposta da API e a restauracao."""
             translation = apply_automatic_substitutions(translated, automatic_rules)
@@ -680,7 +701,7 @@ def run_translation(
                 return None
             cleaned = clean_comment_for_translation(original, cleanup_rules)
             masked, annotation_only = mask_annotations(cleaned, player_names=False)
-            translated = traduzir(masked)
+            translated = traduzir(masked, [contexto_de(original)])
             if not translated:
                 return None
             translation, corrigidos, consertos = acabar(translated, original)
@@ -722,7 +743,7 @@ def run_translation(
                     f"  - Aviso: lance reescrito pelo modelo ({divergencia}), "
                     f"reenviando sozinho: \"{original[:60]}\""
                 )
-                outra = traduzir(masked)
+                outra = traduzir(masked, [contexto_de(original)])
                 batch_api_requests += 1
                 anchors_resent += 1
                 if not outra:
@@ -884,7 +905,9 @@ def run_translation(
                         joined = join_comments_for_batch(masked_texts)
 
                         api_started = time.perf_counter()
-                        translated_joined = traduzir(joined)
+                        translated_joined = traduzir(
+                            joined, [contexto_de(item[0]) for item in grupo_items]
+                        )
                         batch_api_time += time.perf_counter() - api_started
                         batch_api_requests += 1
 
@@ -1010,7 +1033,7 @@ def run_translation(
                                     app.log_message("Traducao cancelada pelo usuario.")
                                     return
                                 api_started = time.perf_counter()
-                                translated = traduzir(masked)
+                                translated = traduzir(masked, [contexto_de(original)])
                                 batch_api_time += time.perf_counter() - api_started
                                 batch_api_requests += 1
                                 if translated:

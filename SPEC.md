@@ -842,8 +842,16 @@ bloco de sistema FIXO com as regras duras, as letras das pecas do par
 (`PIECE_LETTERS`, a mesma fonte de P3), a terminologia da semente e as regras
 `automatic` do par (no Anthropic com `cache_control`: no piloto, 36 % da
 entrada veio do cache), e as sugestoes do glossario que CASAM no texto do lote
-(ate 80). O prompt mora em `llm_prompt` e e o MESMO que o piloto usa — uma
-mudanca de prompt e medida pelo piloto antes de valer aqui.
+(ate 80), e **o lance anterior e o seguinte de cada comentario no arquivo**
+(`antes`/`depois`, garantia B6) — o contexto que o piloto tinha e que, ate
+2026-09-18, o worker nao mandava. O prompt mora em `llm_prompt` e e o MESMO
+que o piloto usa — uma mudanca de prompt e medida pelo piloto antes de valer
+aqui —, e o `max_tokens` tambem e o do piloto (16.000; o limite conta o
+pensamento do modelo). Uma resposta cortada por esse limite, ou recusada, e um
+problema do CONTEUDO do lote e nao da conexao: o provedor divide o lote ao meio
+e tenta cada metade, ate o item sozinho (B1 pela API que a exige); o item que
+sobra sozinho recusado volta vazio, e os que sairam certos das metades ficam na
+memoria do lote — quando o worker os reenviar sozinhos, nao pagam de novo.
 
 **Garantia K1 — a chave de API nunca aparece inteira em log, configuracoes
 ou dialogo.** As chaves ficam em `chaves-api.json` na pasta de dados, fora
@@ -2324,7 +2332,8 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | B2 | Desalinhamento -> traducao individual: contagem de partes errada, ou parte com razao de tamanho em palavras fora de `[0,3; 3,0]` contra o texto enviado (originais de 40 caracteres ou mais) | Risco de desenho: o lote `\|\|\|` alinhava so por posicao (ROADMAP 28.12) |
 | B3 | Falha de API nao vira reprocessamento comentario a comentario | Bug: um lote morto custava ~1 h de requisicoes inuteis |
 | B4 | O disjuntor alcanca o ramo comentario a comentario: tres seguidos sem resposta abortam, um grupo pequeno morto conta como lote, e um grupo vivo zera a conta | Bug: depois de um desalinhamento, a rede caida custava 3 x 30 s por comentario sem que B3 disparasse — o unico caminho fora do alcance do disjuntor (ROADMAP 28.1) |
-| B5 | Um lote JSON dos modelos de linguagem e aceito so se cada id aparece exatamente uma vez; o id que faltou volta como parte VAZIA, que B2 acusa em qualquer tamanho; a resposta embaralhada sai na ordem dos ids | Risco: a razao de tamanho de B2 nao ve a troca de ordem entre partes parecidas; so os ids resolvem (ROADMAP 28.7) |
+| B5 | Um lote JSON dos modelos de linguagem e aceito so se cada id aparece exatamente uma vez; o id que faltou volta como parte VAZIA, que B2 acusa em qualquer tamanho; a resposta embaralhada sai na ordem dos ids; uma resposta cortada por `max_tokens` ou recusada divide o lote ao meio ate o item sozinho (nunca `None`, que e a rede caida), e as metades que sairam certas nao sao pagas de novo quando o worker reenvia sozinho | Risco: a razao de tamanho de B2 nao ve a troca de ordem entre partes parecidas; so os ids resolvem; e um lote cortado tratado como rede caida derrubava 20 comentarios e contava no disjuntor (ROADMAP 28.7) |
+| B6 | Com um modelo de linguagem, cada item do lote (e cada reenvio sozinho) vai com o lance anterior e o seguinte do ARQUIVO — os de fora das chaves, os comentarios vizinhos apagados da janela —, da primeira ocorrencia do texto; o Google nao recebe contexto e a primeira passada nao o extrai | Custo: o piloto foi medido com contexto (198 de 200) e o worker mandava os campos vazios (ROADMAP 28.7) |
 | W2 | Backoff exponencial, e o ritmo cai ao ver 429 | Risco: intervalo agressivo sem defesa contra limite de taxa |
 | T1 | Nao sobrescrever traducao existente | — |
 | T2 | Falhas contabilizadas e exibidas | Bug: sucesso reportado com PGN bilingue |
@@ -2589,6 +2598,11 @@ X3). O que resta declarado como limite:
   pico. Um modelo fora da tabela (ou um nome novo) mostra tokens e "sem preco
   na tabela"; a fatura do provedor e o que vale, e o log diz isso nas duas
   pontas.
+- **O contexto de lances (B6) e uma janela de 80 caracteres** para cada lado,
+  com os comentarios vizinhos apagados: um comentario cujo lance de verdade
+  esta atras de um vizinho maior do que a janela vai sem contexto (5 dos
+  6.500 comentarios distintos do livro de desenvolvimento), e o piloto
+  mostrou que o prompt aceita o campo vazio.
 - **O portao de ancoras (T6) ve a ancora, nao a letra**: `Nf3 -> Bf3` passa
   por ele, e e P3 quem corrige a letra pelo original — com o idioma de origem
   declarado; em "Detectar" a letra trocada fica para o aviso Q4. E o portao e
@@ -2914,7 +2928,12 @@ falhado, PGN com o original) mais quatro — a segunda chance que acerta, o
 caminho individual, o reenvio sem nomes e o Google fora do portao — e 6 de
 notacao para `anchor_divergence`, 7 mutacoes mortas; e **M7** no mesmo dia,
 que nao estava planejada e nasceu do "estimativa de custo antes de iniciar"
-de 28.7, com 4 testes do worker, 7 de `llm_costs` e 9 mutacoes mortas.
+de 28.7, com 4 testes do worker, 7 de `llm_costs` e 9 mutacoes mortas; e
+**B6** (o contexto de lances) com a segunda metade de B5 (o lote dividido no
+corte e na recusa), no mesmo dia, com 6 testes de `pgn_utils`, 6 de
+`llm_providers`, 3 do worker e 16 mutacoes mortas — uma sobreviveu a primeira
+passada e derrubou a regra, nao o teste: "parar na chave" perdia o lance de
+dois comentarios seguidos, e virou "apagar o vizinho da janela".
 **Nenhuma garantia planejada esta pendente em 2026-09-18.** A regra para as
 proximas continua: cada uma entra aqui escrita como o teste que a fara migrar
 — "falha sem a correcao" —, e as que dependem de medicao no banco de dev

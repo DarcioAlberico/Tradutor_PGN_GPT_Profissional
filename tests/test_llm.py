@@ -232,6 +232,73 @@ class ChatCompletionsTranslatorTests(unittest.TestCase):
         self.assertNotIn("max_tokens", corpo)
         self.assertEqual(t._client.chamadas[0][0], "https://api.openai.com/v1/chat/completions")
 
+    def test_the_reading_context_travels_with_each_item(self):
+        t = self.tradutor([resposta_ok([{"id": 1, "traducao": "um"}, {"id": 2, "traducao": "dois"}])])
+        t.translate(BATCH_SEPARATOR.join(["one", "two"]), "pt", contexts=[("12. Nf3", "Nc6"), ("", "13. O-O")])
+        corpo = t._client.chamadas[0][1]["json"]
+        itens = json.loads(corpo["messages"][1]["content"].split("\n\n")[1])["itens"]
+        self.assertEqual(
+            [(i["antes"], i["depois"]) for i in itens], [("12. Nf3", "Nc6"), ("", "13. O-O")]
+        )
+        # Contexto de tamanho errado nao derruba nada: vai vazio.
+        t = self.tradutor([resposta_ok([{"id": 1, "traducao": "um"}])])
+        t.translate("one", "pt", contexts=[("a", "b"), ("c", "d")])
+        corpo = t._client.chamadas[0][1]["json"]
+        itens = json.loads(corpo["messages"][1]["content"].split("\n\n")[1])["itens"]
+        self.assertEqual((itens[0]["antes"], itens[0]["depois"]), ("", ""))
+
+    def test_a_cut_batch_is_split_in_two_and_not_sent_item_by_item(self):
+        """`max_tokens` e do conteudo do lote, nao da conexao: duas metades
+        (B1), em vez de `None` — que o worker trataria como a rede caida."""
+        t = self.tradutor([
+            resposta_ok([{"id": 1, "traducao": "x"}], finish="length"),
+            resposta_ok([{"id": 1, "traducao": "um"}, {"id": 2, "traducao": "dois"}]),
+            resposta_ok([{"id": 1, "traducao": "tres"}, {"id": 2, "traducao": "quatro"}]),
+        ])
+        saida = t.translate(BATCH_SEPARATOR.join(["one", "two", "three", "four"]), "pt", self.logs.append)
+        self.assertEqual(saida, BATCH_SEPARATOR.join(["um", "dois", "tres", "quatro"]))
+        self.assertEqual(len(t._client.chamadas), 3)
+        self.assertTrue(any("lote de 4 itens dividido em 2 + 2" in l for l in self.logs), self.logs)
+
+    def test_a_refused_item_is_isolated_and_the_rest_is_not_paid_twice(self):
+        """A recusa isola o item: os outros saem das metades, e quando o
+        worker os reenviar sozinhos a resposta vem da memoria do lote."""
+        recusa = FakeResponse(200, {
+            "choices": [{"finish_reason": "stop", "message": {"content": None, "refusal": "nao"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 0},
+        })
+        t = self.tradutor([
+            recusa,                                            # [one, two, three]
+            resposta_ok([{"id": 1, "traducao": "um"}]),        # [one]
+            recusa,                                            # [two, three]
+            resposta_ok([{"id": 1, "traducao": "dois"}]),      # [two]
+            recusa,                                            # [three]
+            recusa,                                            # three, sozinho, pelo worker
+        ])
+        saida = t.translate(BATCH_SEPARATOR.join(["one", "two", "three"]), "pt", self.logs.append)
+        self.assertEqual(saida, BATCH_SEPARATOR.join(["um", "dois", ""]), "o recusado volta vazio")
+        self.assertEqual(len(t._client.chamadas), 5)
+        # O que o worker faz com a parte vazia: cada item sozinho.
+        self.assertEqual(t.translate("one", "pt"), "um")
+        self.assertEqual(t.translate("two", "pt"), "dois")
+        self.assertEqual(len(t._client.chamadas), 5, "os dois vieram da memoria, sem requisicao")
+        self.assertIsNone(t.translate("three", "pt", self.logs.append))
+        self.assertEqual(len(t._client.chamadas), 6)
+        self.assertTrue(any("recusou o lote" in l for l in self.logs))
+
+    def test_a_new_batch_forgets_the_divided_one(self):
+        t = self.tradutor([
+            resposta_ok([{"id": 1, "traducao": "x"}], finish="length"),
+            resposta_ok([{"id": 1, "traducao": "um"}]),
+            resposta_ok([{"id": 1, "traducao": "dois"}]),
+            resposta_ok([{"id": 1, "traducao": "tres"}, {"id": 2, "traducao": "quatro"}]),
+            resposta_ok([{"id": 1, "traducao": "UM"}]),
+        ])
+        t.translate(BATCH_SEPARATOR.join(["one", "two"]), "pt")
+        t.translate(BATCH_SEPARATOR.join(["three", "four"]), "pt")
+        self.assertEqual(t.translate("one", "pt"), "UM", "o lote novo apagou a memoria do anterior")
+        self.assertEqual(len(t._client.chamadas), 5)
+
     def test_a_single_comment_is_a_batch_of_one(self):
         t = self.tradutor([resposta_ok([{"id": 1, "traducao": "um"}])])
         self.assertEqual(t.translate("one", "pt"), "um")
@@ -349,6 +416,18 @@ class AnthropicTranslatorTests(unittest.TestCase):
         t = self.tradutor([resposta_anthropic([], stop_reason="max_tokens")])
         self.assertIsNone(t.translate("one", "pt", self.logs.append))
         self.assertIsNone(t.fatal_error)
+
+    def test_a_cut_batch_is_split_and_the_limit_is_the_pilot_one(self):
+        t = self.tradutor([
+            resposta_anthropic([], stop_reason="max_tokens"),
+            resposta_anthropic([{"id": 1, "traducao": "um"}]),
+            resposta_anthropic([{"id": 1, "traducao": "dois"}]),
+        ])
+        saida = t.translate(BATCH_SEPARATOR.join(["one", "two"]), "pt", self.logs.append)
+        self.assertEqual(saida, BATCH_SEPARATOR.join(["um", "dois"]))
+        pedido = t._client.messages.chamadas[0]
+        self.assertEqual(pedido["max_tokens"], 16000, "o mesmo max_tokens do piloto")
+        self.assertEqual(len(t._client.messages.chamadas), 3)
 
     def test_an_authentication_error_is_fatal(self):
         import anthropic

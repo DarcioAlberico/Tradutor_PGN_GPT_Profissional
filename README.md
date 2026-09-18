@@ -541,7 +541,8 @@ mao.
 
 O motor de sempre e o Google, sem chave e sem custo. Desde o ROADMAP 28.7 da
 para traduzir com um modelo de linguagem, que sabe xadrez e recebe o seu
-glossario antes de traduzir: no piloto de 200 comentarios, o Claude deixou 1
+glossario e o lance anterior e o seguinte de cada comentario antes de
+traduzir: no piloto de 200 comentarios, o Claude deixou 1
 aviso de qualidade contra 30 do Google, sem perder um lance nem uma anotacao.
 Custa dinheiro — da ordem de US$ 25 por livro de 7.500 comentarios com o
 `claude-opus-5` — e por isso nunca e ligado sozinho.

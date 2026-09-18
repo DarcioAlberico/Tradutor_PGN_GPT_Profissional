@@ -8674,8 +8674,48 @@ previa e nao foi.**
   pergunta) — sem isso um provedor falso abriria um dialogo modal de verdade
   e a suite pararia, a armadilha de 2026-09-14 de novo.
 - **Nao feito**: os `fallbacks` de recusa da Anthropic (zero recusas em 200
-  linhas; hoje uma recusa e falha de lote, tratada como rede caida) e a
-  leitura cega — que continua sua.
+  linhas) e a leitura cega — que continua sua.
+
+**Feito em 2026-09-18, segunda parte — o que o piloto tinha e o produto nao.**
+
+- **O contexto de lances (B6).** O piloto mandava `antes`/`depois` em 198 de
+  200 itens e o worker mandava vazio — o numero de 1 aviso QA foi medido COM
+  contexto. Agora `pgn_utils.move_context`/`extract_comment_contexts` (o
+  mesmo padrao de lance do piloto, que passou a importar dali para medir o
+  que o produto manda) da a cada comentario distinto o ultimo lance antes e o
+  primeiro depois, numa janela de 80 caracteres por lado; a primeira passada
+  os extrai so com modelo de linguagem (`with_contexts=llm is not None` — o
+  Google nao paga), e o worker os passa pela porta `traduzir(texto,
+  contextos)` no lote, no individual, no reenvio do portao e no reenvio sem
+  nomes. **Uma mutacao sobreviveu e derrubou a regra**: a primeira versao
+  cortava a janela na chave do comentario vizinho, e o cenario certo — dois
+  comentarios seguidos, `{First} {Second}` — mostrou que o segundo perdia o
+  `1. e4` que os dois anotam. A regra que ficou apaga os comentarios inteiros
+  da janela e so corta o pedaco de um vizinho maior do que ela. Medido no
+  livro: 6.495 de 6.500 distintos com contexto; na amostra do piloto, os
+  mesmos 198 de 200, e as duas linhas que mudaram pegavam um lance de DENTRO
+  do comentario vizinho.
+- **O lote cortado divide-se, como o log prometia e o codigo nao fazia.**
+  `max_tokens` estava em 8.000 no produto e em 16.000 no piloto — e o limite
+  conta o pensamento do modelo (adaptativo por padrao no Opus 5; os
+  `reasoning tokens` da OpenAI entram em `max_completion_tokens`), entao os
+  zero cortes do piloto foram medidos com o dobro. Alinhado em 16.000. E a
+  resposta cortada, ou recusada (`stop_reason: refusal` na Anthropic; o
+  campo `refusal` do `chat/completions`), deixou de voltar `None` — que o
+  worker le como rede caida: 20 comentarios falhados e um passo do disjuntor
+  — e passou a dividir o lote ao meio ate o item sozinho (`_translate_parts`,
+  a regra B1 pela API que a exige). O item recusado sozinho volta vazio (o
+  caminho de B2), e as metades que sairam certas ficam em `_divided`: quando
+  o worker reenviar o grupo item a item, esses vem da memoria sem requisicao
+  — 10 requisicoes para isolar um recusado num lote de 20, em vez de 1 lote
+  perdido ou 30 requisicoes.
+- Testes: 6 de `pgn_utils` (vizinhos, comentario vizinho apagado, dois
+  seguidos, vizinho maior que a janela, primeira ocorrencia, so com a
+  flag), 6 de `llm_providers` (contexto por item e tamanho errado, corte
+  dividido, recusa isolada sem pagar duas vezes, memoria apagada no lote
+  novo, `max_tokens` do piloto), 3 do worker (lote e individual com
+  contexto, Google sem). **16 mutacoes, 16 mortas** depois da sobrevivente
+  virar regra.
 
 ### 28.8 O tabuleiro — CONCLUIDO (2026-09-15)
 

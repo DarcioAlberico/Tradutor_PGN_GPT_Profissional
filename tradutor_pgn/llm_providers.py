@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 import requests
@@ -51,10 +52,21 @@ from .translation_api import RETRYABLE_STATUS, CancelFlag, LogMessage, retry_del
 
 GOOGLE_PROVIDER = TRANSLATION_PROVIDER_GOOGLE
 
-# Comprimento maximo da resposta. Um lote do worker tem ate ~4.800 caracteres
-# de entrada (BATCH_MAX_CHARS); a traducao raramente passa do dobro, e 8 mil
-# tokens dao folga de sobra sem deixar um modelo tagarela correr solto.
-MAX_OUTPUT_TOKENS = 8000
+# Comprimento maximo da resposta — o MESMO do piloto (`MAX_TOKENS = 16000`),
+# que e o numero em que os zero lotes cortados foram medidos. Um lote do
+# worker tem ate ~4.800 caracteres de entrada (BATCH_MAX_CHARS) e a traducao
+# raramente passa do dobro, mas o limite conta tambem o pensamento do modelo
+# (adaptativo por padrao no Opus 5; os `reasoning tokens` da OpenAI entram em
+# `max_completion_tokens`), e 8 mil era metade do que o piloto deu.
+MAX_OUTPUT_TOKENS = 16000
+
+# Os motivos de uma chamada sem texto. `cut` e `refusal` sao do CONTEUDO — o
+# lote e dividido ao meio e tentado de novo (B1); os outros sao do transporte
+# ou da conta, e voltam `None` ao worker, que os trata como a rede caida.
+REASON_OK = "ok"
+REASON_CUT = "cut"
+REASON_REFUSAL = "refusal"
+REASON_ERROR = "error"
 REQUEST_TIMEOUT = 120
 MAX_ATTEMPTS = 3
 
@@ -206,6 +218,10 @@ class LLMTranslator:
         # Depois de um 401 ninguem mais e chamado (ver o docstring do modulo).
         self.fatal_error: str | None = None
         self._client: Any = None
+        # O que o ultimo lote dividido traduziu, por texto enviado: quando o
+        # worker reenvia sozinho um item que ja saiu certo de uma das metades,
+        # a resposta vem daqui, sem requisicao (ver `_translate_parts`).
+        self._divided: dict[str, str] = {}
 
     # ------------------------------------------------------------ identidade
 
@@ -229,32 +245,98 @@ class LLMTranslator:
         target_language: str,
         log_message: LogMessage | None = None,
         cancel_flag: CancelFlag | None = None,
+        contexts: Sequence[tuple[str, str]] | None = None,
         **_ignored: Any,
     ) -> str | None:
+        """O texto traduzido (com ` ||| ` entre as partes, como veio) ou `None`.
+
+        `contexts` e o lance anterior e o seguinte de cada parte, na ordem
+        delas (ROADMAP 28.7): e o contexto que o piloto tinha e que o worker
+        agora manda; sem ele os campos vao vazios, como o prompt admite.
+        """
         if self.fatal_error is not None:
             return None
         if cancel_flag is not None and cancel_flag.is_set():
             return None
         partes = text.split(BATCH_SEPARATOR) if BATCH_SEPARATOR in text else [text]
-        itens = [{"id": n, "texto": parte} for n, parte in enumerate(partes, start=1)]
-        sugestoes = sugestoes_para_o_lote(partes, self.suggestion_rules)
-        mensagem = mensagem_do_lote(itens, sugestoes)
-        resposta = self._call(mensagem, log_message, cancel_flag)
-        if resposta is None:
-            return None
-        por_id, problemas = validar_lote(resposta, range(1, len(partes) + 1))
-        if problemas and log_message:
-            log_message(f"  - {self.spec.label}: {'; '.join(problemas[:3])}")
-            self.usage.problems.extend(problemas)
-        if not por_id:
+        contextos = list(contexts or [])
+        if len(contextos) != len(partes):
+            contextos = [("", "")] * len(partes)
+        if len(partes) == 1 and partes[0] in self._divided:
+            # Ja saiu certo de uma das metades do ultimo lote dividido.
+            return self._divided[partes[0]]
+        if len(partes) > 1:
+            self._divided = {}
+        traduzidas = self._translate_parts(partes, contextos, log_message, cancel_flag)
+        if traduzidas is None or not any(traduzidas):
             return None
         # O que faltou volta vazio: o worker ve o vazio como parte deslocada e
         # reenvia o comentario sozinho — o mesmo caminho do lote desalinhado.
-        return BATCH_SEPARATOR.join(por_id.get(n, "") for n in range(1, len(partes) + 1))
+        return BATCH_SEPARATOR.join(t or "" for t in traduzidas)
+
+    def _translate_parts(
+        self,
+        partes: list[str],
+        contextos: list[tuple[str, str]],
+        log_message: LogMessage | None,
+        cancel_flag: CancelFlag | None,
+    ) -> list[str | None] | None:
+        """Uma requisicao para `partes`; cortada ou recusada, duas metades.
+
+        Devolve a traducao de cada parte (`None` na que falhou sozinha), ou
+        `None` quando o transporte falhou — ai o worker faz o que faz com a
+        rede caida (B3). A resposta cortada por `max_tokens` e a recusa sao
+        problemas do CONTEUDO do lote, nao da conexao: o lote e dividido ao
+        meio e cada metade tentada de novo, ate o item sozinho (a regra B1,
+        pela API que a exige). Isola o item que o modelo recusa sem perder os
+        outros, e um lote longo demais custa duas requisicoes em vez de uma
+        por item. As metades que deram certo ficam em `_divided`: quando o
+        worker reenviar sozinho os itens do lote (a parte vazia e
+        desalinhamento para ele), os que ja tem traducao nao pagam de novo.
+        """
+        if cancel_flag is not None and cancel_flag.is_set():
+            return None
+        itens = [
+            {"id": n, "texto": parte, "antes": antes, "depois": depois}
+            for n, (parte, (antes, depois)) in enumerate(zip(partes, contextos), start=1)
+        ]
+        sugestoes = sugestoes_para_o_lote(partes, self.suggestion_rules)
+        resposta, motivo = self._call(mensagem_do_lote(itens, sugestoes), log_message, cancel_flag)
+        if resposta is None:
+            if motivo not in (REASON_CUT, REASON_REFUSAL):
+                return None
+            if len(partes) == 1:
+                return [None]
+            meio = len(partes) // 2
+            if log_message:
+                log_message(
+                    f"  - {self.spec.label}: lote de {len(partes)} itens dividido em "
+                    f"{meio} + {len(partes) - meio}"
+                )
+            esquerda = self._translate_parts(partes[:meio], contextos[:meio], log_message, cancel_flag)
+            if esquerda is None:
+                return None
+            direita = self._translate_parts(partes[meio:], contextos[meio:], log_message, cancel_flag)
+            if direita is None:
+                return None
+            traduzidas = esquerda + direita
+        else:
+            por_id, problemas = validar_lote(resposta, range(1, len(partes) + 1))
+            if problemas and log_message:
+                log_message(f"  - {self.spec.label}: {'; '.join(problemas[:3])}")
+                self.usage.problems.extend(problemas)
+            if not por_id:
+                return None
+            traduzidas = [por_id.get(n) for n in range(1, len(partes) + 1)]
+        for parte, traducao in zip(partes, traduzidas):
+            if traducao:
+                self._divided[parte] = traducao
+        return traduzidas
 
     def _call(
         self, mensagem: str, log_message: LogMessage | None, cancel_flag: CancelFlag | None
-    ) -> str | None:
+    ) -> tuple[str | None, str]:
+        """`(texto, motivo)`: o texto da resposta e `REASON_OK`, ou `None` e por que."""
         if self.spec.kind == "anthropic":
             return self._call_anthropic(mensagem, log_message)
         return self._call_chat_completions(mensagem, log_message, cancel_flag)
@@ -269,7 +351,9 @@ class LLMTranslator:
             self._client = anthropic.Anthropic(api_key=self.api_key, timeout=REQUEST_TIMEOUT)
         return self._client
 
-    def _call_anthropic(self, mensagem: str, log_message: LogMessage | None) -> str | None:
+    def _call_anthropic(
+        self, mensagem: str, log_message: LogMessage | None
+    ) -> tuple[str | None, str]:
         import anthropic
 
         sistema = [
@@ -287,22 +371,22 @@ class LLMTranslator:
             )
         except anthropic.AuthenticationError as exc:
             self._fatal(f"chave recusada pela Anthropic ({exc.status_code})", log_message)
-            return None
+            return None, REASON_ERROR
         except anthropic.PermissionDeniedError as exc:
             self._fatal(f"chave sem permissao na Anthropic ({exc.status_code})", log_message)
-            return None
+            return None, REASON_ERROR
         except anthropic.NotFoundError:
             self._fatal(f"modelo '{self.model}' nao existe na Anthropic", log_message)
-            return None
+            return None, REASON_ERROR
         except anthropic.RateLimitError:
             self._failure("limite de requisicoes da Anthropic (429) esgotou as tentativas", log_message)
-            return None
+            return None, REASON_ERROR
         except anthropic.APIStatusError as exc:
             self._failure(f"erro {exc.status_code} da Anthropic: {exc.message}", log_message)
-            return None
+            return None, REASON_ERROR
         except anthropic.APIConnectionError as exc:
             self._failure(f"sem conexao com a Anthropic: {exc}", log_message)
-            return None
+            return None, REASON_ERROR
         uso = getattr(resposta, "usage", None)
         if uso is not None:
             self.usage.input_tokens += getattr(uso, "input_tokens", 0) or 0
@@ -311,15 +395,15 @@ class LLMTranslator:
             self.usage.cache_write_tokens += getattr(uso, "cache_creation_input_tokens", 0) or 0
         if getattr(resposta, "stop_reason", None) == "refusal":
             self._failure("a Anthropic recusou o lote (refusal)", log_message)
-            return None
+            return None, REASON_REFUSAL
         if getattr(resposta, "stop_reason", None) == "max_tokens":
-            self._failure("resposta cortada por max_tokens; o lote sera dividido", log_message)
-            return None
+            self._failure("resposta cortada por max_tokens", log_message)
+            return None, REASON_CUT
         for bloco in getattr(resposta, "content", []) or []:
             if getattr(bloco, "type", None) == "text":
-                return str(bloco.text)
+                return str(bloco.text), REASON_OK
         self._failure("resposta sem texto", log_message)
-        return None
+        return None, REASON_ERROR
 
     # ------------------------------------------------------ chat/completions
 
@@ -330,7 +414,7 @@ class LLMTranslator:
 
     def _call_chat_completions(
         self, mensagem: str, log_message: LogMessage | None, cancel_flag: CancelFlag | None
-    ) -> str | None:
+    ) -> tuple[str | None, str]:
         corpo: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -344,7 +428,7 @@ class LLMTranslator:
         url = f"{self.spec.base_url}/chat/completions"
         for tentativa in range(1, MAX_ATTEMPTS + 1):
             if cancel_flag is not None and cancel_flag.is_set():
-                return None
+                return None, REASON_ERROR
             self.usage.requests += 1
             try:
                 resposta = self._http().post(
@@ -355,14 +439,14 @@ class LLMTranslator:
                     time.sleep(retry_delay_seconds(tentativa))
                     continue
                 self._failure(f"sem conexao com {self.spec.label}: {exc}", log_message)
-                return None
+                return None, REASON_ERROR
             status = resposta.status_code
             if status in (401, 403):
                 self._fatal(f"chave recusada por {self.spec.label} ({status})", log_message)
-                return None
+                return None, REASON_ERROR
             if status == 404:
                 self._fatal(f"modelo '{self.model}' nao existe em {self.spec.label}", log_message)
-                return None
+                return None, REASON_ERROR
             if status in RETRYABLE_STATUS and tentativa < MAX_ATTEMPTS:
                 time.sleep(retry_delay_seconds(tentativa, status))
                 continue
@@ -370,18 +454,18 @@ class LLMTranslator:
                 self._failure(
                     f"erro {status} de {self.spec.label}: {resposta.text[:200]}", log_message
                 )
-                return None
+                return None, REASON_ERROR
             return self._parse_chat_completion(resposta, log_message)
-        return None
+        return None, REASON_ERROR
 
     def _parse_chat_completion(
         self, resposta: requests.Response, log_message: LogMessage | None
-    ) -> str | None:
+    ) -> tuple[str | None, str]:
         try:
             dados = resposta.json()
         except ValueError:
             self._failure(f"resposta de {self.spec.label} nao e JSON", log_message)
-            return None
+            return None, REASON_ERROR
         uso = dados.get("usage") or {}
         detalhes = uso.get("prompt_tokens_details") or {}
         em_cache = int(detalhes.get("cached_tokens") or uso.get("prompt_cache_hit_tokens") or 0)
@@ -392,16 +476,20 @@ class LLMTranslator:
         self.usage.output_tokens += int(uso.get("completion_tokens") or 0)
         try:
             escolha = dados["choices"][0]
-            conteudo = escolha["message"]["content"]
+            mensagem = escolha["message"]
+            conteudo = mensagem["content"]
         except (KeyError, IndexError, TypeError):
             self._failure(f"resposta de {self.spec.label} sem 'choices'", log_message)
-            return None
+            return None, REASON_ERROR
         if escolha.get("finish_reason") == "length":
-            self._failure("resposta cortada pelo limite de saida; o lote sera dividido", log_message)
-            return None
+            self._failure("resposta cortada pelo limite de saida", log_message)
+            return None, REASON_CUT
+        if isinstance(mensagem, dict) and mensagem.get("refusal"):
+            self._failure(f"{self.spec.label} recusou o lote (refusal)", log_message)
+            return None, REASON_REFUSAL
         if not isinstance(conteudo, str):
             conteudo = json.dumps(conteudo)
-        return conteudo
+        return conteudo, REASON_OK
 
     # ---------------------------------------------------------------- erros
 

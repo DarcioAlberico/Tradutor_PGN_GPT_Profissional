@@ -3168,6 +3168,7 @@ class FakeLLMTranslator:
         self.model = "modelo-falso"
         self.usage = types.SimpleNamespace(summary=lambda: "9 requisicao(oes)")
         self.calls = []
+        self.contexts = []
         self.respostas = respostas
 
     @property
@@ -3177,8 +3178,9 @@ class FakeLLMTranslator:
     def describe(self):
         return "Motor: Provedor Falso, modelo modelo-falso, chave ****fake."
 
-    def translate(self, text, target_language, log_message=None, cancel_flag=None, **_k):
+    def translate(self, text, target_language, log_message=None, cancel_flag=None, contexts=None, **_k):
         self.calls.append(text)
+        self.contexts.append(contexts)
         if self.respostas is not None:
             return self.respostas(text)
         if " ||| " in text:
@@ -3340,6 +3342,48 @@ class WorkerProviderTests(WorkerFallbackHarness, unittest.TestCase):
         self.assertTrue(any(
             l.startswith("Custo em dolares: estimado ~US$ 0,00, real US$ 0,00") for l in app.logs
         ), app.logs)
+
+
+class WorkerReadingContextTests(WorkerFallbackHarness, unittest.TestCase):
+    """O modelo recebe o lance anterior e o seguinte de cada comentario, no
+    lote e sozinho; o Google nao recebe nada (ROADMAP 28.7)."""
+
+    PGN = '[Event "Test"]\n\n1. e4 {First} e5 2. Nf3 {Second} Nc6 3. Bb5 {Third} *\n'
+    COMMENTS = ["First", "Second", "Third"]
+    ESPERADO = [("1. e4", "e5"), ("2. Nf3", "Nc6"), ("3. Bb5", "")]
+
+    def google_nunca(self, *_a, **_k):
+        raise AssertionError("o Google foi chamado numa execucao com provedor de modelo")
+
+    def test_the_batch_carries_one_context_per_part(self):
+        falso = FakeLLMTranslator()
+        with unittest.mock.patch.object(translation_worker, "build_translator", return_value=falso):
+            with tempfile.TemporaryDirectory() as tmp:
+                self.run_worker(Path(tmp), self.google_nunca, provider="deepseek")
+        self.assertEqual(falso.calls, [" ||| ".join(self.COMMENTS)])
+        self.assertEqual(falso.contexts, [self.ESPERADO])
+
+    def test_a_comment_sent_alone_carries_its_own_context(self):
+        def respostas(text):
+            if " ||| " in text:
+                return "so uma parte"  # desalinhado: cada um sozinho
+            return f"<{text}>"
+
+        falso = FakeLLMTranslator(respostas)
+        with unittest.mock.patch.object(translation_worker, "build_translator", return_value=falso):
+            with tempfile.TemporaryDirectory() as tmp:
+                self.run_worker(Path(tmp), self.google_nunca, provider="openai")
+        self.assertEqual(falso.calls[1:], self.COMMENTS)
+        self.assertEqual(falso.contexts[1:], [[c] for c in self.ESPERADO])
+
+    def test_google_gets_no_context_and_the_first_pass_stays_cheap(self):
+        with unittest.mock.patch.object(
+            translation_worker, "extract_comment_texts_from_file",
+            wraps=translation_worker.extract_comment_texts_from_file,
+        ) as extracao:
+            with tempfile.TemporaryDirectory() as tmp:
+                self.run_worker(Path(tmp), lambda text, *_a, **_k: text.upper())
+        self.assertFalse(extracao.call_args.kwargs.get("with_contexts"))
 
 
 class WorkerAnchorGateTests(WorkerFallbackHarness, unittest.TestCase):
