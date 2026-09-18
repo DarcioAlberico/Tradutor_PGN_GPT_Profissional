@@ -18,6 +18,12 @@ from .app_config import (
 )
 
 
+
+# O nome do motor, como vai para o registro de execucoes (garantia Z5). Hoje ha
+# um so; o provedor de 28.7 grava o seu, e "Reverter execucao" e o que permite
+# trocar de motor sem medo.
+TRANSLATION_PROVIDER = "google-gtx"
+
 MAX_ATTEMPTS = 3
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 

@@ -13,8 +13,15 @@ from .annotation_mask import (
 )
 from .chess_notation import fix_move_notation, supports_notation
 from .database import (
+    RUN_ABORTED,
+    RUN_CANCELED,
+    RUN_COMPLETED,
+    RUN_CRASHED,
+    RUN_FAILED,
     SOURCE_LANGUAGE_UNKNOWN,
     adopt_unknown_source_language,
+    begin_translation_run,
+    finish_translation_run,
     initialize_database,
     load_translation_cache,
     record_occurrences,
@@ -48,7 +55,7 @@ from itertools import chain
 from .app_config import TRANSLATION_REQUEST_DELAY_SECONDS  # noqa: F401 (compat)
 from .failed_runs import build_failed_run_record, save_failed_run
 from .settings import load_settings, read_output_settings
-from .translation_api import RequestPacer, translate_text
+from .translation_api import TRANSLATION_PROVIDER, RequestPacer, translate_text
 
 # Disjuntor (garantia B3): tantos lotes seguidos sem NENHUMA resposta da API e a
 # conexao ou o endpoint, nao o conteudo. Cada lote ja gastou 3 tentativas com
@@ -203,6 +210,16 @@ def run_translation(
     failed_count = 0
     failed_files = set()
     failures_recorded = False
+    # O registro da execucao (garantia Z5, ROADMAP 28.6). Fora do `try` pelo
+    # mesmo motivo dos contadores de falha: o `finally` fecha a linha com o
+    # desfecho, e precisa dos numeros mesmo quando a excecao veio antes de o
+    # laco comecar. `run_id` fica `None` ate a primeira passada dizer QUAIS
+    # arquivos a execucao tem — sao eles que "reverter" usa para nao apagar
+    # uma linha que outro livro reaproveitou.
+    run_id = None
+    translated_count = 0
+    aborted_by_api = False
+    crashed = False
     http_session = requests.Session()
 
     def registrar_falhas():
@@ -265,6 +282,8 @@ def run_translation(
         )
         if automatic_rules:
             app.log_message(f"Regras automaticas carregadas: {len(automatic_rules)}")
+
+        provider_name = TRANSLATION_PROVIDER
 
         if only_files is None:
             pgn_files, skipped_generated = collect_pgn_files(source_path, process_subdirs)
@@ -397,8 +416,23 @@ def run_translation(
                 "significam no original."
             )
 
+        # A linha da execucao abre aqui — depois da primeira passada, com a
+        # lista de arquivos, e antes do primeiro INSERT. Comitada na hora: uma
+        # execucao que morrer no meio precisa existir na tabela para a proxima
+        # marca-la `crashed` e para "Reverter execucao" alcancar o que ela
+        # chegou a gravar.
+        run_id = begin_translation_run(
+            cursor,
+            target_language,
+            source_language,
+            source_path,
+            pgn_files,
+            provider_name,
+            getattr(app, "_log_file_path", None),
+        )
+        conn.commit()
+
         processed_comments = 0
-        translated_count = 0
         move_fixes = 0
         prose_fixes = 0
         names_resent = 0
@@ -407,7 +441,6 @@ def run_translation(
         cleaned_empty_count = 0
         generated_files = 0
         consecutive_failed_batches = 0
-        aborted_by_api = False
 
         # Onde a execucao esta, para o texto da barra (ROADMAP 28.10). Um dict e
         # nao variaveis do laco: `update_progress` e uma closure, e ler o
@@ -709,7 +742,7 @@ def run_translation(
                                 translated_map[original] = translation
                                 save_status = save_translation(
                                     cursor, original, translation, target_language,
-                                    source_language,
+                                    source_language, run_id=run_id,
                                 )
                                 if save_status == "inserted":
                                     translated_count += 1
@@ -828,7 +861,7 @@ def run_translation(
                                     translated_map[original] = translation
                                     save_status = save_translation(
                                         cursor, original, translation, target_language,
-                                        source_language,
+                                        source_language, run_id=run_id,
                                     )
                                     # Comita AQUI, e nao no fim do lote
                                     # (garantia C3). O primeiro INSERT abre a
@@ -1186,6 +1219,7 @@ def run_translation(
                 )
 
     except Exception as e:
+        crashed = True
         app.log_message(f"[ERRO GERAL] {e}")
         # O traceback vai para o log, como o relator de callbacks do Tk ja faz
         # (`window_utils`): so `str(e)` de um `IndexError` no meio de um livro
@@ -1212,6 +1246,39 @@ def run_translation(
             except Exception as e:
                 app.log_message(f"[ERRO] Falha ao fechar banco de dados: {e}")
         http_session.close()
+
+        # A linha da execucao fecha com conexao PROPRIA (garantia Z5): a do
+        # pipeline acabou de ser fechada acima, e pode ter morrido junto com a
+        # excecao que trouxe a execucao ate aqui — uma transacao aberta numa
+        # conexao quebrada e o pior lugar para gravar o desfecho. Cinco
+        # desfechos, e a ordem importa: a excecao vence tudo; o cancelamento
+        # vence o disjuntor (um "Cancelar" depois do aborto continua sendo a
+        # decisao do usuario); com falhas e "falhou", sem falhas "concluiu".
+        if run_id is not None:
+            if crashed:
+                desfecho = RUN_CRASHED
+            elif canceled:
+                desfecho = RUN_CANCELED
+            elif aborted_by_api:
+                desfecho = RUN_ABORTED
+            elif failed_count:
+                desfecho = RUN_FAILED
+            else:
+                desfecho = RUN_COMPLETED
+            try:
+                registro = initialize_database(app.output_db)
+                try:
+                    finish_translation_run(
+                        registro.cursor(), run_id, desfecho, translated_count, failed_count
+                    )
+                    registro.commit()
+                finally:
+                    registro.close()
+            except Exception as exc:  # pragma: no cover - defensivo
+                # Registrar e conveniencia: uma execucao concluida nao vira erro
+                # porque o desfecho dela nao coube no banco. A proxima execucao
+                # a marca `crashed`, que e o que ela parece de fora.
+                app.log_message(f"[AVISO] Nao foi possivel registrar o fim da execucao: {exc}")
 
         # A barra termina num estado que significa algo: cheia quando a execucao
         # concluiu, vazia quando nao — cancelada, interrompida pelo disjuntor ou

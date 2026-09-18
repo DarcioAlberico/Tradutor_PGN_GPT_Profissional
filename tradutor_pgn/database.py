@@ -55,7 +55,16 @@ RunRecord = dict[str, Any]
 # autor" e a anotacao que hoje vive no caderno de quem revisa. Sao dois `ALTER
 # TABLE` — nenhuma restricao muda, entao a tabela nao e reconstruida e a migracao
 # custa o mesmo em 6.500 ou em 201.607 linhas.
-SCHEMA_VERSION = 9
+#
+# A versao 10 acrescenta a tabela `translation_runs` e a coluna
+# `comments.inserted_run_id` (ROADMAP 28.6, garantia Z5): qual execucao INSERIU
+# cada linha, gravado so no INSERT e nunca atualizado. E o que permite "Reverter
+# execucao" apagar exatamente o que uma execucao trouxe — a rede de seguranca
+# para experimentar um motor novo. Um `CREATE TABLE` e um `ALTER TABLE`; nada
+# reconstroi `comments`. As linhas anteriores ficam com o campo nulo e nao sao
+# reversiveis por execucao, so por Z4 — o mesmo texto de O2 para as
+# ocorrencias: nao ha de onde derivar uma procedencia que nao foi gravada.
+SCHEMA_VERSION = 10
 
 # Os estados que uma linha NAO verificada pode ter, alem de "pendente".
 #
@@ -203,6 +212,21 @@ DB_METADATA_TABLE = "db_metadata"
 QUALITY_VERSION_KEY = "quality_heuristics_version"
 
 OCCURRENCES_TABLE = "occurrences"
+TRANSLATION_RUNS_TABLE = "translation_runs"
+
+# Os desfechos de uma execucao. `running` e o estado da linha aberta; uma
+# linha que ficou em `running` depois de o programa morrer e marcada `crashed`
+# pela varredura do inicio da execucao seguinte (o worker e o unico escritor,
+# e nunca ha duas execucoes ao mesmo tempo).
+RUN_RUNNING = "running"
+RUN_COMPLETED = "completed"
+RUN_FAILED = "failed"
+RUN_CANCELED = "canceled"
+RUN_ABORTED = "aborted"
+RUN_CRASHED = "crashed"
+RUN_OUTCOMES = (
+    RUN_RUNNING, RUN_COMPLETED, RUN_FAILED, RUN_CANCELED, RUN_ABORTED, RUN_CRASHED,
+)
 
 # As duas ordens da lista do editor. `id` e a ordem de INSERCAO — a que sempre
 # existiu, e que mistura todos os PGN ja processados. `occurrence` e a ordem de
@@ -428,7 +452,26 @@ _COMMENTS_TABLE_SQL = """
         quality_warning INTEGER,
         review_status TEXT NOT NULL DEFAULT '',
         reviewer_note TEXT,
+        inserted_run_id INTEGER,
         UNIQUE(original_comment, source_language, target_language)
+    )
+"""
+
+
+_TRANSLATION_RUNS_TABLE_SQL = f"""
+    CREATE TABLE IF NOT EXISTS {TRANSLATION_RUNS_TABLE} (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        finished_at TEXT,
+        outcome TEXT NOT NULL DEFAULT '{RUN_RUNNING}',
+        source_language TEXT NOT NULL DEFAULT '',
+        target_language TEXT NOT NULL,
+        source_path TEXT,
+        provider TEXT NOT NULL DEFAULT '',
+        files_json TEXT NOT NULL DEFAULT '[]',
+        inserted_count INTEGER NOT NULL DEFAULT 0,
+        failed_count INTEGER NOT NULL DEFAULT 0,
+        log_path TEXT
     )
 """
 
@@ -681,6 +724,12 @@ def _migrate_database(conn: sqlite3.Connection, from_version: int = 0) -> sqlite
         # e apagou", e um dia isso pode importar. Quem le trata os dois como vazio.
         cursor.execute("ALTER TABLE comments ADD COLUMN reviewer_note TEXT")
         conn.commit()
+    # ROADMAP 28.6 (Z5). Nula nas linhas anteriores a versao 10 e nas
+    # importadas: so o INSERT do worker a preenche.
+    if "inserted_run_id" not in cols:
+        cursor.execute("ALTER TABLE comments ADD COLUMN inserted_run_id INTEGER")
+        conn.commit()
+    cursor.execute(_TRANSLATION_RUNS_TABLE_SQL)
 
     # Por ultimo entre as mudancas de coluna: a reconstrucao copia o conjunto
     # final de colunas, entao tudo o que for acrescentado acima ja precisa estar
@@ -1104,18 +1153,25 @@ def load_translation_cache(
 
 
 def save_translation(
-    cursor,
-    original_comment,
-    translated_comment,
-    target_language,
-    source_language=SOURCE_LANGUAGE_UNKNOWN,
-):
+    cursor: sqlite3.Cursor,
+    original_comment: str,
+    translated_comment: str,
+    target_language: str,
+    source_language: str | None = SOURCE_LANGUAGE_UNKNOWN,
+    run_id: int | None = None,
+) -> str:
     """
     Salva uma tradução no cache.
 
     `source_language` e o idioma que o usuário declarou para os PGN desta
     execução, e faz parte da identidade da linha: o mesmo comentário vindo do
     espanhol e do italiano são duas traduções, e não uma reaproveitada.
+
+    `run_id` e a execucao que esta gravando (garantia Z5). Vai para
+    `inserted_run_id` SO no caminho `inserted`: uma linha vazia preenchida ja
+    existia antes desta execucao, e "reverter" nao pode apaga-la — o que a
+    execucao trouxe foi o texto, nao a linha, e a linha volta a ficar vazia por
+    outro caminho (Z4 ou a edicao).
 
     Retorna:
     - inserted: linha nova criada.
@@ -1145,10 +1201,11 @@ def save_translation(
                 source_language,
                 target_language,
                 quality_warning,
+                inserted_run_id,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
             (
                 original_comment,
@@ -1159,6 +1216,7 @@ def save_translation(
                     original_comment, translated_comment,
                     source_language, target_language,
                 ),
+                run_id,
             )
         )
         return "inserted" if cursor.rowcount else "unchanged"
@@ -1197,6 +1255,7 @@ def save_translation(
         return "filled_empty" if cursor.rowcount else "unchanged"
 
     return "unchanged"
+
 
 def resolve_comment_ids(
     cursor: sqlite3.Cursor,
@@ -2778,6 +2837,10 @@ def clear_all_translations(conn: sqlite3.Connection) -> int:
     cursor.execute("DROP TABLE IF EXISTS comments")
     cursor.execute("DROP TABLE IF EXISTS comment_history")
     cursor.execute(f"DROP TABLE IF EXISTS {OCCURRENCES_TABLE}")
+    # As execucoes tambem (Z5 estende Z3): uma execucao registrada apontando
+    # para ids que o `AUTOINCREMENT` vai reusar seria "reverter" apagando as
+    # linhas erradas — o mesmo defeito das ocorrencias, pela outra tabela.
+    cursor.execute(f"DROP TABLE IF EXISTS {TRANSLATION_RUNS_TABLE}")
     conn.commit()
 
     _migrate_database(conn)
@@ -2879,6 +2942,191 @@ def discard_unreviewed_file_translations(
     where_sql, params = _unreviewed_file_rows_query(
         source_file, target_language, source_language
     )
+    ids = [
+        linha[0]
+        for linha in cursor.execute(
+            f"SELECT c.id FROM comments c WHERE {where_sql}", params
+        ).fetchall()
+    ]
+    for inicio in range(0, len(ids), CACHE_LOOKUP_CHUNK):
+        lote = ids[inicio:inicio + CACHE_LOOKUP_CHUNK]
+        marcadores = ", ".join("?" for _id in lote)
+        cursor.execute(
+            f"DELETE FROM {OCCURRENCES_TABLE} WHERE comment_id IN ({marcadores})",
+            lote,
+        )
+        cursor.execute(f"DELETE FROM comments WHERE id IN ({marcadores})", lote)
+    return len(ids)
+
+
+# ---------------------------------------------------------------- execucoes
+#
+# ROADMAP 28.6, garantia Z5. A tabela existe para "Reverter execucao": apagar
+# exatamente o que uma execucao INSERIU e que nenhum humano tocou. E a rede de
+# seguranca de 28.7 — traduzir um livro com um motor novo, olhar, jogar fora.
+
+
+def mark_unfinished_runs_crashed(cursor: sqlite3.Cursor) -> int:
+    """Toda execucao ainda `running` virou `crashed`. Devolve quantas.
+
+    Chamada no inicio de cada execucao, ANTES de abrir a linha nova: o worker e
+    o unico escritor e nunca ha duas execucoes ao mesmo tempo, entao uma linha
+    aberta so pode ser de um programa que morreu sem passar pelo `finally`.
+    """
+    cursor.execute(
+        f"""
+        UPDATE {TRANSLATION_RUNS_TABLE}
+        SET outcome = ?, finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP)
+        WHERE outcome = ?
+        """,
+        (RUN_CRASHED, RUN_RUNNING),
+    )
+    return cursor.rowcount
+
+
+def begin_translation_run(
+    cursor: sqlite3.Cursor,
+    target_language: str,
+    source_language: str | None,
+    source_path: str | None,
+    files: Iterable[str],
+    provider: str,
+    log_path: str | None = None,
+) -> int | None:
+    """Abre a linha da execucao e devolve o id. Os arquivos vao como JSON:
+    sao eles que decidem, ao reverter, o que e "ocorrencia em OUTRO arquivo"."""
+    mark_unfinished_runs_crashed(cursor)
+    cursor.execute(
+        f"""
+        INSERT INTO {TRANSLATION_RUNS_TABLE} (
+            outcome, source_language, target_language, source_path, provider,
+            files_json, log_path, started_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """,
+        (
+            RUN_RUNNING,
+            source_language or SOURCE_LANGUAGE_UNKNOWN,
+            target_language,
+            source_path,
+            provider,
+            json.dumps([os.path.abspath(f) for f in files]),
+            log_path,
+        ),
+    )
+    return cursor.lastrowid
+
+
+def finish_translation_run(
+    cursor: sqlite3.Cursor, run_id: int, outcome: str, inserted_count: int, failed_count: int
+) -> int:
+    """Fecha a linha com o desfecho e as contagens. Idempotente por desenho:
+    o `finally` do worker chama uma vez, mas uma segunda chamada nao estraga."""
+    if outcome not in RUN_OUTCOMES or outcome == RUN_RUNNING:
+        raise ValueError(f"desfecho invalido: {outcome!r}")
+    cursor.execute(
+        f"""
+        UPDATE {TRANSLATION_RUNS_TABLE}
+        SET outcome = ?, finished_at = CURRENT_TIMESTAMP,
+            inserted_count = ?, failed_count = ?
+        WHERE id = ?
+        """,
+        (outcome, inserted_count, failed_count, run_id),
+    )
+    return cursor.rowcount
+
+
+def _run_row(row: Row) -> RunRecord:
+    (
+        run_id, started_at, finished_at, outcome, source_language, target_language,
+        source_path, provider, files_json, inserted_count, failed_count, log_path,
+    ) = row
+    try:
+        files = json.loads(files_json or "[]")
+    except ValueError:
+        files = []
+    return {
+        "id": run_id,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "outcome": outcome,
+        "source_language": source_language,
+        "target_language": target_language,
+        "source_path": source_path,
+        "provider": provider,
+        "files": files if isinstance(files, list) else [],
+        "inserted_count": inserted_count,
+        "failed_count": failed_count,
+        "log_path": log_path,
+    }
+
+
+_RUN_COLUMNS = (
+    "id, started_at, finished_at, outcome, source_language, target_language, "
+    "source_path, provider, files_json, inserted_count, failed_count, log_path"
+)
+
+
+def list_translation_runs(cursor: sqlite3.Cursor, limit: int = 30) -> list[RunRecord]:
+    """As ultimas `limit` execucoes, da mais recente para a mais antiga."""
+    rows = cursor.execute(
+        f"SELECT {_RUN_COLUMNS} FROM {TRANSLATION_RUNS_TABLE} ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [_run_row(row) for row in rows]
+
+
+def get_translation_run(cursor: sqlite3.Cursor, run_id: int) -> RunRecord | None:
+    row = cursor.execute(
+        f"SELECT {_RUN_COLUMNS} FROM {TRANSLATION_RUNS_TABLE} WHERE id = ?", (run_id,)
+    ).fetchone()
+    return _run_row(row) if row else None
+
+
+def _revertible_run_rows_query(run: RunRecord) -> WhereClause:
+    """O `WHERE` de "o que esta execucao inseriu e ninguem tocou", num lugar so.
+
+    E o criterio de Z4 (`_unreviewed_file_rows_query`) com `inserted_run_id`
+    no lugar da ocorrencia no arquivo: verificada, com status, com nota, com
+    QUALQUER historico ou usada por um arquivo FORA da execucao — cada uma
+    poupa a linha. A ultima clausula e a razao de a execucao guardar os
+    arquivos: uma linha inserida ao traduzir A e reaproveitada por B tem
+    ocorrencia em B, e apaga-la encurtaria a obra de B (O3).
+
+    Os arquivos entram por `json_each` sobre o JSON gravado, e nao por uma
+    lista de `?`: uma execucao de pasta inteira pode ter mais arquivos que o
+    limite de parametros.
+    """
+    clauses = [
+        "c.inserted_run_id = ?",
+        "COALESCE(c.verified, 0) = 0",
+        "COALESCE(c.review_status, '') = ''",
+        "COALESCE(c.reviewer_note, '') = ''",
+        "NOT EXISTS (SELECT 1 FROM comment_history h WHERE h.comment_id = c.id)",
+        (
+            f"NOT EXISTS (SELECT 1 FROM {OCCURRENCES_TABLE} o2"
+            " WHERE o2.comment_id = c.id"
+            " AND o2.source_file NOT IN (SELECT value FROM json_each(?)))"
+        ),
+    ]
+    params: SqlParams = [run["id"], json.dumps(run["files"])]
+    return " AND ".join(clauses), params
+
+
+def count_revertible_run_translations(cursor: sqlite3.Cursor, run: RunRecord) -> int:
+    """Quantas linhas "Reverter execucao" apagaria."""
+    where_sql, params = _revertible_run_rows_query(run)
+    return cursor.execute(
+        f"SELECT COUNT(*) FROM comments c WHERE {where_sql}", params
+    ).fetchone()[0]
+
+
+def revert_translation_run(cursor: sqlite3.Cursor, run: RunRecord) -> int:
+    """Apaga o que a execucao inseriu e Z4 permite, com as ocorrencias. Devolve
+    quantas linhas. Mesma mecanica de `discard_unreviewed_file_translations`:
+    ids colhidos ANTES do primeiro `DELETE`, ocorrencias apagadas
+    explicitamente (o `ON DELETE CASCADE` e inerte), lotes de 900."""
+    where_sql, params = _revertible_run_rows_query(run)
     ids = [
         linha[0]
         for linha in cursor.execute(
