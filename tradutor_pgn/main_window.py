@@ -276,6 +276,10 @@ def setup_main_ui(app):
             # (garantia Q2); este botao e para quem cancelou aquela, ou quem quer
             # conferir em que versao o banco esta.
             {"text": "Reavaliar QA", "command": app.reevaluate_quality_warnings},
+            # A decima sexta fecha a grade de 4 x 4 sem custar uma fileira —
+            # e esta janela nao tem uma fileira sobrando (28.10). Antes das
+            # duas vermelhas, para elas continuarem sendo as ultimas.
+            {"text": "Configurações", "command": app.open_settings_window},
             # As duas ultimas, e em vermelho. Sao as unicas acoes da janela que
             # destroem trabalho, e ficam distinguiveis a distancia de um clique
             # apressado — a confirmacao digitada e a defesa, isto e o aviso.

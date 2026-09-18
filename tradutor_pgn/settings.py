@@ -435,22 +435,64 @@ def read_main_window_settings(settings, known_languages):
     return valores
 
 
-def write_main_window_settings(values, path=None):
-    """Grava as escolhas relendo o disco antes (garantia R4).
+def write_settings_sections(sections, path=None):
+    """Grava `{secao: {chave: valor}}` relendo o disco antes (garantia R4).
 
     As janelas de edicao guardam rascunhos no MESMO arquivo. Gravar o snapshot
     inteiro daqui apagaria o que elas escreveram desde que este processo abriu —
-    que e exatamente o defeito que R4 existe para impedir.
+    que e exatamente o defeito que R4 existe para impedir. Varias secoes numa
+    chamada so porque a tela de Configuracoes grava duas de uma vez, e duas
+    releituras seriam duas escritas para um clique.
     """
     def mutator(settings):
-        guardado = settings.get(MAIN_WINDOW_KEY)
-        if not isinstance(guardado, dict):
-            guardado = {}
-            settings[MAIN_WINDOW_KEY] = guardado
-        guardado.update(values)
-        return guardado
+        gravadas = {}
+        for key, values in sections.items():
+            guardado = settings.get(key)
+            if not isinstance(guardado, dict):
+                guardado = {}
+                settings[key] = guardado
+            guardado.update(values)
+            gravadas[key] = guardado
+        return gravadas
 
     return update_settings(mutator, path)
+
+
+def write_main_window_settings(values, path=None):
+    """As escolhas da janela principal, pela mesma porta (R4)."""
+    gravadas = write_settings_sections({MAIN_WINDOW_KEY: values}, path)
+    return gravadas[MAIN_WINDOW_KEY] if gravadas else gravadas
+
+
+APPEARANCE_KEY = "appearance"
+
+# Os tres valores que a tela oferece, e os nomes que o CustomTkinter entende.
+# "system" e o comportamento de sempre: o programa nasceu em
+# `set_appearance_mode("System")` e segue o Windows.
+APPEARANCE_THEMES = ("system", "light", "dark")
+CTK_APPEARANCE_MODES = {"system": "System", "light": "Light", "dark": "Dark"}
+
+APPEARANCE_DEFAULTS = {
+    "theme": "system",
+}
+
+
+def read_appearance_settings(settings):
+    """O tema escolhido, validado: qualquer coisa fora dos tres cai em "system"."""
+    guardado = settings.get(APPEARANCE_KEY)
+    valores = dict(APPEARANCE_DEFAULTS)
+    if not isinstance(guardado, dict):
+        return valores
+    tema = guardado.get("theme")
+    if isinstance(tema, str) and tema in APPEARANCE_THEMES:
+        valores["theme"] = tema
+    return valores
+
+
+def appearance_mode_from_settings(settings):
+    """O argumento de `ctk.set_appearance_mode` para o que esta gravado."""
+    return CTK_APPEARANCE_MODES[read_appearance_settings(settings)["theme"]]
+
 
 BOARD_KEY = "board"
 
@@ -497,3 +539,40 @@ def read_llm_settings(settings):
             valores[chave] = modelo.strip()
     return valores
 
+
+# As opcoes que o USUARIO escolhe, por secao — e so elas. `main_window` e
+# `editor_drafts` tambem vivem no arquivo, mas sao estado que a janela grava
+# sozinha (o ultimo idioma, a geometria, um rascunho), nao uma escolha que se
+# faz numa tela. A tela de Configuracoes e conferida contra isto (garantia M4):
+# toda chave daqui tem um controle la, e um teste enumera.
+USER_OPTION_SECTIONS = {
+    OUTPUT_KEY: OUTPUT_DEFAULTS,
+    APPEARANCE_KEY: APPEARANCE_DEFAULTS,
+    BOARD_KEY: BOARD_DEFAULTS,
+    LLM_KEY: LLM_DEFAULTS,
+}
+
+
+def parse_wrap_columns(text):
+    """O que o usuario digitou no campo da requebra -> `(valor, erro)`.
+
+    Vazio e `0` desligam. Um inteiro de `MIN_WRAP_COLUMNS` para cima e a
+    largura. O resto volta com a razao, para o campo dizer e nao gravar: a
+    regra e a mesma que `read_output_settings` aplica ao JSON editado a mao,
+    escrita uma vez so — o piso mora em `MIN_WRAP_COLUMNS` para as duas.
+    """
+    digitado = (text or "").strip()
+    if not digitado:
+        return 0, None
+    try:
+        valor = int(digitado)
+    except ValueError:
+        return None, "Digite um número inteiro de colunas, ou 0 para desligar."
+    if valor < 0:
+        return None, "A largura não pode ser negativa; 0 desliga a requebra."
+    if 0 < valor < MIN_WRAP_COLUMNS:
+        return None, (
+            f"O mínimo é {MIN_WRAP_COLUMNS} colunas; abaixo disso o PGN vira "
+            f"uma palavra por linha. Use 0 para desligar."
+        )
+    return valor, None

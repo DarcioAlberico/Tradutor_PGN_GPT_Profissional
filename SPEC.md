@@ -76,6 +76,31 @@ O `pgn_tradutor_pro_settings.json` guarda tambem a lista de arquivos que ficaram
 com comentarios sem traduzir na ultima execucao, usada pelo "Reprocessar Falhas"
 (garantia T4), e as escolhas da janela principal (garantia M1).
 
+**Garantia M4 — toda opcao do usuario tem um lugar na tela de Configuracoes.**
+O arquivo tem duas familias de chaves: o que a janela grava sozinha
+(`main_window`, `editor_drafts`, a lista de falhas) e o que o usuario ESCOLHE
+(`output.utf8_bom`, `output.wrap_columns`, `appearance.theme`). A segunda
+familia e `settings.USER_OPTION_SECTIONS`, e cada chave dela tem um controle
+na tela "Configurações" da janela principal (ROADMAP 28.10) — um teste
+enumera as chaves contra os controles, entao uma opcao nova nao nasce so no
+JSON. A tela le o arquivo ao abrir e grava no Salvar por `update_settings`
+(R4): um rascunho que o editor gravou enquanto ela estava aberta sobrevive. A
+largura da requebra e validada pela mesma regra do leitor do JSON
+(`parse_wrap_columns`: vazio ou 0 desliga, minimo `MIN_WRAP_COLUMNS`), e uma
+recusa e escrita na propria tela, nao num dialogo. O tema e aplicado DEPOIS de
+gravado e so quando mudou; ao abrir, o programa liga o tema gravado antes de
+qualquer widget nascer. A pasta de dados aparece com o modo (`describe_data_dir`)
+e um "Abrir pasta", e nao se edita: ela e decidida antes de o programa abrir
+(`PGN_TRADUTOR_DATA`, `app_paths`), e a tela diz isso em vez de fingir um
+campo. O que a tela NAO diz: que o BOM resolve os acentos no ChessBase — aquele
+caso foi resolvido pela promocao para UTF-8, e o texto da opcao descreve so o
+que o BOM faz.
+
+Trocar o tema de dentro do programa repinta os widgets CTk sozinho; o Tk puro
+precisa de gancho, e ha dois: o editor de traducoes (F18) e o `PanedWindow` do
+editor de glossario, que lia o tema uma vez ao construir e agora acompanha pelo
+`AppearanceModeTracker`, com o gancho retirado ao fechar.
+
 **Garantia M1 — a janela principal reabre no que foi escolhido.** Idioma de
 origem, idioma de destino, caminho e "processar subdiretorios" sao gravados
 quando mudam e restaurados na abertura.
@@ -2363,6 +2388,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | M1 | A janela principal reabre no que foi escolhido | Risco: "Detectar" volta sozinho e desliga a correcao de lances sem avisar |
 | M2 | Um BOM no arquivo de configuracoes nao apaga nada | Bug: um caractere invisivel zerava rascunhos, lista de falhas e preferencias |
 | M5 | A barra de progresso diz onde a execucao esta (arquivo, lote, comentarios e uma estimativa), e no fim "Revisar pendentes" abre o editor no arquivo traduzido, em "Pendentes" e no destino DA EXECUCAO, enquanto "Abrir pasta" abre a do PGN gerado — os tres na fileira dos botoes, sem custar altura ao log | Custo: traduzir e revisar sao o mesmo fluxo, e o segundo passo exigia abrir o editor, achar o arquivo no seletor e trocar o status; e a barra nao dizia quanto faltava (ROADMAP 28.10) |
+| M4 | Toda opcao do usuario (`USER_OPTION_SECTIONS`) tem um controle na tela de Configuracoes; a tela grava por `update_settings`, valida a requebra pela regra do leitor, aplica o tema so depois de gravar e o programa abre no tema gravado | Custo: `utf8_bom` e `wrap_columns` so existiam no JSON editado a mao — o mesmo que o Bloco de Notas ja apagou (ROADMAP 28.10) |
 | M6 | Com chave configurada, "Iniciar tradução" e "Reprocessar falhas" perguntam o motor SEMPRE (Google ou um modelo, o da ultima execucao pre-selecionado; provedor sem chave desligado e dito); sem chave nao perguntam; Cancelar nao comeca; SDK ausente e recusado antes; a execucao grava `provedor:modelo` | Risco: trocar de motor em silencio — a licao de M1 — numa execucao que custa dinheiro (ROADMAP 28.7) |
 | K1 | A chave de API nunca aparece inteira em log, configuracoes ou dialogo: vive em `chaves-api.json` cifrada (DPAPI), a tela nunca a le para o campo, o log ve `****wxyz`; a variavel de ambiente vence; um 401 para as chamadas da execucao | Risco: uma chave paga em texto claro num JSON que vai para backup e para o Bloco de Notas (ROADMAP 28.7) |
 | M3 | A gravacao nunca sobrescreve um arquivo que existe e nao pode ser lido; um arquivo invalido e posto de lado (`.corrompido-<data>`) antes de o programa seguir, e os dois casos sao avisados | Bug: um `PermissionError` transitorio na leitura virava `{}`, e a gravacao seguinte apagava rascunhos, lista de falhas e preferencias — o desfecho de M2 por outro caminho (ROADMAP 28.1) |
@@ -2427,11 +2453,10 @@ X3). O que resta declarado como limite:
   comparacao byte a byte entre os spans dos dois lados e o que faz o legado
   corrompido aparecer no filtro "Avisos QA". Corrigi-lo continua sendo trabalho
   manual, uma linha por vez.
-- **O arquivo gerado sai com comentarios em linha unica**, fora do export
-  format de 80 colunas que editoras esperam. Requebrar na gravacao esta na
-  secao 19 do ROADMAP (item 13).
-- **UTF-8 com BOM e opt-in** (`output.utf8_bom`); o padrao continua sem BOM, e
-  quem le os PGN no ChessBase do Windows precisa ligar a opcao.
+- **O arquivo gerado sai com comentarios em linha unica por padrao**; a
+  requebra em 80 colunas (F9) e o UTF-8 com BOM sao opt-in, na tela de
+  Configuracoes (M4). O BOM nao e o conserto dos acentos no ChessBase: aquele
+  caso foi resolvido pela promocao para UTF-8, e a opcao so marca o arquivo.
 
 **Desempenho e escala**
 
@@ -2849,7 +2874,6 @@ testavel e qual e o numero que fica so no ROADMAP.
 | # | Garantia planejada | Item | Como o teste falha sem ela |
 |---|---|---|---|
 | T6 | Um provedor estrito nunca grava uma traducao cujo multiconjunto de ancoras difere do original | 28.7 | Provedor falso que devolve `Nf6` para `Nf3`: nada gravado, `failed_count == 1`, PGN com o original |
-| M4 | Toda opcao do `settings.json` tem um lugar na tela de Configuracoes, e a tela grava por `update_settings` | 28.10 | Um teste enumera as chaves padrao contra os widgets; gravar pela tela nao apaga um rascunho gravado por outra janela |
 
 **Ate 2026-09-14 o registro era o seguinte.** As nove garantias da revisao de 2026-07-31 — **F12**
 (22.1), **Q3** (22.2), **F13** (22.3), **F14** (22.4), **F15** (22.5), **F16**

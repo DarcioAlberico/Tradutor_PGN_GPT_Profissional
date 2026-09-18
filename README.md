@@ -369,9 +369,11 @@ e a nota.
 ## Requebra em 80 colunas (opcional)
 
 O padrao PGN tem um *export format* de 80 colunas, que e o que editora espera
-receber. Ligue com `"output": {"wrap_columns": 80}` no
-`pgn_tradutor_pro_settings.json`; zero, o padrao, mantem cada comentario em linha
-unica como sempre. A requebra muda **so o espaco em branco** — as palavras saem
+receber. Ligue em **Configurações** (botao na grade de Ferramentas), campo
+"Requebra dos comentarios"; zero, o padrao, mantem cada comentario em linha
+unica como sempre. A mesma tela tem o UTF-8 com BOM, o tema (Sistema, Claro,
+Escuro) e mostra a pasta de dados. Tudo continua gravado no
+`pgn_tradutor_pro_settings.json`, mas nao e mais preciso edita-lo a mao. A requebra muda **so o espaco em branco** — as palavras saem
 identicas, as anotacoes `[%...]` nunca sao partidas e o fim de linha do arquivo e
 respeitado.
 
@@ -561,6 +563,7 @@ quantas requisicoes e tokens o modelo gastou.
 - `tradutor_pgn/edit_window.py`: janela de revisao e edicao de traducoes, com filtro por par de idiomas e por arquivo de origem (que traz a obra em ordem de leitura).
 - `tradutor_pgn/editor_common.py`: logica pura compartilhada pelas duas janelas de edicao (geometria, paginacao, preview).
 - `tradutor_pgn/editor_text.py`: busca, substituicao e diff por palavra do texto no editor.
+- `tradutor_pgn/settings_window.py`: a tela de Configuracoes (gravacao, aparencia, tabuleiro, modelos de linguagem, pasta de dados).
 - `tradutor_pgn/stats_window.py`: janela copiavel das estatisticas do banco.
 - `tradutor_pgn/word_count.py`: a definicao de "palavra" do programa, num lugar so.
 - `tradutor_pgn/editor_widgets.py`: pecas de interface compartilhadas pelas duas janelas (mensagens, linhas da lista, divisor, gravacao das configuracoes).

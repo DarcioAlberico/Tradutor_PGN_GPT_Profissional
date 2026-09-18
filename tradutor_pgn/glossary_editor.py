@@ -360,17 +360,35 @@ class GlossaryEditor:
         self.win.columnconfigure(0, weight=1)
         self.win.rowconfigure(0, weight=1)
 
+    @staticmethod
+    def pane_color():
+        return "#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#d1d5db"
+
+    def apply_pane_color(self, _mode=None):
+        try:
+            self.main_pane.configure(bg=self.pane_color())
+        except tk.TclError:  # a janela ja foi destruida
+            pass
+
     def build_list_pane(self):
         """Painel esquerdo: paginacao, busca, filtros, ordem e a lista."""
-        pane_bg = "#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#d1d5db"
         self.main_pane = tk.PanedWindow(
             self.win,
             orient=tk.HORIZONTAL,
             sashwidth=8,
             sashrelief=tk.FLAT,
             bd=0,
-            bg=pane_bg,
+            bg=self.pane_color(),
         )
+        # O `PanedWindow` e Tk puro e nao repinta sozinho quando o tema troca —
+        # e agora o tema troca de dentro do programa, pela tela de
+        # Configuracoes (28.10), nao so pelo Windows. O mesmo gancho do editor
+        # de traducoes, com a mesma tolerancia: sem o registrador, a janela
+        # fica com a cor do tema anterior ate ser reaberta.
+        try:
+            ctk.AppearanceModeTracker.add(self.apply_pane_color, self.win)
+        except Exception:  # pragma: no cover - versao sem o registrador
+            pass
         self.main_pane.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 6))
 
         list_frame = ctk.CTkFrame(self.main_pane, corner_radius=8, width=420)
@@ -1816,6 +1834,12 @@ class GlossaryEditor:
         if self.state.dirty and not self.confirm_discard_changes():
             return
         self.save_editor_settings()
+        # A lista do rastreador e de CLASSE: sem tirar o desta janela, cada
+        # abrir-e-fechar deixaria mais um la (a mesma razao do editor, F18).
+        try:
+            ctk.AppearanceModeTracker.remove(self.apply_pane_color)
+        except Exception:  # pragma: no cover - versao sem o registrador
+            pass
         self.win.destroy()
 
 

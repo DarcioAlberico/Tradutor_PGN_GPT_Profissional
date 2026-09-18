@@ -42,6 +42,7 @@ from .llm_providers import (
 )
 from .provider_dialog import ask_translation_provider
 from .settings import load_settings, read_llm_settings, write_main_window_settings
+from .settings_window import open_settings_window as open_settings_editor
 from .translation_worker import run_translation
 
 
@@ -876,3 +877,10 @@ def open_edit_window(app):
 
 def open_glossary_window(app):
     open_glossary_editor(app)
+
+
+def open_settings_window(app):
+    # Sem guarda de traducao em andamento: a tela so grava o JSON, e o worker
+    # le as opcoes de saida no COMECO de cada execucao — o que se salvar agora
+    # vale para a proxima, e a tela diz isso.
+    return open_settings_editor(app)

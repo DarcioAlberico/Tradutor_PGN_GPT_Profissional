@@ -8840,7 +8840,7 @@ posicao; separador entre os grupos). 23 testes. **15 mutacoes, 15 mortas**
 com o pai, o que sobra e o timer — e o `navigate` incondicional, que so o
 filtro "Verificadas" com a linha saindo expoe).
 
-### 28.10 A janela principal e as configuracoes — progresso e "Revisar pendentes" CONCLUIDOS (2026-09-15)
+### 28.10 A janela principal e as configuracoes — CONCLUIDO (2026-09-15; o menu foi cortado, FEN e provedor esperam 28.8 e 28.7)
 
 - **O menu do rascunho foi cortado.** `tk.Menu` no Windows tem a barra
   desenhada pelo sistema, sem tema (F18 ficaria falsa no tema escuro), e
@@ -8947,7 +8947,35 @@ tres sobreviventes na primeira passada: o registro sem arquivo revisavel
 ja existia), o destino da execucao contra o radio (o cenario tinha os dois
 iguais, padrao 4 da memoria de testes) e a ordem feito/total no rotulo (so
 visivel a meio caminho, porque no fim os dois numeros sao o mesmo). Os tres
-cenarios escritos, as tres morreram. **As configuracoes continuam plano.**
+cenarios escritos, as tres morreram.
+
+**A tela de Configuracoes, feita em 2026-09-15 (M4).** `settings_window.py`,
+botao "Configurações" na grade de Ferramentas — o decimo sexto, que fecha o
+4 x 4 sem custar a fileira que esta janela nao tem (o mesmo motivo pelo qual
+os dois "Zerar" NAO ganharam a fileira propria do plano: 14 + 2 seriam cinco
+fileiras, e a medicao de M5 mostrou que uma a mais derruba o log). Tres
+secoes: gravacao (`utf8_bom` como caixa, `wrap_columns` como campo validado
+por `settings.parse_wrap_columns`, a MESMA regra do leitor do JSON, com a
+recusa escrita na tela e nada gravado), aparencia (Sistema/Claro/Escuro,
+aplicado DEPOIS de gravar e so quando mudou; `app.py` liga o tema gravado
+antes do primeiro widget) e pasta de dados (o `describe_data_dir` do log e um
+"Abrir pasta", sem campo: a pasta e decidida antes de o programa abrir, e a
+tela diz como muda-la). Gravacao por `settings.write_settings_sections`, que
+e o `write_main_window_settings` generalizado para duas secoes numa releitura
+(R4). `settings.USER_OPTION_SECTIONS` e a lista que M4 enumera; `main_window`
+e `editor_drafts` ficam de fora de proposito — sao estado, nao escolha. FEN
+(28.8) e provedor/chave (28.7) entram quando existirem. **O seletor de tema
+custou menos que o plano temia**: as janelas de historico, estatisticas e
+trocas repetidas usam cores em tupla (claro, escuro) do `editor_common`, que
+o CustomTkinter repinta sozinho; o unico Tk puro que lia o tema uma vez era
+o `PanedWindow` do glossario, e ele ganhou o mesmo gancho do editor (F18),
+retirado ao fechar. Medido: a janela requer 580 x 504 com as ajudas
+requebradas em 540 px; minimo 600 x 520, e um teste confere o requerido
+contra o minimo. 13 testes de janela (`SettingsWindowTests`) e 5 puros
+(`UserOptionSettingsTests`); oito mutacoes, oito mortas (tema sempre
+aplicado; tema antes de gravar; substituir a secao em vez de mesclar; sem
+tema na abertura; zero recusado; gancho do glossario que fica; controle sem
+registro; tema sem validar).
 
 ### 28.11 Engenharia
 

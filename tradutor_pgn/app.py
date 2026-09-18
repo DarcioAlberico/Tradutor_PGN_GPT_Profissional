@@ -2,12 +2,15 @@ import queue
 import threading
 import tkinter as tk
 
+import customtkinter as ctk
+
 from . import __version__, app_actions, app_paths, first_run
 from .app_config import LANGUAGE_NAMES
 from .editor_common import window_safe_geometry
 from .glossario import set_glossary_error_handler
 from .main_window import setup_main_ui
 from .settings import (
+    appearance_mode_from_settings,
     load_settings,
     read_main_window_settings,
     set_settings_warning_handler,
@@ -45,7 +48,14 @@ class PGNTranslatorApp:
         # que deixa as duas desligadas. Resetar a cada abertura significa que
         # esquecer um clique custa uma execucao inteira traduzida no escuro, e o
         # programa nao teria como avisar depois: o resultado parece pronto.
-        escolhas = read_main_window_settings(load_settings(), LANGUAGE_NAMES)
+        settings = load_settings()
+        escolhas = read_main_window_settings(settings, LANGUAGE_NAMES)
+        # O tema gravado, antes de qualquer widget nascer (ROADMAP 28.10). O
+        # lancador ja pos "System"; isto so muda algo quando o usuario escolheu
+        # Claro ou Escuro na tela de Configuracoes. Antes do `geometry` porque
+        # a raiz ja existe e o CustomTkinter repinta o que existir — melhor
+        # que nao exista nada ainda.
+        ctk.set_appearance_mode(appearance_mode_from_settings(settings))
         # Tamanho e posicao, como os dois editores ja faziam (ROADMAP 22.12).
         # Esta era a unica janela do programa que abria maximizada sempre, e num
         # monitor grande isso e uma janela de 900 px de conteudo esticada por
@@ -294,6 +304,9 @@ class PGNTranslatorApp:
 
     def open_glossary_window(self):
         app_actions.open_glossary_window(self)
+
+    def open_settings_window(self):
+        return app_actions.open_settings_window(self)
 
     def revert_last_run(self):
         app_actions.revert_last_run(self)
