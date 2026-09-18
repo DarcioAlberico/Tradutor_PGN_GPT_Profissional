@@ -47,6 +47,26 @@ Parte da suite abre as janelas de verdade e clica nos widgets (o editor de
 traducoes, o de glossario e a janela principal). Onde nao houver display, essas
 classes sao puladas e o restante roda normalmente.
 
+Os testes sem janela estao divididos por dominio — `tests/test_banco.py`,
+`test_ocorrencias.py`, `test_glossario.py`, `test_worker.py`, `test_api.py`,
+`test_ferramentas.py`, `test_pgn.py`, `test_notacao.py`, `test_editor.py`,
+`test_settings.py`, `test_qa.py`, `test_corretor.py`, `test_llm.py`,
+`test_piloto_llm.py` —, entao "mudei uma funcao,
+rodo os testes dela" e um modulo de poucos segundos:
+
+```powershell
+uv run python -m pytest tests\test_glossario.py -q
+```
+
+O que os modulos dividem entre si (os `Fake*`, o harness do worker, os PGN de
+amostra, o sandbox por modulo) esta em `tests/helpers.py`. Ha um CI em
+`.github/workflows/testes.yml` (Windows, porque os testes de janela precisam de
+uma sessao de desktop) que roda tudo e publica o `dist/` do PyInstaller como
+artefato. O lint e o `ruff` com as regras escritas no `pyproject.toml` (o
+conjunto padrao dele muda entre versoes); `uv run mypy` confere os modulos ja
+anotados inteiros (`translation_api.py`, `database.py`, `word_count.py`) e
+exige tipos em toda funcao nova deles.
+
 > Se `uv run` reclamar de um Python inexistente (`No Python at ...`), o `.venv`
 > ficou apontando para uma instalacao removida. Apague a pasta `.venv` e rode
 > `uv sync` de novo.
@@ -620,7 +640,7 @@ preenchida e diz a taxa de "aceito sem editar" de cada motor. A barra e 80 %.
 - `tradutor_pgn/translation_api.py`: chamadas de traducao e divisao de comentarios longos.
 - `tradutor_pgn/translation_worker.py`: orquestracao do processamento em segundo plano.
 - `tradutor_pgn/window_utils.py`: utilitarios de janela.
-- `tests/`: suite automatizada; `tests/gui_harness.py` traz o sandbox de caminhos e o silenciamento de dialogos que os testes de janela compartilham.
+- `tests/`: suite automatizada, por dominio (`test_banco.py`, `test_worker.py`, `test_glossario.py`, ...); `tests/helpers.py` traz os dubles e o sandbox por modulo dos testes sem janela, e `tests/gui_harness.py` o sandbox de caminhos e o silenciamento de dialogos dos testes de janela.
 - `.claude/skills/run-tradutor-pgn/`: ferramenta para abrir e dirigir o app sem interacao manual (inclusive o worker de traducao, sem abrir janela) e capturar telas.
 - `dicionarios/`: dicionarios hunspell do idioma de destino, para o corretor de prosa. So `pt_BR` por enquanto, e a janela diz isso nos outros idiomas.
 - `Substituicoes.txt`: as regras do glossario do usuario (original, substituicao e, quando ha, tipo, prioridade e escopo de idioma).

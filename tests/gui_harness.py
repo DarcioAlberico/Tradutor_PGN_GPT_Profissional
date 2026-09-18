@@ -28,6 +28,7 @@ from tradutor_pgn import (
     glossary_editor,
     history_window,
     repeated_edits_window,
+    settings_window,
     stats_window,
     translation_worker,
 )
@@ -60,6 +61,7 @@ DIALOG_MODULES = (
     app_actions,
     history_window,
     repeated_edits_window,
+    settings_window,
     stats_window,
     translation_worker,
 )

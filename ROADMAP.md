@@ -8977,7 +8977,7 @@ aplicado; tema antes de gravar; substituir a secao em vez de mesclar; sem
 tema na abertura; zero recusado; gancho do glossario que fica; controle sem
 registro; tema sem validar).
 
-### 28.11 Engenharia
+### 28.11 Engenharia — CI, divisao dos testes, fachada do db_tools e os tipos de `database.py` CONCLUIDOS (2026-09-16); logging fica
 
 Zero horas de revisao por livro; fica no fim da ordem e nao compete com os
 itens de produto. **Depende de 28.1 item 1**: um CI com `uv sync` sem
@@ -9008,6 +9008,79 @@ itens de produto. **Depende de 28.1 item 1**: um CI com `uv sync` sem
   prometer o que ninguem testa.
 - `logging` no lugar da fila propria: ganho parcial (niveis, `assertLogs`);
   a fila continua necessaria como ponte de thread. Nao urgente.
+
+**Feito em 2026-09-16.**
+
+- **CI** em `.github/workflows/testes.yml`: `windows-latest` (os testes de
+  janela precisam de sessao de desktop), `uv sync --extra tabuleiro` (para
+  os testes do tabuleiro rodarem), `compileall`, `ruff`, `mypy` nos modulos
+  anotados (nao bloqueante), suite headless (teto 10 min) e suite de
+  janelas (teto 25 min, `continue-on-error` ate 2026-09-30 — duas semanas
+  para provar que fica verde sem flake antes de barrar merge), e um job de
+  build do PyInstaller que confere o `.exe` e o glossario inicial dentro de
+  `_internal/` e publica `dist/` como artefato por 14 dias. `pytest`,
+  `ruff`, `mypy` e `types-requests` entraram como grupo `dev` do
+  `pyproject` (o `uv sync` os instala; o `.exe` nao os leva) — antes o
+  `pytest` era o da maquina, e o CI nao teria com o que rodar.
+- **`test_core.py` (21.246 linhas, 182 classes) dividido em 12 modulos por
+  dominio** — `test_banco`, `test_ocorrencias`, `test_glossario`,
+  `test_worker`, `test_api`, `test_ferramentas`, `test_pgn`, `test_notacao`,
+  `test_editor`, `test_settings`, `test_qa`, `test_corretor` — mais
+  `tests/helpers.py` com os `Fake*`, o `WorkerFallbackHarness`, os PGN de
+  amostra e o sandbox por modulo (`setup_module_sandbox`, chamado pelo
+  `setUpModule` de cada um). Feito por script sobre a AST (cada classe com
+  os comentarios que a antecedem; os nomes dos helpers que cada modulo usa
+  viram o `from helpers import`; `ruff --fix` tira os imports que sobraram),
+  e conferido do jeito que importa: **1.126 testes antes, 1.126 depois**,
+  cada modulo verde sozinho e todos juntos. Um teste dependia do arquivo
+  pelo nome (o de mojibake nos fontes lia `tests/test_core.py`); passou a
+  varrer `tests/*.py`. O modulo de uma funcao roda em segundos: `test_api`
+  0,4 s, `test_glossario` 2 s, `test_worker` 24 s (e o que tem I/O).
+- **`db_tools.py` (3.003 linhas) virou fachada**: `db_backup.py` (copia,
+  nome unico, validacao e restauracao — 200 linhas), `db_export.py` (CSV e
+  TMX, leitura, analise, gravacao e exportacao — 551) e `db_stats.py`
+  (calculo, relatorio, tabelas, descricao das execucoes — 304) sao as
+  partes PURAS, sem Tk; `db_tools` (2.064) re-exporta cada nome e guarda a
+  orquestracao com `messagebox`, `filedialog` e `run_with_progress`. A
+  fronteira foi escolhida pelo que os testes SUBSTITUEM: `db_tools.messagebox`,
+  `db_tools.run_with_progress`, `db_tools.ask_typed_confirmation` sao os
+  dublês da suite, entao quem os usa fica em `db_tools` — mover a
+  orquestracao junto quebraria os dublês em silencio. Um teste ja estava
+  quebrado desse jeito e nao sabia: trocava `db_tools.EXPORT_CHUNK` para
+  ver a progressao da exportacao, e a funcao le a constante do modulo dela;
+  passou a trocar em `db_export` e a exigir progressao no meio (antes
+  passava sem ver nada — o padrao 1 da memoria de testes).
+- **Tipos, o comeco**: `translation_api.py` anotado inteiro (`LogMessage`
+  e o `Protocol` `CancelFlag` dizem o que o worker entrega pela forma, nao
+  pelo tipo — o `threading.Event` do app e o `SimpleNamespace` dos testes
+  servem), `[tool.mypy]` no `pyproject` com `files` listando so os modulos
+  anotados, `mypy` verde neles e nao bloqueante no CI.
+- **`database.py` anotado inteiro (2026-09-16)**: as 85 funcoes, mais
+  `word_count.py` (que ele importa e cujo `WordCounts` ele devolve). Os
+  tipos dizem o que o modulo SABE: uma linha do SQLite e `tuple[Any, ...]`
+  (o driver nao sabe mais que isso, e um `TypedDict` por consulta seria
+  inventar), os `WHERE` por partes devolvem `(sql, params)`, as ferramentas
+  em massa devolvem `Stats`, e progresso e cancelamento sao `Callable` — a
+  mesma escolha de `LogMessage`. O `mypy` passou a exigir anotacao completa
+  nos modulos listados (`disallow_untyped_defs`, `follow_imports = silent`):
+  uma funcao nova em `database.py` sem tipos e erro, e o resto do pacote e
+  seguido para resolver nomes sem ser cobrado. Duas mudancas de codigo, as
+  duas sem efeito: `int(valor)` com `valor` possivelmente `None` virou um
+  `if` explicito (o `TypeError` capturado escondia o caso), e
+  `fetch_export_rows` materializa `only_ids` uma vez antes de contar e
+  passar. **O que os tipos nao pegam**: `fetchone()[0]` e `Any`, entao um
+  `-> int` numa funcao que devolve `COUNT(*)` e uma afirmacao, nao uma
+  verificacao (`--warn-return-any` acusa dez delas); vale como documentacao
+  e como contrato para quem chama, e os testes continuam sendo o que prova o
+  valor. Proximos, sem prazo: `pgn_utils.py` e `glossario.py`.
+- **O `ruff` 0.16 trocou o conjunto padrao de regras** — achado ao rodar o
+  lint pelo `uv run` (que instala o `ruff` do lock, 0.16.8) em vez do da
+  maquina (0.15): **272 apontamentos** (BLE001, I001, RUF012, S110, DTZ...)
+  num codigo que estava limpo. O comentario do `[tool.ruff.lint]` dizia "o
+  que ja rodava por padrao, agora escrito" e nao escrevia o `select`; agora
+  escreve (`E4`, `E7`, `E9`, `F`). Sem isso o primeiro CI teria falhado no
+  lint por uma mudanca de ferramenta, nao de codigo.
+- **Nao feito**: `logging` no lugar da fila (nao urgente, como dito acima).
 
 ### 28.12 O lote `|||` alinha por posicao, e so por posicao — CONCLUIDO (2026-09-15)
 

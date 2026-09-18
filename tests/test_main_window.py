@@ -37,7 +37,10 @@ from tradutor_pgn.database import (
     save_translation,
 )
 from tradutor_pgn.review_quality import QUALITY_HEURISTICS_VERSION
-from tradutor_pgn import app_actions, app_config, confirm_dialog, settings
+from tradutor_pgn import api_keys, app_actions, app_config, app_paths, confirm_dialog, settings
+from tradutor_pgn import llm_providers, provider_dialog
+from tradutor_pgn import glossary_editor, settings_window
+from tradutor_pgn.editor_common import DESTRUCTIVE_COLOR
 from tradutor_pgn import main_window
 from tradutor_pgn.backup_retention import is_backup_of_family, prune_log_files
 from tradutor_pgn.failed_runs import load_failed_run, save_failed_run
@@ -70,6 +73,12 @@ class MainWindowTestCase(GuiTestCase):
         # esta referencia.
         self.startup_quality_check = app_actions.run_startup_quality_check
         self.patch(app_actions, "run_startup_quality_check", lambda _app: None)
+
+        # Sem chave de modelo de linguagem, por padrao: o "Iniciar tradução"
+        # abre um dialogo MODAL quando ha uma (ROADMAP 28.7), e a maquina de
+        # quem desenvolve pode ter `ANTHROPIC_API_KEY` no ambiente — a suite
+        # pararia num `wait_window`. Quem quer o dialogo o pede (ProviderDialogTests).
+        self.patch(app_actions, "configured_providers", lambda: [])
 
         self.app = app_module.PGNTranslatorApp(self.root)
         self.root.withdraw()
@@ -152,6 +161,7 @@ class MainWindowTestCase(GuiTestCase):
             process_subdirs,
             only_files=None,
             source_language="",
+            provider="google",
         ):
             chamadas.append(
                 {
@@ -160,6 +170,7 @@ class MainWindowTestCase(GuiTestCase):
                     "source_language": source_language,
                     "process_subdirs": process_subdirs,
                     "only_files": only_files,
+                    "provider": provider,
                 }
             )
             pronto.set()
@@ -363,6 +374,8 @@ class StartTranslationTests(MainWindowTestCase):
                 "source_language": "it",
                 "process_subdirs": False,
                 "only_files": None,
+                # Sem chave configurada, o motor e o Google e ninguem pergunta.
+                "provider": "google",
             }],
         )
         self.assertEqual(self.app.start_button.cget("state"), "disabled")
@@ -1381,6 +1394,8 @@ class MassWriteGuardTests(MainWindowTestCase):
         "Consertar Prosa": "normalize_prose_in_database",
         "Zerar Traduções": "reset_translations_database",
         "Zerar Glossário": "reset_glossary_file",
+        # Fora da grade, na fileira dos botoes de execucao (Z5, ROADMAP 28.6).
+        "Reverter execução": "revert_last_run_in_database",
     }
 
     def espiar(self):
@@ -1939,5 +1954,347 @@ class LogDoesNotYankTheReaderBackTests(MainWindowTestCase):
         self.assertAlmostEqual(self.app.log_text.yview()[0], antes, places=2)
 
 
+class RevertRunButtonTests(MainWindowTestCase):
+    """"Reverter execucao" (Z5): vermelho como os "Zerar", na fileira dos botoes
+    de execucao ao lado de "Revisar pendentes", e sempre habilitado — a ultima
+    execucao pode ser de outra sessao."""
+
+    def test_it_is_red_in_the_run_row_and_enabled(self):
+        botao = self.button("Reverter execução")
+        self.assertEqual(botao.cget("fg_color"), DESTRUCTIVE_COLOR)
+        self.assertIs(botao.master, self.app.review_run_button.master)
+        self.assertEqual(botao.cget("state"), "normal")
+
+    def test_it_calls_the_tool_with_the_app(self):
+        recebidos = []
+        self.patch(app_actions, "revert_last_run_in_database", recebidos.append)
+        self.button("Reverter execução").invoke()
+        self.assertEqual(recebidos, [self.app])
+
+
+class SettingsWindowTests(MainWindowTestCase):
+    """A tela de Configuracoes (garantia M4, ROADMAP 28.10).
+
+    `utf8_bom` e `wrap_columns` so existiam no JSON editado a mao. A tela da um
+    controle a cada opcao do usuario e grava pela mesma porta das outras
+    janelas (R4) — e um teste enumera as chaves contra os controles, para uma
+    opcao nova nao nascer sem lugar na tela.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # O tema e estado de CLASSE do CustomTkinter: um teste que o troque de
+        # verdade deixaria a suite inteira escura. Volta ao que o lancador poe.
+        self.addCleanup(ctk.set_appearance_mode, "System")
+        self.aplicados = []
+        self.patch(settings_window, "apply_appearance", self.aplicados.append)
+
+    def grava(self, **secoes):
+        settings.save_settings(secoes, settings.default_settings_path())
+
+    def arquivo(self):
+        return settings.load_settings(settings.default_settings_path())
+
+    def abre(self):
+        janela = self.app.open_settings_window()
+        self.pump()
+        self.addCleanup(self.fecha, janela)
+        return janela
+
+    def fecha(self, janela):
+        try:
+            janela.win.destroy()
+        except tk.TclError:
+            pass
+
+    def test_the_button_opens_the_window(self):
+        antes = len(self.toplevels())
+        self.button("Configurações").invoke()
+        self.pump()
+        novas = self.toplevels()[antes:]
+        self.assertEqual(len(novas), 1)
+        self.assertEqual(novas[0].title(), "Configurações")
+        novas[0].destroy()
+
+    def test_every_user_option_has_a_control(self):
+        """Garantia M4: as chaves de `USER_OPTION_SECTIONS` contra a tela."""
+        janela = self.abre()
+        esperadas = {
+            (secao, chave)
+            for secao, padroes in settings.USER_OPTION_SECTIONS.items()
+            for chave in padroes
+        }
+        self.assertEqual(set(janela.controls), esperadas)
+        for widget in janela.controls.values():
+            self.assertTrue(widget.winfo_exists())
+
+    def test_it_opens_with_what_the_file_says(self):
+        self.grava(output={"utf8_bom": True, "wrap_columns": 80}, appearance={"theme": "dark"})
+        janela = self.abre()
+        self.assertTrue(janela.bom_var.get())
+        self.assertEqual(janela.wrap_var.get(), "80")
+        self.assertEqual(janela.theme_var.get(), "Escuro")
+
+    def test_it_opens_with_the_defaults_when_there_is_no_file(self):
+        janela = self.abre()
+        self.assertFalse(janela.bom_var.get())
+        self.assertEqual(janela.wrap_var.get(), "0")
+        self.assertEqual(janela.theme_var.get(), "Sistema")
+
+    def test_saving_writes_through_update_settings_and_keeps_a_draft(self):
+        """R4 pela tela: um rascunho gravado por OUTRA janela enquanto esta
+        estava aberta sobrevive ao Salvar."""
+        janela = self.abre()
+        janela.bom_var.set(True)
+        janela.wrap_var.set("80")
+
+        # O editor grava um rascunho depois de a tela ter lido o arquivo.
+        def rascunho(dados):
+            settings.set_editor_draft(dados, self.db_path, "pt", 7, "texto", "base")
+
+        settings.update_settings(rascunho, settings.default_settings_path())
+
+        self.assertTrue(janela.save())
+        self.pump()
+
+        gravado = self.arquivo()
+        self.assertEqual(
+            settings.read_output_settings(gravado), {"utf8_bom": True, "wrap_columns": 80}
+        )
+        rascunho_gravado = settings.get_editor_draft(gravado, self.db_path, "pt", 7, "base")
+        self.assertEqual(
+            (rascunho_gravado or {}).get("text"),
+            "texto",
+            "o rascunho gravado pelo editor sumiu no Salvar da tela",
+        )
+        self.assertIn("salvas", janela.status_label.cget("text"))
+
+    def test_an_invalid_width_is_refused_on_screen_and_nothing_is_written(self):
+        self.grava(output={"utf8_bom": False, "wrap_columns": 80})
+        janela = self.abre()
+        for digitado in ("abc", "10", "-5", "1.5"):
+            with self.subTest(digitado=digitado):
+                janela.wrap_var.set(digitado)
+                self.assertFalse(janela.save())
+                self.pump()
+                self.assertTrue(janela.status_label.cget("text"), "a razao devia estar na tela")
+                self.assertEqual(self.dialogs.messages("error"), [], "sem dialogo: o campo esta ali")
+                self.assertEqual(
+                    settings.read_output_settings(self.arquivo())["wrap_columns"],
+                    80,
+                    "gravou um valor recusado",
+                )
+
+    def test_empty_width_means_off(self):
+        self.grava(output={"utf8_bom": False, "wrap_columns": 80})
+        janela = self.abre()
+        janela.wrap_var.set("")
+        self.assertTrue(janela.save())
+        self.assertEqual(settings.read_output_settings(self.arquivo())["wrap_columns"], 0)
+
+    def test_the_theme_is_applied_only_when_it_changes_and_after_writing(self):
+        janela = self.abre()
+        self.assertTrue(janela.save())
+        self.assertEqual(self.aplicados, [], "salvar sem mudar o tema nao devia repintar")
+
+        janela.theme_var.set("Escuro")
+        self.assertTrue(janela.save())
+        self.assertEqual(self.aplicados, ["dark"])
+        self.assertEqual(settings.read_appearance_settings(self.arquivo())["theme"], "dark")
+
+        # Salvar de novo com o mesmo tema: nada a aplicar.
+        self.assertTrue(janela.save())
+        self.assertEqual(self.aplicados, ["dark"])
+
+    def test_a_failed_write_does_not_apply_the_theme(self):
+        janela = self.abre()
+        janela.theme_var.set("Claro")
+
+        def falha(*_a, **_k):
+            raise OSError("disco cheio")
+
+        self.patch(settings_window, "write_settings_sections", falha)
+
+        self.assertFalse(janela.save())
+        self.assertEqual(self.aplicados, [], "aplicou um tema que o arquivo nao tem")
+        self.assertIn("continuam como estavam", janela.status_label.cget("text"))
+
+    def test_the_saved_theme_is_applied_when_the_program_opens(self):
+        """A escolha vale na proxima abertura, sem passar pela tela de novo."""
+        self.grava(appearance={"theme": "dark"})
+        modos = []
+        self.patch(app_module.ctk, "set_appearance_mode", modos.append)
+        outra = app_module.PGNTranslatorApp(tk.Toplevel(self.root))
+        self.addCleanup(outra.root.destroy)
+        self.assertEqual(modos, ["Dark"])
+
+    def test_the_window_fits_its_minimum_size(self):
+        """Familia "correto e nao cabe na tela" (22.10): o requerido contra o
+        minimo, medido, e nao a olho."""
+        janela = self.abre()
+        janela.win.withdraw()
+        janela.win.update_idletasks()
+        largura, altura = janela.MIN_SIZE
+        self.assertLessEqual(janela.win.winfo_reqwidth(), largura)
+        self.assertLessEqual(janela.win.winfo_reqheight(), altura)
+
+    def test_a_typed_key_is_stored_encrypted_and_leaves_the_field(self):
+        """K1 pela tela: a chave digitada vai para `chaves-api.json`, nunca
+        para o `settings.json`, e o campo volta a dizer so o estado."""
+        janela = self.abre()
+        janela.key_entries["deepseek"].insert(0, " ds-chave-9876 ")
+        janela.model_vars["deepseek"].set("deepseek-reasoner")
+        self.assertTrue(janela.save())
+        self.pump()
+
+        self.assertEqual(api_keys.load_api_key("deepseek"), "ds-chave-9876")
+        self.assertNotIn("ds-chave-9876", Path(settings.default_settings_path()).read_text(encoding="utf-8"))
+        self.assertEqual(settings.read_llm_settings(self.arquivo())["deepseek_model"], "deepseek-reasoner")
+        self.assertEqual(janela.key_entries["deepseek"].get(), "")
+        self.assertIn("****9876", janela.key_entries["deepseek"].cget("placeholder_text"))
+        self.assertNotIn("ds-chave-9876", janela.key_entries["deepseek"].cget("placeholder_text"))
+
+    def test_the_clear_box_removes_a_stored_key_and_an_empty_model_means_default(self):
+        api_keys.save_api_key("openai", "sk-abcd-1111")
+        janela = self.abre()
+        self.assertIn("****1111", janela.key_entries["openai"].cget("placeholder_text"))
+        janela.clear_key_vars["openai"].set(True)
+        janela.model_vars["openai"].set("   ")
+        self.assertTrue(janela.save())
+        self.assertIsNone(api_keys.load_api_key("openai"))
+        self.assertEqual(
+            settings.read_llm_settings(self.arquivo())["openai_model"], settings.LLM_DEFAULTS["openai_model"]
+        )
+        # Sem tocar em nada, salvar de novo nao apaga nem grava chave.
+        api_keys.save_api_key("anthropic", "sk-ant-2222")
+        janela = self.abre()
+        self.assertTrue(janela.save())
+        self.assertEqual(api_keys.load_api_key("anthropic"), "sk-ant-2222")
+
+    def test_the_data_folder_is_shown_and_can_be_opened(self):
+        janela = self.abre()
+        self.assertIn(str(self.base), janela.data_dir_label.cget("text"))
+        abertas = []
+        self.patch(app_actions, "open_path_in_explorer", abertas.append)
+        janela.btn_open_data_dir.invoke()
+        self.assertEqual(abertas, [app_paths.data_dir()])
+
+    def test_the_glossary_pane_follows_the_theme_and_lets_go_on_close(self):
+        """O `PanedWindow` do glossario e Tk puro e lia o tema uma vez; agora o
+        tema troca de dentro do programa, e ele precisa acompanhar."""
+        editor = glossary_editor.open_glossary_editor(self.app)
+        self.pump()
+        self.addCleanup(lambda: editor.win.winfo_exists() and editor.win.destroy())
+
+        ctk.set_appearance_mode("Dark")
+        self.pump()
+        self.assertEqual(editor.main_pane.cget("bg"), "#2b2b2b")
+        ctk.set_appearance_mode("Light")
+        self.pump()
+        self.assertEqual(editor.main_pane.cget("bg"), "#d1d5db")
+
+        editor.close_editor()
+        self.pump()
+        self.assertNotIn(
+            editor.apply_pane_color,
+            ctk.AppearanceModeTracker.callback_list,
+            "o gancho ficou registrado depois de fechar",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProviderDialogTests(MainWindowTestCase):
+    """O dialogo do "Iniciar tradução" (ROADMAP 28.7): so com chave, sempre
+    com chave, e a escolha nunca e um motor sem chave."""
+
+    def dialogo(self, configurados, lembrado="google"):
+        d = provider_dialog.ProviderChoiceDialog(
+            self.app, configurados, settings.LLM_DEFAULTS, lembrado
+        )
+        self.pump()
+        self.addCleanup(d.close)
+        return d
+
+    def test_it_lists_google_and_every_provider_and_disables_the_keyless(self):
+        d = self.dialogo(["deepseek"])
+        self.assertEqual(set(d.radios), {"google", *llm_providers.PROVIDER_ORDER})
+        self.assertEqual(d.radios["deepseek"].cget("state"), "normal")
+        self.assertEqual(d.radios["anthropic"].cget("state"), "disabled")
+        self.assertEqual(d.radios["google"].cget("state"), "normal")
+        self.assertIn(settings.LLM_DEFAULTS["deepseek_model"], d.radios["deepseek"].cget("text"))
+        self.assertEqual(d.choice_var.get(), "google")
+
+    def test_the_remembered_provider_is_preselected_only_with_a_key(self):
+        self.assertEqual(self.dialogo(["openai"], "openai").choice_var.get(), "openai")
+        self.assertEqual(self.dialogo(["deepseek"], "openai").choice_var.get(), "google")
+
+    def test_confirm_returns_the_choice_and_cancel_returns_none(self):
+        d = self.dialogo(["openai"], "openai")
+        d.confirm()
+        self.assertEqual(d.result, "openai")
+        d = self.dialogo(["openai"])
+        d.cancel()
+        self.assertIsNone(d.result)
+        # Um motor sem chave nao sai daqui como escolha, nem forcando a variavel.
+        d = self.dialogo(["openai"])
+        d.choice_var.set("anthropic")
+        d.confirm()
+        self.assertEqual(d.result, "google")
+
+    def test_start_asks_only_with_a_key_and_passes_the_choice_to_the_worker(self):
+        chamadas, pronto = self.worker_falso()
+        self.app.source_path.set(self.escreve_pgn("a.pgn"))
+        perguntas = []
+        self.patch(app_actions, "ask_translation_provider", lambda *a: perguntas.append(a) or "openai")
+
+        # Sem chave: sem pergunta, Google.
+        self.app.start_translation()
+        self.assertTrue(pronto.wait(5))
+        self.assertEqual(perguntas, [])
+        self.assertEqual(chamadas[-1]["provider"], "google")
+        self.app.is_processing = False  # o worker falso nao faz o `finally`
+        self.app._reset_buttons()
+        self.pump()
+
+        # Com chave: pergunta, e a escolha vai para o worker e fica lembrada.
+        self.patch(app_actions, "configured_providers", lambda: ["openai"])
+        pronto.clear()
+        self.app.start_translation()
+        self.assertTrue(pronto.wait(5))
+        self.assertEqual(len(perguntas), 1)
+        self.assertEqual(perguntas[0][1], ["openai"])
+        self.assertEqual(chamadas[-1]["provider"], "openai")
+        self.assertEqual(self.app.translation_provider, "openai")
+        self.assertEqual(
+            settings.read_main_window_settings(
+                settings.load_settings(settings.default_settings_path()), app_config.LANGUAGE_NAMES
+            )["translation_provider"],
+            "openai",
+        )
+        self.app.is_processing = False
+        self.app._reset_buttons()
+        self.pump()
+
+        # Cancelar no dialogo: nada comeca.
+        self.patch(app_actions, "ask_translation_provider", lambda *a: None)
+        pronto.clear()
+        antes = len(chamadas)
+        self.app.start_translation()
+        self.pump()
+        self.assertFalse(self.app.is_processing)
+        self.assertEqual(len(chamadas), antes)
+
+    def test_claude_without_the_sdk_is_refused_before_starting(self):
+        chamadas, _pronto = self.worker_falso()
+        self.app.source_path.set(self.escreve_pgn("a.pgn"))
+        self.patch(app_actions, "configured_providers", lambda: ["anthropic"])
+        self.patch(app_actions, "ask_translation_provider", lambda *a: "anthropic")
+        self.patch(app_actions, "anthropic_sdk_available", lambda: False)
+        self.app.start_translation()
+        self.pump()
+        self.assertFalse(self.app.is_processing)
+        self.assertEqual(chamadas, [])
+        self.assertTrue(any("anthropic" in m for m in self.dialogs.messages("error")))

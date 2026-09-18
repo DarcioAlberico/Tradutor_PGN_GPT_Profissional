@@ -24,6 +24,8 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+
+import customtkinter as ctk
 import types
 import unittest
 from contextlib import redirect_stderr
@@ -31,6 +33,8 @@ from pathlib import Path
 
 from gui_harness import DISPLAY, GuiTestCase
 from tradutor_pgn import (
+    board_widget,
+    database,
     edit_window,
     editor_common,
     editor_widgets,
@@ -42,7 +46,12 @@ from tradutor_pgn import (
     stats_window,
     window_utils,
 )
+from tradutor_pgn.app_config import language_label
+from tradutor_pgn.editor_common import DESTRUCTIVE_COLOR
 from tradutor_pgn.database import (
+    REVIEW_STATUS_PENDING,
+    REVIEW_STATUS_DOUBT,
+    REVIEW_STATUS_REJECTED,
     discard_unreviewed_file_translations,
     initialize_database,
     record_occurrences,
@@ -5461,6 +5470,11 @@ class GestureCostTests(EditorWindowTestCase):
         """Ir de 12 a 18 pt eram seis cliques num botao de 42 px."""
         tamanho = self.editor.state.font_size
 
+        # Foco ANTES da tecla: `event_generate` de um atalho so chega a uma
+        # janela com foco, e com o usuario noutro programa a janela de teste
+        # nem sempre o tem — era um vermelho intermitente (1 em 3).
+        self.editor.win.focus_force()
+        self.pump()
         self.editor.win.event_generate("<Control-plus>")
         self.pump()
         self.assertEqual(self.editor.state.font_size, tamanho + 1)
@@ -5473,6 +5487,8 @@ class GestureCostTests(EditorWindowTestCase):
         """Onde o "+" nao pede Shift, o Tk entrega `<Control-equal>`."""
         tamanho = self.editor.state.font_size
 
+        self.editor.win.focus_force()
+        self.pump()
         self.editor.win.event_generate("<Control-equal>")
         self.pump()
 
@@ -7024,6 +7040,663 @@ class RepeatedEditsWindowTests(EditorWindowTestCase):
             [("rook", "torre")],
         )
         self.assertIn("sem regra", self.rotulos(janela)[0])
+
+
+class EditorBoardTests(EditorWindowTestCase):
+    """O quadro do tabuleiro no painel de sugestoes (ROADMAP 28.8, O5): so
+    existe quando a linha aberta tem FEN gravada, colapsa com um clique e a
+    escolha e lembrada; acompanha o tema; some ao limpar."""
+
+    module = edit_window
+    INICIAL = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    DEPOIS_E4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(ctk.set_appearance_mode, "System")
+        self.arquivo = str(Path(self.base) / "cap01.pgn")
+        self.outro = str(Path(self.base) / "cap02.pgn")
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        for texto in ("com posicao", "sem posicao", "em dois arquivos"):
+            save_translation(cur, texto, f"T {texto}", "pt", "en")
+        conn.commit()
+        ids = resolve_comment_ids(cur, "pt", ["com posicao", "sem posicao", "em dois arquivos"], "en")
+        record_occurrences(
+            cur,
+            self.arquivo,
+            [(1, 1, 1, "com posicao"), (2, 1, 2, "sem posicao"), (3, 1, 3, "em dois arquivos")],
+            ids,
+            fens=[self.DEPOIS_E4, None, self.INICIAL],
+        )
+        record_occurrences(cur, self.outro, [(1, 1, 1, "em dois arquivos")], ids, fens=[self.DEPOIS_E4])
+        conn.commit()
+        conn.close()
+
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+
+    def abrir(self, texto):
+        indice = [linha[1] for linha in self.editor.state.rows].index(texto)
+        self.editor.select_index(indice)
+        self.pump()
+
+    def quadro_visivel(self):
+        return bool(self.editor.board_row.winfo_manager())
+
+    def test_the_board_appears_only_for_a_row_with_a_fen(self):
+        # A janela abre na primeira linha, que tem posicao; a segunda nao tem.
+        self.abrir("sem posicao")
+        self.assertFalse(self.quadro_visivel(), "linha sem FEN: nenhum quadro")
+        self.abrir("com posicao")
+        self.assertTrue(self.quadro_visivel())
+        self.assertEqual(self.editor.board_canvas.fen, self.DEPOIS_E4)
+        self.assertIn("Pretas jogam", self.editor.board_label.cget("text"))
+        # 8 x 8 casas pintadas mais as 32 pecas: o desenho aconteceu (mesmo
+        # fechado, para abrir sem esperar).
+        self.assertEqual(len(self.editor.board_canvas.find_all()), 64 + 32)
+
+        self.abrir("sem posicao")
+        self.assertFalse(self.quadro_visivel(), "linha sem FEN: quadro some, sem aviso")
+        self.assertIsNone(self.editor.board_canvas.fen)
+
+    def test_the_fen_follows_the_file_filter(self):
+        self.abrir("em dois arquivos")
+        self.assertEqual(self.editor.board_canvas.fen, self.INICIAL, "sem filtro: a primeira em ordem de arquivo")
+        rotulo = next(r for r, v in self.editor.file_options.items() if v == os.path.abspath(self.outro))
+        self.editor.file_menu.set(rotulo)
+        self.editor.change_file_filter()
+        self.pump()
+        self.abrir("em dois arquivos")
+        self.assertEqual(self.editor.board_canvas.fen, self.DEPOIS_E4)
+
+    def test_it_is_born_collapsed_and_the_choice_is_remembered(self):
+        """Aberto por padrao, o quadro deixava a lista de sugestoes com 40 px
+        (medido); fechado, sobra o titulo com o lado a jogar, e um clique abre."""
+        self.abrir("com posicao")
+        self.assertTrue(self.quadro_visivel(), "a linha do titulo aparece")
+        self.assertFalse(self.editor.board_canvas.winfo_manager(), "nasce fechado")
+        self.assertEqual(self.editor.board_toggle.cget("text"), "▸")
+        self.assertIn("Pretas jogam", self.editor.board_label.cget("text"))
+
+        self.editor.board_toggle.invoke()
+        self.pump()
+        self.assertTrue(self.editor.board_canvas.winfo_manager())
+        self.assertEqual(self.editor.board_toggle.cget("text"), "▾")
+
+        self.editor.close_editor()
+        self.pump()
+        gravado = settings.load_settings(settings.default_settings_path())
+        self.assertFalse(gravado["editor"]["board_collapsed"])
+
+        # Reaberto, continua aberto.
+        editor2 = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.addCleanup(editor2.win.destroy)
+        self.editor = editor2
+        self.abrir("com posicao")
+        self.assertTrue(self.editor.board_canvas.winfo_manager())
+
+    def test_open_at_the_minimum_size_no_button_leaves_the_pane(self):
+        """F20 na vertical: com o quadro aberto no tamanho minimo, os seis
+        botoes do painel continuam inteiros dentro dele (quem encolhe e a
+        lista de sugestoes, a unica linha com peso)."""
+        self.win.geometry(f"{edit_window.MIN_WIDTH}x{edit_window.MIN_HEIGHT}")
+        self.pump()
+        self.abrir("com posicao")
+        self.editor.board_toggle.invoke()
+        self.pump()
+        self.pump()
+        altura = self.editor.sugg_frame.winfo_height()
+        for botao in (
+            self.editor.btn_refresh, self.editor.btn_apply_one, self.editor.btn_apply_all,
+            self.editor.btn_add_gloss, self.editor.btn_reload_gloss, self.editor.btn_open_gloss,
+        ):
+            self.assertLessEqual(botao.winfo_y() + botao.winfo_height(), altura, botao.cget("text"))
+        self.assertLessEqual(
+            self.editor.board_row.winfo_y() + self.editor.board_row.winfo_height(), altura
+        )
+
+    def test_clearing_the_row_hides_the_board(self):
+        self.abrir("com posicao")
+        self.editor.clear_current()
+        self.pump()
+        self.assertFalse(self.quadro_visivel())
+
+    def test_the_board_repaints_with_the_theme(self):
+        self.abrir("com posicao")
+        self.editor.board_toggle.invoke()
+        ctk.set_appearance_mode("Dark")
+        self.pump()
+        self.assertEqual(self.editor.board_canvas.cget("bg"), board_widget.LIGHT_SQUARE[1])
+        ctk.set_appearance_mode("Light")
+        self.pump()
+        self.assertEqual(self.editor.board_canvas.cget("bg"), board_widget.LIGHT_SQUARE[0])
+
+    def test_the_board_fits_the_suggestion_pane(self):
+        """F20: nada e desenhado fora da faixa em que vive. O quadro tem 192 px
+        mais as margens, contra os 308 do painel."""
+        self.abrir("com posicao")
+        self.editor.board_row.update_idletasks()
+        self.assertLessEqual(
+            self.editor.board_row.winfo_reqwidth(), edit_window.SUGGESTION_PANE_MIN
+        )
+        self.assertEqual(int(self.editor.board_canvas.cget("width")), board_widget.BOARD_SIDE)
+
+
+class EditorSimilarTests(EditorWindowTestCase):
+    """O painel "Semelhantes" (ROADMAP 28.13, F30): na thread do Tk (21 ms),
+    so o par, fechado por padrao, e o duplo clique aplica como um passo de
+    desfazer."""
+
+    module = edit_window
+    ALVO = "chances are about even, Torrecillas-Leon, Barcelona 2011."
+    VIZINHA = "chances are about even, Kamsky-Jobava, Brasov 2011."
+    LONGE = "the knight is dominant on d5 and cannot be challenged"
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        if not database.fts5_available(conn):
+            conn.close()
+            self.skipTest("SQLite sem FTS5")
+        for original, traducao in (
+            (self.ALVO, "as chances sao iguais, Torrecillas-Leon, Barcelona 2011."),
+            (self.VIZINHA, "as chances são iguais, Kamsky-Jobava, Brasov 2011."),
+            (self.LONGE, "o cavalo domina d5"),
+        ):
+            save_translation(cur, original, traducao, "pt", "en")
+        conn.commit()
+        conn.close()
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+
+    def abrir(self, texto):
+        indice = [linha[1] for linha in self.editor.state.rows].index(texto)
+        self.editor.select_index(indice)
+        self.pump()
+
+    def esperar(self, condicao, segundos=5):
+        fim = time.time() + segundos
+        while time.time() < fim:
+            self.pump()
+            if condicao():
+                return True
+            time.sleep(0.02)
+        return condicao()
+
+    def painel_visivel(self):
+        return bool(self.editor.similar_row.winfo_manager())
+
+    def test_the_panel_lists_the_neighbour_and_hides_when_there_is_none(self):
+        self.abrir(self.ALVO)
+        self.assertTrue(self.esperar(lambda: self.editor.similar_items), "a thread nao respondeu")
+        self.assertTrue(self.painel_visivel())
+        self.assertEqual([i[1] for i in self.editor.similar_items], [self.VIZINHA])
+        self.assertEqual(self.editor.similar_label.cget("text"), "Semelhantes · 1")
+
+        self.abrir(self.LONGE)
+        self.assertTrue(self.esperar(lambda: not self.painel_visivel()), "devia sumir sem vizinha")
+
+    def test_it_is_born_collapsed_and_the_choice_is_remembered(self):
+        self.abrir(self.ALVO)
+        self.assertTrue(self.esperar(lambda: self.editor.similar_items))
+        self.assertFalse(self.editor.similar_list.winfo_manager(), "nasce fechado")
+        self.assertEqual(self.editor.similar_toggle.cget("text"), "▸")
+        self.editor.similar_toggle.invoke()
+        self.pump()
+        self.assertTrue(self.editor.similar_list.winfo_manager())
+        self.assertEqual(len(self.editor.similar_buttons), 1)
+        self.assertIn("%", self.editor.similar_buttons[0].cget("text"))
+
+        self.editor.close_editor()
+        self.pump()
+        gravado = settings.load_settings(settings.default_settings_path())
+        self.assertFalse(gravado["editor"]["similar_collapsed"])
+
+    def test_double_click_applies_as_one_undo_step(self):
+        self.abrir(self.ALVO)
+        self.assertTrue(self.esperar(lambda: self.editor.similar_items))
+        antes = self.editor.draft_text()
+        aplicada = self.editor.apply_similar(0)
+        self.pump()
+        self.assertEqual(aplicada, "as chances são iguais, Kamsky-Jobava, Brasov 2011.")
+        self.assertEqual(self.editor.draft_text(), aplicada)
+        self.assertTrue(self.editor.state.dirty)
+        self.editor.trans_text.edit_undo()
+        self.pump()
+        self.assertEqual(self.editor.draft_text(), antes, "um Ctrl+Z devolve o que estava")
+
+    def test_clearing_the_row_hides_the_panel(self):
+        self.abrir(self.ALVO)
+        self.assertTrue(self.esperar(lambda: self.editor.similar_items))
+        self.editor.clear_current()
+        self.pump()
+        self.assertFalse(self.painel_visivel())
+        self.assertEqual(self.editor.similar_items, [])
+
+    def test_only_the_open_pair_is_consulted(self):
+        """R9: a origem do filtro e o destino da linha viajam para a consulta."""
+        recebidos = []
+        original = edit_window.find_similar_translations
+
+        def espiao(cursor, comment_id, texto, destino, origem=None, limit=5):
+            recebidos.append((destino, origem))
+            return original(cursor, comment_id, texto, destino, origem, limit=limit)
+
+        edit_window.find_similar_translations = espiao
+        self.addCleanup(setattr, edit_window, "find_similar_translations", original)
+        self.editor.source_menu.set(language_label("en"))
+        self.editor.change_language_filter()
+        self.pump()
+        self.abrir(self.ALVO)
+        self.assertTrue(self.esperar(lambda: recebidos))
+        self.assertEqual(recebidos[-1], ("pt", "en"))
+
+    def test_without_fts5_the_header_says_so(self):
+        self.editor.show_similar(None)
+        self.pump()
+        self.assertTrue(self.painel_visivel())
+        self.assertIn("indisponível", self.editor.similar_label.cget("text"))
+        self.assertEqual(self.editor.similar_toggle.cget("state"), "disabled")
+
+    def test_the_panel_fits_the_suggestion_pane(self):
+        self.abrir(self.ALVO)
+        self.assertTrue(self.esperar(lambda: self.editor.similar_items))
+        self.editor.similar_toggle.invoke()
+        self.pump()
+        self.editor.similar_row.update_idletasks()
+        self.assertLessEqual(self.editor.similar_row.winfo_reqwidth(), edit_window.SUGGESTION_PANE_MIN)
+
+
+class TooltipTests(EditorWindowTestCase):
+    """As dicas dos controles sem palavra (ROADMAP 28.9, item 4)."""
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        save_translation(conn.cursor(), "a", "A", "pt", "en")
+        conn.commit()
+        conn.close()
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+
+    def mapeado(self, widget):
+        """A dica so nasce sobre um controle NA TELA — e a janela do editor
+        leva alguns `after` para ser mapeada (`bring_window_to_front`). Sem
+        esperar, o timer de 1 ms dispara antes e a dica desiste, como deve."""
+        fim = time.time() + 3
+        while not widget.winfo_ismapped() and time.time() < fim:
+            self.pump()
+            time.sleep(0.01)
+        self.assertTrue(widget.winfo_ismapped(), "o controle nao chegou a tela")
+
+    def test_every_wordless_control_carries_a_tip(self):
+        controles = {
+            "▤/▥": self.editor.btn_layout,
+            "A-": self.editor.btn_font_down,
+            "A+": self.editor.btn_font_up,
+            "B": self.editor.btn_bold,
+            "Aa": self.editor.case_check,
+            "?": self.editor.btn_shortcuts,
+        }
+        for nome, widget in controles.items():
+            with self.subTest(nome=nome):
+                dica = getattr(widget, "tooltip", None)
+                self.assertIsNotNone(dica, f"{nome} sem dica")
+                self.assertTrue(dica.text.strip())
+
+    def test_the_tip_appears_after_the_delay_and_goes_on_leave(self):
+        # `A-`, e nao "B" ou "A+": na largura da janela de teste os ultimos
+        # empacotados da fileira nao estao mapeados — e uma dica so aparece
+        # sobre um controle que esta na tela (medido: "A+" e "B" ficam fora).
+        self.mapeado(self.editor.btn_font_down)
+        dica = self.editor.btn_font_down.tooltip
+        dica.delay_ms = 1
+        dica.schedule()
+        self.assertIsNotNone(dica.after_id, "a dica agenda, nao mostra na hora")
+        self.assertIsNone(dica.window)
+        fim = time.time() + 2
+        while dica.window is None and time.time() < fim:
+            self.pump()
+            time.sleep(0.01)
+        self.assertIsNotNone(dica.window, "a dica nao apareceu")
+        self.assertTrue(dica.window.overrideredirect(), "sem decoracao")
+        rotulos = [w for w in dica.window.winfo_children() if isinstance(w, edit_window.ctk.CTkLabel)]
+        self.assertEqual(rotulos[0].cget("text"), "Diminuir a letra dos textos (Ctrl+-)")
+
+        dica.hide()
+        self.pump()
+        self.assertIsNone(dica.window)
+
+    def test_leaving_before_the_delay_cancels_it(self):
+        dica = self.editor.btn_layout.tooltip
+        dica.schedule()
+        dica.hide()
+        self.pump()
+        self.assertIsNone(dica.after_id)
+        self.assertIsNone(dica.window)
+
+    def test_destroying_a_control_with_a_pending_tip_cancels_it(self):
+        """O `<Destroy>` e o que cancela o timer: sem ele, o `after` de um
+        controle que ja morreu ainda dispararia (e uma janela filha morre
+        com o pai de qualquer jeito — o que este teste NAO mede)."""
+        self.mapeado(self.editor.btn_layout)
+        dica = self.editor.btn_layout.tooltip
+        dica.delay_ms = 60_000
+        dica.schedule()
+        self.assertIsNotNone(dica.after_id)
+        self.editor.btn_layout.destroy()
+        self.pump()
+        self.assertIsNone(dica.after_id, "o timer da dica sobreviveu ao controle")
+
+    def test_destroying_the_control_takes_the_tip_along(self):
+        self.mapeado(self.editor.btn_font_down)
+        dica = self.editor.btn_font_down.tooltip
+        dica.delay_ms = 1
+        dica.schedule()
+        fim = time.time() + 2
+        while dica.window is None and time.time() < fim:
+            self.pump()
+            time.sleep(0.01)
+        self.assertIsNotNone(dica.window)
+        janela = dica.window
+        self.editor.btn_font_down.destroy()
+        self.pump()
+        self.assertFalse(janela.winfo_exists(), "a dica ficou orfa")
+
+    def test_the_tip_is_painted_with_theme_pairs(self):
+        self.assertEqual(len(editor_widgets.TOOLTIP_COLORS), 2)
+        self.assertEqual(len(editor_widgets.TOOLTIP_TEXT_COLORS), 2)
+
+    def test_the_glossary_conflict_buttons_have_tips_too(self):
+        g = glossary_editor.open_glossary_editor(self.app)
+        self.pump()
+        self.addCleanup(lambda: g.win.winfo_exists() and g.win.destroy())
+        self.assertIn("APAGADAS", g.btn_keep_conflict.tooltip.text)
+        self.assertIn("nenhuma é apagada", g.btn_promote_conflict.tooltip.text)
+
+
+class DeleteShownDuplicatesTests(EditorWindowTestCase):
+    """Garantia S22 (ROADMAP 28.9, item 5): "Excluir as N copias repetidas
+    exibidas" so existe com o filtro "Duplicadas", apaga so o EXCESSO dos
+    pares exibidos, e faz backup antes de perguntar."""
+
+    module = glossary_editor
+
+    ENTRIES = [
+        ("rook", "torre", "suggestion"),
+        ("rook", "torre", "suggestion"),
+        ("rook", "torre", "suggestion"),
+        ("queen", "dama", "suggestion"),
+        ("pawn", "peao", "automatic"),
+        ("pawn", "peao", "automatic"),
+    ]
+
+    def setUp(self):
+        super().setUp()
+        self.glossary_path = glossario._default_substitutions_path()
+        save_glossary_entries(self.ENTRIES, self.glossary_path, create_backup=False)
+        self.editor = glossary_editor.open_glossary_editor(self.app)
+        self.pump()
+        self.win = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+
+    def entries_on_disk(self):
+        return [
+            (e["original"], e["replacement"]) if isinstance(e, dict) else tuple(e[:2])
+            for e in load_glossary_entry_details(self.glossary_path, deduplicate=False)
+        ]
+
+    def backups(self):
+        pasta = Path(self.glossary_path).parent / "backups"
+        return sorted(p.name for p in pasta.glob("*")) if pasta.exists() else []
+
+    def filtrar(self, nome):
+        self.editor.filter_segment.set(nome)
+        self.editor.restart_at_first_page()
+        self.pump()
+
+    def botao(self):
+        return self.editor.btn_delete_shown_duplicates
+
+    def test_the_pure_helper_keeps_the_first_copy_of_each_pair(self):
+        entradas = [("a", "1"), ("b", "2"), ("a", "1"), ("a", "1"), ("b", "2"), ("c", "3")]
+        self.assertEqual(
+            glossary_editor.duplicate_extras_indices(entradas, range(len(entradas))), [2, 3, 4]
+        )
+        # So entre os EXIBIDOS: fora da lista, a primeira copia nao conta.
+        self.assertEqual(glossary_editor.duplicate_extras_indices(entradas, [2, 3]), [3])
+        self.assertEqual(glossary_editor.duplicate_extras_indices(entradas, [5]), [])
+
+    def test_the_button_exists_only_with_the_duplicates_filter_and_says_how_many(self):
+        self.assertFalse(self.botao().winfo_manager(), "sem filtro nao ha botao")
+        self.filtrar("Duplicadas")
+        self.assertTrue(self.botao().winfo_manager())
+        self.assertEqual(self.botao().cget("text"), "Excluir as 3 cópias repetidas exibidas")
+        self.assertEqual(self.botao().cget("fg_color"), DESTRUCTIVE_COLOR)
+        self.filtrar("Todas")
+        self.assertFalse(self.botao().winfo_manager())
+
+    def test_it_deletes_only_the_extras_after_a_backup_and_a_yes(self):
+        self.filtrar("Duplicadas")
+        self.dialogs.askyesno_result = True
+        antes = self.backups()
+        apagadas = self.editor.delete_shown_duplicates()
+        self.pump()
+        self.assertEqual(apagadas, 3)
+        self.assertEqual(
+            self.entries_on_disk(), [("rook", "torre"), ("queen", "dama"), ("pawn", "peao")]
+        )
+        # Pelo menos um novo (o de antes da pergunta; a gravacao faz o dela
+        # tambem), e o nomeado na pergunta existe de verdade.
+        self.assertGreaterEqual(len(self.backups()), len(antes) + 1, "um backup novo")
+        pergunta = self.dialogs.messages("askyesno")[-1]
+        self.assertIn("3 cópia(s)", pergunta)
+        nomeado = next((nome for nome in self.backups() if nome in pergunta), None)
+        self.assertIsNotNone(nomeado, "o caminho do backup esta na pergunta e o arquivo existe")
+        self.assertFalse(self.botao().winfo_manager(), "sem excesso, o botao some")
+
+    def test_saying_no_keeps_everything_but_the_backup_exists(self):
+        self.filtrar("Duplicadas")
+        self.dialogs.askyesno_result = False
+        antes = self.backups()
+        self.assertIsNone(self.editor.delete_shown_duplicates())
+        self.assertEqual(len(self.entries_on_disk()), 6)
+        self.assertGreaterEqual(len(self.backups()), len(antes) + 1, "o backup vem antes da pergunta")
+
+    def test_the_search_narrows_what_is_deleted(self):
+        self.filtrar("Duplicadas")
+        self.editor.search_text.set("rook")
+        self.editor.apply_search()
+        self.pump()
+        self.assertEqual(self.botao().cget("text"), "Excluir as 2 cópias repetidas exibidas")
+        self.dialogs.askyesno_result = True
+        self.assertEqual(self.editor.delete_shown_duplicates(), 2)
+        self.assertEqual(self.entries_on_disk().count(("pawn", "peao")), 2, "fora da busca, intocada")
+        self.assertEqual(self.entries_on_disk().count(("rook", "torre")), 1)
+
+
+class GlossaryEditorZoomTests(EditorWindowTestCase):
+    """`Ctrl+roda`/`Ctrl+±` nos dois textos do glossario (ROADMAP 28.9, item 5)."""
+
+    module = glossary_editor
+
+    def setUp(self):
+        super().setUp()
+        self.glossary_path = glossario._default_substitutions_path()
+        save_glossary_entries([("rook", "torre", "suggestion")], self.glossary_path, create_backup=False)
+        self.editor = glossary_editor.open_glossary_editor(self.app)
+        self.pump()
+        self.win = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+
+    def test_the_wheel_and_the_keys_change_both_texts_and_it_is_remembered(self):
+        self.assertEqual(self.editor.font_size, 12)
+        self.editor.zoom_with_wheel(types.SimpleNamespace(delta=120))
+        self.assertEqual(self.editor.font_size, 13)
+        self.editor.adjust_font(-2)
+        self.assertEqual(self.editor.font_size, 11)
+        self.assertEqual(self.editor.text_font.cget("size"), 11)
+        self.assertIs(self.editor.orig_text.cget("font"), self.editor.text_font)
+        self.assertIs(self.editor.new_text.cget("font"), self.editor.text_font)
+        # Limites, como no outro editor.
+        self.editor.adjust_font(-50)
+        self.assertEqual(self.editor.font_size, 9)
+        self.editor.adjust_font(50)
+        self.assertEqual(self.editor.font_size, 24)
+
+        self.editor.close_editor()
+        self.pump()
+        gravado = settings.load_settings(settings.default_settings_path())
+        self.assertEqual(gravado["glossary_editor"]["font_size"], 24)
+        outro = glossary_editor.open_glossary_editor(self.app)
+        self.pump()
+        self.addCleanup(outro.win.destroy)
+        self.assertEqual(outro.font_size, 24)
+
+    def test_the_keys_are_bound_on_the_window(self):
+        ligados = {str(seq).replace("-Key-", "-") for seq in self.editor.win.bind()}
+        for seq in ("<Control-plus>", "<Control-equal>", "<Control-minus>", "<Control-MouseWheel>"):
+            self.assertIn(seq, ligados)
+
+
+class ReviewStatusShortcutTests(EditorWindowTestCase):
+    """ROADMAP 28.9, item 6: rejeitar / por em duvida AVANCANDO so pelo
+    atalho; botoes de status dormem sem linha; Consolas na posicao; separador
+    entre edicao e qualidade na segunda fileira."""
+
+    module = edit_window
+
+    def setUp(self):
+        super().setUp()
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        for texto in ("primeira", "segunda", "terceira"):
+            save_translation(cur, texto, f"T {texto}", "pt", "en")
+        conn.commit()
+        conn.close()
+        self.editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        self.win = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+
+    def status_de(self, texto):
+        conn = initialize_database(self.db_path)
+        try:
+            return conn.execute(
+                "SELECT review_status FROM comments WHERE original_comment = ?", (texto,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_the_shortcut_rejects_and_moves_on_while_the_button_stays(self):
+        self.editor.select_index(0)
+        self.pump()
+        self.assertEqual(self.editor.current["orig"], "primeira")
+
+        self.editor.set_review_status_and_next(REVIEW_STATUS_REJECTED)
+        self.pump()
+        self.assertEqual(self.status_de("primeira"), REVIEW_STATUS_REJECTED)
+        self.assertEqual(self.editor.current["orig"], "segunda", "o atalho anda uma linha")
+
+        # O botao continua parado na linha (F12).
+        self.editor.btn_doubt.invoke()
+        self.pump()
+        self.assertEqual(self.status_de("segunda"), REVIEW_STATUS_DOUBT)
+        self.assertEqual(self.editor.current["orig"], "segunda")
+
+    def test_the_shortcut_puts_in_doubt_and_moves_on(self):
+        self.editor.select_index(1)
+        self.pump()
+        self.editor.set_review_status_and_next(REVIEW_STATUS_DOUBT)
+        self.pump()
+        self.assertEqual(self.status_de("segunda"), REVIEW_STATUS_DOUBT)
+        self.assertEqual(self.editor.current["orig"], "terceira")
+
+    def test_at_the_end_of_the_list_it_stays_on_the_last(self):
+        self.editor.select_index(2)
+        self.pump()
+        self.editor.set_review_status_and_next(REVIEW_STATUS_REJECTED)
+        self.pump()
+        self.assertEqual(self.status_de("terceira"), REVIEW_STATUS_REJECTED)
+        self.assertEqual(self.editor.current["orig"], "terceira")
+
+    def test_when_the_row_leaves_the_list_the_replacement_is_already_next(self):
+        """A regra de F15: com o filtro "Verificadas", rejeitar tira a linha da
+        lista e quem ocupou o lugar dela JA e a proxima — andar pularia uma."""
+        conn = initialize_database(self.db_path)
+        cur = conn.cursor()
+        for texto in ("primeira", "segunda", "terceira"):
+            set_translation_verified_by_id(
+                cur, resolve_comment_ids(cur, "pt", [texto], "en")[texto], True
+            )
+        conn.commit()
+        conn.close()
+        self.editor.status_segment.set("Verificadas")
+        self.editor.toggle_filter()
+        self.pump()
+        self.assertEqual([l[1] for l in self.editor.state.rows], ["primeira", "segunda", "terceira"])
+        self.editor.select_index(0)
+        self.pump()
+
+        self.editor.set_review_status_and_next(REVIEW_STATUS_REJECTED)
+        self.pump()
+        self.assertEqual([l[1] for l in self.editor.state.rows], ["segunda", "terceira"])
+        self.assertEqual(self.editor.current["orig"], "segunda", "andou uma a mais")
+
+    def test_without_an_open_row_nothing_is_written(self):
+        self.editor.clear_current()
+        self.pump()
+        self.assertEqual(self.editor.set_review_status_and_next(REVIEW_STATUS_REJECTED), 0)
+        for texto in ("primeira", "segunda", "terceira"):
+            self.assertEqual(self.status_de(texto), REVIEW_STATUS_PENDING)
+
+    def test_the_keys_are_bound_and_in_the_table(self):
+        ligados = {str(seq).replace("-Key-", "-") for seq in self.editor.win.bind()}
+        self.assertIn("<Control-R>", ligados)
+        self.assertIn("<Control-D>", ligados)
+        tabela = {
+            seq
+            for _t, atalhos in edit_window.KEYBOARD_SHORTCUTS
+            for _r, seqs, _d in atalhos
+            for seq in (seqs if isinstance(seqs, tuple) else (seqs,))
+        }
+        self.assertIn("<Control-R>", tabela)
+        self.assertIn("<Control-D>", tabela)
+
+    def test_the_status_buttons_sleep_without_a_row_and_wake_with_one(self):
+        """Parte da lista VAZIA e depois carrega uma linha: so assim os dois
+        estados sao vistos (o padrao 4 da memoria de testes)."""
+        self.editor.clear_current()
+        self.pump()
+        for botao in (self.editor.btn_reject, self.editor.btn_doubt, self.editor.btn_clear_status):
+            self.assertEqual(botao.cget("state"), "disabled", botao.cget("text"))
+        self.editor.select_index(0)
+        self.pump()
+        for botao in (self.editor.btn_reject, self.editor.btn_doubt, self.editor.btn_clear_status):
+            self.assertEqual(botao.cget("state"), "normal", botao.cget("text"))
+        self.editor.clear_current()
+        self.pump()
+        self.assertEqual(self.editor.btn_reject.cget("state"), "disabled")
+
+    def test_the_position_label_is_monospaced_and_the_counts_are_not(self):
+        self.assertEqual(self.editor.selection_label.cget("font").cget("family"), "Consolas")
+        self.assertNotEqual(
+            self.editor.counts_label.cget("font").cget("family"), "Consolas",
+            "medido: em Consolas o pior caso das contagens estoura a faixa",
+        )
+
+    def test_a_separator_sits_between_the_edit_and_the_quality_buttons(self):
+        coluna = lambda w: int(w.grid_info()["column"])  # noqa: E731
+        sep = self.editor.secondary_separator
+        self.assertTrue(sep.winfo_manager())
+        self.assertLess(coluna(self.editor.btn_redo), coluna(sep))
+        self.assertLess(coluna(sep), coluna(self.editor.btn_next_qa))
+        self.assertEqual(int(sep.cget("width")), 2)
 
 
 if __name__ == "__main__":
