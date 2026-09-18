@@ -374,6 +374,27 @@ receber. Ligue com `"output": {"wrap_columns": 80}` no
 unica como sempre. A requebra muda **so o espaco em branco** — as palavras saem
 identicas, as anotacoes `[%...]` nunca sao partidas e o fim de linha do arquivo e
 respeitado.
+
+## Atalhos que andam
+
+`Ctrl+Shift+R` rejeita a linha aberta e vai para a proxima; `Ctrl+Shift+D` a
+poe em duvida e vai para a proxima. Os botoes "Rejeitar"/"Em dúvida" continuam
+parados na linha. Os controles curtos da barra (`▤/▥`, `A-`, `A+`, `B`, `Aa`,
+`?`) mostram uma dica ao passar o mouse. No editor de glossario, com o filtro
+"Duplicadas", um botao vermelho exclui as copias a mais das entradas exibidas
+(a primeira de cada par fica), com backup antes de perguntar; `Ctrl+roda` e
+`Ctrl+±` mudam a letra dos dois textos, como no editor de traducoes.
+
+## Traducoes semelhantes
+
+Sob o quadro do tabuleiro, "Semelhantes · N" lista ate cinco linhas do mesmo
+par cujo original mais se parece com o aberto, com a traducao delas: um clique
+mostra de onde veio, o duplo clique a poe na linha aberta (Ctrl+Z desfaz). E o
+que substitui a "memoria de traducao" que a medicao derrubou — a maioria das
+frases parecidas de um livro difere so por nome, casa ou pontuacao, e o
+vizinho ja revisado e o melhor ponto de partida. Precisa do FTS5 do SQLite
+(o do Python tem).
+
 ## O tabuleiro do editor (opcional)
 
 O editor mostra a posicao em que o comentario aberto aparece: uma linha

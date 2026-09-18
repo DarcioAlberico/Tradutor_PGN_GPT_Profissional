@@ -45,6 +45,8 @@ from .glossario import (
 from .db_tools import preview_automatic_rule_impact
 from .settings import load_settings
 from .editor_common import (
+    DESTRUCTIVE_COLOR,
+    DESTRUCTIVE_HOVER_COLOR,
     ERROR_TEXT_COLOR,
     MUTED_TEXT_COLOR,
     OK_TEXT_COLOR,
@@ -61,6 +63,7 @@ from .editor_common import (
     window_safe_geometry,
 )
 from .editor_widgets import (
+    attach_tooltip,
     flash_message,
     render_row_buttons,
     restore_sash,
@@ -262,6 +265,27 @@ class GlossaryEditorState:
         self.validation_lookup = None
 
 
+def duplicate_extras_indices(entries, shown_indices):
+    """As copias A MAIS dos pares repetidos entre os indices exibidos (S22).
+
+    Para cada par `(original, substituicao)` que aparece mais de uma vez na
+    lista exibida, ficam de fora a PRIMEIRA copia em ordem de arquivo e entram
+    as outras. Apagar todas as copias — que e o que "excluir as exibidas" diria
+    ao pe da letra com o filtro "Duplicadas", ja que ele mostra cada copia —
+    apagaria a regra; a duplicata e o excesso, nao o par. Pura, e devolve os
+    indices em `entries`, em ordem.
+    """
+    vistos = set()
+    extras = []
+    for index in sorted(shown_indices):
+        pair = glossary_entry_pair(entries[index])
+        if pair in vistos:
+            extras.append(index)
+        else:
+            vistos.add(pair)
+    return extras
+
+
 class GlossaryEditor:
     """A janela de edicao do glossario.
 
@@ -400,6 +424,19 @@ class GlossaryEditor:
             else "Todas"
         )
         self.filter_segment.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 6))
+        # So com o filtro "Duplicadas" e so quando ha copia a mais na lista
+        # (ROADMAP 28.9, item 5): fora disso o botao nao existe, em vez de
+        # existir desabilitado explicando uma condicao. `grid_remove` guarda a
+        # posicao; ele volta na mesma linha, entre o filtro e a ordem.
+        self.btn_delete_shown_duplicates = ctk.CTkButton(
+            list_frame,
+            text="",
+            fg_color=DESTRUCTIVE_COLOR,
+            hover_color=DESTRUCTIVE_HOVER_COLOR,
+            command=self.delete_shown_duplicates,
+        )
+        self.btn_delete_shown_duplicates.grid(row=7, column=0, sticky="ew", padx=10, pady=(0, 6))
+        self.btn_delete_shown_duplicates.grid_remove()
 
         sort_bar = ctk.CTkFrame(list_frame, fg_color="transparent")
         sort_bar.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 6))
@@ -434,7 +471,16 @@ class GlossaryEditor:
             padx=10,
             pady=(10, 2),
         )
-        self.orig_text = ctk.CTkTextbox(detail_frame, height=120, wrap=tk.WORD)
+        # A letra dos dois textos, com `Ctrl+roda` e `Ctrl+±` como no outro
+        # editor (ROADMAP 28.9, item 5); o tamanho e lembrado.
+        tamanho = self.editor_settings.get("font_size", 12)
+        if not isinstance(tamanho, int) or isinstance(tamanho, bool):
+            tamanho = 12
+        self.font_size = max(9, min(24, tamanho))
+        self.text_font = ctk.CTkFont(size=self.font_size)
+        self.orig_text = ctk.CTkTextbox(
+            detail_frame, height=120, wrap=tk.WORD, font=self.text_font
+        )
         self.orig_text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
 
         ctk.CTkLabel(detail_frame, text="Substituir por:").grid(
@@ -444,7 +490,9 @@ class GlossaryEditor:
             padx=10,
             pady=(0, 2),
         )
-        self.new_text = ctk.CTkTextbox(detail_frame, height=120, wrap=tk.WORD)
+        self.new_text = ctk.CTkTextbox(
+            detail_frame, height=120, wrap=tk.WORD, font=self.text_font
+        )
         self.new_text.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 8))
 
         type_bar = ctk.CTkFrame(detail_frame, fg_color="transparent")
@@ -539,6 +587,14 @@ class GlossaryEditor:
         )
         self.btn_promote_conflict.grid(row=0, column=1, sticky="e", padx=(6, 0))
         self.btn_keep_conflict = ctk.CTkButton(self.conflict_bar, text="Manter esta", width=110)
+        attach_tooltip(
+            self.btn_promote_conflict,
+            "Esta regra passa a vencer as concorrentes; nenhuma é apagada (S10)",
+        )
+        attach_tooltip(
+            self.btn_keep_conflict,
+            "Esta regra fica e as concorrentes são APAGADAS do glossário",
+        )
         self.btn_keep_conflict.grid(row=0, column=2, sticky="e", padx=(6, 0))
         self.conflict_bar.grid_remove()
 
@@ -649,6 +705,11 @@ class GlossaryEditor:
         self.win.bind("<Alt-Right>", lambda _event: (self.step_entry(1), "break")[1])
         self.win.bind("<Control-Prior>", lambda _event: (self.change_page(-1), "break")[1])
         self.win.bind("<Control-Next>", lambda _event: (self.change_page(1), "break")[1])
+        # Zoom dos dois textos, as mesmas tres teclas e a roda do outro editor.
+        self.win.bind("<Control-plus>", lambda _event: (self.adjust_font(1), "break")[1])
+        self.win.bind("<Control-equal>", lambda _event: (self.adjust_font(1), "break")[1])
+        self.win.bind("<Control-minus>", lambda _event: (self.adjust_font(-1), "break")[1])
+        self.win.bind("<Control-MouseWheel>", self.zoom_with_wheel)
         self.win.protocol("WM_DELETE_WINDOW", self.close_editor)
 
     def load_first_entry(self, initial_original=None, initial_replacement=None):
@@ -667,11 +728,25 @@ class GlossaryEditor:
         # que nomeiam a regra em conflito.
         flash_message(self.msg_label, self.win, text, text_color=color)
 
+    def adjust_font(self, delta):
+        self.font_size = max(9, min(24, self.font_size + delta))
+        self.text_font.configure(size=self.font_size)
+        self.save_editor_settings()
+
+    def zoom_with_wheel(self, event):
+        """Um entalhe da roda vale um ponto, como no editor de traducoes."""
+        self.adjust_font(1 if getattr(event, "delta", 0) > 0 else -1)
+        return "break"
+
     def save_editor_settings(self):
         save_window_section(
             self.settings,
             "glossary_editor",
-            {"filter": self.filter_segment.get(), "sort": self.sort_text.get()},
+            {
+                "filter": self.filter_segment.get(),
+                "sort": self.sort_text.get(),
+                "font_size": self.font_size,
+            },
             window=self.win,
             sashes=(("main_sash_x", self.main_pane, 0),),
         )
@@ -1110,6 +1185,71 @@ class GlossaryEditor:
         )
         self.list_count_label.configure(text=f"{len(self.state.filtered_indices)} exibidas")
         self.update_page_controls()
+        self.update_delete_shown_duplicates_button()
+
+    def shown_duplicate_extras(self):
+        if self.filter_segment.get() != "Duplicadas":
+            return []
+        return duplicate_extras_indices(self.state.entries, self.state.filtered_indices)
+
+    def update_delete_shown_duplicates_button(self):
+        extras = self.shown_duplicate_extras()
+        if not extras:
+            self.btn_delete_shown_duplicates.grid_remove()
+            return
+        plural = "cópia repetida exibida" if len(extras) == 1 else "cópias repetidas exibidas"
+        self.btn_delete_shown_duplicates.configure(text=f"Excluir as {len(extras)} {plural}")
+        self.btn_delete_shown_duplicates.grid()
+
+    def delete_shown_duplicates(self):
+        """Apaga as copias a mais dos pares exibidos, com backup e confirmacao
+        proprios (garantia S22). Uma exclusao em massa e acao destrutiva nova
+        (22.12): nao herda o `askyesno` curto da exclusao de uma regra, e o
+        backup vem ANTES da pergunta, com o caminho nela (a regra de Z1)."""
+        extras = self.shown_duplicate_extras()
+        if not extras:
+            self.show_message("Nenhuma cópia repetida na lista exibida")
+            return None
+        try:
+            backup_path = create_glossary_backup()
+        except Exception as exc:
+            messagebox.showerror("Erro", f"Erro ao criar backup:\n{exc}", parent=self.win)
+            return None
+        if not messagebox.askyesno(
+            "Excluir cópias repetidas",
+            (
+                f"Excluir {len(extras)} cópia(s) repetida(s) das entradas exibidas?\n\n"
+                "A primeira cópia de cada par fica; só o excesso sai. "
+                "Um backup acabou de ser criado em:\n"
+                f"{backup_path}"
+            ),
+            parent=self.win,
+        ):
+            self.show_message(f"Exclusão cancelada. Backup em {os.path.basename(backup_path)}")
+            return None
+        apagar = set(extras)
+        restantes = [
+            entry for index, entry in enumerate(self.state.entries) if index not in apagar
+        ]
+        try:
+            save_glossary_entries(restantes)
+        except Exception as exc:
+            messagebox.showerror("Erro", f"Erro ao excluir as cópias:\n{exc}", parent=self.win)
+            return None
+        self.load_rows_from_file()
+        self.state.selected_index = None
+        self.set_dirty(False)
+        self.update_app_glossary()
+        self.apply_filter()
+        if self.state.filtered_indices:
+            self.select_entry(self.state.filtered_indices[0])
+        else:
+            self.clear_form()
+        self.show_message(
+            f"{len(extras)} cópia(s) repetida(s) excluída(s). "
+            f"Backup em {os.path.basename(backup_path)}"
+        )
+        return len(extras)
 
     def build_row_button(self, parent, _visible_index, entry_index):
         button = ctk.CTkButton(

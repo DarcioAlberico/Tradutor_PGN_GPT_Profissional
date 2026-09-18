@@ -187,6 +187,26 @@ def open_database(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def open_database_readonly(db_path: str, timeout: float = 0.05) -> sqlite3.Connection:
+    """Uma conexao SO DE LEITURA que nunca espera por escritor nenhum.
+
+    Para as consultas de conforto que rodam em thread enquanto a janela
+    trabalha — as "Semelhantes" do editor (F30). `open_database` liga o WAL
+    (um instante de lock exclusivo) e espera ate 30 s por um escritor; numa
+    thread de fundo isso vira uma consulta que dorme meio minuto atras de uma
+    transacao aberta e, na suite, um `join` que espera por ela em cada teste
+    — medido: a suite de janelas foi de 9 para 50 minutos. Aqui: `mode=ro`
+    pela URI (o caminho com espacos e percent-encoded), sem PRAGMA nenhum, e
+    um `timeout` de 50 ms: se o banco estiver ocupado, a consulta falha na
+    hora e o painel simplesmente nao aparece nesta linha. Em WAL o leitor
+    nem chega a esperar; a tabela `temp` continua gravavel em `mode=ro`.
+    """
+    from urllib.parse import quote
+
+    uri = "file:" + quote(os.path.abspath(db_path).replace("\\", "/")) + "?mode=ro"
+    return sqlite3.connect(uri, uri=True, timeout=timeout)
+
+
 def quality_warning_flag(
     original: str | None,
     translated: str | None,
@@ -408,7 +428,114 @@ def _create_fts_index(conn: sqlite3.Connection) -> None:
     conn.execute(f"INSERT INTO {FTS_TABLE}({FTS_TABLE}) VALUES ('rebuild')")
 
 
-def build_fts_match_query(search_text):
+# ------------------------------------------------------- traducoes semelhantes
+#
+# ROADMAP 28.13, garantia F30. O que sobrou da "memoria de traducao" depois da
+# medicao: um painel no editor com as linhas do MESMO par cujo original mais se
+# parece com o aberto — e a traducao delas para copiar. Consulta o FTS5 que ja
+# existe; sem ele, o painel diz que o indice nao esta disponivel.
+
+# Um termo que aparece em mais de 5 % das linhas do banco nao distingue nada
+# ("white", "black", "the"): filtrado pela frequencia que o `fts5vocab` da. O
+# piso absoluto e para o banco pequeno: com 40 linhas, 5 % e duas — e toda
+# palavra que aparece tres vezes viraria "comum", inclusive as que sao a
+# unica ponte entre duas frases parecidas.
+SIMILAR_TERM_MAX_DOC_SHARE = 0.05
+SIMILAR_TERM_MIN_DOC_CEILING = 20
+# Quantos termos raros entram na consulta (os mais raros primeiro), e quantas
+# candidatas o FTS devolve para o `SequenceMatcher` ordenar.
+SIMILAR_QUERY_TERMS = 6
+SIMILAR_CANDIDATES = 200
+# Abaixo disto a "semelhante" e outra frase: nao vale a linha no painel.
+SIMILAR_MIN_RATIO = 0.6
+_SIMILAR_WORD_RE = re.compile(r"[^\W\d_]{3,}", re.UNICODE)
+
+
+def _similar_query_terms(cursor: sqlite3.Cursor, original: str | None) -> list[str]:
+    """As palavras mais raras do original, pelo `fts5vocab`, para o `MATCH`."""
+    palavras = {w.lower() for w in _SIMILAR_WORD_RE.findall(original or "")}
+    if not palavras:
+        return []
+    cursor.execute(
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS temp.similar_vocab"
+        f" USING fts5vocab('main', '{FTS_TABLE}', 'row')"
+    )
+    total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0] or 1
+    teto = max(SIMILAR_TERM_MIN_DOC_CEILING, int(total * SIMILAR_TERM_MAX_DOC_SHARE))
+    marcadores = ", ".join("?" for _ in palavras)
+    frequencias = cursor.execute(
+        f"SELECT term, doc FROM temp.similar_vocab WHERE term IN ({marcadores})",
+        sorted(palavras),
+    ).fetchall()
+    # `remove_diacritics 2` guarda os termos sem acento; uma palavra acentuada
+    # do original nao casa no vocabulario e fica de fora — e o preco de nao
+    # duplicar o normalizador do FTS aqui.
+    raras = sorted(
+        ((doc, term) for term, doc in frequencias if 0 < doc <= teto)
+    )
+    return [term for _doc, term in raras[:SIMILAR_QUERY_TERMS]]
+
+
+def find_similar_translations(
+    cursor: sqlite3.Cursor,
+    comment_id: int | None,
+    original: str | None,
+    target_language: str,
+    source_language: str | None = None,
+    limit: int = 5,
+) -> list[tuple[int, str, str, int, float]] | None:
+    """As `limit` linhas do par cujo original mais se parece com `original`.
+
+    `[(id, original, traducao, verified, ratio)]`, da mais parecida para a
+    menos, so as com traducao preenchida e `ratio >= SIMILAR_MIN_RATIO`, nunca
+    a propria linha. `None` quando o FTS5 nao existe — o painel diz isso, em
+    vez de fingir que nao ha semelhantes.
+
+    So o par aberto (R9): `source_language=None` e "Origem: Todos", e ai o
+    destino sozinho decide, como na lista.
+    """
+    if not fts5_available(cursor.connection):
+        return None
+    termos = _similar_query_terms(cursor, original)
+    if not termos:
+        return []
+    consulta = " OR ".join(f'"{t}"' for t in termos)
+    clauses = ["c.target_language = ?", "COALESCE(c.translated_comment, '') <> ''", "c.id <> ?"]
+    params: SqlParams = [consulta, target_language, comment_id if comment_id is not None else -1]
+    if source_language is not None:
+        clauses.append("c.source_language = ?")
+        params.append(source_language)
+    params.append(SIMILAR_CANDIDATES)
+    candidatas = cursor.execute(
+        f"""
+        SELECT c.id, c.original_comment, c.translated_comment, COALESCE(c.verified, 0)
+        FROM {FTS_TABLE} f JOIN comments c ON c.id = f.rowid
+        WHERE {FTS_TABLE} MATCH ? AND {" AND ".join(clauses)}
+        ORDER BY rank
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    if not candidatas:
+        return []
+
+    from difflib import SequenceMatcher
+
+    medidor = SequenceMatcher(None, "", original or "")
+    pontuadas: list[tuple[int, str, str, int, float]] = []
+    for row_id, texto, traducao, verified in candidatas:
+        medidor.set_seq1(texto or "")
+        if medidor.quick_ratio() < SIMILAR_MIN_RATIO:
+            continue
+        ratio = medidor.ratio()
+        if ratio >= SIMILAR_MIN_RATIO:
+            pontuadas.append((row_id, texto, traducao, int(verified), ratio))
+    # Empate no `ratio`: a verificada primeiro — e a que o revisor confiaria.
+    pontuadas.sort(key=lambda item: (-item[4], -item[3], item[0]))
+    return pontuadas[:limit]
+
+
+def build_fts_match_query(search_text: str | None) -> str | None:
     """Traduz o que o usuario digitou para a sintaxe do FTS5, ou `None`.
 
     O texto digitado nao pode ir cru para o `MATCH`: `AND`, `OR`, `NOT`, `-`,

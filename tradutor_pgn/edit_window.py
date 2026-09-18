@@ -1,5 +1,6 @@
 import csv
 import os
+import sqlite3
 import threading
 from collections import Counter
 from contextlib import closing
@@ -25,6 +26,8 @@ from .database import (
     count_review_rows,
     fetch_comment_occurrences,
     fetch_occurrence_fen,
+    find_similar_translations,
+    open_database_readonly,
     fetch_exact_translation_match_candidates,
     fetch_review_row_ids,
     fetch_review_rows,
@@ -81,6 +84,7 @@ from .editor_common import (
     window_safe_geometry,
 )
 from .editor_widgets import (
+    attach_tooltip,
     flash_message,
     render_row_buttons,
     restore_sash,
@@ -137,6 +141,12 @@ EDITOR_PANE_MIN = 520
 # 136, e todos os seis ficavam 4 px curtos. O numero e o `winfo_reqwidth` do
 # painel montado, medido na janela real.
 SUGGESTION_PANE_MIN = 308
+
+# Quantas traducoes semelhantes o painel lista (ROADMAP 28.13, F30). Cinco e o
+# que cabe sem rolagem sob os botoes; a consulta ja vem ordenada da mais
+# parecida para a menos.
+SIMILAR_PANEL_LIMIT = 5
+
 # O painel de baixo contem o editor e as sugestoes: o minimo dele e o dos dois
 # mais o divisor. Declarar 620 aqui (o que havia) autorizava arrastar o divisor
 # da lista ate esmagar as sugestoes, mesmo com a janela larga.
@@ -287,6 +297,8 @@ KEYBOARD_SHORTCUTS = (
             ("Ctrl+Z", "<Control-z>", "Desfazer"),
             ("Ctrl+Y", "<Control-y>", "Refazer"),
             ("Ctrl+B", "<Control-b>", "Negrito no trecho selecionado da tradução"),
+            ("Ctrl+Shift+R", "<Control-R>", "Rejeitar e ir para a próxima"),
+            ("Ctrl+Shift+D", "<Control-D>", "Pôr em dúvida e ir para a próxima"),
             (
                 "Alt+1 a Alt+9",
                 tuple(f"<Alt-Key-{n}>" for n in range(1, 10)),
@@ -1250,6 +1262,12 @@ class TranslationEditor:
             font=ctk.CTkFont(weight="bold"),
         )
         self.btn_bold.pack(side=tk.LEFT, padx=(4, 0))
+        # As dicas dos controles sem palavra (ROADMAP 28.9, item 4): o que
+        # 22.8 deixou de fora por falta de largura, e nao gasta largura.
+        attach_tooltip(self.btn_layout, "Textos lado a lado ou um sobre o outro")
+        attach_tooltip(self.btn_font_down, "Diminuir a letra dos textos (Ctrl+-)")
+        attach_tooltip(self.btn_font_up, "Aumentar a letra dos textos (Ctrl++)")
+        attach_tooltip(self.btn_bold, "Negrito na seleção (Ctrl+B)")
         self.trans_text = self.create_text_editor(
             self.translation_block, 1, bottom_pad=4
         )
@@ -1300,6 +1318,7 @@ class TranslationEditor:
             width=46,
         )
         self.case_check.pack(side=tk.LEFT, padx=(4, 0))
+        attach_tooltip(self.case_check, "Diferenciar maiúsculas de minúsculas na busca")
 
         # A nota do revisor (ROADMAP 19, item 12). Uma linha de entrada, e nao um
         # bloco de texto: ela e um recado curto — "conferir com o autor", "termo
@@ -1474,6 +1493,143 @@ class TranslationEditor:
         self.btn_open_gloss.grid(row=4, column=1, sticky="ew", padx=(4, 10), pady=(0, 10))
 
         self.build_board_row()
+        self.build_similar_row()
+
+    def build_similar_row(self):
+        """"Traducoes semelhantes" (ROADMAP 28.13, garantia F30), sob o quadro.
+
+        As linhas do MESMO par cujo original mais se parece com o aberto, com a
+        traducao delas para copiar — o que sobrou da "memoria de traducao"
+        depois da medicao (99 linhas nao verificadas do banco de dev tem um
+        vizinho verificado a 90 %).
+
+        **A consulta roda na thread do Tk, de proposito.** O plano pedia uma
+        thread com contador de geracao (o padrao de F8), e a implementacao
+        chegou a existir: a thread devolvia por fila, o Tk drenava por
+        `after`, um `WeakSet` guardava as threads para a suite esperar por
+        elas. Custou tres defeitos que a medicao achou e o plano nao previa:
+        o `after` de dentro da thread so funciona com a thread principal no
+        `mainloop`; uma consulta atras de um escritor dormia ate 30 s e cada
+        teste esperava 5 s por ela; e, o pior, o coletor de lixo rodando NA
+        thread finalizava `Variable`s do Tk de janelas ja destruidas — Tcl
+        chamado fora da thread dele, "Windows fatal exception 0x80000003" no
+        meio da suite. Tudo isso para esconder **21 ms** (medido no banco de
+        dev; o FTS limita as candidatas a 200 antes do `SequenceMatcher`). O
+        carregamento de uma linha ja faz cinco consultas nessa ordem de
+        grandeza; a sexta nao se ve. Sem thread nao ha resposta atrasada,
+        fila, geracao nem `join`.
+
+        Nasce FECHADO pela razao do tabuleiro: o painel de sugestoes nao tem
+        altura para mais uma lista aberta por padrao. O titulo diz quantas ha
+        ("Semelhantes · 3") — e "indice indisponivel" num SQLite sem FTS5.
+        """
+        self.similar_row = ctk.CTkFrame(self.sugg_frame, fg_color="transparent")
+        self.similar_row.columnconfigure(1, weight=1)
+        self.similar_collapsed = bool(self.editor_settings.get("similar_collapsed", True))
+        self.similar_items = []
+        self.similar_buttons = []
+        self.similar_toggle = ctk.CTkButton(
+            self.similar_row, text="", width=28, command=self.toggle_similar
+        )
+        self.similar_toggle.grid(row=0, column=0, sticky="w", padx=(10, 4), pady=(0, 4))
+        self.similar_label = ctk.CTkLabel(self.similar_row, text="Semelhantes", anchor="w")
+        self.similar_label.grid(row=0, column=1, sticky="w", pady=(0, 4))
+        self.similar_list = ctk.CTkFrame(self.similar_row, fg_color="transparent")
+        self.similar_list.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
+        self.similar_list.columnconfigure(0, weight=1)
+        self.similar_row.grid_remove()
+
+    def toggle_similar(self):
+        self.similar_collapsed = not self.similar_collapsed
+        self.update_similar_row()
+
+    def request_similar(self):
+        """As semelhantes da linha aberta, agora, na thread do Tk."""
+        comment_id = self.current.get("id")
+        original = self.current.get("orig") or ""
+        if comment_id is None or not original.strip():
+            self.show_similar([])
+            return
+        destino = self.current.get("target_language") or self.lang
+        origem = self.selected_source_language()
+        try:
+            # So de leitura e sem espera (`open_database_readonly`): se o
+            # banco estiver ocupado, o painel simplesmente nao aparece nesta
+            # linha — nunca uma interface parada atras de um escritor.
+            with closing(open_database_readonly(self.app.output_db)) as conn:
+                itens = find_similar_translations(
+                    conn.cursor(), comment_id, original, destino, origem,
+                    limit=SIMILAR_PANEL_LIMIT,
+                )
+        except sqlite3.Error:
+            itens = []
+        self.show_similar(itens)
+
+    def show_similar(self, itens):
+        """Pinta o painel com `itens` (`None` = sem FTS5)."""
+        self.similar_items = itens
+        self.update_similar_row()
+
+    def update_similar_row(self):
+        for botao in self.similar_buttons:
+            botao.destroy()
+        self.similar_buttons = []
+        itens = self.similar_items
+        if itens is None:
+            self.similar_row.grid(row=6, column=0, columnspan=2, sticky="ew")
+            self.similar_label.configure(text="Semelhantes · índice FTS5 indisponível")
+            self.similar_toggle.configure(text="·", state="disabled")
+            self.similar_list.grid_remove()
+            return
+        if not itens:
+            self.similar_row.grid_remove()
+            return
+        self.similar_row.grid(row=6, column=0, columnspan=2, sticky="ew")
+        self.similar_toggle.configure(state="normal")
+        self.similar_label.configure(text=f"Semelhantes · {len(itens)}")
+        if self.similar_collapsed:
+            self.similar_toggle.configure(text="▸")
+            self.similar_list.grid_remove()
+            return
+        self.similar_toggle.configure(text="▾")
+        self.similar_list.grid()
+        for indice, (_id, _orig, traducao, verificada, ratio) in enumerate(itens):
+            marca = "✓ " if verificada else ""
+            botao = ctk.CTkButton(
+                self.similar_list,
+                text=f"{marca}{int(round(ratio * 100))}%  {preview(traducao, 34)}",
+                anchor="w",
+                fg_color=ROW_COLOR,
+                hover_color=ROW_HOVER_COLOR,
+                text_color=ROW_TEXT_COLOR,
+                font=self.suggestion_font,
+                height=26,
+                command=lambda i=indice: self.preview_similar(i),
+            )
+            botao.grid(row=indice, column=0, sticky="ew", pady=1)
+            botao.bind("<Double-Button-1>", lambda _e, i=indice: self.apply_similar(i))
+            self.similar_buttons.append(botao)
+
+    def preview_similar(self, indice):
+        """Um clique mostra de onde veio; o duplo clique aplica."""
+        if not (0 <= indice < len(self.similar_items or [])):
+            return
+        _id, original, traducao, _verificada, _ratio = self.similar_items[indice]
+        self.show_message(f"Semelhante: {preview(original, 60)} -> {preview(traducao, 60)}")
+
+    def apply_similar(self, indice):
+        """Poe a traducao semelhante na linha aberta, como UM passo de desfazer
+        (F14): e uma reescrita da mesma linha, e o Ctrl+Z tem de devolver o que
+        estava — a semelhante e um ponto de partida, nao uma resposta."""
+        if not (0 <= indice < len(self.similar_items or [])):
+            return None
+        _id, _original, traducao, _verificada, _ratio = self.similar_items[indice]
+        self.set_translation_text(
+            traducao, mark_dirty=True, focus_editor=True, keep_undo=True
+        )
+        self.show_message("Tradução semelhante aplicada (Ctrl+Z desfaz)")
+        return traducao
+
     def build_board_row(self):
         """O tabuleiro da linha aberta (ROADMAP 28.8, O5), sob os botoes.
 
@@ -1566,18 +1722,30 @@ class TranslationEditor:
         # A posicao na tela continua saindo do `side`: os dois `RIGHT` vao para a
         # direita mesmo tendo sido empacotados no meio.
         self.btn_shortcuts = ctk.CTkButton(self.status_info, text="?", width=32)
+        attach_tooltip(self.btn_shortcuts, "Atalhos de teclado (F1)")
         self.btn_shortcuts.pack(side=tk.RIGHT)
 
         self.dirty_label = ctk.CTkLabel(self.status_info, text="Salvo", text_color=OK_TEXT_COLOR)
         self.dirty_label.pack(side=tk.LEFT, padx=(0, 12))
 
+        # `Consolas` no rotulo da posicao (item 6): "Item 9/120" e "Item
+        # 10/120" tem larguras diferentes numa fonte proporcional, e a cada
+        # linha os rotulos vizinhos pulam; monoespacada, o que muda e o
+        # digito. O plano pedia nos DOIS rotulos de contagem, e a medicao
+        # disse nao: o `counts_label` do pior caso (seis contagens de seis
+        # digitos) em Consolas 12 estoura a faixa na largura minima e rouba
+        # 69 px justamente do rotulo da posicao (F20). Ele fica proporcional
+        # — muda de largura so quando um filtro muda, nao a cada linha.
+        self.counts_font = ctk.CTkFont(family="Consolas", size=12)
         self.counts_label = ctk.CTkLabel(
             self.status_info,
             text="Todas: 0 · Pendentes: 0 · Verificadas: 0 · QA: 0",
         )
         self.counts_label.pack(side=tk.RIGHT, padx=(12, 12))
 
-        self.selection_label = ctk.CTkLabel(self.status_info, text="Item 0/0")
+        self.selection_label = ctk.CTkLabel(
+            self.status_info, text="Item 0/0", font=self.counts_font
+        )
         self.selection_label.pack(side=tk.RIGHT, padx=(12, 0))
 
         self.msg_label = ctk.CTkLabel(self.status_info, text="", text_color=OK_TEXT_COLOR)
@@ -1644,20 +1812,26 @@ class TranslationEditor:
         )
         self.btn_history = ctk.CTkButton(self.secondary_actions, text="Hist\u00f3rico", width=100)
 
-        for index, button in enumerate(
-            [
-                self.btn_copy_original,
-                self.btn_restore,
-                self.btn_undo,
-                self.btn_redo,
-                self.btn_next_qa,
-                self.btn_export_qa,
-                self.btn_apply_auto,
-                self.btn_history,
-            ]
+        # Um separador entre os quatro de EDICAO (mexem no texto aberto) e os
+        # quatro de QUALIDADE (andam pela lista ou gravam em massa): sao duas
+        # familias com o mesmo tamanho de botao, e sem a linha a fileira le
+        # como oito acoes iguais (ROADMAP 28.9, item 6). Uma coluna de 2 px sem
+        # peso: nao custa largura que os botoes sentiriam.
+        self.secondary_separator = ctk.CTkFrame(
+            self.secondary_actions, width=2, fg_color=MUTED_TEXT_COLOR
+        )
+        coluna = 0
+        for grupo in (
+            [self.btn_copy_original, self.btn_restore, self.btn_undo, self.btn_redo],
+            [self.btn_next_qa, self.btn_export_qa, self.btn_apply_auto, self.btn_history],
         ):
-            button.grid(row=0, column=index, sticky="ew", padx=(0, 6), pady=2)
-            self.secondary_actions.columnconfigure(index, weight=1)
+            if coluna:
+                self.secondary_separator.grid(row=0, column=coluna, sticky="ns", padx=(2, 8), pady=4)
+                coluna += 1
+            for button in grupo:
+                button.grid(row=0, column=coluna, sticky="ew", padx=(0, 6), pady=2)
+                self.secondary_actions.columnconfigure(coluna, weight=1)
+                coluna += 1
 
 
     def connect_events(self):
@@ -1760,6 +1934,18 @@ class TranslationEditor:
         # filtros, e ganha o acorde vizinho do que ja existia em vez de tomar o
         # lugar dele: quem tem o Ctrl+Enter na memoria dos dedos continua com ele.
         self.win.bind("<Control-Shift-Return>", self.mark_and_next_shortcut)
+        # Rejeitar / por em duvida AVANCANDO, so pelo atalho (ROADMAP 28.9,
+        # item 6): os botoes continuam parados na linha, como F12 fixou. O
+        # keysym e o MAIUSCULO com Shift: `<Control-Shift-r>` nunca dispara
+        # no Windows, e `<Control-r>`/`<Control-d>` sem Shift sao do `Text`.
+        self.win.bind(
+            "<Control-R>",
+            lambda _event: (self.set_review_status_and_next(REVIEW_STATUS_REJECTED), "break")[1],
+        )
+        self.win.bind(
+            "<Control-D>",
+            lambda _event: (self.set_review_status_and_next(REVIEW_STATUS_DOUBT), "break")[1],
+        )
         # As viradas de pagina existiam so nos botoes. O `Control` e o que impede
         # de roubar a rolagem nativa do texto — `PageDown` dentro de um
         # comentario longo tem de continuar rolando o comentario.
@@ -2742,6 +2928,7 @@ class TranslationEditor:
         # "Rejeitar" a gravaria na linha errada.
         self.set_origin_text("")
         self.show_board(None)
+        self.show_similar([])
         self.current["review_status"] = REVIEW_STATUS_PENDING
         self.current["reviewer_note"] = ""
         self.reviewer_note_text.set("")
@@ -3490,6 +3677,12 @@ class TranslationEditor:
         # chamada o rotulo anuncia o par da linha ANTERIOR, que e o pior tipo de
         # informacao errada porque parece certa.
         self.update_selection_label()
+        # Os botoes de status acordam AQUI, e nao no `update_review_status_label`
+        # de cima: la o `current["id"]` ainda e o da linha anterior (o rotulo e
+        # pintado antes de o id ser trocado), e a primeira linha carregada
+        # ficaria com os botoes dormindo.
+        self.update_review_status_buttons()
+        self.request_similar()
 
     def update_current_row_cache(self, verified=None):
         index = self.get_index()
@@ -4275,6 +4468,30 @@ class TranslationEditor:
                 self.clear_current()
         return mudou
 
+    def set_review_status_and_next(self, status):
+        """O atalho: grava o status e anda uma linha (ROADMAP 28.9, item 6).
+
+        `set_review_status` recarrega a lista e reencontra a linha pelo id;
+        se ela ainda esta na tela, o proximo passo e o `navigate` de sempre.
+        Se saiu do filtro (o filtro era "Verificadas", ou "Pendentes" com uma
+        linha que virou rejeitada num filtro que nao a mostra), quem ocupou o
+        lugar dela JA e a proxima — a regra de F15 —, e andar seria pular uma.
+        """
+        comment_id = self.current["id"]
+        if not comment_id:
+            return 0
+        mudou = self.set_review_status(status)
+        if self.current["id"] == comment_id:
+            self.navigate(1)
+        return mudou
+
+    def update_review_status_buttons(self):
+        """Sem linha aberta, os tres botoes de status dormem (item 6): um
+        clique neles sem linha nao fazia nada e nao dizia nada."""
+        estado = "normal" if self.current.get("id") else "disabled"
+        for botao in (self.btn_reject, self.btn_doubt, self.btn_clear_status):
+            botao.configure(state=estado)
+
     def update_review_status_label(self):
         """Diz o status da linha aberta EM PALAVRAS, e pinta o campo de nota.
 
@@ -4292,6 +4509,7 @@ class TranslationEditor:
         Sem status, o rotulo sai do grid e o campo volta ao neutro: a nota de uma
         linha pendente e um lembrete, e nao um alarme.
         """
+        self.update_review_status_buttons()
         status = self.current.get("review_status") or REVIEW_STATUS_PENDING
         cor = {
             REVIEW_STATUS_REJECTED: ERROR_TEXT_COLOR,

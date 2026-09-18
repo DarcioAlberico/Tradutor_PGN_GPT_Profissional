@@ -1307,6 +1307,19 @@ de S20, grava a regra com o escopo do par do editor e aplica com S19 so essa
 regra e so esse arquivo. A janela e modeless e fixa arquivo e par na abertura,
 como o historico fixa o id (R3).
 
+**Garantia S22 — "Excluir as N copias repetidas exibidas" apaga so o
+excesso dos pares exibidos, com backup antes da pergunta.** O botao so
+existe com o filtro "Duplicadas" ativo e quando ha copia a mais na lista
+(ROADMAP 28.9, item 5); fora disso nao aparece, em vez de aparecer
+desabilitado explicando uma condicao. O que ele apaga e o EXCESSO: o filtro
+mostra cada copia de um par repetido, e "excluir as exibidas" ao pe da letra
+apagaria a regra — fica a primeira copia em ordem de arquivo, saem as
+outras, e a busca ativa restringe o que conta (`duplicate_extras_indices`,
+pura). E uma exclusao em massa, acao destrutiva nova (22.12): backup do
+glossario ANTES da pergunta, com o caminho nela (a regra de Z1), e a
+gravacao faz o backup dela por cima. Os dois textos do glossario ganharam
+`Ctrl+roda`/`Ctrl+±` com o tamanho lembrado, como no outro editor.
+
 **Garantia O3 — com um arquivo escolhido, a lista e a obra em ordem de
 leitura.** Um terceiro seletor, "Arquivo", lista as obras do par (as que tem
 ocorrencia gravada) mais "Todos os arquivos". Escolher uma filtra a lista e a
@@ -1450,6 +1463,53 @@ da digitacao (ROADMAP 28.9):
   caixa da lista acompanha na mesma chamada — as duas sao a mesma marca. A
   caixa tem 32 px, e nao os 24 padrao: e o unico alvo de clique da lista que
   nao e o botao inteiro.
+- **Os controles sem palavra tem dica** (ROADMAP 28.9, item 4): `▤/▥`, "A-",
+  "A+", "B", "Aa", "?" e, no glossario, "Priorizar esta"/"Manter esta" — um
+  `Toplevel` sem decoracao com um `CTkLabel` de cores em par (troca com o
+  tema, F18), que nasce meio segundo depois do `<Enter>`, some no `<Leave>`,
+  no clique e no `<Destroy>` do controle (o timer e cancelado junto). E o
+  que 22.8 deixou de fora por falta de largura, e nao gasta largura.
+- **`Ctrl+Shift+R` rejeita e `Ctrl+Shift+D` poe em duvida ANDANDO uma
+  linha** (item 6); os botoes continuam parados na linha, como F12 fixou. O
+  keysym e o maiusculo com Shift (`<Control-R>`, `<Control-D>`):
+  `<Control-Shift-r>` nunca dispara no Windows, e as minusculas sao do
+  `Text`. Se a linha saiu do filtro ao mudar de status, quem ocupou o lugar
+  dela ja e a proxima (F15) e o atalho nao anda. Sem linha aberta os tres
+  botoes de status dormem. O rotulo da posicao do rodape e `Consolas` — o
+  plano pedia nos dois rotulos de contagem, e a medicao disse nao: o das
+  contagens no pior caso estoura a faixa minima e rouba 69 px do vizinho
+  (F20). Um separador de 2 px divide os quatro botoes de edicao dos quatro
+  de qualidade na segunda fileira.
+
+**Garantia F30 — "Semelhantes" consulta so o par aberto, na thread do Tk,
+sem esperar por escritor nenhum.** E o que sobrou da "memoria de traducao"
+depois da medicao (ROADMAP 28.13): sob o quadro do tabuleiro, as ate cinco
+linhas do mesmo par cujo original mais se parece com o aberto, com a traducao
+delas — 99 linhas nao verificadas do banco de dev tem um vizinho verificado a
+90 %. `database.find_similar_translations` pede ao FTS5 as candidatas pelos
+termos RAROS do original (o `fts5vocab` da a frequencia; termo em mais de 5 %
+das linhas, com piso absoluto de 20 para o banco pequeno, nao distingue nada),
+o `SequenceMatcher` ordena (`quick_ratio` como filtro, `ratio` como medida,
+pela razao da quase-igualdade do QA), abaixo de 0,6 nao entra, a propria
+linha nunca entra, sem traducao nao serve, e no empate a verificada vem
+primeiro. So o par (R9): o destino da linha e a origem do filtro. Medido no
+banco de dev: **21 ms por consulta**, 99 de 400 linhas nao verificadas com
+vizinho.
+
+**Sincrona, e a medicao e a razao.** O plano pedia uma thread com contador
+de geracao, e ela existiu por um dia: custou tres defeitos que so a suite
+completa mostrou — o `after` chamado de dentro da thread so funciona com a
+thread principal no `mainloop`; a conexao da thread dormia ate 30 s atras de
+um escritor e cada teste esperava 5 s por ela (9 minutos viraram 50); e o
+coletor de lixo rodando NA thread finalizava `Variable`s do Tk de janelas ja
+destruidas — Tcl fora da thread dele, "Windows fatal exception 0x80000003"
+no meio da suite. Tudo para esconder 21 ms num carregamento que ja faz cinco
+consultas dessa ordem. A consulta abre o banco por `open_database_readonly`
+(`mode=ro`, 50 ms de espera, sem PRAGMA): ocupado, o painel nao aparece
+nesta linha, e a interface nunca para atras de um escritor. Sem FTS5 o
+titulo diz "indice FTS5 indisponivel". Nasce fechado, pela razao do
+tabuleiro; um clique numa semelhante mostra de onde veio, e o duplo clique a
+poe na linha aberta como UM passo de desfazer (F14).
 
 **Garantia F10 — `verified` e `review_status` andam em lockstep.** Uma linha nao
 verificada pode estar **rejeitada** ou **em duvida**, com uma nota do revisor:
@@ -2180,6 +2240,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | F17 | Nenhum campo depende do placeholder para ser identificado | Bug: o CustomTkinter nao mostra placeholder em campo com `textvariable`, e o buscar-e-substituir eram dois campos anonimos lado a lado |
 | F18 | Os atalhos aparecem na janela, o foco tem borda, o "B" ligado se ve nos dois temas e a troca de tema repinta o Tk puro | Bug: treze atalhos so no fonte (um deles sem nenhum caminho de descoberta), foco invisivel, "B" ligado igual ao desligado no escuro, e meia janela no tema antigo |
 | F29 | `Alt+1` a `Alt+9` aplicam a sugestao N (numerada no proprio botao ate a nona), `Ctrl+M` marca a linha aberta e a caixa da lista acompanha, e a sugestao selecionada e realcada no trecho que "Aplicar selecionada" vai trocar — o primeiro, e so ele | Custo: aplicar uma sugestao exigia a mao no mouse no meio da digitacao, e so "Aplicar todas" tinha previa (ROADMAP 28.9) |
+| F30 | "Semelhantes" lista ate cinco linhas do par aberto (destino da linha, origem do filtro) por termos raros do FTS5 e `SequenceMatcher` >= 0,6, na thread do Tk (21 ms) por uma conexao so de leitura que nao espera; o duplo clique aplica como um passo de desfazer; sem FTS5 o titulo diz | Custo: 99 linhas nao verificadas do banco de dev tem um vizinho verificado a 90 % e o revisor nao o via; a versao em thread custou 3 defeitos de suite, inclusive um crash do Tcl (ROADMAP 28.13) |
 | F19 | As cores de rotulo passam 4,5:1 nos dois temas, e o status de revisao aparece em palavras | Bug: as quatro cores semanticas reprovavam (o ambar dos avisos a 1,55:1), e rejeitada/em-duvida era so a cor de uma borda |
 | F20 | Cada rotulo de acao carrega o objeto dela, a largura minima da janela e a SOMA dos minimos dos paineis, e nada e desenhado fora da faixa em que vive | Bug: tres botoes "Limpar" e quatro "Página"; e a 1120 px o painel de sugestoes ficava com 109 dos 300 que declara, dois botoes do lote saiam da barra e o campo de pagina media 11 px |
 | F21 | Toda acao repetida do fluxo tem atalho, a nota do revisor e gravada como o texto, e o clique numa linha poe o foco onde se vai digitar | Custo: em "Todas" eram dois acordes por linha; a nota digitada era descartada em silencio ao navegar; e "Verificar" em lote voltava ao topo da pagina |
@@ -2196,6 +2257,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | S19 | "Aplicar Automaticas" tem escopo — par, arquivo do filtro e "so pendentes" por padrao; a verificada so entra quando o escopo pede, e o editor so pede no filtro "Verificadas", depois de perguntar | Bug: a consulta nao filtrava `verified`, e promover uma regra na linha 500 reescrevia as 499 aprovadas — 9 das 39 alteraveis no banco de dev (ROADMAP 28.5) |
 | S20 | Gravar uma regra como `automatic` (nova, promovida ou com o texto mudado) mede antes quantas pendentes do escopo dela mudariam, mostra dez pela saida real do pipeline, fora da thread do Tk, e so grava no "sim" — medicao que falha nao grava | Risco: a memoria da revisao de terminologia pediu "nao aplicar em massa sem ver"; `Black esta -> as pretas estao` sai "As pretas estao" e so a previa mostra (ROADMAP 28.5) |
 | S21 | "Trocas repetidas nesta obra" lista os pares `antes -> depois` mais frequentes das edicoes humanas do arquivo, diz se ja ha regra pelo que a regra PRODUZ (cobre / produz outra coisa / nao altera / sem regra), e "Criar automatica e aplicar" passa por S20 e aplica com S19 so a regra e so o arquivo | Custo: 94 `o jogo -> a partida` e 63 `Brancas -> brancas` digitados um a um, o segundo com uma regra inerte no glossario (ROADMAP 28.5) |
+| S22 | "Excluir as N copias repetidas exibidas" so existe com o filtro "Duplicadas" e copia a mais na lista; apaga so o excesso dos pares exibidos (a primeira copia fica), respeita a busca, e faz backup do glossario antes da pergunta com o caminho nela | Custo: excluir oito duplicatas eram oito ciclos de clique + Excluir + Sim (22.12; ROADMAP 28.9) |
 | P3 | As letras dos lances vem do original, numa passagem so | Bug: `Rd1` (Torre) traduzido como `Rd1` (Rei) |
 | P4 | A correcao alcanca tambem o que ja estava gravado | Limite: P3 so valia para traducao nova, e 4.144 linhas ficariam erradas |
 | S1 | Matches disjuntos | Bug: `"de de de"` -> `"dede"` |
@@ -2697,9 +2759,7 @@ testavel e qual e o numero que fica so no ROADMAP.
 | T6 | Um provedor estrito nunca grava uma traducao cujo multiconjunto de ancoras difere do original | 28.7 | Provedor falso que devolve `Nf6` para `Nf3`: nada gravado, `failed_count == 1`, PGN com o original |
 | K1 | A chave de API nunca aparece inteira em log, configuracoes ou dialogo | 28.7 | Uma execucao falsa com chave conhecida: o texto inteiro nao esta em nenhum dos tres; `****wxyz` esta |
 | B5 | Um lote JSON e aceito so se cada id aparece exatamente uma vez; senao e desalinhado (B2) | 28.7 | Id repetido, faltando e fora do intervalo: os tres devolvem `None` |
-| S22 | Com o filtro "Duplicadas" ativo, "Excluir as N exibidas" apaga so elas, com backup antes | 28.9 | Glossario com 3 duplicadas e 2 unicas: sobram as 2, existe um backup novo |
 | M4 | Toda opcao do `settings.json` tem um lugar na tela de Configuracoes, e a tela grava por `update_settings` | 28.10 | Um teste enumera as chaves padrao contra os widgets; gravar pela tela nao apaga um rascunho gravado por outra janela |
-| F30 | O painel "Traducoes semelhantes" consulta so o par aberto, numa thread, e descarta o resultado de uma geracao velha | 28.13 | Linha de outro par nao aparece (R9); resultado atrasado nao pinta o painel |
 
 **Ate 2026-09-14 o registro era o seguinte.** As nove garantias da revisao de 2026-07-31 — **F12**
 (22.1), **Q3** (22.2), **F13** (22.3), **F14** (22.4), **F15** (22.5), **F16**

@@ -8577,7 +8577,7 @@ cenarios novos: "nunca por partida" sobrevivia porque o teste tinha as duas
 partidas com o mesmo texto casavel — o cenario e o "Diagram" que so a
 partida 2 tem).
 
-### 28.9 O editor: o que ainda custa gestos — itens 1 a 3 CONCLUIDOS (2026-09-15)
+### 28.9 O editor: o que ainda custa gestos — CONCLUIDO (itens 1 a 3 em 2026-09-15; 4 a 6 em 2026-09-16)
 
 A varredura de UX leu o `edit_window.py` inteiro e concluiu que os cinco
 gestos mais repetidos (abrir, editar, salvar e verificar, avancar, aplicar
@@ -8658,6 +8658,46 @@ passou a aceitar uma TUPLA de sequencias num rotulo so ("Alt+1 a Alt+9"), e
 os dois testes de F18 — todo listado esta ligado, todo ligado esta listado —
 continuam sendo a conferencia. **10 mutacoes, nenhuma sobrevivente.** Os
 itens 4 a 6 e o 5 (S22) continuam plano.
+
+**Itens 4 a 6 feitos em 2026-09-16, com o que a medicao mudou.**
+
+- **Dicas** (`editor_widgets.Tooltip`/`attach_tooltip`): `Toplevel` sem
+  decoracao, `CTkLabel` com cores em par, 500 ms, some no `<Leave>`, no
+  clique e no `<Destroy>` do controle — este ultimo e o que cancela o
+  timer, porque a janela filha morre com o pai de qualquer jeito. Nos seis
+  controles sem palavra do editor e nos dois do conflito do glossario.
+- **"Excluir as N copias repetidas exibidas"**: o plano dizia "excluir as
+  N exibidas", e o filtro "Duplicadas" mostra TODAS as copias de um par —
+  excluir as exibidas apagaria a regra. Fica a primeira copia em ordem de
+  arquivo e sai o excesso; a busca restringe; backup antes da pergunta com
+  o caminho nela. S22 foi escrita assim. `Ctrl+roda`/`Ctrl+±` nos dois
+  textos do glossario, tamanho lembrado em `glossary_editor.font_size`.
+- **`Ctrl+Shift+R`/`Ctrl+Shift+D`** (`<Control-R>`/`<Control-D>`, na
+  tabela de F18): gravam e andam pelo `navigate` de sempre, salvo quando a
+  linha saiu do filtro — ai quem ocupou o lugar ja e a proxima (F15). Os
+  botoes de status dormem sem linha aberta, acordados DEPOIS de o id ser
+  trocado (o rotulo de status e pintado antes disso, e la os botoes veriam
+  a linha anterior). **`Consolas` so no rotulo da posicao**: no das
+  contagens, o pior caso do rodape (seis contagens de seis digitos) em
+  monoespacada estoura a faixa minima e rouba 69 px do rotulo vizinho —
+  medido pelo teste de F20, que ficou vermelho na primeira tentativa.
+  Separador de 2 px entre edicao e qualidade na segunda fileira.
+
+**O que a verificacao fixou.** Em `test_editor_windows.py`: `TooltipTests`
+(7: todo controle sem palavra tem dica; aparece depois do atraso e some no
+`hide`; sair antes cancela; destruir com timer pendente cancela; destruir
+leva a janela; cores em par; os do conflito do glossario),
+`DeleteShownDuplicatesTests` (5: a pura mantem a primeira copia e so entre
+os exibidos; o botao so com o filtro e com o numero; apaga so o excesso com
+backup e "sim"; "nao" deixa tudo e o backup existe; a busca restringe),
+`GlossaryEditorZoomTests` (2) e `ReviewStatusShortcutTests` (9: rejeita e
+anda enquanto o botao fica; duvida e anda; no fim fica; sem linha nao
+grava; linha que saiu do filtro nao anda uma a mais; teclas ligadas e na
+tabela; botoes dormem e acordam partindo da lista vazia; Consolas so na
+posicao; separador entre os grupos). 23 testes. **15 mutacoes, 15 mortas**
+(duas so depois de cenario novo: o `<Destroy>` — a janela filha ja morria
+com o pai, o que sobra e o timer — e o `navigate` incondicional, que so o
+filtro "Verificadas" com a linha saindo expoe).
 
 ### 28.10 A janela principal e as configuracoes — progresso e "Revisar pendentes" CONCLUIDOS (2026-09-15)
 
@@ -8837,7 +8877,7 @@ nomeando a parte no log). Seis mutacoes, seis mortas (minimo a zero, maximo
 a 100, piso a zero, piso invertido, caracteres no lugar de palavras, `return
 None`).
 
-### 28.13 Memoria de traducao: o que a medicao derrubou
+### 28.13 Memoria de traducao: o que a medicao derrubou — o painel CONCLUIDO (2026-09-16)
 
 A primeira analise propunha uma memoria fuzzy por lances e numeros, e a
 varredura de arquitetura desenhou coluna, backfill e reidratacao para ela.
@@ -8860,6 +8900,56 @@ de F8), so por par (R9), duplo clique aplica como um passo de desfazer
 (F14). Medido: 99 linhas nao verificadas tem um vizinho verificado a
 `ratio >= 90` — e o que o painel oferece. Sem FTS5 o painel diz "indice
 indisponivel". Garantia planejada **F30**.
+
+**Feito em 2026-09-16, e o que mudou do desenho.**
+
+- **Sem thread, e a medicao decidiu.** O plano dizia "numa thread com
+  contador de geracao, o padrao de F8", e a thread existiu por um dia. Tres
+  defeitos, na ordem em que a suite os mostrou: (1) F8 devolve o resultado
+  com `self.win.after` de dentro da thread, que so funciona com a thread
+  principal DENTRO do `mainloop` — na suite, que bombeia com `update()`,
+  levanta `RuntimeError` engolido e o painel nunca aparecia; trocado por
+  fila + `after` da thread do Tk. (2) A thread abria o banco por
+  `open_database`, que liga o WAL e espera ate 30 s por um escritor; presa
+  atras de uma transacao dos testes, cada limpeza de sandbox esperava 5 s
+  por ela (dezenas de testes a 6,2 s no `--durations`), a suite de janelas
+  foi de 9 para 50 minutos, com `PermissionError` de limpeza e um `Can't
+  find a usable tk.tcl` por exaustao; trocado por
+  `database.open_database_readonly` (`mode=ro` pela URI com o caminho
+  percent-encoded, sem PRAGMA, 50 ms). (3) O que decidiu: `Windows fatal
+  exception 0x80000003` no meio da suite, com o coletor de lixo rodando na
+  thread da consulta (o `SequenceMatcher` aloca muito) e finalizando
+  `Variable`s do Tk de janelas ja destruidas — Tcl chamado fora da thread
+  dele. Isso nao se conserta com desenho: qualquer thread que aloque
+  bastante pode ser a que o coletor escolhe. **Tudo isso para esconder 21
+  ms** (medido) num carregamento de linha que ja faz cinco consultas dessa
+  ordem. A consulta roda na thread do Tk, pela conexao so de leitura que
+  nao espera; nao ha fila, geracao, `join` nem resposta atrasada. O
+  `open_database_readonly` ficou, com dois testes (le e nao escreve; com um
+  escritor em `BEGIN EXCLUSIVE` responde em menos de 1 s). O rascunho (F8)
+  continua em thread porque no programa de verdade a thread principal esta
+  no `mainloop` — mas o mesmo risco de coletor vale para ele, e fica
+  registrado.
+- **Piso absoluto na frequencia dos termos.** "Mais de 5 % das linhas" num
+  banco de 40 linhas sao duas: toda palavra que aparece tres vezes virava
+  "comum", inclusive a unica ponte entre duas frases parecidas. Teto =
+  max(20, 5 %).
+- **Nasce fechado, sob o tabuleiro**, pela razao dele (a lista de sugestoes
+  nao tem altura para dois paineis abertos); o titulo diz quantas ha, um
+  clique mostra de onde veio, o duplo clique aplica (F14).
+- Medido no banco de dev: **21 ms por consulta**, 99 de 400 linhas nao
+  verificadas com vizinho a `ratio >= 0,6`.
+
+**O que a verificacao fixou.** Em `test_core.py`, `SimilarTranslationsTests`
+(7: a mais parecida primeiro e o resto fora — propria linha, sem traducao,
+outro par; "Origem: Todos" decide so pelo destino; palavra comum nao guia a
+consulta; sem FTS5 e `None`; limite e piso; candidata pelos termos abaixo do
+piso nao entra; empate = verificada primeiro). Em `test_editor_windows.py`,
+`EditorSimilarTests` (7: lista a vizinha e some sem ela; nasce fechado e a
+escolha e lembrada; duplo clique aplica como um Ctrl+Z; limpar esconde; so o
+par aberto viaja para a consulta; sem FTS5 o titulo diz; cabe nos 308 px) e
+`ReadOnlyConnectionTests` em `test_banco.py` (2). 16 testes. **11 mutacoes, 11 mortas** (duas so depois de cenario novo:
+o piso — a candidata "longe" nem chegava ao FTS — e o limpar).
 
 ### 28.14 O que nao muda, e por que
 
