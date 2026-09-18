@@ -482,7 +482,7 @@ mao.
 - `tradutor_pgn/chess_terms.py`: leitura da lista de termos cuja traducao errada da para reconhecer pelo texto, escopada por idioma.
 - `tradutor_pgn/confirm_dialog.py`: confirmacao que exige digitar `delete`, usada pelas duas ferramentas que apagam trabalho do usuario.
 - `tradutor_pgn/database.py`: inicializacao, conexao e cache do SQLite, indexado pelo par de idiomas (origem, destino).
-- `tradutor_pgn/db_tools.py`: estatisticas, backup/restauracao, importacao/exportacao CSV, regras automaticas, correcao dos lances do banco ja gravado e as duas ferramentas de zerar — todas em segundo plano.
+- `tradutor_pgn/db_tools.py`: a orquestracao das ferramentas de banco (dialogos, confirmacao, progresso em segundo plano): regras automaticas, correcao dos lances e da prosa do banco ja gravado, zerar, descartar, reverter execucao. As partes puras moram ao lado e ele as re-exporta: `db_backup.py` (copia e restauracao pela API de backup do SQLite), `db_export.py` (CSV e TMX, leitura e gravacao) e `db_stats.py` (estatisticas e o relatorio).
 - `tradutor_pgn/edit_window.py`: janela de revisao e edicao de traducoes, com filtro por par de idiomas e por arquivo de origem (que traz a obra em ordem de leitura).
 - `tradutor_pgn/editor_common.py`: logica pura compartilhada pelas duas janelas de edicao (geometria, paginacao, preview).
 - `tradutor_pgn/editor_text.py`: busca, substituicao e diff por palavra do texto no editor.
