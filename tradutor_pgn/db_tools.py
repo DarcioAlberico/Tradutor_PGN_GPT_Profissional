@@ -15,9 +15,11 @@ from .database import (
     apply_automatic_translation_updates,
     apply_move_notation_updates,
     clear_all_translations,
+    count_revertible_run_translations,
     count_unreviewed_file_translations,
     discard_unreviewed_file_translations,
     list_translation_runs,
+    revert_translation_run,
     get_quality_heuristics_version,
     initialize_database,
     quality_heuristics_are_current,
@@ -1187,6 +1189,153 @@ def discard_unreviewed_translations(
         on_success=pronto,
         on_error=falhou,
         message="Descartando as traducoes nao revisadas (nao interrompa)...",
+        allow_cancel=False,
+    )
+
+
+def _latest_run_and_count(db_path):
+    """`(execucao, quantas apagaria)` da execucao mais recente, ou `(None, None)`."""
+    conn = None
+    try:
+        conn = initialize_database(db_path)
+        cursor = conn.cursor()
+        runs = list_translation_runs(cursor, limit=1)
+        if not runs:
+            return None, None
+        return runs[0], count_revertible_run_translations(cursor, runs[0])
+    except sqlite3.Error:
+        return None, None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def revert_last_translation_run(app, parent=None, on_finish=None):
+    """"Reverter a última execução", apos backup e palavra digitada (Z5).
+
+    A rede de seguranca do ROADMAP 28.6 para trocar de motor: a execucao mais
+    recente registrada no banco — desta sessao ou de outra — tem o que ela
+    INSERIU e ninguem tocou apagado, com as ocorrencias. O criterio mora em
+    `database._revertible_run_rows_query`; a orquestracao e a de "Descartar nao
+    revisadas" passo a passo: backup antes da pergunta (Z1), palavra digitada
+    (Z2), sem cancelamento no meio, cache em memoria limpo.
+
+    E sempre a MAIS RECENTE, e nao uma escolhida numa lista: o caso que a
+    ferramenta serve e "traduzi, olhei, nao quero" — e uma execucao antiga tem
+    linhas que as seguintes reaproveitaram, entao "reverter a de anteontem"
+    quase nunca apaga o que o usuario imagina. As ultimas 30 estao no
+    relatorio de estatisticas, para conferir qual e a mais recente antes.
+
+    `on_finish(apagadas)` chega na thread do Tk; `None` quando nao havia o que
+    apagar, o usuario desistiu ou deu erro.
+    """
+    janela = parent if parent is not None else app.root
+    titulo = "Reverter execução"
+
+    falhou, _cancelado = _database_task_callbacks(
+        app, titulo, "Erro ao reverter a execucao:", on_finish
+    )
+
+    run, total = _latest_run_and_count(app.output_db)
+    if run is None:
+        messagebox.showinfo(
+            titulo,
+            "Nenhuma execução registrada ainda. Só as execuções feitas a partir "
+            "desta versão do programa podem ser revertidas.",
+            parent=parent,
+        )
+        if on_finish is not None:
+            on_finish(None)
+        return
+    descricao = describe_translation_run(run)
+    if total == 0:
+        messagebox.showinfo(
+            titulo,
+            (
+                f"Não há o que reverter na última execução:\n{descricao}\n\n"
+                "Tudo o que ela inseriu foi verificado, tem status ou nota, foi "
+                "editado ou é usado por outro arquivo — ou ela não inseriu nada."
+            ),
+            parent=parent,
+        )
+        if on_finish is not None:
+            on_finish(None)
+        return
+
+    quantas = "um numero desconhecido de" if total is None else f"{total:,}".replace(",", ".")
+    arquivos = run.get("files") or []
+    nomes = ", ".join(os.path.basename(f) for f in arquivos[:3])
+    if len(arquivos) > 3:
+        nomes += f" e mais {len(arquivos) - 3}"
+
+    try:
+        backup_path = create_database_backup(app.output_db)
+    except Exception as exc:
+        falhou(exc)
+        return
+
+    confirmado = ask_typed_confirmation(
+        janela,
+        titulo,
+        (
+            f"Última execução:\n{descricao}\n"
+            f"Arquivos: {nomes}\n\n"
+            f"Isto apaga {quantas} tradução(ões) que ela inseriu. "
+            "Ficam de fora as verificadas, as com status ou nota, as que têm "
+            "histórico de edição e as que outro arquivo também usa. "
+            "As ocorrências dessas linhas vão junto.\n\n"
+            "Um backup acabou de ser criado em:\n"
+            f"{backup_path}\n\n"
+            "É por ele que dá para voltar atrás."
+        ),
+    )
+    if not confirmado:
+        app.log_message(
+            f"Reversao da execucao #{run['id']} cancelada. "
+            f"O backup criado ficou em: {backup_path}"
+        )
+        if on_finish is not None:
+            on_finish(None)
+        return
+
+    def trabalho(task):
+        task.report(0, 1)
+        conn = initialize_database(app.output_db)
+        try:
+            apagadas = revert_translation_run(conn.cursor(), run)
+            conn.commit()
+        finally:
+            conn.close()
+        task.report(1, 1)
+        return apagadas
+
+    def pronto(apagadas):
+        if hasattr(app, "translation_cache"):
+            # Pela razao de "Zerar Traducoes": o cache em memoria tem
+            # precedencia sobre o banco.
+            app.translation_cache.clear()
+        app.log_message(
+            f"Execucao #{run['id']} revertida: {apagadas} traducao(oes) apagada(s). "
+            f"Backup em: {backup_path}"
+        )
+        messagebox.showinfo(
+            titulo,
+            (
+                f"{apagadas} tradução(ões) da execução #{run['id']} apagada(s).\n\n"
+                f"O backup anterior está em:\n{backup_path}"
+            ),
+            parent=parent,
+        )
+        if on_finish is not None:
+            on_finish(apagadas)
+
+    run_with_progress(
+        janela,
+        titulo,
+        trabalho,
+        on_success=pronto,
+        on_error=falhou,
+        message="Revertendo a execucao (nao interrompa)...",
         allow_cancel=False,
     )
 

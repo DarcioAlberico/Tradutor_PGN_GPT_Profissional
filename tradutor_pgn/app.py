@@ -290,3 +290,6 @@ class PGNTranslatorApp:
 
     def open_glossary_window(self):
         app_actions.open_glossary_window(self)
+
+    def revert_last_run(self):
+        app_actions.revert_last_run(self)

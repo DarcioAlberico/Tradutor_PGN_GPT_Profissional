@@ -410,8 +410,9 @@ nunca chama esse caminho.
 
 **Garantia T5 — nenhuma ferramenta de escrita em massa roda durante uma
 traducao.** "Restaurar BD", "Importar CSV", "Aplicar Automaticas", "Corrigir
-Lances", "Zerar Traducoes", "Zerar Glossario" e, no editor, "Descartar nao
-revisadas" recusam com uma mensagem enquanto o worker esta ativo. A pior era a restauracao: substituir o banco enquanto o
+Lances", "Zerar Traducoes", "Zerar Glossario", "Reverter execucao" e, no
+editor, "Descartar nao revisadas" recusam com uma mensagem enquanto o worker
+esta ativo. A pior era a restauracao: substituir o banco enquanto o
 worker grava produz um arquivo que nao e nem o backup nem a execucao, com o cache
 em memoria apontando para linhas que ja nao existem.
 
@@ -815,7 +816,42 @@ Traducoes", com o nome que diz o que faz. Depois, a lista do editor e refeita
 do zero e o menu de arquivos tambem: um capitulo cujas linhas eram todas da
 maquina deixa de ser uma obra e cai em "Todos os arquivos".
 
-Nenhuma das tres roda com uma traducao em andamento — e nenhuma das outras
+**Garantia Z5 — "Reverter execucao" apaga so o que a ultima execucao inseriu
+e Z4 permite.** E a quarta ferramenta destrutiva, e a que fecha o ciclo de
+trocar de motor (ROADMAP 28.6 e 28.7): traduzir, olhar, jogar fora. Cada
+execucao do worker abre uma linha em `translation_runs` (inicio, fim, desfecho
+em `completed | failed | canceled | aborted | crashed`, par, caminho,
+provedor, arquivos, contagens, log) depois da primeira passada — quando ja se
+sabe QUAIS arquivos ela tem — e antes do primeiro INSERT, comitada na hora;
+`comments.inserted_run_id` e gravado SO no caminho `inserted` de
+`save_translation` (uma linha vazia preenchida ja existia, e a execucao
+trouxe o texto, nao a linha). O `finally` do worker fecha a linha com conexao
+PROPRIA — a do pipeline pode ter morrido com a excecao —, e a excecao vence o
+cancelamento, que vence o disjuntor, que vence "com falhas"; o inicio da
+execucao seguinte marca `crashed` toda linha que ficou em `running`, porque o
+worker e o unico escritor e nunca ha duas execucoes ao mesmo tempo.
+
+O criterio e o de Z4 com `inserted_run_id = ?` no lugar da ocorrencia no
+arquivo: verificada, com status, com nota, com QUALQUER historico ou usada por
+um arquivo FORA da execucao — cada marca poupa a linha, e os arquivos da
+execucao (gravados como JSON e lidos por `json_each`) sao o que decide "fora".
+Dois capitulos da mesma execucao repetindo um comentario nao poupam a linha;
+um livro de outra execucao, sim. Contar e apagar usam o mesmo `WHERE`
+(`_revertible_run_rows_query`), os ids sao colhidos antes do primeiro `DELETE`
+e as ocorrencias vao junto, como em Z4. E sempre a execucao MAIS RECENTE do
+banco, desta sessao ou de outra, e nao uma escolhida numa lista: uma execucao
+antiga tem linhas que as seguintes reaproveitaram, e "reverter a de
+anteontem" quase nunca apaga o que o usuario imagina; as ultimas 30 estao no
+relatorio de estatisticas, para conferir qual e a mais recente antes. A
+pergunta descreve a execucao (numero, data, desfecho, par, arquivos, motor) e
+o numero de linhas; segue Z1, Z2 e Z3 passo a passo. "Zerar Traducoes"
+derruba `translation_runs` junto: uma execucao apontando para ids que o
+`AUTOINCREMENT` vai reusar seria "reverter" apagando as linhas erradas. As
+linhas gravadas antes da versao 10 do banco (e as importadas, e as das
+ferramentas) tem `inserted_run_id` nulo e nao sao reversiveis por execucao —
+so por Z4; nao ha de onde derivar uma procedencia que nao foi gravada.
+
+Nenhuma das quatro roda com uma traducao em andamento — e nenhuma das outras
 ferramentas de escrita em massa tambem (garantia T5, secao 3.4).
 
 ---
@@ -2154,6 +2190,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | Z1 | O backup vem antes da pergunta, e o caminho dele aparece nela | Risco: a unica volta atras depender de o que vem depois do "Apagar" |
 | Z2 | Apagar exige a palavra digitada, e o botao parece inerte ate la | Risco: "Sim" a um pixel do "Nao" para 201 mil traducoes |
 | Z3 | Zerar um nao toca no outro, e leva junto historico, indice e cache | Risco: o cache em memoria reviver o que foi apagado |
+| Z5 | "Reverter execucao" apaga so o que a execucao MAIS RECENTE inseriu (`inserted_run_id`, gravado so no INSERT) e que nao tem marca de humano nem uso por arquivo fora da execucao; as ocorrencias vao junto; a linha da execucao abre antes do primeiro INSERT e fecha no `finally` com conexao propria e o desfecho certo; a seguinte marca `crashed` o que ficou aberto; "Zerar Traducoes" leva a tabela | Risco: trocar de motor (28.7) sem poder desfazer exatamente o que UMA execucao trouxe, em varios arquivos de uma vez (ROADMAP 28.6) |
 | Z4 | "Descartar nao revisadas" apaga so as linhas do arquivo do filtro sem historico, nao verificadas, sem status, sem nota e cujas ocorrencias sao so desse arquivo, no par da tela, com backup antes da pergunta e palavra digitada; as ocorrencias vao junto, o cache e limpo e a lista e o menu de arquivos sao refeitos | Risco: trocar de motor (28.7) sem poder jogar fora o que o motor velho deixou num livro sem perder uma linha revisada (ROADMAP 28.6) |
 | N1 | So as cinco tags mudam; lances, variantes e comentarios saem identicos | Risco: a lista de tags vivia em dois lugares |
 | C1 | Trabalho pesado roda fora da thread do Tk, e a resposta volta nela | Bug: "Aplicar automaticas" segurava a janela por 38 s |
@@ -2615,7 +2652,6 @@ testavel e qual e o numero que fica so no ROADMAP.
 
 | # | Garantia planejada | Item | Como o teste falha sem ela |
 |---|---|---|---|
-| Z5 | Reverter uma execucao apaga so o que ela inseriu e Z4 permite, leva as ocorrencias junto, e "Zerar Traducoes" leva a tabela de execucoes | 28.6 | Execucao com 5 insercoes e uma reusada por outra: 4 somem; `translation_runs` vazia depois do Zerar |
 | T6 | Um provedor estrito nunca grava uma traducao cujo multiconjunto de ancoras difere do original | 28.7 | Provedor falso que devolve `Nf6` para `Nf3`: nada gravado, `failed_count == 1`, PGN com o original |
 | K1 | A chave de API nunca aparece inteira em log, configuracoes ou dialogo | 28.7 | Uma execucao falsa com chave conhecida: o texto inteiro nao esta em nenhum dos tres; `****wxyz` esta |
 | B5 | Um lote JSON e aceito so se cada id aparece exatamente uma vez; senao e desalinhado (B2) | 28.7 | Id repetido, faltando e fora do intervalo: os tres devolvem `None` |

@@ -22,6 +22,7 @@ from .db_tools import reevaluate_quality_in_database
 from .db_tools import reset_glossary as reset_glossary_file
 from .db_tools import reset_translations as reset_translations_database
 from .db_tools import restore_database as restore_database_file
+from .db_tools import revert_last_translation_run as revert_last_run_in_database
 from .db_tools import show_db_stats as show_database_stats
 from .edit_window import open_translation_editor
 from .failed_runs import (
@@ -568,6 +569,15 @@ def review_last_run(app):
         status_filter="Pendentes",
         target_language=ultima.get("target_language"),
     )
+
+
+def revert_last_run(app):
+    """"Reverter execucao" (Z5): a mais recente do banco. Guarda T5 como toda
+    escrita em massa — reverter durante uma traducao apagaria linhas que o
+    worker acabou de gravar e que o cache dele ainda considera existentes."""
+    if _busy_with_translation(app, "Reverter execução", "reverter uma execução"):
+        return
+    revert_last_run_in_database(app)
 
 
 def open_last_run_folder(app):

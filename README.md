@@ -401,6 +401,15 @@ ser traduzido de novo, por outro motor ou depois de uma correcao no glossario.
 Como "Zerar Traducoes", faz o backup antes de perguntar e exige a palavra
 digitada; o dialogo diz quantas linhas vao e onde esta o backup.
 
+Na janela principal, ao lado de "Revisar pendentes", **Reverter execucao**
+faz o mesmo para a ULTIMA execucao inteira, em todos os arquivos dela: apaga
+o que ela inseriu e ninguem tocou, e poupa o que outro arquivo tambem usa. E
+o jeito de experimentar um motor ou um glossario num livro e voltar atras num
+clique. Cada execucao fica registrada no banco (data, desfecho, par, arquivos,
+quantas linhas inseriu, quantas falharam); as ultimas 30 aparecem em
+"Estatisticas do BD". So as execucoes feitas a partir desta versao sao
+reversiveis — as traducoes antigas nao sabem de que execucao vieram.
+
 As traducoes gravadas antes desta versao nao tem procedencia — ela nao esta em
 lugar nenhum do banco, e nada e inventado para elas. Elas aparecem em "Todos os
 arquivos" e ganham a primeira ocorrencia quando o PGN delas for processado de

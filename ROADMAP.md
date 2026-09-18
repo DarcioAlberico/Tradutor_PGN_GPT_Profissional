@@ -8225,7 +8225,7 @@ era o padrao 5 (`if only_pending:` existe duas vezes em `database.py`).
 Cenarios corrigidos, as tres morreram. S19, S20 e S21 migraram para a
 secao 9 da SPEC.
 
-### 28.6 Descartar o que a maquina deixou, e reverter uma execucao — Z4 CONCLUIDO (2026-09-15); Z5 e plano
+### 28.6 Descartar o que a maquina deixou, e reverter uma execucao — CONCLUIDO (Z4 e Z5, 2026-09-15)
 
 O 18.7 explicou por que "reverter a execucao de ontem" ficou de fora. As
 duas revisoes criticas concordaram numa coisa: 90 % do valor e a rede de
@@ -8307,7 +8307,68 @@ clausula `verified` nao derrubava nada, porque verificar pela janela grava
 historico e a linha caia na clausula vizinha (padrao 4 da memoria de
 testes); a linha importada ja verificada, sem historico, e o cenario que a
 clausula decide sozinha — escrito, a mutacao morreu. Z4 migrou para a secao
-9 da SPEC (secao 4, ao lado de Z1-Z3 e O4). **Z5 continua plano.**
+9 da SPEC (secao 4, ao lado de Z1-Z3 e O4).
+
+**Z5 feito em 2026-09-15, e quatro coisas sairam diferentes do plano.**
+
+- **Sempre a execucao MAIS RECENTE, sem lista para escolher.** O caso que a
+  ferramenta serve e "traduzi, olhei, nao quero"; uma execucao antiga tem
+  linhas que as seguintes reaproveitaram (e, pela clausula do arquivo de
+  fora, poupadas), entao "reverter a de anteontem" quase nunca apaga o que
+  o usuario imagina. As ultimas 30 saem no relatorio de estatisticas, com
+  a mais recente em cima, para conferir antes.
+- **Mora na fileira dos botoes de execucao, ao lado de "Revisar pendentes",
+  e nao em "Ferramentas"**: e o outro desfecho do mesmo olhar, e a grade
+  esta cheia (16 = 4 x 4 com Configuracoes). Vermelho como os "Zerar";
+  sempre habilitado, porque a ultima execucao pode ser de outra sessao —
+  e a pergunta que diz qual e. Empacotado por ultimo, some antes dos
+  outros numa janela estreita (a regra de 22.10). Guarda T5 pela lista
+  de `MassWriteGuardTests`.
+- **A linha da execucao abre DEPOIS da primeira passada**, e nao antes: e
+  ali que se sabe quais arquivos a execucao tem, e os arquivos sao o que
+  a clausula "ocorrencia em arquivo FORA da execucao" usa — gravados como
+  JSON e lidos por `json_each`, porque uma pasta inteira pode ter mais
+  arquivos que o limite de parametros. Dois capitulos da MESMA execucao
+  repetindo um comentario nao poupam a linha; um livro de outra, sim.
+- **A varredura do que ficou `running` roda no inicio da execucao
+  seguinte**, e nao na abertura do programa: o worker e o unico escritor,
+  nunca ha duas execucoes ao mesmo tempo, e assim o registro nao precisa de
+  gancho na abertura (que ja tem tres tarefas de fundo). O `finally` fecha a
+  linha com conexao PROPRIA e a ordem dos desfechos e: excecao > cancelado >
+  disjuntor > com falhas > concluida. `save_translation(run_id=)` carimba
+  SO o caminho `inserted` — a vazia preenchida ja existia. O provedor sai
+  de `translation_api.TRANSLATION_PROVIDER` ("google-gtx"); o de 28.7 grava
+  o seu.
+
+Schema 10: `CREATE TABLE translation_runs` + `ALTER TABLE comments ADD
+inserted_run_id`; nada reconstroi `comments`. As linhas anteriores ficam
+nulas e sao reversiveis so por Z4. "Zerar Traducoes" derruba a tabela (Z3
+estendido). **O que a verificacao fixou.** Em `test_core.py`:
+`TranslationRunRecordTests` (6: abrir/fechar com desfecho e contagens,
+desfecho invalido recusado; lista da mais recente e limitada; a aberta vira
+`crashed` na seguinte e a fechada nao e tocada; so o INSERT carimba —
+vazia preenchida e `unchanged` ficam nulos; um banco na versao 9 ganha a
+coluna e a tabela; Zerar derruba as execucoes), `RevertRunRowsTests` (5: o
+cenario da SPEC com OITO insercoes — duas limpas somem e cada marca poupa a
+sua, inclusive a verificada SEM historico e a linha da execucao anterior no
+mesmo livro; as ocorrencias vao junto; repeticao entre capitulos da mesma
+execucao nao poupa; execucao sem carimbo nao apaga nada; 905 linhas somem
+inteiras), `RevertRunToolTests` (8: backup antes da pergunta e nomeado nela;
+a pergunta descreve a execucao; "nao" deixa banco e cache; "sim" apaga so
+as intocadas e limpa o cache; sem execucao nem pergunta nem backup; nada a
+reverter na segunda vez sem backup novo; a mais recente e nao a antiga; o
+relatorio lista as execucoes da mais nova para a mais velha e sobrevive sem
+a chave) e `WorkerRunRecordTests` (4: concluida com as insercoes
+carimbadas; com falhas e `failed` contando; excecao vira `crashed` pela
+conexao propria; traduzir-reverter-traduzir carimba com a segunda). Em
+`test_main_window.py`, `RevertRunButtonTests` (2) e a entrada na lista T5.
+25 testes. **13 mutacoes, 3 sobreviventes na primeira passada**, os tres do
+padrao 4 da memoria de testes: a clausula `verified` (verificar pela janela
+grava historico — o cenario que faltava e a importada ja verificada, o
+mesmo sobrevivente de Z4), a clausula `inserted_run_id` (a linha da outra
+execucao estava em outro ARQUIVO, e a clausula vizinha a poupava — o
+cenario e a execucao anterior do MESMO livro) e "a mais recente" (o teste
+tinha uma execucao so). Os tres cenarios escritos, as tres morreram.
 
 ### 28.7 O modelo de linguagem: primeiro o piloto, depois o provedor
 

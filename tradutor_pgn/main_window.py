@@ -226,6 +226,20 @@ def setup_main_ui(app):
         command=app.review_last_run,
     )
     app.review_run_button.pack(side=tk.RIGHT, padx=(8, 0))
+    # "Reverter execucao" (Z5, ROADMAP 28.6) mora ao lado de "Revisar
+    # pendentes" porque e o outro desfecho do mesmo olhar: traduzi, olhei, nao
+    # quero. Vermelho como os dois "Zerar": apaga trabalho. Sempre habilitado —
+    # a ultima execucao pode ser de outra sessao, e e a pergunta que diz qual.
+    # Empacotado depois dos dois, entao numa janela estreita some antes deles.
+    app.revert_run_button = ctk.CTkButton(
+        btns_line,
+        text="Reverter execução",
+        width=140,
+        fg_color=DESTRUCTIVE_COLOR,
+        hover_color=DESTRUCTIVE_HOVER_COLOR,
+        command=app.revert_last_run,
+    )
+    app.revert_run_button.pack(side=tk.RIGHT, padx=(8, 0))
     # O texto da barra, a esquerda dos dois: "Lote 37/125 · 2.410/6.500 ·
     # ~1 min". Nesta fileira, e nao sob a barra, porque uma linha nova custaria
     # 32 px que esta janela nao tem — o log e o ultimo a receber espaco, e a
