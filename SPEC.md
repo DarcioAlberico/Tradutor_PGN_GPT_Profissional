@@ -261,6 +261,20 @@ exatamente o numero esperado de partes, o lote e descartado e os comentarios
 sao traduzidos individualmente. Nunca se atribui uma traducao a um comentario
 sem certeza de alinhamento.
 
+A contagem e a primeira peneira; a razao de tamanho e a segunda (ROADMAP
+28.12). Com o numero certo de partes, cada parte e comparada, em palavras,
+com o texto ENVIADO na mesma posicao (mascarado, como foi para a API): uma
+razao fora de `[0,3; 3,0]` num original de 40 caracteres ou mais
+(`BATCH_PART_MINIMUM_LENGTH`, o mesmo piso do QA) e desalinhamento, com o
+mesmo destino da contagem errada, e o log diz qual parte estourou. Medido no
+banco de dev, a razao real fica entre 0,50 e 1,83 nos originais acima do
+piso, entao a folga nao derruba lote nenhum de verdade; abaixo do piso a
+razao nao diz nada (`", and"` -> `"e"` e 0,5). O que a segunda peneira pega
+e a fusao — uma parte engoliu a vizinha e a vizinha voltou vazia; quem
+denuncia e a VAZIA, porque a dobrada fica perto de 2 e cabe na folga. O que
+ela nao pega e a troca de ordem entre partes de tamanho parecido: isso so os
+ids do lote JSON resolvem por construcao (B5, 28.7).
+
 **Garantia B3 — falha de API nao e desalinhamento.** O caminho individual so e
 acionado quando a resposta **veio** e nao pode ser realinhada. Se a chamada em si
 falhou, os comentarios do lote sao contados como falha de uma vez: repeti-los um
@@ -2055,7 +2069,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | E4 | A codificacao escolhida decodifica o arquivo inteiro | Bug: UTF-16 lido como UTF-8, com NUL entre as letras |
 | G2 | Saida sem `U+FFFD` | Mesmo bug |
 | B1 | `BATCH_MAX_CHARS < MAX_TRANSLATE_CHARS` | Acoplamento fragil entre modulos |
-| B2 | Desalinhamento -> traducao individual | — |
+| B2 | Desalinhamento -> traducao individual: contagem de partes errada, ou parte com razao de tamanho em palavras fora de `[0,3; 3,0]` contra o texto enviado (originais de 40 caracteres ou mais) | Risco de desenho: o lote `\|\|\|` alinhava so por posicao (ROADMAP 28.12) |
 | B3 | Falha de API nao vira reprocessamento comentario a comentario | Bug: um lote morto custava ~1 h de requisicoes inuteis |
 | B4 | O disjuntor alcanca o ramo comentario a comentario: tres seguidos sem resposta abortam, um grupo pequeno morto conta como lote, e um grupo vivo zera a conta | Bug: depois de um desalinhamento, a rede caida custava 3 x 30 s por comentario sem que B3 disparasse — o unico caminho fora do alcance do disjuntor (ROADMAP 28.1) |
 | W2 | Backoff exponencial, e o ritmo cai ao ver 429 | Risco: intervalo agressivo sem defesa contra limite de taxa |
@@ -2505,9 +2519,11 @@ numero e o do item que o resolve.
   28.4), e "Consertar Prosa" (P6) alcanca as linhas ja gravadas, menos as
   verificadas: 3 no banco de dev, que a revisao aprovou com o defeito e a
   ferramenta nao toca por desenho.
-- **O lote `|||` alinha por posicao**: `split_batch_translation` so confere
-  o numero de partes. Incidencia medida zero em 6.500 linhas; e risco de
-  desenho. (28.12)
+- **O lote `|||` alinha por posicao, com a razao de tamanho como segunda
+  peneira** (B2, 28.12): a fusao de duas partes e pega pela parte vazia; a
+  troca de ordem entre partes de tamanho parecido nao e — incidencia medida
+  zero em 6.500 linhas, e so os ids do lote JSON (28.7) a resolvem por
+  construcao.
 - **Um backup NOVO restaurado num programa VELHO carimba `user_version`
   para baixo sem avisar.** Pre-existente; os dois schemas novos da secao 28
   (execucoes e FEN) tornam o caso mais provavel. (28.6, 28.8)

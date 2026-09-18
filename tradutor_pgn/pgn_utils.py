@@ -648,6 +648,60 @@ def split_batch_translation(translated_text, expected_count):
     return None
 
 
+# A contagem de partes so garante que o lote voltou com o NUMERO certo de
+# pedacos; nada confere que a parte `i` e a traducao do comentario `i`. Uma
+# resposta que funde dois comentarios vizinhos numa parte e devolve a outra
+# vazia — ou reordena — passa pela contagem e grava cada texto no lugar do
+# outro. Medido no banco de dev, incidencia zero em 6.500 linhas (ROADMAP
+# 28.12); e risco de desenho, e a defesa e barata: a razao de tamanho de cada
+# parte contra o original que ela deveria traduzir.
+#
+# Em PALAVRAS, e nao caracteres, porque e a unidade que a fusao e o vazio
+# deslocam. No banco de dev a razao fica entre 0,50 e 1,83 nos originais de 40
+# caracteres ou mais; [0,3; 3,0] deixa folga para a prosa normal ("as pretas
+# estao" para "Black is"). Quem denuncia a fusao e a parte VAZIA (razao zero),
+# nao a que dobrou: o dobro fica perto de 2 e cabe na folga — mas numa fusao com
+# a contagem certa sempre sobra uma vazia. O que a razao nao ve e a troca de
+# ordem entre duas partes de tamanho parecido; isso so os ids do lote JSON
+# resolvem, por construcao (28.7).
+#
+# O piso de 40 caracteres e o mesmo do QA (PROPORTION_MINIMUM_LENGTH): abaixo
+# dele a razao nao diz nada — `", and"` -> `"e"` e traducao normal com razao
+# 0,5, e sem o piso esse unico caso derrubaria um lote inteiro de 40 para o
+# modo individual.
+BATCH_PART_RATIO_MIN = 0.3
+BATCH_PART_RATIO_MAX = 3.0
+BATCH_PART_MINIMUM_LENGTH = 40
+
+
+def misaligned_batch_part(parts, originals):
+    """Indice da primeira parte cujo tamanho nao pode ser a traducao do original.
+
+    `parts` e a lista que `split_batch_translation` devolveu; `originals` sao os
+    textos ENVIADOS, na mesma ordem (mascarados, como foram para a API: a
+    sentinela pesa o mesmo dos dois lados). Devolve `None` quando toda parte
+    cabe na razao — ou quando nenhum original alcanca o piso. Um indice e o
+    sinal de desalinhamento (garantia B2): o worker descarta o lote e traduz
+    um a um, como ja faz com a contagem errada.
+    """
+    for index, (part, original) in enumerate(zip(parts, originals)):
+        # Uma parte VAZIA para um original que tem texto nunca e traducao,
+        # abaixo ou acima do piso: e o pedaco que a fusao engoliu — ou, no lote
+        # JSON dos modelos de linguagem (28.7), o id que a resposta nao trouxe
+        # e que o provedor devolve vazio de proposito para cair aqui.
+        if not part.strip() and original.strip():
+            return index
+        if len(original) < BATCH_PART_MINIMUM_LENGTH:
+            continue
+        palavras_originais = len(original.split())
+        if not palavras_originais:
+            continue
+        razao = len(part.split()) / palavras_originais
+        if razao < BATCH_PART_RATIO_MIN or razao > BATCH_PART_RATIO_MAX:
+            return index
+    return None
+
+
 def sanitize_pgn_comment(text: str) -> str:
     return text.replace("{", "(").replace("}", ")")
 

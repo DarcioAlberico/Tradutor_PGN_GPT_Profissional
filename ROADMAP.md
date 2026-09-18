@@ -8678,7 +8678,7 @@ itens de produto. **Depende de 28.1 item 1**: um CI com `uv sync` sem
 - `logging` no lugar da fila propria: ganho parcial (niveis, `assertLogs`);
   a fila continua necessaria como ponte de thread. Nao urgente.
 
-### 28.12 O lote `|||` alinha por posicao, e so por posicao
+### 28.12 O lote `|||` alinha por posicao, e so por posicao — CONCLUIDO (2026-09-15)
 
 `split_batch_translation` aceita a resposta quando o **numero** de partes
 bate; nada confere que a parte `i` e a traducao do comentario `i`. Com uma
@@ -8694,6 +8694,26 @@ barata: razao de tamanho de cada parte contra o original fora de
 `[0,3; 3,0]` **so para originais com 40 caracteres ou mais** (o mesmo piso
 do QA) -> tratar como desalinhado (B2). Sem o piso, o unico falso positivo
 medido derrubaria um lote inteiro de 40 para o modo individual.
+
+**Feito em 2026-09-15.** `pgn_utils.misaligned_batch_part(parts, originals)`
+(pura: indice da primeira parte fora da razao, ou `None`) e chamada no worker
+logo depois de `split_batch_translation`, contra os textos MASCARADOS — os
+que foram para a API, para a sentinela pesar o mesmo dos dois lados — e
+manda o lote para o ramo individual que ja existia, com uma linha de log
+propria dizendo qual parte estourou. Remedido antes de fixar o intervalo: a
+razao real em palavras fica entre 0,50 e 1,83 (em caracteres, 0,62 a 1,65)
+nos 6.500 do banco de dev acima do piso, entao `[0,3; 3,0]` nao pega linha
+nenhuma de verdade. **O que o teste ensinou e o plano nao dizia:** a parte
+que ENGOLIU a vizinha tem razao perto de 2 e cabe na folga; quem denuncia a
+fusao e a parte vazia (razao zero), e numa fusao com a contagem certa sempre
+sobra uma. A troca de ordem entre partes de tamanho parecido continua
+invisivel, como registrado — e o limite declarado, e fica para os ids de
+28.7. Tres testes em `test_core.py` (a fusao pelo vazio; o piso e as bordas
+0,25/3,08 contra 0,33/3,0; o worker com contagem certa e tamanhos errados
+gravando cada comentario com a SUA traducao em 1 + N requisicoes e
+nomeando a parte no log). Seis mutacoes, seis mortas (minimo a zero, maximo
+a 100, piso a zero, piso invertido, caracteres no lugar de palavras, `return
+None`).
 
 ### 28.13 Memoria de traducao: o que a medicao derrubou
 

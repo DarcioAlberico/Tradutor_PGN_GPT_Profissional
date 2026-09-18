@@ -37,6 +37,7 @@ from .pgn_utils import (
     extract_comments_from_content,
     generate_translated_pgn,
     join_comments_for_batch,
+    misaligned_batch_part,
     read_pgn_text,
     split_batch_translation,
     translated_output_path,
@@ -643,6 +644,22 @@ def run_translation(
                             parts = split_batch_translation(
                                 translated_joined, len(originals)
                             )
+                        if parts:
+                            # A contagem bateu; a razao de tamanho e a segunda
+                            # peneira (ROADMAP 28.12). Uma parte que dobrou ou
+                            # sumiu contra o texto enviado e um lote que voltou
+                            # com o numero certo de pedacos nos lugares errados
+                            # — e desalinhamento (B2), com o mesmo destino da
+                            # contagem errada: o modo individual, logo abaixo.
+                            deslocada = misaligned_batch_part(parts, masked_texts)
+                            if deslocada is not None:
+                                app.log_message(
+                                    f"  - Aviso: parte {deslocada + 1} do lote "
+                                    f"nao tem o tamanho do comentario "
+                                    f"correspondente ({len(originals)} "
+                                    f"comentarios), traduzindo individualmente."
+                                )
+                                parts = None
 
                         if parts:
                             # A API respondeu alinhado: o disjuntor zera aqui.
