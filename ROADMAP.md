@@ -8717,6 +8717,23 @@ previa e nao foi.**
   contexto, Google sem). **16 mutacoes, 16 mortas** depois da sobrevivente
   virar regra.
 
+**Feito em 2026-09-18, terceira parte — "Testar chaves e modelos" (K2).** O
+limite da SPEC dizia que a tela nao consulta a lista de modelos do provedor,
+e o preco disso era descobrir uma chave colada errada ou um nome aposentado
+no meio de uma execucao, depois do dialogo de custo, como 401/404 fatal.
+`llm_providers.check_credentials` faz uma requisicao GRATUITA — a API de
+modelos: `client.models.retrieve` pelo SDK da Anthropic, `GET /models/{id}`
+na OpenAI, e na DeepSeek, que documenta so a lista, um 404 no id cai em
+`GET /models` e o nome e procurado nela (o veredito lista os ids quando nao
+acha). O botao fica na secao dos modelos da tela de Configuracoes, testa
+cada provedor que tem chave (a digitada vale sobre a gravada, sem gravar
+nada), diz "sem chave" dos outros, roda na thread de fundo com o resultado
+voltando por fila e `after` agendado da thread do Tk (a armadilha de 28.13:
+um `after` chamado de dentro da thread nao funciona fora do `mainloop`), e
+nunca mostra a chave (K1). 7 testes headless + 2 de janela; 7 mutacoes
+mortas (404 sem lista, nome fora da lista aceito, 403 ignorado, sem chave
+perguntando, chave no texto, NotFound como chave, lista vazia como "fora").
+
 ### 28.8 O tabuleiro — CONCLUIDO (2026-09-15)
 
 O revisor decide "qual bispo", "que coluna", "troca ou qualidade" olhando a

@@ -553,7 +553,9 @@ Custa dinheiro — da ordem de US$ 25 por livro de 7.500 comentarios com o
    `chaves-api.json` na pasta de dados, cifrada com o DPAPI do Windows (so esta
    conta, nesta maquina); nunca aparece inteira em tela ou log. Uma variavel
    de ambiente (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`) tem
-   precedencia sobre o arquivo.
+   precedencia sobre o arquivo. **Testar chaves e modelos** confere, com uma
+   requisicao gratuita, se a chave e o nome do modelo valem — antes de gastar
+   uma execucao para descobrir.
 2. Para o Claude e preciso o SDK: `uv sync --extra llm`. ChatGPT e DeepSeek
    nao precisam de nada.
 3. Com pelo menos uma chave gravada, **Iniciar tradução** (e **Reprocessar

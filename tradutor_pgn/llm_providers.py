@@ -152,9 +152,12 @@ def anthropic_sdk_available() -> bool:
 
 
 class ChatClient(Protocol):
-    """O que um cliente de `chat/completions` precisa ter: so o `post`."""
+    """O que um cliente de `chat/completions` precisa ter: `post` (o lote) e
+    `get` (a conferencia de chave e modelo)."""
 
     def post(self, url: str, **kwargs: Any) -> requests.Response: ...
+
+    def get(self, url: str, **kwargs: Any) -> requests.Response: ...
 
 
 @dataclass
@@ -503,6 +506,99 @@ class LLMTranslator:
         self.fatal_error = motivo
         if log_message:
             log_message(f"[ERRO] {motivo}. Nenhuma outra requisicao sera feita nesta execucao.")
+
+
+# ----------------------------------------------------------- conferencia
+
+CHECK_TIMEOUT = 15
+
+
+def check_credentials(
+    provider_id: str,
+    model: str,
+    api_key: str | None = None,
+    session: ChatClient | None = None,
+    client: Any = None,
+) -> tuple[bool, str]:
+    """`(ok, texto)`: a chave e o nome do modelo, conferidos por uma requisicao
+    GRATUITA — a API de modelos do provedor, que nao gera tokens.
+
+    E o botao "Testar chaves e modelos" da tela de Configuracoes. Sem isto, um
+    nome de modelo que o provedor aposentou ou uma chave colada errada so
+    apareciam no meio de uma execucao, depois do dialogo de custo, como um 404
+    ou 401 fatal. A Anthropic tem `GET /v1/models/{id}` (pelo SDK); a OpenAI
+    tem `GET /models/{id}`; a DeepSeek documenta so a lista (`GET /models`),
+    entao um 404 no id cai na lista e o nome e procurado nela. O texto vai
+    para a tela (com acentos), nunca a chave (K1). `session`/`client` sao
+    para os testes.
+    """
+    spec = PROVIDERS.get(provider_id)
+    if spec is None:
+        return False, f"provedor desconhecido: {provider_id!r}"
+    chave = api_key or load_api_key(spec.id, spec.env_var)
+    if not chave:
+        return False, "sem chave para testar"
+    modelo = (model or "").strip() or spec.default_model
+    if spec.kind == "anthropic":
+        return _check_anthropic(spec, modelo, chave, client)
+    # `Any`: o `requests.Session` satisfaz o `ChatClient` na pratica, e o mypy
+    # nao casa as assinaturas dos stubs com o Protocol.
+    http: Any = session if session is not None else requests.Session()
+    return _check_chat_completions(spec, modelo, chave, http)
+
+
+def _check_anthropic(spec: ProviderSpec, modelo: str, chave: str, client: Any) -> tuple[bool, str]:
+    if not anthropic_sdk_available():
+        return False, "o pacote anthropic não está instalado (uv sync --extra llm)"
+    import anthropic
+
+    if client is None:
+        client = anthropic.Anthropic(api_key=chave, timeout=CHECK_TIMEOUT)
+    try:
+        resposta = client.models.retrieve(modelo)
+    except anthropic.AuthenticationError:
+        return False, "chave recusada (401)"
+    except anthropic.PermissionDeniedError:
+        return False, "chave sem permissão (403)"
+    except anthropic.NotFoundError:
+        return False, f"modelo '{modelo}' não existe"
+    except anthropic.APIConnectionError as exc:
+        return False, f"sem conexão: {exc}"
+    except anthropic.APIStatusError as exc:
+        return False, f"erro {exc.status_code}: {exc.message}"
+    nome = getattr(resposta, "display_name", "") or ""
+    detalhe = f" ({nome})" if nome and nome != modelo else ""
+    return True, f"chave aceita; modelo {modelo}{detalhe} existe"
+
+
+def _check_chat_completions(
+    spec: ProviderSpec, modelo: str, chave: str, session: ChatClient
+) -> tuple[bool, str]:
+    cabecalhos = {"Authorization": f"Bearer {chave}"}
+    try:
+        resposta = session.get(f"{spec.base_url}/models/{modelo}", headers=cabecalhos, timeout=CHECK_TIMEOUT)
+    except requests.RequestException as exc:
+        return False, f"sem conexão: {exc}"
+    status = resposta.status_code
+    if status == 200:
+        return True, f"chave aceita; modelo {modelo} existe"
+    if status in (401, 403):
+        return False, f"chave recusada ({status})"
+    if status != 404:
+        return False, f"erro {status}: {resposta.text[:120]}"
+    # 404: o modelo nao existe — ou o provedor nao tem o endpoint do id (a
+    # DeepSeek documenta so a lista). A lista decide.
+    try:
+        lista = session.get(f"{spec.base_url}/models", headers=cabecalhos, timeout=CHECK_TIMEOUT)
+        ids = [str(item.get("id", "")) for item in (lista.json().get("data") or [])] if lista.status_code == 200 else []
+    except (requests.RequestException, ValueError, AttributeError):
+        ids = []
+    if modelo in ids:
+        return True, f"chave aceita; modelo {modelo} existe"
+    if ids:
+        mostrados = ", ".join(ids[:8]) + (", …" if len(ids) > 8 else "")
+        return False, f"modelo '{modelo}' não está na lista do provedor ({mostrados})"
+    return False, f"modelo '{modelo}' não encontrado (404)"
 
 
 def build_translator(

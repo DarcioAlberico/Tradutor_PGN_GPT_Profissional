@@ -152,7 +152,7 @@ class FakeResponse:
 
 
 class FakeSession:
-    """Grava cada `post` e devolve as respostas na ordem combinada."""
+    """Grava cada `post`/`get` e devolve as respostas na ordem combinada."""
 
     def __init__(self, respostas):
         self.respostas = list(respostas)
@@ -161,6 +161,13 @@ class FakeSession:
     def post(self, url, **kwargs):
         self.chamadas.append((url, kwargs))
         return self.respostas.pop(0)
+
+    def get(self, url, **kwargs):
+        self.chamadas.append((url, kwargs))
+        resposta = self.respostas.pop(0)
+        if isinstance(resposta, Exception):
+            raise resposta
+        return resposta
 
 
 def resposta_ok(itens, finish="stop", usage=None):
@@ -444,6 +451,103 @@ class AnthropicTranslatorTests(unittest.TestCase):
         self.assertEqual(len(t._client.messages.chamadas), 1)
         for linha in self.logs:
             self.assertNotIn(CHAVE, linha)
+
+
+# ============================================================ conferencia
+
+
+class CheckCredentialsTests(unittest.TestCase):
+    """O botao "Testar chaves e modelos": uma requisicao gratuita que diz se a
+    chave e o nome do modelo valem, ANTES de uma execucao descobrir."""
+
+    def confere(self, respostas, provider="openai", modelo="gpt-5"):
+        sessao = FakeSession(respostas)
+        ok, texto = llm_providers.check_credentials(provider, modelo, api_key=CHAVE, session=sessao)
+        return ok, texto, sessao
+
+    def test_the_model_endpoint_answers_and_the_key_never_reaches_the_text(self):
+        ok, texto, sessao = self.confere([FakeResponse(200, {"id": "gpt-5"})])
+        self.assertTrue(ok)
+        self.assertIn("modelo gpt-5 existe", texto)
+        self.assertNotIn(CHAVE, texto)
+        url, kwargs = sessao.chamadas[0]
+        self.assertEqual(url, "https://api.openai.com/v1/models/gpt-5")
+        self.assertEqual(kwargs["headers"]["Authorization"], f"Bearer {CHAVE}")
+
+    def test_a_rejected_key_is_named(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                ok, texto, _s = self.confere([FakeResponse(status, {"error": "no"})])
+                self.assertFalse(ok)
+                self.assertIn(f"chave recusada ({status})", texto)
+
+    def test_a_404_falls_back_to_the_list_where_deepseek_documents_only_the_list(self):
+        lista = FakeResponse(200, {"data": [{"id": "deepseek-flash"}, {"id": "deepseek-v4-pro"}]})
+        ok, texto, sessao = self.confere(
+            [FakeResponse(404, {"error": "no"}), lista], provider="deepseek", modelo="deepseek-flash"
+        )
+        self.assertTrue(ok, texto)
+        self.assertEqual(sessao.chamadas[1][0], "https://api.deepseek.com/v1/models")
+        ok, texto, _s = self.confere(
+            [FakeResponse(404, {"error": "no"}), lista], provider="deepseek", modelo="deepseek-chat"
+        )
+        self.assertFalse(ok)
+        self.assertIn("não está na lista do provedor (deepseek-flash, deepseek-v4-pro)", texto)
+
+    def test_a_404_without_a_list_is_model_not_found(self):
+        ok, texto, _s = self.confere([FakeResponse(404, {"error": "no"}), FakeResponse(500, text="x")])
+        self.assertFalse(ok)
+        self.assertIn("modelo 'gpt-5' não encontrado (404)", texto)
+
+    def test_other_statuses_and_no_connection_are_reported(self):
+        ok, texto, _s = self.confere([FakeResponse(503, text="down")])
+        self.assertEqual((ok, texto), (False, "erro 503: down"))
+        import requests
+
+        ok, texto, _s = self.confere([requests.ConnectionError("dns")])
+        self.assertFalse(ok)
+        self.assertIn("sem conexão", texto)
+
+    def test_without_a_key_nothing_is_asked(self):
+        with mock.patch.object(llm_providers, "load_api_key", return_value=""):
+            ok, texto = llm_providers.check_credentials("openai", "gpt-5", session=FakeSession([]))
+        self.assertEqual((ok, texto), (False, "sem chave para testar"))
+        self.assertEqual(llm_providers.check_credentials("nada", "x", api_key=CHAVE)[0], False)
+
+    @unittest.skipUnless(llm_providers.anthropic_sdk_available(), "sem o SDK anthropic")
+    def test_anthropic_uses_the_models_api_of_the_sdk(self):
+        import anthropic
+
+        class Models:
+            def __init__(self, resultado):
+                self.resultado = resultado
+                self.pedidos = []
+
+            def retrieve(self, modelo):
+                self.pedidos.append(modelo)
+                if isinstance(self.resultado, Exception):
+                    raise self.resultado
+                return self.resultado
+
+        cliente = types.SimpleNamespace(models=Models(types.SimpleNamespace(display_name="Claude Opus 5")))
+        ok, texto = llm_providers.check_credentials("anthropic", "claude-opus-5", api_key=CHAVE, client=cliente)
+        self.assertEqual((ok, texto), (True, "chave aceita; modelo claude-opus-5 (Claude Opus 5) existe"))
+        self.assertEqual(cliente.models.pedidos, ["claude-opus-5"])
+
+        erro = anthropic.NotFoundError.__new__(anthropic.NotFoundError)
+        Exception.__init__(erro, "no")
+        erro.status_code = 404
+        cliente = types.SimpleNamespace(models=Models(erro))
+        ok, texto = llm_providers.check_credentials("anthropic", "claude-x", api_key=CHAVE, client=cliente)
+        self.assertEqual((ok, texto), (False, "modelo 'claude-x' não existe"))
+
+        erro = anthropic.AuthenticationError.__new__(anthropic.AuthenticationError)
+        Exception.__init__(erro, "bad")
+        erro.status_code = 401
+        ok, texto = llm_providers.check_credentials(
+            "anthropic", "claude-opus-5", api_key=CHAVE, client=types.SimpleNamespace(models=Models(erro))
+        )
+        self.assertEqual((ok, texto), (False, "chave recusada (401)"))
 
 
 # ================================================================= custo

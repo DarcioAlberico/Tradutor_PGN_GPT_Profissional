@@ -17,6 +17,8 @@ o caso dos acentos no ChessBase foi resolvido pela promocao para UTF-8, e que
 o BOM sozinho nunca resolveria. O texto da tela diz o que o BOM faz, e so.
 """
 
+import queue
+import threading
 import tkinter as tk
 from tkinter import messagebox
 
@@ -25,7 +27,7 @@ import customtkinter as ctk
 from . import api_keys, app_paths, first_run
 from .editor_common import ERROR_TEXT_COLOR, MUTED_TEXT_COLOR, OK_TEXT_COLOR
 from .editor_widgets import flash_message
-from .llm_providers import PROVIDERS, anthropic_sdk_available, model_setting_key
+from .llm_providers import PROVIDERS, anthropic_sdk_available, check_credentials, model_setting_key
 from .pgn_positions import chess_available
 from .pgn_utils import PGN_EXPORT_LINE_WIDTH
 from .settings import (
@@ -255,6 +257,22 @@ class SettingsWindow:
                     onvalue=True,
                     offvalue=False,
                 ).grid(row=linha, column=3, sticky="w", padx=(4, 10), pady=(2, 0))
+        # "Testar": uma requisicao gratuita por provedor com chave (a API de
+        # modelos), na thread de fundo, com o resultado voltando pela fila e um
+        # `after` agendado daqui — a thread nunca toca em widget (C1), e um
+        # `after` chamado de dentro dela nao funciona fora do `mainloop`.
+        linha += 1
+        self.btn_test_keys = ctk.CTkButton(
+            frame, text="Testar chaves e modelos", width=190, command=self.test_credentials
+        )
+        self.btn_test_keys.grid(row=linha, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 0))
+        linha += 1
+        self.test_result_label = ctk.CTkLabel(
+            frame, text="", anchor="w", justify=tk.LEFT, wraplength=self.HINT_WRAP
+        )
+        self.test_result_label.grid(row=linha, column=0, columnspan=4, sticky="w", padx=10, pady=(2, 0))
+        self._test_queue = queue.Queue()
+        self._test_results = {}
         if anthropic_sdk_available():
             sdk = "O pacote anthropic (para o Claude) está instalado."
         else:
@@ -274,6 +292,72 @@ class SettingsWindow:
             f"API do provedor aceita; confira no console dele. {sdk}",
             columnspan=4,
         )
+
+    def test_credentials(self):
+        """Confere chave e modelo de cada provedor que tem chave (digitada ou
+        gravada), sem gravar nada: o que esta no campo vale para o teste."""
+        alvos = []
+        for spec in PROVIDERS.values():
+            digitada = self.key_entries[spec.id].get().strip()
+            chave = digitada or api_keys.load_api_key(spec.id, spec.env_var)
+            modelo = self.model_vars[spec.id].get().strip() or spec.default_model
+            alvos.append((spec, chave, modelo))
+        self._test_results = {
+            spec.id: (None, "sem chave") for spec, chave, _m in alvos if not chave
+        }
+        pendentes = [(spec, chave, modelo) for spec, chave, modelo in alvos if chave]
+        self.show_test_results(pendentes)
+        if not pendentes:
+            return
+        self.btn_test_keys.configure(state="disabled")
+
+        def conferir():
+            for spec, chave, modelo in pendentes:
+                try:
+                    resultado = check_credentials(spec.id, modelo, api_key=chave)
+                except Exception as exc:  # a rede e de quem a chama
+                    resultado = (False, f"erro: {exc}")
+                self._test_queue.put((spec.id, resultado))
+
+        threading.Thread(target=conferir, daemon=True).start()
+        self.win.after(100, self.poll_test_results)
+
+    def poll_test_results(self):
+        """Drena a fila na thread do Tk; para quando todos responderam."""
+        try:
+            while True:
+                provider_id, resultado = self._test_queue.get_nowait()
+                self._test_results[provider_id] = resultado
+        except queue.Empty:
+            pass
+        faltam = [spec for spec in PROVIDERS.values() if spec.id not in self._test_results]
+        self.show_test_results([(spec, None, None) for spec in faltam])
+        if faltam:
+            try:
+                self.win.after(100, self.poll_test_results)
+            except tk.TclError:  # a janela fechou no meio
+                pass
+            return
+        try:
+            self.btn_test_keys.configure(state="normal")
+        except tk.TclError:
+            pass
+
+    def show_test_results(self, pendentes):
+        """Uma linha por provedor: o resultado, ou "testando…" enquanto nao ha."""
+        ainda = {spec.id for spec, _c, _m in pendentes}
+        linhas = []
+        for spec in PROVIDERS.values():
+            if spec.id in self._test_results:
+                ok, texto = self._test_results[spec.id]
+                marca = "✓ " if ok else ("✗ " if ok is False else "")
+                linhas.append(f"{marca}{spec.label}: {texto}")
+            elif spec.id in ainda:
+                linhas.append(f"{spec.label}: testando…")
+        try:
+            self.test_result_label.configure(text="\n".join(linhas))
+        except tk.TclError:
+            pass
 
     def describe_key_state(self, spec):
         """O que o campo vazio diz da chave, sem mostra-la (K1)."""

@@ -2206,6 +2206,62 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class SettingsCredentialCheckTests(MainWindowTestCase):
+    """O botao "Testar chaves e modelos": o que esta no campo vale para o
+    teste, o provedor sem chave e dito, o resultado chega pela fila e o botao
+    volta — sem rede (a conferencia e substituida)."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch(api_keys, "load_api_key", lambda *_a, **_k: "")
+
+    def abre(self):
+        janela = self.app.open_settings_window()
+        self.pump()
+        self.addCleanup(lambda: janela.win.destroy() if janela.win.winfo_exists() else None)
+        return janela
+
+    def espera_resultado(self, janela, tentativas=50):
+        for _ in range(tentativas):
+            self.pump()
+            if janela.btn_test_keys.cget("state") == "normal" and "testando" not in janela.test_result_label.cget("text"):
+                return janela.test_result_label.cget("text")
+            time.sleep(0.05)
+        self.fail("o teste das chaves nao terminou: " + janela.test_result_label.cget("text"))
+
+    def test_the_typed_key_and_model_are_checked_and_the_keyless_provider_is_said(self):
+        pedidos = []
+
+        def falso(provider_id, model, api_key=None, **_k):
+            pedidos.append((provider_id, model, api_key))
+            return (provider_id == "deepseek", "chave aceita" if provider_id == "deepseek" else "chave recusada (401)")
+
+        self.patch(settings_window, "check_credentials", falso)
+        janela = self.abre()
+        janela.key_entries["deepseek"].insert(0, " ds-chave-1234 ")
+        janela.model_vars["deepseek"].set("deepseek-flash")
+        janela.key_entries["openai"].insert(0, "oa-chave-5678")
+        janela.btn_test_keys.invoke()
+        texto = self.espera_resultado(janela)
+
+        self.assertEqual(sorted(pedidos), [("deepseek", "deepseek-flash", "ds-chave-1234"), ("openai", "gpt-5", "oa-chave-5678")])
+        self.assertIn("\u2713 DeepSeek: chave aceita", texto)
+        self.assertIn("\u2717 ChatGPT (OpenAI): chave recusada (401)", texto)
+        self.assertIn("Claude (Anthropic): sem chave", texto)
+        self.assertNotIn("ds-chave-1234", texto)
+        self.assertEqual(janela.btn_test_keys.cget("state"), "normal")
+
+    def test_without_any_key_nothing_is_asked(self):
+        chamadas = []
+        self.patch(settings_window, "check_credentials", lambda *a, **k: chamadas.append(a) or (True, "x"))
+        janela = self.abre()
+        janela.btn_test_keys.invoke()
+        self.pump()
+        self.assertEqual(chamadas, [])
+        self.assertEqual(janela.test_result_label.cget("text").count("sem chave"), 3)
+        self.assertEqual(janela.btn_test_keys.cget("state"), "normal")
+
+
 class ProviderDialogTests(MainWindowTestCase):
     """O dialogo do "Iniciar tradução" (ROADMAP 28.7): so com chave, sempre
     com chave, e a escolha nunca e um motor sem chave."""

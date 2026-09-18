@@ -863,7 +863,9 @@ guarda base64. Uma variavel de ambiente (`ANTHROPIC_API_KEY`,
 Configuracoes nunca LE a chave para o campo: o campo nasce vazio, o
 placeholder diz o estado ("não configurada", "gravada ****wxyz", "do
 ambiente", "ilegível nesta máquina"), o que se digita e gravado e sai do
-campo, e "apagar" e uma caixa a parte. O log da execucao mostra
+campo, e "apagar" e uma caixa a parte; "Testar chaves e modelos" (K2) confere
+o que esta nos campos por uma requisicao gratuita e mostra so o veredito. O
+log da execucao mostra
 `chave ****wxyz` e o resumo de tokens; o dialogo mostra o modelo. Um 401 e
 FATAL para a execucao: o provedor para de chamar a API, cada lote volta
 `None` e o disjuntor (B3) encerra com o motivo no log — insistir seria pagar
@@ -2432,6 +2434,8 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | M4 | Toda opcao do usuario (`USER_OPTION_SECTIONS`) tem um controle na tela de Configuracoes; a tela grava por `update_settings`, valida a requebra pela regra do leitor, aplica o tema so depois de gravar e o programa abre no tema gravado | Custo: `utf8_bom` e `wrap_columns` so existiam no JSON editado a mao — o mesmo que o Bloco de Notas ja apagou (ROADMAP 28.10) |
 | M6 | Com chave configurada, "Iniciar tradução" e "Reprocessar falhas" perguntam o motor SEMPRE (Google ou um modelo, o da ultima execucao pre-selecionado; provedor sem chave desligado e dito); sem chave nao perguntam; Cancelar nao comeca; SDK ausente e recusado antes; a execucao grava `provedor:modelo` | Risco: trocar de motor em silencio — a licao de M1 — numa execucao que custa dinheiro (ROADMAP 28.7) |
 | K1 | A chave de API nunca aparece inteira em log, configuracoes ou dialogo: vive em `chaves-api.json` cifrada (DPAPI), a tela nunca a le para o campo, o log ve `****wxyz`; a variavel de ambiente vence; um 401 para as chamadas da execucao | Risco: uma chave paga em texto claro num JSON que vai para backup e para o Bloco de Notas (ROADMAP 28.7) |
+| K2 | "Testar chaves e modelos" (Configuracoes) confere chave e nome do modelo de cada provedor que tem chave — a digitada vale sobre a gravada, sem gravar nada — por uma requisicao GRATUITA (a API de modelos; na DeepSeek, a lista), na thread de fundo com o resultado voltando pela fila; o provedor sem chave e dito; o veredito nunca contem a chave | Custo: uma chave colada errada ou um nome de modelo aposentado so apareciam no meio de uma execucao, depois do dialogo de custo, como 401/404 fatal (ROADMAP 28.7) |
+| K2 | "Testar chaves e modelos" (Configuracoes) confere chave e nome do modelo de cada provedor que tem chave — a digitada vale sobre a gravada, sem gravar nada — por uma requisicao GRATUITA (a API de modelos; na DeepSeek, a lista), na thread de fundo com o resultado voltando pela fila; o provedor sem chave e dito; o veredito nunca contem a chave | Custo: uma chave colada errada ou um nome de modelo aposentado so apareciam no meio de uma execucao, depois do dialogo de custo, como 401/404 fatal (ROADMAP 28.7) |
 | M7 | Com um modelo de linguagem, a primeira requisicao so sai depois de o usuario ver a estimativa — comentarios fora do cache, tokens e dolares quando o modelo tem preco na tabela datada — e responder "Sim" (dialogo na thread do Tk pela ponte, C1); "Nao" nao envia nada nem abre execucao; com tudo em cache, e com o Google, nao ha pergunta; o fim do log diz "estimado -> real" | Custo: uma execucao de livro custa dezenas de dolares, e o unico numero que o usuario via chegava no fim (ROADMAP 28.7) |
 | M3 | A gravacao nunca sobrescreve um arquivo que existe e nao pode ser lido; um arquivo invalido e posto de lado (`.corrompido-<data>`) antes de o programa seguir, e os dois casos sao avisados | Bug: um `PermissionError` transitorio na leitura virava `{}`, e a gravacao seguinte apagava rascunhos, lista de falhas e preferencias — o desfecho de M2 por outro caminho (ROADMAP 28.1) |
 | X1 | Anotacoes `[%...]` atravessam a traducao byte a byte, ou o comentario conta como falha | Bug: `[%cal Ra1h8]` virava `[%cal Ta1h8]`; `[%eval +0.35]` quebrado antes da API |
@@ -2585,7 +2589,10 @@ X3). O que resta declarado como limite:
   chave de novo. Fora do Windows o arquivo guarda base64 e diz isso.
 - **Os nomes dos modelos sao os que o provedor aceita HOJE**; o campo e livre
   e um nome que deixou de existir e um 404 que aborta a execucao com o
-  motivo no log — a tela nao consulta a lista de modelos do provedor.
+  motivo no log. O que a tela oferece contra isso e o botao "Testar chaves e
+  modelos" (K2): uma requisicao gratuita a API de modelos, que diz se a chave
+  e o nome valem — e para a DeepSeek, que documenta so a lista, o nome e
+  procurado nela. A tela nao preenche o nome sozinha.
 - **"Cancelar" nao alcanca a requisicao em voo** do modelo (ate 120 s de
   `timeout`; o SDK da Anthropic ainda tenta 429 e 5xx duas vezes sozinho);
   vale entre lotes e entre tentativas dos provedores por `requests`.
