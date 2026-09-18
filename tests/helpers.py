@@ -247,8 +247,13 @@ class WorkerFallbackHarness:
     )
     COMMENTS = ["First comment here", "Second comment here", "Third comment here"]
 
-    def run_worker(self, tmp_path, translate, **kwargs):
-        """`kwargs` vao para `run_translation` (o `provider` de 28.7, por exemplo)."""
+    def run_worker(self, tmp_path, translate, ask_yes_no=None, **kwargs):
+        """`kwargs` vao para `run_translation` (o `provider` de 28.7, por exemplo).
+
+        `ask_yes_no` substitui o `askyesno` do dialogo de custo (28.7): por
+        padrao responde "sim"; um teste que queira recusar, ou ler a pergunta,
+        passa a funcao dele.
+        """
         pgn = tmp_path / "game.pgn"
         pgn.write_text(self.PGN, encoding="utf-8")
         app = FakeApp(tmp_path / "cache.db")
@@ -257,18 +262,21 @@ class WorkerFallbackHarness:
         # `FakeRoot.after` executa na hora — sem isto, um teste que force o
         # `[ERRO GERAL]` abre um dialogo modal de verdade e a suite trava em
         # vez de falhar (a mesma armadilha do `setUp` de TranslationWorkerTests;
-        # custou 40 minutos de suite parada em 2026-09-14).
+        # custou 40 minutos de suite parada em 2026-09-14). E `askyesno`, pelo
+        # mesmo motivo: o dialogo de custo de um provedor de modelo e modal.
         originals = (
             translation_worker.translate_text,
             translation_worker.messagebox.showinfo,
             translation_worker.messagebox.showwarning,
             translation_worker.messagebox.showerror,
+            translation_worker.messagebox.askyesno,
         )
         try:
             translation_worker.translate_text = translate
             translation_worker.messagebox.showinfo = lambda *_a, **_k: None
             translation_worker.messagebox.showwarning = lambda *_a, **_k: None
             translation_worker.messagebox.showerror = lambda *_a, **_k: None
+            translation_worker.messagebox.askyesno = ask_yes_no or (lambda *_a, **_k: True)
             translation_worker.run_translation(app, str(pgn), "pt", False, **kwargs)
         finally:
             (
@@ -276,6 +284,7 @@ class WorkerFallbackHarness:
                 translation_worker.messagebox.showinfo,
                 translation_worker.messagebox.showwarning,
                 translation_worker.messagebox.showerror,
+                translation_worker.messagebox.askyesno,
             ) = originals
 
         return app, pgn

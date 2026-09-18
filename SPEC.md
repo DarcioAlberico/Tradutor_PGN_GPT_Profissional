@@ -861,11 +861,42 @@ FATAL para a execucao: o provedor para de chamar a API, cada lote volta
 `None` e o disjuntor (B3) encerra com o motivo no log — insistir seria pagar
 por requisicoes que ninguem vai atender.
 
-**O que nao esta feito, e esta dito**: o portao estrito de ancoras (T6, ainda
-na secao 11) — hoje a correcao de lances (P3) troca a letra e o QA (Q4) avisa
-o lance que sumiu, mas um lance REESCRITO pelo modelo nao e recusado antes de
-gravar; a estimativa de custo antes de iniciar; e os `fallbacks` de recusa da
-API da Anthropic (o piloto nao teve nenhuma em 200 linhas).
+**Garantia T6 — com um modelo de linguagem, um lance reescrito nunca chega
+ao banco.** Depois das regras automaticas, da correcao de lances (P3) e da
+prosa (P5), o worker compara as ancoras de lance do texto ENVIADO — limpo e
+mascarado, o que o modelo viu — com as da resposta (`anchor_divergence`, a
+mesma conta do aviso Q1 do QA, de proposito). Divergiram, o comentario e
+reenviado sozinho UMA vez (um modelo nao e deterministico, e o que errou no
+lote costuma acertar sozinho); divergiram de novo, ou o reenvio nao veio, e
+falha (T2/T3): o comentario fica no idioma original, contado e informado com
+o que sumiu e o que apareceu (`sumiu f3; apareceu f6`). O reenvio sem a
+mascara de nomes (X4) passa pelo mesmo portao, sem outra chance — ele ja e a
+segunda. As tres verificacoes (portao, restauracao das anotacoes, reenvio de
+nomes) moram numa funcao so, `concluir`, usada pelo caminho do lote e pelo
+individual — a licao da secao 10.4 do ROADMAP. **O Google fica fora do
+portao**, com numero: 6 divergencias em 6.500 linhas do banco de
+desenvolvimento, quatro delas o numero colado ao lance que P5 ja desfaz e uma
+um defeito do original; para ele o aviso Q1 na revisao e a medida certa, e um
+portao so tiraria da tela linhas que o revisor edita em segundos.
+
+**Garantia M7 — a primeira requisicao a um modelo so sai depois da
+estimativa.** Depois da carga do cache — o que ja esta no banco nao vai para
+a API e nao entra na conta — e antes de abrir a linha da execucao (Z5), o
+worker conta os comentarios que vao mesmo ser enviados (limpos, como a API os
+recebe), estima tokens e dolares (`llm_costs`: uma regra de tres calibrada no
+piloto — 0,91 token de entrada e 0,54 de saida por caractere de original, 36 %
+da entrada lida do cache — e uma tabela de precos com data, `PRICES_DATED`)
+e pergunta num `askyesno` levado a thread do Tk pela ponte
+`confirm_on_main_thread` (C1). "Nao" nao envia nada nem abre execucao; com
+tudo em cache, e com o Google, nao ha pergunta. Um modelo fora da tabela
+recebe os tokens e "sem preco na tabela" — nunca um numero inventado. No fim
+o log escreve "estimado ~US$ X, real US$ Y", o real calculado sobre o que o
+provedor contou (`Usage.input_tokens` e a entrada NAO cacheada nos dois
+protocolos; leitura e escrita do cache tem preco proprio).
+
+**O que nao esta feito, e esta dito**: os `fallbacks` de recusa da API da
+Anthropic (o piloto nao teve nenhuma em 200 linhas; uma recusa hoje e uma
+falha de lote, que o worker trata como a rede caida).
 
 ## 4. Zerar o banco e zerar o glossario
 
@@ -2299,6 +2330,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | T2 | Falhas contabilizadas e exibidas | Bug: sucesso reportado com PGN bilingue |
 | T4 | A lista de falhas sobrevive a execucao, e so ela e reprocessada | Custo: reexecutar tudo por causa de dois arquivos |
 | T5 | Nenhuma ferramenta de escrita em massa roda durante uma traducao | Bug: restaurar um backup durante uma execucao produz um banco que nao e nem um nem outro |
+| T6 | Com um modelo de linguagem, uma traducao cujas ancoras de lance diferem das do texto enviado nunca e gravada: um reenvio sozinho, depois falha (T2/T3) com o que sumiu e o que apareceu no log; o reenvio sem nomes (X4) passa pelo mesmo portao; os dois caminhos (lote e individual) fazem as mesmas verificacoes, e o Google fica fora | Risco: um modelo pode "corrigir" o lance que julga errado, e o texto le bem e diz outra coisa — o erro mais grave que um comentario de xadrez pode ter (ROADMAP 28.7) |
 | P1 | O par (original, origem, destino) e a identidade da traducao | Limite: o mesmo texto em duas linguas era uma linha so |
 | P2 | Declarar o idioma adota o cache existente em vez de paga-lo de novo | Risco: a mudanca de chave cobrar 201.607 traducoes ja feitas |
 | P5 | As normalizacoes de prosa — espaco entre numero/reticencia e lance, `cavalo-d5` -> `cavalo de d5`, `U+200B` — so agem onde o original prova a forma (mesmo lance, mesma casa, nenhum `U+200B` la), e o hifen so com destino `pt` | Bug: 111 lances colados, 131 hifens e 68 espacos de largura zero na saida da maquina, zero no original; a revisao consertava um a um (ROADMAP 28.2) |
@@ -2391,6 +2423,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | M4 | Toda opcao do usuario (`USER_OPTION_SECTIONS`) tem um controle na tela de Configuracoes; a tela grava por `update_settings`, valida a requebra pela regra do leitor, aplica o tema so depois de gravar e o programa abre no tema gravado | Custo: `utf8_bom` e `wrap_columns` so existiam no JSON editado a mao — o mesmo que o Bloco de Notas ja apagou (ROADMAP 28.10) |
 | M6 | Com chave configurada, "Iniciar tradução" e "Reprocessar falhas" perguntam o motor SEMPRE (Google ou um modelo, o da ultima execucao pre-selecionado; provedor sem chave desligado e dito); sem chave nao perguntam; Cancelar nao comeca; SDK ausente e recusado antes; a execucao grava `provedor:modelo` | Risco: trocar de motor em silencio — a licao de M1 — numa execucao que custa dinheiro (ROADMAP 28.7) |
 | K1 | A chave de API nunca aparece inteira em log, configuracoes ou dialogo: vive em `chaves-api.json` cifrada (DPAPI), a tela nunca a le para o campo, o log ve `****wxyz`; a variavel de ambiente vence; um 401 para as chamadas da execucao | Risco: uma chave paga em texto claro num JSON que vai para backup e para o Bloco de Notas (ROADMAP 28.7) |
+| M7 | Com um modelo de linguagem, a primeira requisicao so sai depois de o usuario ver a estimativa — comentarios fora do cache, tokens e dolares quando o modelo tem preco na tabela datada — e responder "Sim" (dialogo na thread do Tk pela ponte, C1); "Nao" nao envia nada nem abre execucao; com tudo em cache, e com o Google, nao ha pergunta; o fim do log diz "estimado -> real" | Custo: uma execucao de livro custa dezenas de dolares, e o unico numero que o usuario via chegava no fim (ROADMAP 28.7) |
 | M3 | A gravacao nunca sobrescreve um arquivo que existe e nao pode ser lido; um arquivo invalido e posto de lado (`.corrompido-<data>`) antes de o programa seguir, e os dois casos sao avisados | Bug: um `PermissionError` transitorio na leitura virava `{}`, e a gravacao seguinte apagava rascunhos, lista de falhas e preferencias — o desfecho de M2 por outro caminho (ROADMAP 28.1) |
 | X1 | Anotacoes `[%...]` atravessam a traducao byte a byte, ou o comentario conta como falha | Bug: `[%cal Ra1h8]` virava `[%cal Ta1h8]`; `[%eval +0.35]` quebrado antes da API |
 | X2 | Comentario esvaziado pela limpeza sai do arquivo sem deixar `{}` | Sujeira: o PGN gerado saia pontilhado de `{}` |
@@ -2547,12 +2580,22 @@ X3). O que resta declarado como limite:
 - **"Cancelar" nao alcanca a requisicao em voo** do modelo (ate 120 s de
   `timeout`; o SDK da Anthropic ainda tenta 429 e 5xx duas vezes sozinho);
   vale entre lotes e entre tentativas dos provedores por `requests`.
-- **Nao ha estimativa de custo antes de iniciar**: o log diz no fim quantos
-  tokens a execucao gastou; a fatura e do provedor. O piloto mediu US$ 0,0034
-  por linha com o `claude-opus-5` — ~US$ 25 por livro de 7.500.
-- **O portao estrito de ancoras (T6) nao existe**: um lance que o modelo
-  reescreva em vez de traduzir passa por P3 (que so troca letra) e e o QA
-  (Q4) que avisa depois de gravado.
+- **A estimativa de custo (M7) e uma regra de tres, e a tabela de precos tem
+  data.** Os tokens por caractere vem do piloto com o `claude-opus-5`
+  (US$ 0,0034 por linha; ~US$ 25 por livro de 7.500) e valem como estimativa
+  para os tres provedores, cada um com o seu tokenizador; os precos sao os
+  das paginas dos provedores em `PRICES_DATED` (`llm_costs.PRICE_TABLE`), e
+  a DeepSeek ainda cobra a metade fora do horario de pico — a tabela traz o
+  pico. Um modelo fora da tabela (ou um nome novo) mostra tokens e "sem preco
+  na tabela"; a fatura do provedor e o que vale, e o log diz isso nas duas
+  pontas.
+- **O portao de ancoras (T6) ve a ancora, nao a letra**: `Nf3 -> Bf3` passa
+  por ele, e e P3 quem corrige a letra pelo original — com o idioma de origem
+  declarado; em "Detectar" a letra trocada fica para o aviso Q4. E o portao e
+  estrito de proposito: um original malformado (`Ng5+which`, sem espaco, cujo
+  `+` nao entra na ancora do original) pode ser recusado nas duas tentativas
+  e ficar no idioma original para o revisor traduzir a mao — o preco de
+  nunca gravar um lance reescrito com cara de certo.
 
 **Idioma de origem**
 
@@ -2865,15 +2908,18 @@ releitura, o destino da execucao contra um radio ja trocado, e a ordem
 feito/total — que no fim da execucao sao o mesmo numero); K1 e B5 em
 2026-09-16, com o provedor de 28.7 (27 testes headless em `test_llm.py`, 4 do
 worker, 7 de janela), mais M6, que nao estava planejada e nasceu do pedido de
-escolher o motor a cada execucao; T6 fica, porque o portao estrito de ancoras
-nao foi feito (secao 3.8 diz o que existe no lugar). Cada uma das que ficam esta escrita
-como o teste que a fara migrar — "falha sem a correcao" —, e as
-que dependem de medicao no banco de dev dizem qual e o comportamento
-testavel e qual e o numero que fica so no ROADMAP.
-
-| # | Garantia planejada | Item | Como o teste falha sem ela |
-|---|---|---|---|
-| T6 | Um provedor estrito nunca grava uma traducao cujo multiconjunto de ancoras difere do original | 28.7 | Provedor falso que devolve `Nf6` para `Nf3`: nada gravado, `failed_count == 1`, PGN com o original |
+escolher o motor a cada execucao; **T6 em 2026-09-18**, com o teste que esta
+tabela pedia (provedor falso que devolve `Nf6` para `Nf3`: nada gravado, um
+falhado, PGN com o original) mais quatro — a segunda chance que acerta, o
+caminho individual, o reenvio sem nomes e o Google fora do portao — e 6 de
+notacao para `anchor_divergence`, 7 mutacoes mortas; e **M7** no mesmo dia,
+que nao estava planejada e nasceu do "estimativa de custo antes de iniciar"
+de 28.7, com 4 testes do worker, 7 de `llm_costs` e 9 mutacoes mortas.
+**Nenhuma garantia planejada esta pendente em 2026-09-18.** A regra para as
+proximas continua: cada uma entra aqui escrita como o teste que a fara migrar
+— "falha sem a correcao" —, e as que dependem de medicao no banco de dev
+dizem qual e o comportamento testavel e qual e o numero que fica so no
+ROADMAP.
 
 **Ate 2026-09-14 o registro era o seguinte.** As nove garantias da revisao de 2026-07-31 — **F12**
 (22.1), **Q3** (22.2), **F13** (22.3), **F14** (22.4), **F15** (22.5), **F16**

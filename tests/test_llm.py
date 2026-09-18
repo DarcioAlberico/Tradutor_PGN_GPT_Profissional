@@ -20,7 +20,7 @@ from unittest import mock
 
 from helpers import setup_module_sandbox, teardown_module_sandbox
 
-from tradutor_pgn import api_keys, llm_prompt, llm_providers, settings
+from tradutor_pgn import api_keys, llm_costs, llm_prompt, llm_providers, settings
 from tradutor_pgn.llm_providers import (
     GOOGLE_PROVIDER,
     PROVIDERS,
@@ -206,6 +206,24 @@ class ChatCompletionsTranslatorTests(unittest.TestCase):
         self.assertEqual(t.usage.requests, 1)
         self.assertEqual((t.usage.input_tokens, t.usage.output_tokens), (100, 40))
 
+    def test_cached_prompt_tokens_are_taken_out_of_the_input(self):
+        """`prompt_tokens` inclui o cache; `Usage.input_tokens` e so o que foi
+        cobrado inteiro — a mesma conta da Anthropic, para o custo ser uma so."""
+        t = self.tradutor([resposta_ok(
+            [{"id": 1, "traducao": "um"}],
+            usage={"prompt_tokens": 1000, "completion_tokens": 40,
+                   "prompt_tokens_details": {"cached_tokens": 900}},
+        )], provider="openai")
+        t.translate("one", "pt")
+        self.assertEqual((t.usage.input_tokens, t.usage.cache_read_tokens), (100, 900))
+        t = self.tradutor([resposta_ok(
+            [{"id": 1, "traducao": "um"}],
+            usage={"prompt_tokens": 500, "completion_tokens": 40, "prompt_cache_hit_tokens": 450},
+        )])
+        t.translate("one", "pt")
+        self.assertEqual((t.usage.input_tokens, t.usage.cache_read_tokens), (50, 450))
+        self.assertIn("450 lidos do cache", t.usage.summary())
+
     def test_openai_uses_the_new_output_limit_field(self):
         t = self.tradutor([resposta_ok([{"id": 1, "traducao": "um"}])], provider="openai")
         t.translate("one", "pt")
@@ -295,7 +313,10 @@ class FakeAnthropicMessages:
 def resposta_anthropic(itens, stop_reason="end_turn"):
     return types.SimpleNamespace(
         content=[types.SimpleNamespace(type="text", text=json.dumps({"itens": itens}))],
-        usage=types.SimpleNamespace(input_tokens=200, output_tokens=50, cache_read_input_tokens=150),
+        usage=types.SimpleNamespace(
+            input_tokens=200, output_tokens=50, cache_read_input_tokens=150,
+            cache_creation_input_tokens=30,
+        ),
         stop_reason=stop_reason,
     )
 
@@ -319,6 +340,8 @@ class AnthropicTranslatorTests(unittest.TestCase):
             self.assertEqual(bloco["cache_control"], {"type": "ephemeral"})
         self.assertEqual(pedido["output_config"]["format"]["schema"], llm_prompt.ESQUEMA_DO_LOTE)
         self.assertEqual(t.usage.cache_read_tokens, 150)
+        self.assertEqual(t.usage.cache_write_tokens, 30)
+        self.assertIn("30 escritos no cache", t.usage.summary())
 
     def test_refusal_and_max_tokens_are_failures(self):
         t = self.tradutor([resposta_anthropic([], stop_reason="refusal")])
@@ -342,6 +365,77 @@ class AnthropicTranslatorTests(unittest.TestCase):
         self.assertEqual(len(t._client.messages.chamadas), 1)
         for linha in self.logs:
             self.assertNotIn(CHAVE, linha)
+
+
+# ================================================================= custo
+
+
+class CostTests(unittest.TestCase):
+    """A estimativa antes de iniciar e o "estimado -> real" do fim (28.7)."""
+
+    def test_the_price_matches_the_exact_id_or_the_id_with_a_date(self):
+        opus = llm_costs.PRICE_TABLE["claude-opus-5"]
+        self.assertEqual(llm_costs.price_for("claude-opus-5"), opus)
+        self.assertEqual(llm_costs.price_for(" Claude-Opus-5-20260401 "), opus)
+        self.assertEqual(llm_costs.price_for("gpt-5-mini"), llm_costs.PRICE_TABLE["gpt-5-mini"])
+        self.assertNotEqual(llm_costs.price_for("gpt-5-mini"), llm_costs.PRICE_TABLE["gpt-5"])
+        for fora in ("gpt-5-turbo", "modelo-falso", "", None):
+            with self.subTest(modelo=fora):
+                self.assertIsNone(llm_costs.price_for(fora))
+
+    def test_the_defaults_of_the_three_providers_have_a_price(self):
+        """Um padrao sem preco mostraria "sem preco na tabela" na primeira
+        execucao de todo mundo."""
+        for modelo in settings.LLM_DEFAULTS.values():
+            with self.subTest(modelo=modelo):
+                self.assertIsNotNone(llm_costs.price_for(modelo))
+
+    def test_the_estimate_reproduces_the_pilot(self):
+        """200 comentarios de 202 caracteres: os tokens e os US$ 0,67 do
+        piloto, menos o que o arredondamento leva."""
+        estimativa = llm_costs.estimate_cost("claude-opus-5", ["x" * 202] * 200 + ["", None])
+        self.assertEqual((estimativa.comments, estimativa.characters), (200, 40_400))
+        self.assertAlmostEqual(estimativa.input_tokens, 36_844, delta=100)
+        self.assertAlmostEqual(estimativa.output_tokens, 21_823, delta=100)
+        self.assertAlmostEqual(estimativa.cost_usd, 0.67, places=2)
+
+    def test_a_model_off_the_table_gets_tokens_and_no_dollars(self):
+        estimativa = llm_costs.estimate_cost("modelo-falso", ["abc"])
+        self.assertEqual((estimativa.comments, estimativa.input_tokens > 0), (1, True))
+        self.assertIsNone(estimativa.cost_usd)
+        texto = llm_costs.describe_estimate(estimativa, "Falso", "modelo-falso", 0)
+        self.assertIn("sem preço na tabela para o modelo 'modelo-falso'", texto)
+        self.assertNotIn("US$", texto)
+        self.assertIn("sem preco na tabela", llm_costs.describe_estimate_line(estimativa, "modelo-falso", 0))
+
+    def test_the_dialog_text_names_the_cache_and_the_date_of_the_table(self):
+        estimativa = llm_costs.estimate_cost("claude-opus-5", ["x" * 202] * 200)
+        texto = llm_costs.describe_estimate(estimativa, "Claude (Anthropic)", "claude-opus-5", 287)
+        self.assertIn("Motor: Claude (Anthropic), modelo claude-opus-5.", texto)
+        self.assertIn("200 (287 já estavam no banco e não serão enviados)", texto)
+        self.assertIn("cerca de US$ 0,67", texto)
+        self.assertIn(llm_costs.PRICES_DATED, texto)
+        linha = llm_costs.describe_estimate_line(estimativa, "claude-opus-5", 287)
+        self.assertEqual(linha.count(chr(10)), 0, "uma linha so, para o log")
+        self.assertIn("200 comentarios para a API (287 no banco)", linha)
+
+    def test_the_actual_cost_prices_the_cache_separately(self):
+        uso = llm_providers.Usage(
+            requests=10, input_tokens=23_654, cache_read_tokens=13_190,
+            cache_write_tokens=0, output_tokens=21_823,
+        )
+        self.assertAlmostEqual(llm_costs.actual_cost("claude-opus-5", uso), 0.6704, places=3)
+        uso.cache_write_tokens = 1_000_000
+        self.assertAlmostEqual(llm_costs.actual_cost("claude-opus-5", uso), 0.6704 + 6.25, places=3)
+        self.assertIsNone(llm_costs.actual_cost("modelo-falso", uso))
+        self.assertIn("estimado ~US$ 0,50, real US$ 6,92", llm_costs.describe_outcome("claude-opus-5", 0.5, uso))
+        self.assertIn("sem preco na tabela", llm_costs.describe_outcome("modelo-falso", 0.5, uso))
+        self.assertIn("sem preco na tabela", llm_costs.describe_outcome("claude-opus-5", None, uso))
+
+    def test_dollars_are_written_the_brazilian_way(self):
+        self.assertEqual(llm_costs.format_usd(1234.5), "US$ 1.234,50")
+        self.assertEqual(llm_costs.format_usd(0.6704), "US$ 0,67")
+        self.assertEqual(llm_costs.format_usd(0), "US$ 0,00")
 
 
 # ============================================================ build/config

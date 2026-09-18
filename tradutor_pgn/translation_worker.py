@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -11,7 +12,12 @@ from .annotation_mask import (
     mask_annotations,
     restore_annotations,
 )
-from .chess_notation import fix_move_notation, supports_notation
+from .chess_notation import (
+    anchor_divergence,
+    describe_anchor_divergence,
+    fix_move_notation,
+    supports_notation,
+)
 from .database import (
     RUN_ABORTED,
     RUN_CANCELED,
@@ -55,6 +61,7 @@ from itertools import chain
 
 from .app_config import TRANSLATION_REQUEST_DELAY_SECONDS  # noqa: F401 (compat)
 from .failed_runs import build_failed_run_record, save_failed_run
+from .llm_costs import describe_estimate, describe_estimate_line, describe_outcome, estimate_cost
 from .llm_providers import GOOGLE_PROVIDER, build_translator, model_setting_key
 from .pgn_positions import chess_available, compute_comment_fens
 from .settings import (
@@ -119,6 +126,33 @@ def set_progress_text(app, text):
     if rotulo is None:
         return
     app.root.after(0, lambda t=text: rotulo.configure(text=t))
+
+
+def confirm_on_main_thread(app, ask):
+    """Faz a pergunta `ask()` na thread do Tk e espera a resposta (garantia C1).
+
+    O worker roda numa thread propria e nao pode abrir dialogo; a thread do Tk
+    nao pode ficar esperando por ninguem. A ponte: `after(0)` agenda a
+    pergunta na thread principal e um `Event` segura o worker ate ela ser
+    respondida — o dialogo e modal, entao a janela de tras nao recebe clique
+    nesse meio-tempo. Um cancelamento que chegue enquanto se espera vale
+    "nao", e uma pergunta que quebre tambem. Nos testes o `after` do `FakeRoot`
+    executa na hora, e o `wait` nem chega a esperar.
+    """
+    resposta = {"valor": False}
+    pronto = threading.Event()
+
+    def perguntar():
+        try:
+            resposta["valor"] = bool(ask())
+        finally:
+            pronto.set()
+
+    app.root.after(0, perguntar)
+    while not pronto.wait(0.2):
+        if app.cancel_flag.is_set():
+            return False
+    return resposta["valor"]
 
 
 def _first_pass(app, pgn_files):
@@ -233,6 +267,9 @@ def run_translation(
     # uma linha que outro livro reaproveitou.
     run_id = None
     translated_count = 0
+    # A estimativa de custo (ROADMAP 28.7) so existe com modelo de linguagem;
+    # fora do `try` porque o resumo do fim a compara com o real.
+    custo_estimado = None
     aborted_by_api = False
     crashed = False
     http_session = requests.Session()
@@ -463,6 +500,36 @@ def run_translation(
             f"traduzidos"
         )
 
+        # O custo, DEPOIS da carga do cache e ANTES da primeira requisicao
+        # (ROADMAP 28.7): o que ja esta no banco nao vai para a API e nao entra
+        # na conta — antes do cache a estimativa cobraria o que o programa nao
+        # vai pagar. O dialogo e bloqueante, na thread do Tk pela ponte (C1),
+        # e a execucao so continua com o "Sim"; recusada, nada foi enviado nem
+        # aberto (a linha da execucao vem depois). Sem nada a enviar nao ha o
+        # que perguntar. O texto limpo, e nao o cru: e o que a API recebe.
+        if llm is not None:
+            a_enviar = [
+                clean_comment_for_translation(comentario, cleanup_rules)
+                for comentario in dict.fromkeys(comentarios_do_lote())
+                if comentario not in app.translation_cache
+            ]
+            estimativa = estimate_cost(llm.model, a_enviar)
+            custo_estimado = estimativa.cost_usd
+            app.log_message(describe_estimate_line(estimativa, llm.model, reaproveitaveis))
+            if estimativa.comments:
+                pergunta = (
+                    describe_estimate(estimativa, llm.spec.label, llm.model, reaproveitaveis)
+                    + "\n\nIniciar a tradução?"
+                )
+                if not confirm_on_main_thread(
+                    app, lambda: messagebox.askyesno("Custo estimado", pergunta)
+                ):
+                    canceled = True
+                    app.log_message(
+                        "Traducao nao iniciada: a estimativa de custo foi recusada."
+                    )
+                    return
+
         # A correcao de lances precisa do idioma de origem declarado: ela le os
         # lances do comentario ORIGINAL para saber o que cada letra significa, e
         # sem saber em que alfabeto ele esta nao ha o que ler. Dito uma vez, no
@@ -503,6 +570,8 @@ def run_translation(
         move_fixes = 0
         prose_fixes = 0
         names_resent = 0
+        anchors_resent = 0
+        anchors_rejected = 0
         filled_empty_count = 0
         cache_count = 0
         cleaned_empty_count = 0
@@ -564,6 +633,32 @@ def run_translation(
             )
             return translation, corrigidos, consertos
 
+        def portao_de_ancoras(translation, masked):
+            """Garantia T6: com um modelo de linguagem, um lance reescrito e recusado.
+
+            Compara as ancoras de lance do texto ENVIADO — limpo e mascarado,
+            o que o modelo viu — com as da resposta ja passada por regras,
+            correcao de lances e prosa: dessas tres so a letra da peca e o
+            espaco do lance mudam, e nenhum dos dois toca na ancora. Devolve a
+            divergencia por escrito, ou `None` quando bate.
+
+            So para os modelos, de proposito. O Google troca a letra e cola o
+            numero no lance — o que P3 e P5 consertam — e nao inventa lance:
+            medido no banco de desenvolvimento, 6 divergencias em 6.500,
+            quatro delas o numero colado que a prosa ja desfaz e uma um defeito
+            do ORIGINAL; para ele, o aviso Q1 do QA na revisao e a medida
+            certa. Um modelo pode "corrigir" o lance que julga errado, e esse
+            texto le bem e diz outra coisa — o erro mais grave que um
+            comentario de xadrez pode ter, e que nao pode chegar ao banco com
+            cara de certo.
+            """
+            if llm is None:
+                return None
+            divergencia = anchor_divergence(masked, translation)
+            if divergencia is None:
+                return None
+            return describe_anchor_divergence(divergencia)
+
         def resend_without_names(original, tokens):
             """Segunda tentativa quando um sentinela de NOME nao voltou (X4).
 
@@ -573,12 +668,14 @@ def run_translation(
             traduziu e o defeito que existia ANTES da mascara — e menor do que
             um comentario inteiro no idioma original. Entao, se os tokens que
             faltaram eram so nomes, o comentario e reenviado sozinho, com as
-            anotacoes ainda mascaradas e os nomes crus. O que volta passa pela
-            mesma restauracao; se ainda falhar, ai e falha (T2/T3).
+            anotacoes ainda mascaradas e os nomes crus. O que volta passa pelo
+            mesmo portao de ancoras (sem outra chance: esta JA e a segunda) e
+            pela mesma restauracao; se ainda falhar, ai e falha (T2/T3).
 
             Devolve `(traducao, corrigidos, consertos)` ou `None`. Custa uma
             requisicao, e so acontece quando ha nome na mascara.
             """
+            nonlocal anchors_rejected
             if not has_player_name_tokens(tokens):
                 return None
             cleaned = clean_comment_for_translation(original, cleanup_rules)
@@ -587,9 +684,77 @@ def run_translation(
             if not translated:
                 return None
             translation, corrigidos, consertos = acabar(translated, original)
+            divergencia = portao_de_ancoras(translation, masked)
+            if divergencia is not None:
+                anchors_rejected += 1
+                app.log_message(
+                    f"  - Aviso: o reenvio sem a mascara de nomes reescreveu um "
+                    f"lance ({divergencia})."
+                )
+                return None
             translation, intactas = restore_annotations(translation, annotation_only)
             if not intactas:
                 return None
+            return translation, corrigidos, consertos
+
+        def concluir(translated, original, masked, tokens):
+            """Da resposta da API ao texto gravavel — ou `None`, com o motivo no log.
+
+            As MESMAS etapas nos dois caminhos, o do lote e o individual, de
+            proposito (a licao da secao 10.4 do ROADMAP): `acabar` (regras
+            automaticas, correcao de lances, prosa), o portao de ancoras (T6)
+            e a restauracao verificada das anotacoes (X1), que e o ULTIMO
+            passo antes de gravar. Cada verificacao tem UMA segunda chance, e
+            cada segunda chance custa uma requisicao: o lance reescrito e
+            reenviado sozinho — um modelo nao e deterministico, e o que errou
+            uma vez costuma acertar na segunda —, e o sentinela de nome
+            engolido e reenviado sem a mascara de nomes (X4). Depois disso e
+            falha (T2/T3): o comentario fica no idioma original, contado e
+            informado, e nada com cara de certo chega ao banco.
+
+            Devolve `(translation, corrigidos, consertos)`.
+            """
+            nonlocal batch_api_requests, names_resent, anchors_resent, anchors_rejected
+            translation, corrigidos, consertos = acabar(translated, original)
+            divergencia = portao_de_ancoras(translation, masked)
+            if divergencia is not None:
+                app.log_message(
+                    f"  - Aviso: lance reescrito pelo modelo ({divergencia}), "
+                    f"reenviando sozinho: \"{original[:60]}\""
+                )
+                outra = traduzir(masked)
+                batch_api_requests += 1
+                anchors_resent += 1
+                if not outra:
+                    anchors_rejected += 1
+                    app.log_message(
+                        f"  - [FALHA] O reenvio nao teve resposta; o comentario "
+                        f"fica no idioma original: \"{original[:60]}\""
+                    )
+                    return None
+                translation, corrigidos, consertos = acabar(outra, original)
+                divergencia = portao_de_ancoras(translation, masked)
+                if divergencia is not None:
+                    anchors_rejected += 1
+                    app.log_message(
+                        f"  - [FALHA] Lance reescrito pelo modelo nas duas "
+                        f"tentativas ({divergencia}); o comentario fica no "
+                        f"idioma original: \"{original[:60]}\""
+                    )
+                    return None
+            translation, intactas = restore_annotations(translation, tokens)
+            if not intactas:
+                segunda = resend_without_names(original, tokens)
+                if segunda is None:
+                    app.log_message(
+                        f"  - [FALHA] Anotacoes [%...] ou nomes "
+                        f"nao voltaram intactos da traducao: "
+                        f"\"{original[:60]}\""
+                    )
+                    return None
+                translation, corrigidos, consertos = segunda
+                names_resent += 1
+                batch_api_requests += 1
             return translation, corrigidos, consertos
 
         for pgn_index, pgn_file in enumerate(pgn_files, start=1):
@@ -753,40 +918,22 @@ def run_translation(
                             # (garantia B4). Zerar antes dele, como era, fazia
                             # um grupo pequeno morto nunca contar.
                             consecutive_failed_batches = 0
-                            for (original, _masked, tokens), part in zip(
+                            for (original, masked, tokens), part in zip(
                                 grupo_items, parts
                             ):
                                 # Regras automaticas, correcao de lances e
-                                # normalizacoes de prosa, nessa ordem, depois da
-                                # API e ANTES de gravar: o que vai para o banco e
-                                # para o PGN e o mesmo texto (P3, P5, P7).
-                                translation, corrigidos, consertos = acabar(
-                                    part, original
-                                )
-                                # A restauracao e o ULTIMO passo, e e verificada:
-                                # se a traducao nao devolveu cada sentinela
-                                # exatamente uma vez, gravar seria guardar uma
-                                # anotacao corrompida com cara de certa. O
-                                # comentario conta como falha e fica no idioma
-                                # original (T2/T3) — depois de uma segunda
-                                # chance sem a mascara de nomes (X4).
-                                translation, intactas = restore_annotations(
-                                    translation, tokens
-                                )
-                                if not intactas:
-                                    segunda = resend_without_names(original, tokens)
-                                    if segunda is None:
-                                        failed_count += 1
-                                        failed_files.add(pgn_file)
-                                        app.log_message(
-                                            f"  - [FALHA] Anotacoes [%...] ou nomes "
-                                            f"nao voltaram intactos da traducao: "
-                                            f"\"{original[:60]}\""
-                                        )
-                                        continue
-                                    translation, corrigidos, consertos = segunda
-                                    names_resent += 1
-                                    batch_api_requests += 1
+                                # normalizacoes de prosa, o portao de ancoras e
+                                # a restauracao verificada, nessa ordem, depois
+                                # da API e ANTES de gravar: o que vai para o
+                                # banco e para o PGN e o mesmo texto (P3, P5,
+                                # P7, T6, X1). O que `concluir` recusa conta
+                                # como falha e fica no idioma original (T2/T3).
+                                resultado = concluir(part, original, masked, tokens)
+                                if resultado is None:
+                                    failed_count += 1
+                                    failed_files.add(pgn_file)
+                                    continue
+                                translation, corrigidos, consertos = resultado
                                 move_fixes += corrigidos
                                 prose_fixes += consertos
                                 app.translation_cache[original] = translation
@@ -869,35 +1016,21 @@ def run_translation(
                                 if translated:
                                     respondidos += 1
                                     sem_resposta_seguidas = 0
-                                    translation, corrigidos, consertos = acabar(
-                                        translated, original
-                                    )
-                                    # A mesma verificacao do caminho do lote, e
-                                    # nao por zelo: uma correcao que so
+                                    # As mesmas etapas do caminho do lote, e
+                                    # nao por zelo: uma verificacao que so
                                     # existisse num dos dois daria uma execucao
                                     # cujo resultado depende de a rede ter
                                     # respondido alinhada — a licao da secao
                                     # 10.4 do ROADMAP.
-                                    translation, intactas = restore_annotations(
-                                        translation, tokens
-                                    )
-                                    if not intactas:
-                                        segunda = resend_without_names(original, tokens)
-                                        if segunda is None:
-                                            failed_count += 1
-                                            failed_files.add(pgn_file)
-                                            app.log_message(
-                                                f"  - [FALHA] Anotacoes [%...] ou nomes "
-                                                f"nao voltaram intactos da traducao: "
-                                                f"\"{original[:60]}\""
-                                            )
-                                            wait_seconds = pacer.next_delay()
-                                            time.sleep(wait_seconds)
-                                            batch_wait_time += wait_seconds
-                                            continue
-                                        translation, corrigidos, consertos = segunda
-                                        names_resent += 1
-                                        batch_api_requests += 1
+                                    resultado = concluir(translated, original, masked, tokens)
+                                    if resultado is None:
+                                        failed_count += 1
+                                        failed_files.add(pgn_file)
+                                        wait_seconds = pacer.next_delay()
+                                        time.sleep(wait_seconds)
+                                        batch_wait_time += wait_seconds
+                                        continue
+                                    translation, corrigidos, consertos = resultado
                                     move_fixes += corrigidos
                                     prose_fixes += consertos
                                     app.translation_cache[original] = translation
@@ -1144,9 +1277,20 @@ def run_translation(
         app.log_message(f"Comentarios que falharam: {failed_count}")
         app.log_message(f"Arquivos PGN traduzidos gerados: {generated_files}")
         if llm is not None:
-            # O que o modelo custou, em tokens: a fatura e do provedor, mas o
-            # numero que a explica fica no log da execucao.
+            # O que o modelo custou, em tokens e em dolares — estimado antes,
+            # real agora: a fatura e do provedor, mas o numero que a explica
+            # fica no log da execucao (ROADMAP 28.7).
             app.log_message(f"{llm.spec.label} ({llm.model}): {llm.usage.summary()}")
+            app.log_message(describe_outcome(llm.model, custo_estimado, llm.usage))
+        if anchors_resent or anchors_rejected:
+            # O portao de ancoras (T6) so tem o que dizer com modelo de
+            # linguagem, e so quando agiu: um "0" fixo faria o usuario procurar
+            # o que nao houve.
+            app.log_message(
+                f"Lances reescritos pelo modelo: {anchors_resent} comentario(s) "
+                f"reenviado(s) sozinho(s), {anchors_rejected} recusado(s) e "
+                f"deixado(s) no idioma original"
+            )
         if corrige_lances:
             app.log_message(f"Lances com a letra da peca corrigida: {move_fixes}")
         if names_resent:

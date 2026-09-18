@@ -14,6 +14,8 @@ from tradutor_pgn.annotation_mask import (
 )
 from tradutor_pgn.chess_notation import (
     PIECE_LETTERS,
+    anchor_divergence,
+    describe_anchor_divergence,
     extract_moves,
     move_anchors,
     fix_move_notation,
@@ -704,6 +706,36 @@ class MoveAnchorTests(unittest.TestCase):
         for vazio in ("", None):
             with self.subTest(vazio=vazio):
                 self.assertEqual(move_anchors(vazio), Counter())
+
+
+class AnchorDivergenceTests(unittest.TestCase):
+    """A pergunta do portao estrito (T6) e do aviso Q1: o que sumiu e o que
+    apareceu entre as ancoras dos dois textos."""
+
+    def test_the_same_move_in_two_languages_does_not_diverge(self):
+        self.assertIsNone(anchor_divergence("Best was Nf3 here", "Melhor era Cf3 aqui"))
+
+    def test_a_rewritten_move_is_one_missing_and_one_extra(self):
+        divergencia = anchor_divergence("Best was Nf3", "Melhor era Cf6")
+        self.assertEqual(divergencia, (Counter({("f3", "", ""): 1}), Counter({("f6", "", ""): 1})))
+        self.assertEqual(describe_anchor_divergence(divergencia), "sumiu f3; apareceu f6")
+
+    def test_a_dropped_move_is_only_missing(self):
+        divergencia = anchor_divergence("after Bxf7+ Kxf7", "depois de Bxf7+")
+        self.assertEqual(describe_anchor_divergence(divergencia), "sumiu xf7")
+
+    def test_repetition_counts_as_a_multiset(self):
+        """O original repete `Nf3`; a traducao escreve uma vez: um `f3` sumiu."""
+        divergencia = anchor_divergence("Nf3 and Nf3 again", "Cf3 de novo")
+        self.assertEqual(describe_anchor_divergence(divergencia), "sumiu f3")
+
+    def test_annotations_are_not_moves(self):
+        """`[%cal Ra1h8]` de um lado so nao e divergencia (X1)."""
+        self.assertIsNone(anchor_divergence("good [%cal Ra1h8] Nf3", "bom Cf3"))
+
+    def test_empty_texts_do_not_diverge(self):
+        self.assertIsNone(anchor_divergence("", ""))
+        self.assertIsNone(anchor_divergence(None, "sem lance"))
 
 
 if __name__ == "__main__":

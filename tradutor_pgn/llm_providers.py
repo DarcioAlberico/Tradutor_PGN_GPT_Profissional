@@ -147,17 +147,27 @@ class ChatClient(Protocol):
 
 @dataclass
 class Usage:
-    """Contagem do que a execucao gastou, para o resumo do log."""
+    """Contagem do que a execucao gastou, para o resumo e o custo do log.
+
+    `input_tokens` e a entrada que o provedor cobrou INTEIRA — fora do cache
+    — nos dois protocolos: a Anthropic ja separa leitura e escrita do cache na
+    resposta, e do `prompt_tokens` da OpenAI/DeepSeek (que inclui o cache) o
+    provedor desconta os `cached_tokens`. E o que deixa `llm_costs.actual_cost`
+    fazer uma conta so para os tres.
+    """
 
     requests: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     failures: int = 0
     problems: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         cache = f", {self.cache_read_tokens} lidos do cache" if self.cache_read_tokens else ""
+        if self.cache_write_tokens:
+            cache += f", {self.cache_write_tokens} escritos no cache"
         return (
             f"{self.requests} requisicao(oes), {self.input_tokens} tokens de entrada"
             f"{cache}, {self.output_tokens} de saida, {self.failures} falha(s)"
@@ -298,6 +308,7 @@ class LLMTranslator:
             self.usage.input_tokens += getattr(uso, "input_tokens", 0) or 0
             self.usage.output_tokens += getattr(uso, "output_tokens", 0) or 0
             self.usage.cache_read_tokens += getattr(uso, "cache_read_input_tokens", 0) or 0
+            self.usage.cache_write_tokens += getattr(uso, "cache_creation_input_tokens", 0) or 0
         if getattr(resposta, "stop_reason", None) == "refusal":
             self._failure("a Anthropic recusou o lote (refusal)", log_message)
             return None
@@ -372,12 +383,13 @@ class LLMTranslator:
             self._failure(f"resposta de {self.spec.label} nao e JSON", log_message)
             return None
         uso = dados.get("usage") or {}
-        self.usage.input_tokens += int(uso.get("prompt_tokens") or 0)
-        self.usage.output_tokens += int(uso.get("completion_tokens") or 0)
         detalhes = uso.get("prompt_tokens_details") or {}
-        self.usage.cache_read_tokens += int(
-            detalhes.get("cached_tokens") or uso.get("prompt_cache_hit_tokens") or 0
-        )
+        em_cache = int(detalhes.get("cached_tokens") or uso.get("prompt_cache_hit_tokens") or 0)
+        # `prompt_tokens` INCLUI o que veio do cache; `Usage.input_tokens` e
+        # so o que foi cobrado inteiro (ver o docstring de `Usage`).
+        self.usage.input_tokens += max(0, int(uso.get("prompt_tokens") or 0) - em_cache)
+        self.usage.cache_read_tokens += em_cache
+        self.usage.output_tokens += int(uso.get("completion_tokens") or 0)
         try:
             escolha = dados["choices"][0]
             conteudo = escolha["message"]["content"]

@@ -42,10 +42,12 @@ from tradutor_pgn.pgn_utils import (
     extract_comments_from_file,
     generate_translated_pgn,
     read_pgn_text,
+    translated_output_path,
 )
 from tradutor_pgn import pgn_utils
 from tradutor_pgn import (
     failed_runs,
+    llm_providers,
     translation_worker,
 )
 from helpers import setup_module_sandbox, teardown_module_sandbox
@@ -3259,3 +3261,201 @@ class WorkerProviderTests(WorkerFallbackHarness, unittest.TestCase):
                 stored = self.stored(tmp_path / "cache.db")
         self.assertEqual(stored, {c: c.upper() for c in self.COMMENTS})
         montado.assert_not_called()
+
+    def test_the_cost_is_estimated_after_the_cache_and_asked_before_the_first_request(self):
+        """A pergunta vem DEPOIS da carga do cache — o que ja esta no banco nao
+        entra na conta — e ANTES da primeira requisicao; com tudo em cache nao
+        ha pergunta (ROADMAP 28.7)."""
+        perguntas = []
+
+        def ask(*args, **_k):
+            perguntas.append(args)
+            return True
+
+        falso = FakeLLMTranslator()
+        with unittest.mock.patch.object(translation_worker, "build_translator", return_value=falso):
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                app, _pgn = self.run_worker(tmp_path, self.google_nunca, ask_yes_no=ask, provider="deepseek")
+                self.assertEqual(len(falso.calls), 1)
+                self.assertEqual(len(perguntas), 1)
+                titulo, mensagem = perguntas[0]
+                self.assertEqual(titulo, "Custo estimado")
+                self.assertIn("Motor: Provedor Falso, modelo modelo-falso.", mensagem)
+                self.assertIn("Comentários a traduzir pelo modelo: 3,", mensagem)
+                self.assertIn("sem preço na tabela para o modelo 'modelo-falso'", mensagem)
+                self.assertTrue(mensagem.endswith("Iniciar a tradução?"))
+                self.assertTrue(any(
+                    "Estimativa para o modelo modelo-falso: 3 comentarios para a API (0 no banco)" in l
+                    for l in app.logs
+                ))
+                self.assertTrue(any("Custo: sem preco na tabela para o modelo 'modelo-falso'" in l for l in app.logs))
+                # A ordem: a estimativa depois do cache e antes de abrir a execucao.
+                posicoes = [next(i for i, l in enumerate(app.logs) if marca in l)
+                            for marca in ("Cache carregado", "Estimativa para o modelo", "Processando arquivo")]
+                self.assertEqual(posicoes, sorted(posicoes))
+
+                # Segunda execucao: tudo em cache, nada a enviar, nenhuma pergunta.
+                app, _pgn = self.run_worker(tmp_path, self.google_nunca, ask_yes_no=ask, provider="deepseek")
+                self.assertEqual(len(perguntas), 1, "com tudo em cache nao ha o que perguntar")
+                self.assertEqual(len(falso.calls), 1)
+                self.assertTrue(any("0 comentarios para a API (3 no banco)" in l for l in app.logs))
+
+    def test_declining_the_estimate_sends_nothing_and_opens_no_run(self):
+        falso = FakeLLMTranslator()
+        with unittest.mock.patch.object(translation_worker, "build_translator", return_value=falso):
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                app, _pgn = self.run_worker(
+                    tmp_path, self.google_nunca, ask_yes_no=lambda *_a, **_k: False, provider="openai"
+                )
+                stored = self.stored(tmp_path / "cache.db")
+                execucoes = self.execucoes(tmp_path)
+
+        self.assertEqual(falso.calls, [])
+        self.assertEqual(stored, {})
+        self.assertEqual(execucoes, [], "recusada antes de abrir a execucao")
+        self.assertTrue(any("Traducao nao iniciada: a estimativa de custo foi recusada." in l for l in app.logs))
+        self.assertFalse(app.is_processing)
+        self.assertEqual(app.progress.value, 0.0)
+
+    def test_the_google_run_never_asks_about_cost(self):
+        perguntas = []
+
+        def ask(*args, **_k):
+            perguntas.append(args)
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.run_worker(Path(tmp), lambda text, *_a, **_k: text.upper(), ask_yes_no=ask)
+        self.assertEqual(perguntas, [])
+
+    def test_a_priced_model_reports_estimated_and_real_dollars(self):
+        falso = FakeLLMTranslator()
+        falso.model = "claude-opus-5"
+        falso.usage = llm_providers.Usage()
+        with unittest.mock.patch.object(translation_worker, "build_translator", return_value=falso):
+            with tempfile.TemporaryDirectory() as tmp:
+                app, _pgn = self.run_worker(Path(tmp), self.google_nunca, provider="anthropic")
+        self.assertTrue(any(
+            l.startswith("Custo em dolares: estimado ~US$ 0,00, real US$ 0,00") for l in app.logs
+        ), app.logs)
+
+
+class WorkerAnchorGateTests(WorkerFallbackHarness, unittest.TestCase):
+    """Garantia T6: com um modelo de linguagem, um lance reescrito nunca chega
+    ao banco — uma segunda chance sozinho, depois falha (T2/T3)."""
+
+    PGN = '[Event "Test"]\n\n1. e4 {Best was Nf3 here} e5 {Plain comment} *\n'
+    COMMENTS = ["Best was Nf3 here", "Plain comment"]
+
+    def google_nunca(self, *_a, **_k):
+        raise AssertionError("o Google foi chamado numa execucao com provedor de modelo")
+
+    @staticmethod
+    def reescreve(part):
+        return "Melhor era Cf6 aqui" if "Nf3" in part else f"<{part}>"
+
+    def roda_com_modelo(self, respostas):
+        falso = FakeLLMTranslator(respostas)
+        with unittest.mock.patch.object(translation_worker, "build_translator", return_value=falso):
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                app, pgn = self.run_worker(tmp_path, self.google_nunca, provider="deepseek")
+                stored = self.stored(tmp_path / "cache.db")
+                saida = Path(translated_output_path(str(pgn), "pt"))
+                gerado = saida.read_text(encoding="utf-8") if saida.exists() else None
+        return app, falso, stored, gerado
+
+    def test_a_rewritten_move_is_resent_once_and_then_refused(self):
+        def respostas(text):
+            return " ||| ".join(self.reescreve(p) for p in text.split(" ||| "))
+
+        app, falso, stored, gerado = self.roda_com_modelo(respostas)
+
+        self.assertEqual(falso.calls, [" ||| ".join(self.COMMENTS), "Best was Nf3 here"],
+                         "o lote e depois o comentario sozinho, uma vez")
+        self.assertEqual(stored, {"Plain comment": "<Plain comment>"}, "nada com o lance reescrito")
+        self.assertIn("{Best was Nf3 here}", gerado, "o PGN sai com o original")
+        self.assertIn("{<Plain comment>}", gerado)
+        self.assertTrue(any(
+            "[FALHA] Lance reescrito pelo modelo nas duas tentativas (sumiu f3; apareceu f6)" in l
+            for l in app.logs
+        ), app.logs)
+        self.assertTrue(any("Comentarios que falharam: 1" in l for l in app.logs))
+        self.assertTrue(any(
+            "Lances reescritos pelo modelo: 1 comentario(s) reenviado(s) sozinho(s), 1 recusado(s)" in l
+            for l in app.logs
+        ))
+
+    def test_the_second_try_can_bring_the_move_back(self):
+        """Um modelo nao e deterministico: o que errou no lote acerta sozinho."""
+        def respostas(text):
+            if " ||| " in text:
+                return " ||| ".join(self.reescreve(p) for p in text.split(" ||| "))
+            return "Melhor era Cf3 aqui"
+
+        app, falso, stored, _gerado = self.roda_com_modelo(respostas)
+
+        self.assertEqual(len(falso.calls), 2)
+        self.assertEqual(stored, {"Best was Nf3 here": "Melhor era Cf3 aqui", "Plain comment": "<Plain comment>"})
+        self.assertTrue(any("Comentarios que falharam: 0" in l for l in app.logs))
+        self.assertTrue(any(
+            "Lances reescritos pelo modelo: 1 comentario(s) reenviado(s) sozinho(s), 0 recusado(s)" in l
+            for l in app.logs
+        ))
+
+    def test_the_individual_path_has_the_same_gate(self):
+        """Lote desalinhado -> individual -> lance reescrito: o mesmo portao,
+        a mesma segunda chance, a mesma recusa (a licao da secao 10.4)."""
+        def respostas(text):
+            if " ||| " in text:
+                return "so uma parte"  # desalinhado: cai no individual
+            return self.reescreve(text)
+
+        app, falso, stored, gerado = self.roda_com_modelo(respostas)
+
+        self.assertEqual(
+            falso.calls,
+            [" ||| ".join(self.COMMENTS), "Best was Nf3 here", "Best was Nf3 here", "Plain comment"],
+        )
+        self.assertEqual(stored, {"Plain comment": "<Plain comment>"})
+        self.assertIn("{Best was Nf3 here}", gerado)
+        self.assertTrue(any("Comentarios que falharam: 1" in l for l in app.logs))
+
+    def test_the_gate_does_not_apply_to_google(self):
+        """O Google nao inventa lance (medido: 6 em 6.500, artefatos que a prosa
+        desfaz); para ele o aviso Q1 na revisao e a medida certa."""
+        def translate(text, *_a, **_k):
+            return " ||| ".join(self.reescreve(p) for p in text.split(" ||| "))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _pgn = self.run_worker(Path(tmp), translate)
+            stored = self.stored(Path(tmp) / "cache.db")
+
+        self.assertEqual(stored["Best was Nf3 here"], "Melhor era Cf6 aqui")
+        self.assertTrue(any("Comentarios que falharam: 0" in l for l in app.logs))
+        self.assertFalse(any("Lances reescritos pelo modelo" in l for l in app.logs))
+
+    def test_the_resend_without_names_passes_the_gate_too(self):
+        """Sentinela de nome engolido -> reenvio sem a mascara (X4) -> lance
+        reescrito nesse reenvio: e a segunda chance, e nao ha terceira."""
+        self.PGN = '[Event "Test"]\n\n1. e4 {Nf3 was better in G. Sax-G. Mohr, Maribor 2000.} *\n'
+        self.COMMENTS = ["Nf3 was better in G. Sax-G. Mohr, Maribor 2000."]
+
+        def respostas(text):
+            if "\u27e6" in text:
+                return "Cf3 era melhor em , Maribor 2000."  # sentinela do nome engolido
+            return "Cf6 era melhor em G. Sax-G. Mohr, Maribor 2000."  # e agora o lance
+
+        app, falso, stored, gerado = self.roda_com_modelo(respostas)
+
+        self.assertEqual(len(falso.calls), 2)
+        self.assertEqual(stored, {})
+        self.assertIsNone(gerado, "nada traduzido, nenhum arquivo de saida")
+        self.assertTrue(any(
+            "Aviso: o reenvio sem a mascara de nomes reescreveu um lance (sumiu f3; apareceu f6)" in l
+            for l in app.logs
+        ), app.logs)
+        self.assertTrue(any("[FALHA]" in l and "nomes" in l for l in app.logs))
+        self.assertTrue(any("Comentarios que falharam: 1" in l for l in app.logs))

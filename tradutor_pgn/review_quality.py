@@ -26,7 +26,7 @@ from difflib import SequenceMatcher
 import re
 
 from .annotation_mask import COMMAND_TAG_RE
-from .chess_notation import move_anchors
+from .chess_notation import format_anchor, move_anchors
 from .chess_terms import find_suspect_terms
 
 
@@ -125,12 +125,6 @@ def eval_symbols(text):
             achados[simbolo] += quantos
             restante = restante.replace(simbolo, " ")
     return achados
-
-
-def format_anchor(anchor):
-    """A ancora de lance como se le: `('xd4', '', '+')` -> `xd4+`."""
-    corpo, igual, fim = anchor
-    return f"{corpo}{igual}{fim}"
 
 
 def _sample(items):

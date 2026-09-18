@@ -8370,7 +8370,7 @@ execucao estava em outro ARQUIVO, e a clausula vizinha a poupava — o
 cenario e a execucao anterior do MESMO livro) e "a mais recente" (o teste
 tinha uma execucao so). Os tres cenarios escritos, as tres morreram.
 
-### 28.7 O modelo de linguagem: primeiro o piloto, depois o provedor — o piloto RODOU (2026-09-15); os TRES provedores e o dialogo do motor FEITOS (2026-09-16); a leitura cega continua devida
+### 28.7 O modelo de linguagem: primeiro o piloto, depois o provedor — o piloto RODOU (2026-09-15); os TRES provedores e o dialogo do motor FEITOS (2026-09-16); o portao de ancoras (T6) e a estimativa de custo (M7) FEITOS (2026-09-18); a leitura cega continua devida
 
 O motor e o endpoint `gtx` nao oficial do Google, e so ele
 (`translation_api.py`). O projeto se chama "GPT" e nao ha modelo de linguagem
@@ -8606,6 +8606,76 @@ previa e nao foi.**
   sozinha; provedor indisponivel aborta antes da primeira linha; Google
   continua o padrao) e 7 de janela (tela e dialogo). Mutacao: tirar a regra
   da parte vazia derruba dois testes.
+
+**Feito em 2026-09-18 — o portao de ancoras e a estimativa de custo, os dois
+"nao feitos" de 2026-09-16.**
+
+- **T6, o portao de ancoras**, e uma comparacao e uma segunda chance.
+  Depois de `acabar` (regras automaticas, P3, P5), o worker compara as
+  ancoras do texto ENVIADO — limpo e mascarado, o que o modelo viu — com as
+  da resposta (`chess_notation.anchor_divergence`, que faz a MESMA conta do
+  aviso Q1 do QA: `format_anchor` saiu de `review_quality` para la, para
+  haver uma definicao so). Divergiram, o comentario e reenviado sozinho uma
+  vez; divergiram de novo, ou o reenvio nao veio, e falha T2/T3, com
+  `sumiu f3; apareceu f6` no log e o comentario no idioma original no PGN.
+  O que mudou de lugar para isso: o trecho entre a resposta da API e a
+  gravacao, que existia DUAS vezes (lote e individual) e estava prestes a
+  ganhar uma terceira verificacao em cada, virou uma funcao so, `concluir`
+  — portao, restauracao verificada das anotacoes (X1) e reenvio sem a
+  mascara de nomes (X4), que agora tambem passa pelo portao (sem outra
+  chance: ele ja e a segunda). Uma verificacao que so existisse num dos dois
+  caminhos daria uma execucao cujo resultado depende de a rede ter
+  respondido alinhada — a licao de 10.4, agora com o desenho que a impede.
+  **O Google fica fora do portao, com o numero de 28.2**: 6 divergencias em
+  6.500 linhas, quatro o numero colado que P5 desfaz e uma um defeito do
+  original; para ele um portao so tiraria da tela linhas que o revisor
+  conserta em segundos. O resumo do log ganhou uma linha, so quando houve:
+  "Lances reescritos pelo modelo: N reenviado(s) sozinho(s), M recusado(s)".
+- **M7, a estimativa**, e uma regra de tres com a data escrita. O worker a
+  faz DEPOIS da carga do cache (o que ja esta no banco nao vai para a API e
+  nao entra na conta — antes do cache ela cobraria o que o programa nao vai
+  pagar) e ANTES de abrir a linha da execucao (Z5): conta os comentarios que
+  vao mesmo ser enviados, ja limpos, e estima tokens e dolares com o que o
+  piloto mediu — 36.844 tokens de entrada (13.190 do cache) e 21.823 de
+  saida para 40.426 caracteres de original, ou seja 0,91 e 0,54 por
+  caractere, 36 % da entrada em cache. Nos 200 comentarios do piloto a
+  estimativa da US$ 0,67, que foi o real. A pergunta e um `askyesno` levado
+  a thread do Tk por `confirm_on_main_thread` (um `after(0)` e um `Event`;
+  garantia C1) — "Nao" nao envia nada nem abre execucao; com tudo em cache,
+  ou com o Google, nao ha pergunta. No fim, "estimado ~US$ X, real US$ Y".
+  **A tabela de precos (`llm_costs.PRICE_TABLE`) e das paginas dos tres
+  provedores em 2026-09-18**, com `PRICES_DATED` no texto do dialogo e do
+  log: nove modelos da Anthropic, treze da OpenAI (a familia `gpt-5.x` ate o
+  `gpt-5.6`), e a DeepSeek, que em 2026-09-14 passou a atender
+  `deepseek-v4-pro` e os nomes antigos pelo V4.1-Flash ao preco dele (pico;
+  fora do pico cobra a metade). O casamento e pelo id exato ou pelo id com
+  uma data atras (`claude-opus-5-20260401`); `gpt-5-mini` NAO e `gpt-5`. Um
+  modelo fora da tabela recebe os tokens e "sem preco na tabela" — nunca um
+  numero inventado. Para o custo real ser UMA conta nos dois protocolos,
+  `Usage.input_tokens` passou a ser a entrada NAO cacheada (o
+  `prompt_tokens` da OpenAI/DeepSeek inclui o cache e o provedor o desconta;
+  a Anthropic ja separa) e `Usage` ganhou `cache_write_tokens`.
+- **O padrao da DeepSeek mudou de `deepseek-chat` para `deepseek-flash`**:
+  e o nome que a documentacao do provedor da como o atual; o antigo era
+  palpite, e um teste novo exige que os tres padroes tenham preco na tabela
+  (um padrao sem preco mostraria "sem preco" na primeira execucao de todo
+  mundo).
+- Testes: 6 de notacao (`anchor_divergence` e a descricao), 5 do worker para
+  T6 (a recusa, a segunda chance que acerta, o caminho individual, o reenvio
+  sem nomes, o Google fora), 4 do worker para M7 (ordem cache -> estimativa
+  -> execucao e "com tudo em cache nao pergunta", a recusa, o Google nao
+  pergunta, estimado -> real), 7 de custo e 1 de `Usage` (mais duas
+  assercoes no teste da Anthropic). **16 mutacoes, 16 mortas** (portao mudo; portao no Google; sem segunda chance; segunda chance
+  sem portao; reenvio sem nomes sem portao; individual sem `concluir`; nao
+  pergunta; pergunta com zero; conta o cache; ponte ignora a resposta;
+  recusa nao cancela; real sem cache; prefixo cru; estimativa sem desconto;
+  resumo mudo; linha final muda). O `WorkerFallbackHarness` substitui
+  `messagebox.askyesno` (padrao "sim"; `ask_yes_no=` para recusar ou ler a
+  pergunta) — sem isso um provedor falso abriria um dialogo modal de verdade
+  e a suite pararia, a armadilha de 2026-09-14 de novo.
+- **Nao feito**: os `fallbacks` de recusa da Anthropic (zero recusas em 200
+  linhas; hoje uma recusa e falha de lote, tratada como rede caida) e a
+  leitura cega — que continua sua.
 
 ### 28.8 O tabuleiro — CONCLUIDO (2026-09-15)
 

@@ -558,12 +558,21 @@ Custa dinheiro — da ordem de US$ 25 por livro de 7.500 comentarios com o
 3. Com pelo menos uma chave gravada, **Iniciar tradução** (e **Reprocessar
    falhas**) pergunta qual motor usar — Google ou um dos modelos —, com o da
    execucao anterior pre-selecionado. Sem chave nenhuma, nao pergunta.
+4. Com um modelo, o programa carrega o cache, conta o que vai mesmo para a
+   API e mostra a **estimativa** — comentarios, tokens e dolares, pela tabela
+   de precos datada de `tradutor_pgn/llm_costs.py` — antes da primeira
+   requisicao; "Não" nao envia nada. Um modelo fora da tabela mostra so os
+   tokens. No fim, o log diz "estimado -> real".
 
 Tudo o mais e igual: o lote, a mascara das anotacoes, o glossario, a
 correcao de lances, o aviso de qualidade e o **Reverter execução** — que e a
 rede de seguranca para experimentar um motor novo e jogar fora o que ele
-deixou. A execucao fica registrada com `provedor:modelo`, e o fim do log diz
-quantas requisicoes e tokens o modelo gastou.
+deixou. Uma diferenca a mais, a favor: um lance que o modelo REESCREVA em
+vez de traduzir (`Nf3` que volta `Cf6`) e reenviado sozinho uma vez e, se
+insistir, recusado — o comentario fica no idioma original, contado como
+falha, em vez de gravado com cara de certo. A execucao fica registrada com
+`provedor:modelo`, e o fim do log diz quantas requisicoes e tokens o modelo
+gastou.
 
 ## Piloto do modelo de linguagem
 
@@ -608,7 +617,8 @@ preenchida e diz a taxa de "aceito sem editar" de cada motor. A barra e 80 %.
 - `tradutor_pgn/app_config.py`: constantes compartilhadas do projeto.
 - `tradutor_pgn/background_task.py`: executa operacoes longas fora da thread da interface, com progresso e cancelamento.
 - `tradutor_pgn/backup_retention.py`: politica de retencao de `backups/` e `logs/`, com a decisao separada da remocao.
-- `tradutor_pgn/chess_notation.py`: letras das pecas por idioma, correcao dos lances da traducao contra o comentario original e as ancoras que o aviso de qualidade compara.
+- `tradutor_pgn/chess_notation.py`: letras das pecas por idioma, correcao dos lances da traducao contra o comentario original e as ancoras que o aviso de qualidade e o portao dos modelos (T6) comparam.
+- `tradutor_pgn/llm_costs.py`: a estimativa de custo de uma execucao com modelo (calibrada no piloto), a tabela de precos datada e o custo real ao fim.
 - `tradutor_pgn/chess_terms.py`: leitura da lista de termos cuja traducao errada da para reconhecer pelo texto, escopada por idioma.
 - `tradutor_pgn/confirm_dialog.py`: confirmacao que exige digitar `delete`, usada pelas duas ferramentas que apagam trabalho do usuario.
 - `tradutor_pgn/database.py`: inicializacao, conexao e cache do SQLite, indexado pelo par de idiomas (origem, destino).

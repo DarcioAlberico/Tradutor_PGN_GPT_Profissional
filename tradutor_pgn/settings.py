@@ -523,7 +523,7 @@ LLM_KEY = "llm"
 LLM_DEFAULTS = {
     "anthropic_model": "claude-opus-5",
     "openai_model": "gpt-5",
-    "deepseek_model": "deepseek-chat",
+    "deepseek_model": "deepseek-flash",
 }
 
 
