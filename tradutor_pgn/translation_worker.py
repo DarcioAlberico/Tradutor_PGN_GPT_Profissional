@@ -54,7 +54,12 @@ from itertools import chain
 
 from .app_config import TRANSLATION_REQUEST_DELAY_SECONDS  # noqa: F401 (compat)
 from .failed_runs import build_failed_run_record, save_failed_run
-from .settings import load_settings, read_output_settings
+from .pgn_positions import chess_available, compute_comment_fens
+from .settings import (
+    load_settings,
+    read_board_settings,
+    read_output_settings,
+)
 from .translation_api import TRANSLATION_PROVIDER, RequestPacer, translate_text
 
 # Disjuntor (garantia B3): tantos lotes seguidos sem NENHUMA resposta da API e a
@@ -312,6 +317,20 @@ def run_translation(
         if wrap_columns:
             app.log_message(
                 f"Requebra dos comentarios ligada: {wrap_columns} colunas."
+            )
+
+        # O tabuleiro (ROADMAP 28.8): a opcao decide, e o pacote decide
+        # depois dela. Sem o `python-chess` o aviso sai UMA vez por execucao
+        # e diz onde desligar — ligado por padrao, e a instalacao do `.exe`
+        # nao tem o pacote de proposito (licenca), entao o aviso e a resposta
+        # a "cade o tabuleiro?".
+        calcular_fen = read_board_settings(load_settings())["fen"]
+        if calcular_fen and not chess_available():
+            calcular_fen = False
+            app.log_message(
+                "Posicoes (FEN) nao calculadas: o pacote python-chess nao esta "
+                "instalado. O tabuleiro do editor fica sem posicao; desligue a "
+                "opcao em Configuracoes para nao ver este aviso."
             )
 
         primeira = _first_pass(app, pgn_files)
@@ -1016,6 +1035,21 @@ def run_translation(
             # encontra o resto no cache e completa (ROADMAP 18).
             posicoes = info.get("occurrences") or []
             if posicoes:
+                # A posicao de cada comentario (O5, ROADMAP 28.8), AQUI e nao
+                # na primeira passada: e a vez do arquivo, o texto ja esta na
+                # mao e a gravacao das ocorrencias e logo abaixo — a FEN e uma
+                # coluna delas. Cancelavel entre partidas; ~2 s por 800 KB.
+                fens = None
+                if calcular_fen:
+                    inicio_fen = time.perf_counter()
+                    fens = compute_comment_fens(
+                        content, posicoes, should_cancel=app.cancel_flag.is_set
+                    )
+                    com_fen = sum(1 for fen in fens if fen)
+                    app.log_message(
+                        f"  - Posicoes (FEN) calculadas: {com_fen}/{len(posicoes)} "
+                        f"em {time.perf_counter() - inicio_fen:.1f} s"
+                    )
                 ids_por_texto = resolve_comment_ids(
                     cursor,
                     target_language,
@@ -1023,7 +1057,7 @@ def run_translation(
                     source_language,
                 )
                 gravadas, sem_linha = record_occurrences(
-                    cursor, pgn_file, posicoes, ids_por_texto
+                    cursor, pgn_file, posicoes, ids_por_texto, fens=fens
                 )
                 conn.commit()
                 if gravadas:

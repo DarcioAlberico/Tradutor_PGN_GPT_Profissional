@@ -13,6 +13,14 @@ dependencies = [
     "spylls>=0.1.7",
 ]
 
+# O tabuleiro do editor (ROADMAP 28.8) e OPCIONAL, e por licenca: python-chess
+# e GPL-3.0-ou-posterior, e o programa nao muda de licenca por um quadro de
+# conforto. Sem o pacote nada quebra — o worker pula o calculo das posicoes e o
+# editor nao mostra o quadro. O `.spec` do PyInstaller o exclui de proposito.
+#   uv sync --extra tabuleiro   /   python -m pip install chess
+[project.optional-dependencies]
+tabuleiro = ["chess>=1.11"]
+
 # So para desenvolver e para o CI: a suite roda com `pytest` (tambem roda com
 # `unittest`, mas o CI quer o `-q` e o resumo dele) e o lint com `ruff`. O `uv
 # sync` instala o grupo `dev` por padrao; o `.exe` nao os leva.

@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from .app_config import LANGUAGE_NAMES, LANGUAGES, UNKNOWN_SOURCE_LABEL, language_label
+from .board_widget import BoardCanvas
 from .database import (
     ORDER_BY_ID,
     ORDER_BY_OCCURRENCE,
@@ -23,6 +24,7 @@ from .database import (
     count_from_status_counts,
     count_review_rows,
     fetch_comment_occurrences,
+    fetch_occurrence_fen,
     fetch_exact_translation_match_candidates,
     fetch_review_row_ids,
     fetch_review_rows,
@@ -756,6 +758,8 @@ class TranslationEditor:
         # mudou de cor (garantia F10 continua valendo: quem manda na cor e o
         # status).
         self.update_review_status_label()
+        if getattr(self, "board_canvas", None) is not None:
+            self.board_canvas.apply_theme(ctk.get_appearance_mode())
 
     def paint_focus_border(self, texto, com_foco):
         """Pinta o anel do container do texto conforme ele tem ou nao o foco.
@@ -1469,6 +1473,68 @@ class TranslationEditor:
         self.btn_reload_gloss.grid(row=4, column=0, sticky="ew", padx=(10, 4), pady=(0, 10))
         self.btn_open_gloss.grid(row=4, column=1, sticky="ew", padx=(4, 10), pady=(0, 10))
 
+        self.build_board_row()
+    def build_board_row(self):
+        """O tabuleiro da linha aberta (ROADMAP 28.8, O5), sob os botoes.
+
+        So aparece quando a ocorrencia tem FEN gravada — uma linha antiga, uma
+        importada ou um banco sem `python-chess` nao ganham um quadro vazio
+        dizendo "sem posicao" em cada clique. Abaixo dos botoes de proposito:
+        o quadro entra como linha SEM peso, entao quem encolhe e a lista de
+        sugestoes (a unica linha com peso), e nunca um botao sai da tela.
+
+        **Nasce FECHADO, e a escolha e lembrada.** Medido: o painel de
+        sugestoes tem ~563 px de altura com o divisor no lugar de sempre, e
+        o quadro aberto (230 px com o titulo) deixa a lista de sugestoes com
+        40 px — uma sugestao e meia. E a familia "correto e nao cabe" do
+        22.10: aberto por padrao, ele tiraria a lista de todo mundo para
+        servir os ~10 % das linhas em que a posicao decide. Fechado, sobra a
+        linha do titulo com o lado a jogar — o sinal de que ha posicao —, e
+        quem a quer clica uma vez; a partir dai fica aberto ate fechar de
+        novo, e quem precisa dos dois arrasta o divisor de cima.
+        """
+        self.board_row = ctk.CTkFrame(self.sugg_frame, fg_color="transparent")
+        self.board_row.columnconfigure(1, weight=1)
+        self.board_collapsed = bool(self.editor_settings.get("board_collapsed", True))
+        self.board_toggle = ctk.CTkButton(
+            self.board_row, text="", width=28, command=self.toggle_board
+        )
+        self.board_toggle.grid(row=0, column=0, sticky="w", padx=(10, 4), pady=(0, 2))
+        self.board_label = ctk.CTkLabel(self.board_row, text="Posição", anchor="w")
+        self.board_label.grid(row=0, column=1, sticky="w", pady=(0, 2))
+        self.board_canvas = BoardCanvas(self.board_row, mode=ctk.get_appearance_mode())
+        # Margens curtas de proposito: na altura MINIMA da janela, com o quadro
+        # aberto, o painel tem 387 px e o quadro terminava em 388 — um pixel
+        # cortado (medido depois de a segunda fileira do rodape ganhar o
+        # separador). Seis pixels a menos aqui e ele cabe inteiro.
+        self.board_canvas.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 6))
+        self.board_fen = None
+        self.update_board_row()
+
+    def toggle_board(self):
+        self.board_collapsed = not self.board_collapsed
+        self.update_board_row()
+
+    def show_board(self, fen):
+        """A FEN da linha aberta, ou `None`: decide se a linha do quadro existe."""
+        self.board_fen = fen or None
+        self.board_canvas.set_fen(self.board_fen)
+        self.update_board_row()
+
+    def update_board_row(self):
+        if not self.board_fen:
+            self.board_row.grid_remove()
+            return
+        self.board_row.grid(row=5, column=0, columnspan=2, sticky="ew")
+        lado = self.board_canvas.describe()
+        self.board_label.configure(text=f"Posição · {lado}" if lado else "Posição")
+        if self.board_collapsed:
+            self.board_toggle.configure(text="▸")
+            self.board_canvas.grid_remove()
+        else:
+            self.board_toggle.configure(text="▾")
+            self.board_canvas.grid()
+
 
     def build_status_bar(self):
         """Rodape: mensagens, contagens e os botoes de acao."""
@@ -1795,6 +1861,9 @@ class TranslationEditor:
                 "file_filter": self.selected_source_file() or "",
                 # A orientacao dos dois textos (ROADMAP 19, item 1).
                 "side_by_side": self.side_by_side,
+                # O quadro do tabuleiro fechado ou aberto (ROADMAP 28.8).
+                "board_collapsed": self.board_collapsed,
+                "similar_collapsed": self.similar_collapsed,
             },
             window=self.win,
             sashes=(
@@ -2672,6 +2741,7 @@ class TranslationEditor:
         # revisor sai junto, e por um motivo mais grave: deixada na tela, o proximo
         # "Rejeitar" a gravaria na linha errada.
         self.set_origin_text("")
+        self.show_board(None)
         self.current["review_status"] = REVIEW_STATUS_PENDING
         self.current["reviewer_note"] = ""
         self.reviewer_note_text.set("")
@@ -3344,9 +3414,14 @@ class TranslationEditor:
                 preferred_file=self.selected_source_file(),
             )
             status_revisao, nota_revisao = fetch_review_status_by_id(cur, comment_id)
+            fen = fetch_occurrence_fen(
+                cur, comment_id, preferred_file=self.selected_source_file()
+            )
 
         if row is None:
             return
+
+        self.show_board(fen)
 
         self.current["review_status"] = status_revisao
         self.current["reviewer_note"] = nota_revisao

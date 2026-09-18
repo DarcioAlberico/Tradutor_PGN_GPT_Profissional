@@ -20,7 +20,9 @@ integralmente lances, variantes e metadados, com:
 - uma etapa de revisao humana assistida.
 
 Nao-objetivos: jogar xadrez, validar legalidade de lances, editar a arvore de
-variantes.
+variantes. Mostrar a posicao de um comentario (O5) nao muda isto: a FEN e
+calculada por um pacote opcional, gravada como texto e desenhada — o programa
+continua sem julgar lance nenhum.
 
 ---
 
@@ -53,7 +55,7 @@ toca.
 
 | Artefato | Papel | Versionado |
 |---|---|---|
-| `traducoes.db` | Cache de traducoes + historico de edicoes | Nao |
+| `traducoes.db` | Cache de traducoes + historico de edicoes + ocorrencias (com a FEN, O5) + registro de execucoes (Z5) | Nao |
 | `traducoes.db` (`PRAGMA user_version`) | Versao do schema; migracao so roda quando desatualizada | — |
 | `comments_fts` (dentro do `traducoes.db`) | Indice de busca FTS5, mantido por gatilhos (R8) | Nao |
 | `occurrences` (dentro do `traducoes.db`) | Onde cada comentario foi lido: arquivo, partida, indice e lance (O1) | Nao |
@@ -320,6 +322,42 @@ nao ha de onde derivar —, e uma procedencia inventada apareceria no filtro por
 arquivo como uma obra que ninguem traduziu. As linhas antigas ganham a primeira
 ocorrencia quando o PGN delas for processado de novo, e ate la aparecem so em
 "Todos os arquivos".
+
+**Garantia O5 — a FEN de uma ocorrencia e a da posicao do comentario, e so
+por texto casado.** `occurrences.fen` (schema 11, ROADMAP 28.8) e escrita pelo
+worker na vez do arquivo, depois dos lotes e junto com as ocorrencias, quando
+a opcao "Tabuleiro" esta ligada (padrao) E o `python-chess` esta instalado.
+O pacote e GPL-3.0-ou-posterior e por isso e **opcional** (`pyproject`,
+extra `tabuleiro`) e **excluido do `.exe`**; sem ele o worker avisa uma vez
+por execucao, diz onde desligar, e grava nulo. O calculo (`pgn_positions`)
+anda a arvore que o `python-chess` le SEM copiar o tabuleiro: ao entrar numa
+variante o lance principal e desfeito, e ao sair desfaz-se ATE A PROFUNDIDADE
+em que a variante comecou — desfazer um lance so deixava o tabuleiro dentro
+da variante para o resto da partida (692 de 7.487 FENs na primeira medicao;
+7.426 com a correcao, conferidas uma a uma contra o metodo com copia). O
+comentario chega a FEN **so por texto igual**, em sequencia e por partida:
+igual no ponteiro; contido no texto do ponteiro (o parser junta dois `{}`
+do mesmo lance, que estao na mesma posicao); ou o proximo igual ate 60 a
+frente. Nada casou: sem FEN, e nunca a FEN de um texto diferente. Medido no
+PGN real (99 partidas, 7.487 comentarios): **7.473 casados em 1,8 s**; os 14
+que faltam sao comentarios que o parser pendura num lance nulo `--` ou funde
+de outro jeito, e ficam sem quadro. O parser recebe o texto com `\r`
+normalizado — a exportacao do ChessBase usa so `\r`, e o leitor por linhas
+devolvia zero partidas sem erro. As linhas anteriores ao schema 11 ficam
+nulas, sem backfill, pela razao de O2.
+
+No editor, o quadro (`board_widget`, um `tk.Canvas` de 8 x 24 px com glifos
+Unicode, sem `python-chess`) vive sob os botoes do painel de sugestoes e so
+existe quando a ocorrencia da linha — a do arquivo do filtro, quando ha — tem
+FEN; nasce FECHADO, com o titulo dizendo o lado a jogar, e a escolha de
+abri-lo e lembrada: aberto por padrao, os 230 px deixavam a lista de
+sugestoes com 40 px (medido) — a familia "correto e nao cabe" (22.10).
+Acompanha o tema pela mesma chamada dos campos de texto (F18).
+
+O que o alinhamento achou de tabela: a contagem de partidas de
+`comment_reading_context` (`^[Event` com MULTILINE) nao via a linha que
+termina em `\r` sozinho, e no PGN real toda ocorrencia era "partida 1";
+corrigido, com a mesma correcao no prefixo de linha que reconhece as tags.
 
 "Detectar" nao e um idioma: as linhas que ele produz ficam com a origem **nao
 informada**, o mesmo estado das linhas gravadas antes de o programa perguntar. E
@@ -2122,6 +2160,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | O2 | O contexto entra ao lado da traducao (N para 1), e nunca e inventado | Risco: o arquivo na chave faria a revisao ser feita uma vez por livro |
 | O3 | Com um arquivo escolhido, a lista e a obra em ordem de leitura, cada comentario uma vez | Limite: nao havia como revisar um livro na ordem em que ele se le |
 | O4 | "Zerar Traducoes" leva as ocorrencias junto | Risco: o `AUTOINCREMENT` reinicia, e a ocorrencia velha aponta para a traducao nova |
+| O5 | A FEN de uma ocorrencia e a da posicao do comentario, inclusive dentro de variante (desfeita ate a profundidade de entrada), atribuida so por texto igual, em sequencia e por partida; sem `python-chess` (opcional, fora do `.exe`) ou com a opcao desligada fica nula; o quadro do editor so aparece com FEN e nasce fechado | Custo: ~10 % das linhas exigem olhar a posicao, ate aqui em outro programa (ROADMAP 28.8) |
 | F1 | Trocar a orientacao dos dois textos nao perde o que esta sendo editado | Risco: reconstruir os paineis apaga texto, desfazer e selecao no meio de uma edicao |
 | F2 | A linha da lista diz status, aviso e origem, e o marcador vem da coluna | Limite: achar as linhas com aviso exigia trocar o filtro e perder a obra de vista |
 | F3 | "Voltar" restaura a linha E os filtros que a traziam | Limite: usar a busca como concordancia descartava a pagina, sem volta |
@@ -2598,9 +2637,12 @@ numero e o do item que o resolve.
   partida. Um arquivo sem `[Event` conta como uma partida so; um com tags fora de
   ordem conta o que estiver escrito. Sao numeros para localizar o comentario na
   obra, e nao uma leitura da posicao — validar lance segue nao-objetivo (secao 1).
-- **Nao existe FEN por ocorrencia.** O esquema tem onde pendura-la, e nenhuma
-  coluna foi criada para ficar nula: uma coluna que ninguem escreve em 200 mil
-  linhas nao e preparo. (ROADMAP 18.1)
+- **A FEN por ocorrencia existe desde o schema 11 (O5), e e nula onde o
+  worker nao passou depois dela**: linhas antigas, importadas, ou gravadas
+  sem o `python-chess` — que fica fora do `.exe` por licenca. Catorze dos
+  7.487 comentarios do PGN real ficam sem FEN (o parser os pendura num lance
+  nulo `--`), e a memoria de pico do calculo e a da MAIOR partida do arquivo
+  mais duas copias do texto (16 MB no PGN de 842 KB). (ROADMAP 28.8)
 
 **Estrutura**
 
@@ -2655,7 +2697,6 @@ testavel e qual e o numero que fica so no ROADMAP.
 | T6 | Um provedor estrito nunca grava uma traducao cujo multiconjunto de ancoras difere do original | 28.7 | Provedor falso que devolve `Nf6` para `Nf3`: nada gravado, `failed_count == 1`, PGN com o original |
 | K1 | A chave de API nunca aparece inteira em log, configuracoes ou dialogo | 28.7 | Uma execucao falsa com chave conhecida: o texto inteiro nao esta em nenhum dos tres; `****wxyz` esta |
 | B5 | Um lote JSON e aceito so se cada id aparece exatamente uma vez; senao e desalinhado (B2) | 28.7 | Id repetido, faltando e fora do intervalo: os tres devolvem `None` |
-| O5 | A FEN de uma ocorrencia e a da posicao do comentario, inclusive dentro de variante, atribuida so por texto casado em sequencia e ressincronizada por partida | 28.8 | Comentario dentro de `(...)` tem a FEN da variante; lista esperada com um texto a mais: a partida seguinte volta a casar |
 | S22 | Com o filtro "Duplicadas" ativo, "Excluir as N exibidas" apaga so elas, com backup antes | 28.9 | Glossario com 3 duplicadas e 2 unicas: sobram as 2, existe um backup novo |
 | M4 | Toda opcao do `settings.json` tem um lugar na tela de Configuracoes, e a tela grava por `update_settings` | 28.10 | Um teste enumera as chaves padrao contra os widgets; gravar pela tela nao apaga um rascunho gravado por outra janela |
 | F30 | O painel "Traducoes semelhantes" consulta so o par aberto, numa thread, e descarta o resultado de uma geracao velha | 28.13 | Linha de outro par nao aparece (R9); resultado atrasado nao pinta o painel |

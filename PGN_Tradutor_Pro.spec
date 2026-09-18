@@ -234,6 +234,11 @@ else:
 # numpy pelo PIL, cryptography pelo urllib3 — e as duas funcionam sem eles. O
 # PIL fica: o customtkinter o importa na carga.
 excludes = ["numpy", "cryptography"]
+# `chess` (python-chess) fica FORA do executavel por licenca: e GPL-3.0-ou-
+# posterior, e o tabuleiro do editor (ROADMAP 28.8) e conforto opcional. Quem
+# roda do fonte e o tem instalado ve o quadro; o `.exe` sai sem ele e a licenca
+# do programa nao muda. O codigo importa o pacote na hora e trata a ausencia.
+excludes += ["chess"]
 
 
 a = Analysis(

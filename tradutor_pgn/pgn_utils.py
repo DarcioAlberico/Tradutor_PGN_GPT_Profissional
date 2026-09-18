@@ -320,7 +320,13 @@ def count_semicolon_comments(content: str) -> int:
 # linha porque e la que a tag mora — e a busca roda sobre o texto com os
 # comentarios apagados (ver `_blank_spans`), entao um `[Event` DENTRO de um
 # comentario nao vira partida nova.
-_GAME_START_RE = re.compile(r'^[ \t]*\[[ \t]*Event\b', re.MULTILINE)
+#
+# "Comeco da linha" inclui a linha que termina em `\r` sozinho: a exportacao
+# do ChessBase usa so `\r`, e `^` com MULTILINE so reconhece `\n` — no PGN
+# real do usuario (99 partidas) toda ocorrencia saia como "partida 1", e o
+# rotulo do editor dizia isso com confianca (achado ao alinhar as posicoes do
+# tabuleiro, ROADMAP 28.8).
+_GAME_START_RE = re.compile(r'(?:^|(?<=[\r\n]))[ \t]*\[[ \t]*Event\b')
 
 # Numero de lance no movetext: digitos seguidos de ponto (`12.`, `12...`, e
 # tambem `12 .`, que alguns exportadores escrevem). Tres recortes, e cada um pega
@@ -380,7 +386,9 @@ def _outside_movetext(content: str, pos: int) -> bool:
     e o resto de linha de um comentario `;`, que este programa nao traduz mas que
     continua sendo texto e nao movetext.
     """
-    inicio = content.rfind("\n", 0, pos) + 1
+    # `\r` tambem termina linha (a exportacao do ChessBase usa so ele): sem
+    # isto, num PGN assim o "prefixo da linha" era o arquivo inteiro.
+    inicio = max(content.rfind("\n", 0, pos), content.rfind("\r", 0, pos)) + 1
     prefixo = content[inicio:pos]
     return prefixo.lstrip().startswith("[") or ";" in prefixo
 

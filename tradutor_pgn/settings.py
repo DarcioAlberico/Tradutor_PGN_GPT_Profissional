@@ -437,3 +437,22 @@ def write_main_window_settings(values, path=None):
         return guardado
 
     return update_settings(mutator, path)
+
+BOARD_KEY = "board"
+
+BOARD_DEFAULTS = {
+    # Calcular a posicao (FEN) de cada comentario na vez do arquivo (ROADMAP
+    # 28.8). Ligado por padrao: custa ~2 s por 800 KB de PGN e so acontece
+    # quando o `python-chess` esta instalado; sem ele o worker avisa uma vez
+    # por execucao e segue, e desligar aqui cala o aviso.
+    "fen": True,
+}
+
+
+def read_board_settings(settings):
+    guardado = settings.get(BOARD_KEY)
+    valores = dict(BOARD_DEFAULTS)
+    if isinstance(guardado, dict) and isinstance(guardado.get("fen"), bool):
+        valores["fen"] = guardado["fen"]
+    return valores
+

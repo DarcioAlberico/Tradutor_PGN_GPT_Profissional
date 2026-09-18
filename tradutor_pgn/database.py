@@ -64,7 +64,14 @@ RunRecord = dict[str, Any]
 # reconstroi `comments`. As linhas anteriores ficam com o campo nulo e nao sao
 # reversiveis por execucao, so por Z4 — o mesmo texto de O2 para as
 # ocorrencias: nao ha de onde derivar uma procedencia que nao foi gravada.
-SCHEMA_VERSION = 10
+#
+# A versao 11 acrescenta `occurrences.fen` (ROADMAP 28.8, garantia O5): a
+# posicao do tabuleiro no ponto em que o comentario aparece, calculada pelo
+# worker na vez do arquivo quando o `python-chess` esta instalado e a opcao
+# esta ligada. Nula nas linhas anteriores e sem backfill, pela mesma razao das
+# ocorrencias (O2): a posicao vem do PGN, e o PGN nao esta no banco. Um `ALTER
+# TABLE`; nada e reconstruido.
+SCHEMA_VERSION = 11
 
 # Os estados que uma linha NAO verificada pode ter, alem de "pendente".
 #
@@ -485,6 +492,7 @@ _OCCURRENCES_TABLE_SQL = f"""
         comment_index INTEGER NOT NULL,
         move_number INTEGER,
         recorded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        fen TEXT,
         UNIQUE(source_file, comment_index),
         FOREIGN KEY(comment_id) REFERENCES comments(id) ON DELETE CASCADE
     )
@@ -517,6 +525,10 @@ def _create_occurrences_table(conn: sqlite3.Connection) -> None:
     as tabelas juntas em vez de contar com o cascade.
     """
     conn.execute(_OCCURRENCES_TABLE_SQL)
+    # Versao 11: a coluna da posicao numa tabela que ja existia.
+    colunas = [row[1] for row in conn.execute(f"PRAGMA table_info({OCCURRENCES_TABLE})")]
+    if "fen" not in colunas:
+        conn.execute(f"ALTER TABLE {OCCURRENCES_TABLE} ADD COLUMN fen TEXT")
     # A UNIQUE ja indexa `(source_file, comment_index)`, que e a ordem de leitura
     # e tambem o filtro por arquivo. O que falta e o caminho inverso: dado um
     # comentario, onde ele aparece. O indice cobre a consulta inteira — a
@@ -1298,12 +1310,23 @@ def resolve_comment_ids(
     return encontrados
 
 
-def record_occurrences(cursor, source_file, occurrences, comment_ids):
+def record_occurrences(
+    cursor: sqlite3.Cursor,
+    source_file: str,
+    occurrences: Sequence[tuple[int, int | None, int | None, str]],
+    comment_ids: dict[str, int],
+    fens: Sequence[str | None] | None = None,
+) -> tuple[int, int]:
     """Grava onde os comentarios deste arquivo foram lidos (ROADMAP 18).
 
     `occurrences` e a lista que a extracao devolve — `(indice, partida, lance,
     texto)` — e `comment_ids` o mapa de `resolve_comment_ids`. Devolve
     `(gravadas, sem_linha)`.
+
+    `fens` e a lista paralela de `pgn_positions.compute_comment_fens` (O5,
+    ROADMAP 28.8), ou `None` quando o passo nao rodou; um `None` dentro dela e
+    um comentario que o parser nao alcancou, e fica nulo — nunca a FEN do
+    vizinho.
 
     **O conjunto do arquivo e SUBSTITUIDO, e nao mesclado.** O arquivo em disco e
     a verdade sobre a obra: se ele encurtou, as posicoes que sobravam nao existem
@@ -1329,15 +1352,18 @@ def record_occurrences(cursor, source_file, occurrences, comment_ids):
         f"DELETE FROM {OCCURRENCES_TABLE} WHERE source_file = ?", (source_file,)
     )
 
-    linhas = []
+    if fens is None:
+        fens = [None] * len(occurrences)
+
+    linhas: list[tuple[int, str, int | None, int, int | None, str | None]] = []
     sem_linha = 0
-    for comment_index, game_index, move_number, texto in occurrences:
+    for (comment_index, game_index, move_number, texto), fen in zip(occurrences, fens):
         comment_id = comment_ids.get(texto)
         if comment_id is None:
             sem_linha += 1
             continue
         linhas.append(
-            (comment_id, source_file, game_index, comment_index, move_number)
+            (comment_id, source_file, game_index, comment_index, move_number, fen)
         )
 
     if linhas:
@@ -1345,16 +1371,36 @@ def record_occurrences(cursor, source_file, occurrences, comment_ids):
             f"""
             INSERT INTO {OCCURRENCES_TABLE} (
                 comment_id, source_file, game_index, comment_index, move_number,
-                recorded_at
+                fen, recorded_at
             )
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             linhas,
         )
     return len(linhas), sem_linha
 
 
-def list_occurrence_files(cursor, target_language, source_language=None):
+def fetch_occurrence_fen(
+    cursor: sqlite3.Cursor, comment_id: int, preferred_file: str | None = None
+) -> str | None:
+    """A FEN da primeira ocorrencia do comentario — a do arquivo do filtro,
+    quando ha — ou `None`. Uma consulta por id, como as do rodape."""
+    row = cursor.execute(
+        f"""
+        SELECT fen
+        FROM {OCCURRENCES_TABLE}
+        WHERE comment_id = ? AND fen IS NOT NULL AND fen <> ''
+        ORDER BY (source_file <> ?), source_file, comment_index
+        LIMIT 1
+        """,
+        (comment_id, preferred_file or ""),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def list_occurrence_files(
+    cursor: sqlite3.Cursor, target_language: str, source_language: str | None = None
+) -> list[Row]:
     """`[(arquivo, posicoes, comentarios)]` do par, em ordem de nome.
 
     Alimenta o filtro por arquivo do editor. As duas contagens sao coisas

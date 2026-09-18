@@ -8466,7 +8466,7 @@ dialogo — testavel por amostra nos tres) e **B5** (lote JSON: cada id
 exatamente uma vez, ou o lote e desalinhado). E o maior item da secao:
 provedor, configuracao, chave, dialogo de custo, ponte C1 e testes.
 
-### 28.8 O tabuleiro
+### 28.8 O tabuleiro — CONCLUIDO (2026-09-15)
 
 O revisor decide "qual bispo", "que coluna", "troca ou qualidade" olhando a
 posicao — hoje em outro programa, em ~10 % das linhas. A SPEC declarou
@@ -8515,6 +8515,67 @@ do arquivo depois dos lotes (D5), `fen: true` nas configuracoes com o log
 oferecendo desligar, e um `tk.Canvas` de 8 x 24 px com glifos Unicode num
 quadro colapsavel do painel de sugestoes (F20: cabe nos 300 px). Garantia
 planejada **O5**.
+
+**Feito em 2026-09-15 (schema 11), e o que a implementacao achou que a
+medicao anterior nao tinha dito.**
+
+- **O detalhe da profundidade e mais fundo do que o texto acima diz.** A
+  primeira versao desfazia UM lance ao sair da variante — e uma variante
+  tem varios. O tabuleiro ficava dentro dela para o resto da partida, o
+  `push` seguinte falhava por lance impossivel, e o erro ENGOLIDO deixava a
+  partida sem FEN dali em diante: 692 de 7.487 na primeira medicao, sem
+  nenhum erro na tela. Correcao: `len(board.move_stack)` guardado ao entrar,
+  `pop` ate ele ao sair; e o `try` em volta do visitor saiu — um lance que
+  o parser aceitou e empurravel, e um erro ali e erro DESTE codigo. 7.426
+  FENs, multiconjunto identico ao do metodo com `board.copy()`.
+- **O alinhamento por texto tem tres regras, e a ORDEM delas decide.** O
+  parser junta dois `{}` seguidos do mesmo lance num texto so; a regra "o
+  texto do parser contem o da extracao" resolve isso, mas conferida DEPOIS
+  da busca para a frente ela chegava tarde: um pedaco curto (":",
+  "Instead") tambem existe sozinho mais adiante, a busca o casava la e
+  deixava 245 comentarios atras do ponteiro. Igual no ponteiro, contido no
+  ponteiro, depois busca ate 60 a frente. **7.473 de 7.487 em 1,8 s** (os
+  14 sao comentarios que o parser pendura num lance nulo `--`; ficam sem
+  quadro, nunca com o quadro errado).
+- **A contagem de partidas da extracao estava errada para o PGN do usuario
+  — desde a secao 18.** `^[Event` com MULTILINE nao ve a linha que termina
+  em `\r` sozinho, e as 7.487 ocorrencias do livro eram todas "partida 1"
+  no rotulo do editor; o prefixo de linha das tags tinha o mesmo defeito.
+  Corrigidos os dois (`pgn_utils`), com teste em `\r` e em `\r\n`: 99
+  partidas, e o alinhamento passou a ressincronizar por partida de verdade.
+- **O quadro nasce FECHADO.** Aberto, os 230 px (titulo + 192 de tabuleiro)
+  deixavam a lista de sugestoes com 40 px na altura de sempre do painel
+  (563) — uma sugestao e meia, para servir os ~10 % das linhas em que a
+  posicao decide. Fechado sobra a linha do titulo com "Brancas/Pretas
+  jogam", que e o sinal de que ha posicao; um clique abre, e a escolha e
+  lembrada com as outras do editor. A opcao `board.fen` entrou na tela de
+  Configuracoes (M4 a enumera), com o texto dizendo se o pacote esta
+  instalado.
+- **Custo de memoria medido, e nao o do plano:** o `python-chess` monta a
+  arvore de UMA partida por vez, e a maior do livro mais duas copias do
+  texto dao 16 MB de pico no PGN de 842 KB — por arquivo, solto em seguida.
+  O teste que mede "o worker nao segura todos os arquivos" roda com a opcao
+  desligada, senao mediria a arvore.
+
+**O que a verificacao fixou.** Em `test_core.py`: `PgnPositionsWalkTests`
+(5, pulados sem o pacote: FENs iguais ao metodo com copia e na ordem do
+arquivo, com variante de varios lances desfeita inteira; `\r` sozinho;
+duas partidas; cancelar; a extracao inteira casa), `PgnPositionsAlignTests`
+(8, puros: ordem, pulo e ressincronizacao — inclusive dois "Diagram"
+seguidos —, o juntado, o pedaco curto que a busca casaria longe, nunca em
+texto diferente, busca limitada, partida a partida contra a sequencia
+global, sem pacote), `FenBoardRowsTests` (3), `OccurrenceFenTests` (3:
+gravada ao lado e nulo continua nulo; o arquivo do filtro vence; banco na
+versao 10 ganha a coluna), `WorkerFenTests` (3: gravadas e no log; opcao
+desligada grava nulo e cala; sem pacote avisa UMA vez e aponta
+Configuracoes) e o teste de `\r` em `ReadingContextTests`. Em
+`test_editor_windows.py`, `EditorBoardTests` (7: so com FEN; o arquivo do
+filtro decide; nasce fechado e a escolha e lembrada; limpar esconde;
+acompanha o tema; cabe nos 308 px; aberto no tamanho minimo nenhum botao sai
+do painel). 30 testes. **17 mutacoes, 17 mortas** (uma so depois de dois
+cenarios novos: "nunca por partida" sobrevivia porque o teste tinha as duas
+partidas com o mesmo texto casavel — o cenario e o "Diagram" que so a
+partida 2 tem).
 
 ### 28.9 O editor: o que ainda custa gestos — itens 1 a 3 CONCLUIDOS (2026-09-15)
 
@@ -8837,4 +8898,5 @@ editadas; ~30 s poupados por linha que deixa de precisar de edicao):
 reconstroi `comments`, e o numero e reservado no merge, nunca no branch. Um
 backup NOVO restaurado num programa VELHO carimba `user_version` para baixo
 sem avisar — limite pre-existente que dois schemas novos tornam mais
-provavel, e que fica registrado na SPEC 10.
+provavel, e que fica registrado na SPEC 10. **O 10 e de Z5 e o 11 de 28.8
+(os dois em 2026-09-15).**

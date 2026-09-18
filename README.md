@@ -374,6 +374,23 @@ receber. Ligue com `"output": {"wrap_columns": 80}` no
 unica como sempre. A requebra muda **so o espaco em branco** — as palavras saem
 identicas, as anotacoes `[%...]` nunca sao partidas e o fim de linha do arquivo e
 respeitado.
+## O tabuleiro do editor (opcional)
+
+O editor mostra a posicao em que o comentario aberto aparece: uma linha
+"Posicao · Brancas jogam" sob os botoes de sugestoes, que abre num quadro de
+8 x 8 ao clicar (a escolha fica lembrada). A posicao e calculada ao traduzir,
+na vez de cada arquivo, e gravada com as ocorrencias — entao so as linhas
+traduzidas a partir desta versao a tem.
+
+Precisa do pacote `python-chess`, que e **opcional e nao vem no executavel**:
+ele e GPL, e o programa nao muda de licenca por um quadro. Rodando do fonte:
+
+```bash
+python -m pip install chess
+```
+
+(ou `uv sync --extra tabuleiro`). Sem o pacote nada quebra: o log avisa uma
+vez por execucao e a opcao "Tabuleiro" em Configuracoes cala o aviso.
 
 ## Revisar um livro na ordem em que ele se le
 
