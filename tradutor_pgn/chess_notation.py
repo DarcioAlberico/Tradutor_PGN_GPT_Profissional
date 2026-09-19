@@ -120,7 +120,7 @@ def _move_pattern(letters):
     letras em que a mais curta tambem levasse a um lance valido — e ai o
     retrocesso escolheria a errada em silencio.
     """
-    pecas = "|".join(sorted((re.escape(l) for l in letters), key=len, reverse=True))
+    pecas = "|".join(sorted((re.escape(letra) for letra in letters), key=len, reverse=True))
     captura = f"[{re.escape(CAPTURE_MARKS)}]"
     return re.compile(
         r"(?<!\w)"
@@ -279,6 +279,46 @@ def move_anchors(text):
             continue
         achadas[_anchor(match)] += 1
     return achadas
+
+
+def format_anchor(anchor):
+    """A ancora de lance como se le: `('xd4', '', '+')` -> `xd4+`."""
+    corpo, igual, fim = anchor
+    return f"{corpo}{igual}{fim}"
+
+
+def anchor_divergence(original, translated):
+    """O que separa as ancoras de lance dos dois textos, ou `None` se batem.
+
+    Devolve `(sumiram, apareceram)`: as ancoras que `original` tem e
+    `translated` nao, e as que `translated` tem e `original` nao — como
+    multiconjuntos, entao um `Nf3` que o original repete e a traducao escreve
+    uma vez so e um `f3` que sumiu. E a pergunta do portao estrito (T6) e a do
+    aviso Q1 do QA; as duas fazem a MESMA conta de proposito, para nunca
+    discordarem sobre o que e um lance perdido.
+    """
+    esquerda = move_anchors(original)
+    direita = move_anchors(translated)
+    faltando = esquerda - direita
+    sobrando = direita - esquerda
+    if not faltando and not sobrando:
+        return None
+    return faltando, sobrando
+
+
+def describe_anchor_divergence(divergence):
+    """`sumiu f3; apareceu f6` — a divergencia como o log a escreve."""
+    faltando, sobrando = divergence
+    partes = []
+    if faltando:
+        partes.append(
+            "sumiu " + ", ".join(format_anchor(a) for a in sorted(faltando.elements()))
+        )
+    if sobrando:
+        partes.append(
+            "apareceu " + ", ".join(format_anchor(a) for a in sorted(sobrando.elements()))
+        )
+    return "; ".join(partes)
 
 
 def fix_move_notation(original, translated, source_language, target_language):

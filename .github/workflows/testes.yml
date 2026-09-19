@@ -1,0 +1,81 @@
+# CI (ROADMAP 28.11). `windows-latest` de proposito: os testes de janela
+# (`test_editor_windows`, `test_main_window`) abrem Tk de verdade e precisam de
+# uma sessao de desktop, que o runner do Windows tem; num runner Linux eles
+# seriam pulados pelo gate de display do `gui_harness` e a suite mediria menos
+# da metade do que mede aqui.
+#
+# O teto de 25 min: a suite completa mede ~9 min de janelas + ~1 min headless
+# na maquina de desenvolvimento; num runner de dois nucleos e o dobro, e
+# apertado — por isso o `timeout-minutes` e por passo, para o log dizer QUAL
+# passo estourou.
+#
+# Nao bloqueante ate 2026-09-30 (`continue-on-error` no passo da suite): duas
+# semanas para o CI provar que fica verde sem flake antes de barrar merge.
+# Depois disso, apagar as duas linhas de `continue-on-error`.
+name: testes
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Dependencias (com o extra do tabuleiro, para os testes dele rodarem)
+        run: uv sync --extra tabuleiro --extra llm
+
+      - name: compileall
+        run: uv run python -m compileall -q tradutor_pgn tests ferramentas
+
+      - name: ruff
+        run: uv run ruff check tradutor_pgn tests ferramentas
+
+      - name: mypy (so os modulos anotados; nao bloqueante)
+        continue-on-error: true
+        run: uv run mypy
+
+      - name: Suite headless
+        timeout-minutes: 10
+        run: uv run python -m pytest tests -q -p no:cacheprovider --ignore=tests/test_editor_windows.py --ignore=tests/test_main_window.py
+
+      - name: Suite de janelas
+        timeout-minutes: 25
+        continue-on-error: true  # ate 2026-09-30, ver o cabecalho
+        run: uv run python -m pytest tests/test_editor_windows.py tests/test_main_window.py -q -p no:cacheprovider
+
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    needs: suite
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Dependencias + PyInstaller
+        run: |
+          uv sync
+          uv run --with pyinstaller python -m PyInstaller --noconfirm PGN_Tradutor_Pro.spec
+
+      - name: O exe existe e a pasta esta completa
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/PGN_Tradutor_Pro/PGN_Tradutor_Pro.exe")) { throw "sem exe" }
+          if (-not (Test-Path "dist/PGN_Tradutor_Pro/_internal/tradutor_pgn/Substituicoes-inicial.txt")) { throw "sem glossario inicial" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PGN_Tradutor_Pro-dist
+          path: dist/PGN_Tradutor_Pro
+          retention-days: 14

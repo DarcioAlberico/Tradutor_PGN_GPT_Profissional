@@ -2521,7 +2521,8 @@ def _ordered_rules_cache_key(rules):
         return None
 
 
-_ordered_rules_cache = {}
+# Chave de `_ordered_rules_cache_key` -> as regras ja ordenadas.
+_ordered_rules_cache: dict = {}
 _ORDERED_RULES_CACHE_MAX = 8
 
 

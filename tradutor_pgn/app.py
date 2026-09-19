@@ -2,14 +2,18 @@ import queue
 import threading
 import tkinter as tk
 
-from . import __version__, app_actions, app_paths, first_run
+import customtkinter as ctk
+
+from . import __version__, app_actions, app_log, app_paths, first_run
 from .app_config import LANGUAGE_NAMES
 from .editor_common import window_safe_geometry
 from .glossario import set_glossary_error_handler
 from .main_window import setup_main_ui
 from .settings import (
+    appearance_mode_from_settings,
     load_settings,
     read_main_window_settings,
+    set_settings_warning_handler,
     write_main_window_settings,
 )
 from .window_utils import (
@@ -44,7 +48,14 @@ class PGNTranslatorApp:
         # que deixa as duas desligadas. Resetar a cada abertura significa que
         # esquecer um clique custa uma execucao inteira traduzida no escuro, e o
         # programa nao teria como avisar depois: o resultado parece pronto.
-        escolhas = read_main_window_settings(load_settings(), LANGUAGE_NAMES)
+        settings = load_settings()
+        escolhas = read_main_window_settings(settings, LANGUAGE_NAMES)
+        # O tema gravado, antes de qualquer widget nascer (ROADMAP 28.10). O
+        # lancador ja pos "System"; isto so muda algo quando o usuario escolheu
+        # Claro ou Escuro na tela de Configuracoes. Antes do `geometry` porque
+        # a raiz ja existe e o CustomTkinter repinta o que existir — melhor
+        # que nao exista nada ainda.
+        ctk.set_appearance_mode(appearance_mode_from_settings(settings))
         # Tamanho e posicao, como os dois editores ja faziam (ROADMAP 22.12).
         # Esta era a unica janela do programa que abria maximizada sempre, e num
         # monitor grande isso e uma janela de 900 px de conteudo esticada por
@@ -63,8 +74,20 @@ class PGNTranslatorApp:
         self.target_language = tk.StringVar(value=escolhas["target_language"])
         self.source_language = tk.StringVar(value=escolhas["source_language"])
         self.process_subdirs = tk.BooleanVar(value=escolhas["process_subdirs"])
+        # O motor da ultima execucao (ROADMAP 28.7): o que o dialogo do
+        # "Iniciar tradução" oferece pre-selecionado. So vale com chave; sem
+        # ela o dialogo nem aparece e o Google e o motor.
+        self.translation_provider = escolhas["translation_provider"]
         self.is_processing = False
+        # A ultima execucao que gravou posicoes: `{"files", "generated",
+        # "target_language", "completed"}`, escrita pelo worker e lida por
+        # "Revisar pendentes"/"Abrir pasta" (ROADMAP 28.10). `None` ate la.
+        self.last_run = None
         self.log_queue = queue.Queue()
+        # O `logging` do programa aponta para esta fila e para o arquivo da
+        # execucao (ROADMAP 28.11); as bibliotecas de terceiros entram nele a
+        # partir de WARNING.
+        app_log.install(self)
 
         # Antes de qualquer coisa que possa falhar: sob `pythonw` nao ha console,
         # entao sem isto um erro em callback do Tk desaparece sem deixar rastro e
@@ -78,6 +101,13 @@ class PGNTranslatorApp:
         self._glossary_error_shown = None
         set_glossary_error_handler(
             lambda message: app_actions.report_glossary_failure(self, message)
+        )
+        # O mesmo desenho para as configuracoes (garantia M3): uma gravacao que
+        # desiste ou um arquivo renomeado por corrupcao precisam ser ditos, e
+        # a primeira gravacao acontece logo abaixo, em `_remember_choices`.
+        self._settings_warning_shown = None
+        set_settings_warning_handler(
+            lambda message: app_actions.report_settings_failure(self, message)
         )
 
         # ANTES da primeira carga do glossario, e essa e a ordem inteira do
@@ -222,6 +252,12 @@ class PGNTranslatorApp:
     def _reset_buttons(self):
         app_actions.reset_buttons(self)
 
+    def review_last_run(self):
+        app_actions.review_last_run(self)
+
+    def open_last_run_folder(self):
+        app_actions.open_last_run_folder(self)
+
     # ============================
     #   FERRAMENTAS DO BANCO
     # ============================
@@ -252,6 +288,9 @@ class PGNTranslatorApp:
     def fix_move_notation(self):
         app_actions.fix_move_notation(self)
 
+    def normalize_prose(self):
+        app_actions.normalize_prose(self)
+
     def reevaluate_quality_warnings(self):
         app_actions.reevaluate_quality_warnings(self)
 
@@ -269,3 +308,9 @@ class PGNTranslatorApp:
 
     def open_glossary_window(self):
         app_actions.open_glossary_window(self)
+
+    def open_settings_window(self):
+        return app_actions.open_settings_window(self)
+
+    def revert_last_run(self):
+        app_actions.revert_last_run(self)

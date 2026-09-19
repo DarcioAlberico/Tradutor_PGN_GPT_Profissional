@@ -1,15 +1,33 @@
 import os
+import threading
 import time
+import traceback
 from datetime import datetime
 from tkinter import messagebox
 
 import requests
 
-from .annotation_mask import mask_annotations, restore_annotations
-from .chess_notation import fix_move_notation, supports_notation
+from .annotation_mask import (
+    has_player_name_tokens,
+    mask_annotations,
+    restore_annotations,
+)
+from .chess_notation import (
+    anchor_divergence,
+    describe_anchor_divergence,
+    fix_move_notation,
+    supports_notation,
+)
 from .database import (
+    RUN_ABORTED,
+    RUN_CANCELED,
+    RUN_COMPLETED,
+    RUN_CRASHED,
+    RUN_FAILED,
     SOURCE_LANGUAGE_UNKNOWN,
     adopt_unknown_source_language,
+    begin_translation_run,
+    finish_translation_run,
     initialize_database,
     load_translation_cache,
     record_occurrences,
@@ -21,6 +39,7 @@ from .glossario import (
     clean_comment_for_translation,
     load_automatic_substitutions,
     load_cleanup_substitutions,
+    load_interactive_substitutions,
 )
 from .pgn_utils import (
     BATCH_MAX_CHARS,
@@ -32,16 +51,26 @@ from .pgn_utils import (
     extract_comments_from_content,
     generate_translated_pgn,
     join_comments_for_batch,
+    misaligned_batch_part,
     read_pgn_text,
     split_batch_translation,
     translated_output_path,
 )
+from .prose_fixes import normalize_prose
 from itertools import chain
 
 from .app_config import TRANSLATION_REQUEST_DELAY_SECONDS  # noqa: F401 (compat)
 from .failed_runs import build_failed_run_record, save_failed_run
-from .settings import load_settings, read_output_settings
-from .translation_api import RequestPacer, translate_text
+from .llm_costs import describe_estimate, describe_estimate_line, describe_outcome, estimate_cost
+from .llm_providers import GOOGLE_PROVIDER, build_translator, model_setting_key
+from .pgn_positions import chess_available, compute_comment_fens
+from .settings import (
+    load_settings,
+    read_board_settings,
+    read_llm_settings,
+    read_output_settings,
+)
+from .translation_api import TRANSLATION_PROVIDER, RequestPacer, translate_text
 
 # Disjuntor (garantia B3): tantos lotes seguidos sem NENHUMA resposta da API e a
 # conexao ou o endpoint, nao o conteudo. Cada lote ja gastou 3 tentativas com
@@ -51,12 +80,90 @@ from .translation_api import RequestPacer, translate_text
 MAX_CONSECUTIVE_FAILED_BATCHES = 3
 
 
-def _first_pass(app, pgn_files):
+def format_eta(seconds):
+    """`~40 s`, `~3 min`, `~1 h 20 min`: uma estimativa, e com cara de estimativa."""
+    if seconds is None:
+        return ""
+    if seconds < 60:
+        return f"~{max(1, int(round(seconds)))} s"
+    minutos = int(round(seconds / 60))
+    if minutos < 60:
+        return f"~{max(1, minutos)} min"
+    horas, resto = divmod(minutos, 60)
+    return f"~{horas} h {resto} min" if resto else f"~{horas} h"
+
+
+def format_progress_status(
+    file_index, file_count, batch_index, batch_count, processed, total, elapsed
+):
+    """O texto ao lado da barra (ROADMAP 28.10): "Arquivo 2/5 · Lote 37/125 · 2.410/6.500 · ~1 min".
+
+    Puro, para o teste nao precisar de worker. O "Arquivo" so aparece com mais
+    de um arquivo — num livro de um capitulo ele e ruido. O tempo restante e uma
+    regra de tres sobre o que ja foi processado, e por isso so aparece com pelo
+    menos um comentario feito e falta de pelo menos um: no comeco nao ha de onde
+    tirar a conta, e no fim ela e zero. O cache faz a conta otimista (um acerto
+    custa milissegundos) — e uma estimativa, e o `~` diz isso.
+    """
+    partes = []
+    if file_count > 1:
+        partes.append(f"Arquivo {file_index}/{file_count}")
+    partes.append(f"Lote {batch_index}/{batch_count}")
+    partes.append(f"{processed:,}/{total:,}".replace(",", "."))
+    restante = total - processed
+    if processed > 0 and restante > 0 and elapsed > 0:
+        partes.append(format_eta(elapsed / processed * restante))
+    return " \u00b7 ".join(partes)
+
+
+def set_progress_text(app, text):
+    """Poe `text` ao lado da barra, na thread do Tk.
+
+    `getattr` porque o worker e chamado com apps de teste que tem `progress` e
+    nao tem o rotulo — o rotulo e cosmetico, a barra nao.
+    """
+    rotulo = getattr(app, "progress_label", None)
+    if rotulo is None:
+        return
+    app.root.after(0, lambda t=text: rotulo.configure(text=t))
+
+
+def confirm_on_main_thread(app, ask):
+    """Faz a pergunta `ask()` na thread do Tk e espera a resposta (garantia C1).
+
+    O worker roda numa thread propria e nao pode abrir dialogo; a thread do Tk
+    nao pode ficar esperando por ninguem. A ponte: `after(0)` agenda a
+    pergunta na thread principal e um `Event` segura o worker ate ela ser
+    respondida — o dialogo e modal, entao a janela de tras nao recebe clique
+    nesse meio-tempo. Um cancelamento que chegue enquanto se espera vale
+    "nao", e uma pergunta que quebre tambem. Nos testes o `after` do `FakeRoot`
+    executa na hora, e o `wait` nem chega a esperar.
+    """
+    resposta = {"valor": False}
+    pronto = threading.Event()
+
+    def perguntar():
+        try:
+            resposta["valor"] = bool(ask())
+        finally:
+            pronto.set()
+
+    app.root.after(0, perguntar)
+    while not pronto.wait(0.2):
+        if app.cancel_flag.is_set():
+            return False
+    return resposta["valor"]
+
+
+def _first_pass(app, pgn_files, with_contexts=False):
     """Le so o que a adocao (P2) e a carga de cache precisam: os TEXTOS.
 
-    Devolve `{"total", "distintos", "semicolon", "por_arquivo"}`, ou `None` se o
-    usuario cancelou no meio. `por_arquivo` e `{caminho: [textos distintos]}`, na
-    ordem em que os comentarios aparecem no arquivo.
+    Devolve `{"total", "distintos", "semicolon", "por_arquivo", "contextos"}`,
+    ou `None` se o usuario cancelou no meio. `por_arquivo` e
+    `{caminho: [textos distintos]}`, na ordem em que os comentarios aparecem
+    no arquivo. `contextos` e `{texto: (lance anterior, lance seguinte)}` da
+    primeira ocorrencia de cada texto, so com `with_contexts` — e o que o
+    modelo de linguagem recebe (ROADMAP 28.7); o Google nao usa e nao paga.
 
     **O que fica guardado sao os textos, e nada mais** (ROADMAP 20.4). Antes,
     `info_by_file` guardava o resultado COMPLETO da extracao de todos os PGN —
@@ -79,14 +186,19 @@ def _first_pass(app, pgn_files):
     total_distintos = 0
     total_semicolon = 0
     por_arquivo = {}
+    contextos = {}
 
     for pgn_file in pgn_files:
         if app.cancel_flag.is_set():
             app.log_message("Traducao cancelada antes da extracao completa.")
             return None
 
-        info = extract_comment_texts_from_file(pgn_file, app.log_message)
+        info = extract_comment_texts_from_file(
+            pgn_file, app.log_message, with_contexts=with_contexts
+        )
         total_comments += len(info["comments"])
+        for texto, contexto in (info.get("contexts") or {}).items():
+            contextos.setdefault(texto, contexto)
         # `dict.fromkeys` preservando a ordem: o mesmo comentario repetido no
         # arquivo — "Diagram", "(D)", a legenda de cada figura — era enviado
         # tantas vezes quantas aparecia, porque o cache so aprende a traducao
@@ -110,6 +222,7 @@ def _first_pass(app, pgn_files):
         "distintos": total_distintos,
         "semicolon": total_semicolon,
         "por_arquivo": por_arquivo,
+        "contextos": contextos,
     }
 
 
@@ -120,8 +233,15 @@ def run_translation(
     process_subdirs,
     only_files=None,
     source_language=SOURCE_LANGUAGE_UNKNOWN,
+    provider=GOOGLE_PROVIDER,
 ):
     """Traduz os comentarios dos PGN de `source_path`.
+
+    `provider` e o motor (ROADMAP 28.7): `"google"` e o de sempre; um id de
+    `llm_providers.PROVIDERS` monta um `LLMTranslator` com a chave do usuario
+    e o prompt do par, e TODAS as chamadas a API desta execucao passam por
+    ele — pela mesma costura de lote ` ||| ` do Google, de modo que B1/B2/B3,
+    a mascara X1 e o que vem depois dela nao sabem qual motor respondeu.
 
     `only_files` restringe a execucao a uma lista explicita, que e como o
     "Reprocessar falhas" reaproveita esta funcao inteira em vez de duplicar o
@@ -148,6 +268,19 @@ def run_translation(
     failed_count = 0
     failed_files = set()
     failures_recorded = False
+    # O registro da execucao (garantia Z5, ROADMAP 28.6). Fora do `try` pelo
+    # mesmo motivo dos contadores de falha: o `finally` fecha a linha com o
+    # desfecho, e precisa dos numeros mesmo quando a excecao veio antes de o
+    # laco comecar. `run_id` fica `None` ate a primeira passada dizer QUAIS
+    # arquivos a execucao tem — sao eles que "reverter" usa para nao apagar
+    # uma linha que outro livro reaproveitou.
+    run_id = None
+    translated_count = 0
+    # A estimativa de custo (ROADMAP 28.7) so existe com modelo de linguagem;
+    # fora do `try` porque o resumo do fim a compara com o real.
+    custo_estimado = None
+    aborted_by_api = False
+    crashed = False
     http_session = requests.Session()
 
     def registrar_falhas():
@@ -211,6 +344,50 @@ def run_translation(
         if automatic_rules:
             app.log_message(f"Regras automaticas carregadas: {len(automatic_rules)}")
 
+        # O motor. Sem chave ou sem SDK a execucao nem comeca — o dialogo ja
+        # recusou antes (M1) —, mas a guarda fica: uma chave apagada entre o
+        # dialogo e este ponto nao pode virar uma execucao no Google sem aviso.
+        llm = None
+        if provider != GOOGLE_PROVIDER:
+            modelos = read_llm_settings(load_settings())
+            try:
+                llm = build_translator(
+                    provider,
+                    modelos.get(model_setting_key(provider), ""),
+                    source_language,
+                    target_language,
+                    automatic_rules,
+                    load_interactive_substitutions(
+                        source_language=source_language, target_language=target_language
+                    ),
+                )
+            except (ValueError, LookupError, ImportError) as exc:
+                app.log_message(f"[ERRO] Motor {provider!r} indisponivel: {exc}")
+                aborted_by_api = True
+                return
+            app.log_message(llm.describe())
+        provider_name = llm.run_label if llm is not None else TRANSLATION_PROVIDER
+
+        def traduzir(texto, contextos=None):
+            """UMA porta para a API, seja qual for o motor. `translate_text` e
+            resolvido na chamada, e nao no import, para os testes que o
+            substituem continuarem valendo. `contextos` — o lance anterior e o
+            seguinte de cada parte — so o modelo de linguagem recebe."""
+            if llm is not None:
+                return llm.translate(
+                    texto, target_language, app.log_message, app.cancel_flag,
+                    contexts=contextos,
+                )
+            return translate_text(
+                texto,
+                target_language,
+                app.log_message,
+                app.cancel_flag,
+                session=http_session,
+                pacer=pacer,
+                source_language=source_language,
+            )
+
         if only_files is None:
             pgn_files, skipped_generated = collect_pgn_files(source_path, process_subdirs)
             if skipped_generated:
@@ -240,11 +417,29 @@ def run_translation(
                 f"Requebra dos comentarios ligada: {wrap_columns} colunas."
             )
 
-        primeira = _first_pass(app, pgn_files)
+        # O tabuleiro (ROADMAP 28.8): a opcao decide, e o pacote decide
+        # depois dela. Sem o `python-chess` o aviso sai UMA vez por execucao
+        # e diz onde desligar — ligado por padrao, e a instalacao do `.exe`
+        # nao tem o pacote de proposito (licenca), entao o aviso e a resposta
+        # a "cade o tabuleiro?".
+        calcular_fen = read_board_settings(load_settings())["fen"]
+        if calcular_fen and not chess_available():
+            calcular_fen = False
+            app.log_message(
+                "Posicoes (FEN) nao calculadas: o pacote python-chess nao esta "
+                "instalado. O tabuleiro do editor fica sem posicao; desligue a "
+                "opcao em Configuracoes para nao ver este aviso."
+            )
+
+        primeira = _first_pass(app, pgn_files, with_contexts=llm is not None)
         if primeira is None:
             canceled = True
             return
         total_comments = primeira["total"]
+        # O contexto de leitura de cada comentario, para o modelo (ROADMAP
+        # 28.7): e o que o piloto tinha — 198 de 200 com contexto — e o worker
+        # nao mandava. Vazio com o Google, que nao o usa.
+        contextos_de_leitura = primeira["contextos"]
         # O denominador do progresso, e o numero de comentarios que a execucao de
         # fato traduz: um comentario repetido no proprio arquivo e processado uma
         # vez so (ROADMAP 20.3).
@@ -322,6 +517,36 @@ def run_translation(
             f"traduzidos"
         )
 
+        # O custo, DEPOIS da carga do cache e ANTES da primeira requisicao
+        # (ROADMAP 28.7): o que ja esta no banco nao vai para a API e nao entra
+        # na conta — antes do cache a estimativa cobraria o que o programa nao
+        # vai pagar. O dialogo e bloqueante, na thread do Tk pela ponte (C1),
+        # e a execucao so continua com o "Sim"; recusada, nada foi enviado nem
+        # aberto (a linha da execucao vem depois). Sem nada a enviar nao ha o
+        # que perguntar. O texto limpo, e nao o cru: e o que a API recebe.
+        if llm is not None:
+            a_enviar = [
+                clean_comment_for_translation(comentario, cleanup_rules)
+                for comentario in dict.fromkeys(comentarios_do_lote())
+                if comentario not in app.translation_cache
+            ]
+            estimativa = estimate_cost(llm.model, a_enviar)
+            custo_estimado = estimativa.cost_usd
+            app.log_message(describe_estimate_line(estimativa, llm.model, reaproveitaveis))
+            if estimativa.comments:
+                pergunta = (
+                    describe_estimate(estimativa, llm.spec.label, llm.model, reaproveitaveis)
+                    + "\n\nIniciar a tradução?"
+                )
+                if not confirm_on_main_thread(
+                    app, lambda: messagebox.askyesno("Custo estimado", pergunta)
+                ):
+                    canceled = True
+                    app.log_message(
+                        "Traducao nao iniciada: a estimativa de custo foi recusada."
+                    )
+                    return
+
         # A correcao de lances precisa do idioma de origem declarado: ela le os
         # lances do comentario ORIGINAL para saber o que cada letra significa, e
         # sem saber em que alfabeto ele esta nao ha o que ler. Dito uma vez, no
@@ -342,15 +567,43 @@ def run_translation(
                 "significam no original."
             )
 
+        # A linha da execucao abre aqui — depois da primeira passada, com a
+        # lista de arquivos, e antes do primeiro INSERT. Comitada na hora: uma
+        # execucao que morrer no meio precisa existir na tabela para a proxima
+        # marca-la `crashed` e para "Reverter execucao" alcancar o que ela
+        # chegou a gravar.
+        run_id = begin_translation_run(
+            cursor,
+            target_language,
+            source_language,
+            source_path,
+            pgn_files,
+            provider_name,
+            getattr(app, "_log_file_path", None),
+        )
+        conn.commit()
+
         processed_comments = 0
-        translated_count = 0
         move_fixes = 0
+        prose_fixes = 0
+        names_resent = 0
+        anchors_resent = 0
+        anchors_rejected = 0
         filled_empty_count = 0
         cache_count = 0
         cleaned_empty_count = 0
         generated_files = 0
         consecutive_failed_batches = 0
-        aborted_by_api = False
+
+        # Onde a execucao esta, para o texto da barra (ROADMAP 28.10). Um dict e
+        # nao variaveis do laco: `update_progress` e uma closure, e ler o
+        # `batch_idx` do laco de dentro dela e contar com a ordem de definicao.
+        progresso = {"arquivo": 0, "arquivos": len(pgn_files), "lote": 0, "lotes": 0}
+        run_started = time.perf_counter()
+        # Os arquivos cujas posicoes foram gravadas: sao os que o editor sabe
+        # filtrar, e por isso os que "Revisar as pendentes desta execucao" abre.
+        arquivos_revisaveis = []
+        arquivos_gerados = []
 
         def update_progress():
             # Sobre os DISTINTOS, e nao sobre o total: com a deduplicacao do lote
@@ -363,6 +616,18 @@ def run_translation(
                 else 0
             )
             app.root.after(0, lambda v=value: app.progress.set(v / 100))
+            set_progress_text(
+                app,
+                format_progress_status(
+                    progresso["arquivo"],
+                    progresso["arquivos"],
+                    progresso["lote"],
+                    progresso["lotes"],
+                    processed_comments,
+                    total_distintos,
+                    time.perf_counter() - run_started,
+                ),
+            )
 
         def wait_if_paused():
             pause_started = None
@@ -373,6 +638,145 @@ def run_translation(
             if pause_started is None:
                 return 0.0
             return time.perf_counter() - pause_started
+
+        def contexto_de(original):
+            """`(lance anterior, lance seguinte)` do comentario, ou vazios."""
+            return contextos_de_leitura.get(original, ("", ""))
+
+        def acabar(translated, original):
+            """As tres etapas entre a resposta da API e a restauracao."""
+            translation = apply_automatic_substitutions(translated, automatic_rules)
+            translation, corrigidos = fix_move_notation(
+                original, translation, source_language, target_language
+            )
+            translation, consertos = normalize_prose(
+                original, translation, source_language, target_language
+            )
+            return translation, corrigidos, consertos
+
+        def portao_de_ancoras(translation, masked):
+            """Garantia T6: com um modelo de linguagem, um lance reescrito e recusado.
+
+            Compara as ancoras de lance do texto ENVIADO — limpo e mascarado,
+            o que o modelo viu — com as da resposta ja passada por regras,
+            correcao de lances e prosa: dessas tres so a letra da peca e o
+            espaco do lance mudam, e nenhum dos dois toca na ancora. Devolve a
+            divergencia por escrito, ou `None` quando bate.
+
+            So para os modelos, de proposito. O Google troca a letra e cola o
+            numero no lance — o que P3 e P5 consertam — e nao inventa lance:
+            medido no banco de desenvolvimento, 6 divergencias em 6.500,
+            quatro delas o numero colado que a prosa ja desfaz e uma um defeito
+            do ORIGINAL; para ele, o aviso Q1 do QA na revisao e a medida
+            certa. Um modelo pode "corrigir" o lance que julga errado, e esse
+            texto le bem e diz outra coisa — o erro mais grave que um
+            comentario de xadrez pode ter, e que nao pode chegar ao banco com
+            cara de certo.
+            """
+            if llm is None:
+                return None
+            divergencia = anchor_divergence(masked, translation)
+            if divergencia is None:
+                return None
+            return describe_anchor_divergence(divergencia)
+
+        def resend_without_names(original, tokens):
+            """Segunda tentativa quando um sentinela de NOME nao voltou (X4).
+
+            A mascara de nomes e a de anotacoes usam a mesma restauracao
+            verificada, mas o custo de falhar e diferente: uma anotacao
+            corrompida nao pode ser gravada, enquanto um nome que a maquina
+            traduziu e o defeito que existia ANTES da mascara — e menor do que
+            um comentario inteiro no idioma original. Entao, se os tokens que
+            faltaram eram so nomes, o comentario e reenviado sozinho, com as
+            anotacoes ainda mascaradas e os nomes crus. O que volta passa pelo
+            mesmo portao de ancoras (sem outra chance: esta JA e a segunda) e
+            pela mesma restauracao; se ainda falhar, ai e falha (T2/T3).
+
+            Devolve `(traducao, corrigidos, consertos)` ou `None`. Custa uma
+            requisicao, e so acontece quando ha nome na mascara.
+            """
+            nonlocal anchors_rejected
+            if not has_player_name_tokens(tokens):
+                return None
+            cleaned = clean_comment_for_translation(original, cleanup_rules)
+            masked, annotation_only = mask_annotations(cleaned, player_names=False)
+            translated = traduzir(masked, [contexto_de(original)])
+            if not translated:
+                return None
+            translation, corrigidos, consertos = acabar(translated, original)
+            divergencia = portao_de_ancoras(translation, masked)
+            if divergencia is not None:
+                anchors_rejected += 1
+                app.log_message(
+                    f"  - Aviso: o reenvio sem a mascara de nomes reescreveu um "
+                    f"lance ({divergencia})."
+                )
+                return None
+            translation, intactas = restore_annotations(translation, annotation_only)
+            if not intactas:
+                return None
+            return translation, corrigidos, consertos
+
+        def concluir(translated, original, masked, tokens):
+            """Da resposta da API ao texto gravavel — ou `None`, com o motivo no log.
+
+            As MESMAS etapas nos dois caminhos, o do lote e o individual, de
+            proposito (a licao da secao 10.4 do ROADMAP): `acabar` (regras
+            automaticas, correcao de lances, prosa), o portao de ancoras (T6)
+            e a restauracao verificada das anotacoes (X1), que e o ULTIMO
+            passo antes de gravar. Cada verificacao tem UMA segunda chance, e
+            cada segunda chance custa uma requisicao: o lance reescrito e
+            reenviado sozinho — um modelo nao e deterministico, e o que errou
+            uma vez costuma acertar na segunda —, e o sentinela de nome
+            engolido e reenviado sem a mascara de nomes (X4). Depois disso e
+            falha (T2/T3): o comentario fica no idioma original, contado e
+            informado, e nada com cara de certo chega ao banco.
+
+            Devolve `(translation, corrigidos, consertos)`.
+            """
+            nonlocal batch_api_requests, names_resent, anchors_resent, anchors_rejected
+            translation, corrigidos, consertos = acabar(translated, original)
+            divergencia = portao_de_ancoras(translation, masked)
+            if divergencia is not None:
+                app.log_message(
+                    f"  - Aviso: lance reescrito pelo modelo ({divergencia}), "
+                    f"reenviando sozinho: \"{original[:60]}\""
+                )
+                outra = traduzir(masked, [contexto_de(original)])
+                batch_api_requests += 1
+                anchors_resent += 1
+                if not outra:
+                    anchors_rejected += 1
+                    app.log_message(
+                        f"  - [FALHA] O reenvio nao teve resposta; o comentario "
+                        f"fica no idioma original: \"{original[:60]}\""
+                    )
+                    return None
+                translation, corrigidos, consertos = acabar(outra, original)
+                divergencia = portao_de_ancoras(translation, masked)
+                if divergencia is not None:
+                    anchors_rejected += 1
+                    app.log_message(
+                        f"  - [FALHA] Lance reescrito pelo modelo nas duas "
+                        f"tentativas ({divergencia}); o comentario fica no "
+                        f"idioma original: \"{original[:60]}\""
+                    )
+                    return None
+            translation, intactas = restore_annotations(translation, tokens)
+            if not intactas:
+                segunda = resend_without_names(original, tokens)
+                if segunda is None:
+                    app.log_message(
+                        f"  - [FALHA] Anotacoes [%...] ou nomes "
+                        f"nao voltaram intactos da traducao: "
+                        f"\"{original[:60]}\""
+                    )
+                    return None
+                translation, corrigidos, consertos = segunda
+                names_resent += 1
+                batch_api_requests += 1
+            return translation, corrigidos, consertos
 
         for pgn_index, pgn_file in enumerate(pgn_files, start=1):
             if app.cancel_flag.is_set():
@@ -404,8 +808,11 @@ def run_translation(
 
             batches = create_comment_batches(comments)
             translated_map = {}
+            progresso["arquivo"] = pgn_index
+            progresso["lotes"] = len(batches)
 
             for batch_idx, batch in enumerate(batches, start=1):
+                progresso["lote"] = batch_idx
                 batch_started = time.perf_counter()
                 batch_api_time = 0.0
                 batch_wait_time = 0.0
@@ -498,65 +905,65 @@ def run_translation(
                         joined = join_comments_for_batch(masked_texts)
 
                         api_started = time.perf_counter()
-                        translated_joined = translate_text(
-                            joined,
-                            target_language,
-                            app.log_message,
-                            app.cancel_flag,
-                            session=http_session,
-                            pacer=pacer,
-                            source_language=source_language,
+                        translated_joined = traduzir(
+                            joined, [contexto_de(item[0]) for item in grupo_items]
                         )
                         batch_api_time += time.perf_counter() - api_started
                         batch_api_requests += 1
 
                         parts = None
                         if translated_joined:
-                            # A API respondeu — o disjuntor conta lotes SEM
-                            # resposta, e nao lotes desalinhados. Desalinhamento
-                            # e um problema do conteudo, nao da conexao.
-                            consecutive_failed_batches = 0
                             parts = split_batch_translation(
                                 translated_joined, len(originals)
                             )
+                        if parts:
+                            # A contagem bateu; a razao de tamanho e a segunda
+                            # peneira (ROADMAP 28.12). Uma parte que dobrou ou
+                            # sumiu contra o texto enviado e um lote que voltou
+                            # com o numero certo de pedacos nos lugares errados
+                            # — e desalinhamento (B2), com o mesmo destino da
+                            # contagem errada: o modo individual, logo abaixo.
+                            deslocada = misaligned_batch_part(parts, masked_texts)
+                            if deslocada is not None:
+                                app.log_message(
+                                    f"  - Aviso: parte {deslocada + 1} do lote "
+                                    f"nao tem o tamanho do comentario "
+                                    f"correspondente ({len(originals)} "
+                                    f"comentarios), traduzindo individualmente."
+                                )
+                                parts = None
 
                         if parts:
-                            for (original, _masked, tokens), part in zip(
+                            # A API respondeu alinhado: o disjuntor zera aqui.
+                            # Desalinhamento e um problema do conteudo, nao da
+                            # conexao — mas quem decide se o lote desalinhado
+                            # estava vivo e o ramo individual, DEPOIS de tentar
+                            # (garantia B4). Zerar antes dele, como era, fazia
+                            # um grupo pequeno morto nunca contar.
+                            consecutive_failed_batches = 0
+                            for (original, masked, tokens), part in zip(
                                 grupo_items, parts
                             ):
-                                translation = apply_automatic_substitutions(
-                                    part, automatic_rules
-                                )
-                                # Depois das regras automaticas e ANTES de
-                                # gravar: o que vai para o banco e para o PGN e o
-                                # mesmo texto, entao corrigir aqui cobre os dois
-                                # de uma vez.
-                                translation, corrigidos = fix_move_notation(
-                                    original, translation, source_language, target_language
-                                )
-                                # A restauracao e o ULTIMO passo, e e verificada:
-                                # se a traducao nao devolveu cada sentinela
-                                # exatamente uma vez, gravar seria guardar uma
-                                # anotacao corrompida com cara de certa. O
-                                # comentario conta como falha e fica no idioma
-                                # original (T2/T3).
-                                translation, intactas = restore_annotations(
-                                    translation, tokens
-                                )
-                                if not intactas:
+                                # Regras automaticas, correcao de lances e
+                                # normalizacoes de prosa, o portao de ancoras e
+                                # a restauracao verificada, nessa ordem, depois
+                                # da API e ANTES de gravar: o que vai para o
+                                # banco e para o PGN e o mesmo texto (P3, P5,
+                                # P7, T6, X1). O que `concluir` recusa conta
+                                # como falha e fica no idioma original (T2/T3).
+                                resultado = concluir(part, original, masked, tokens)
+                                if resultado is None:
                                     failed_count += 1
                                     failed_files.add(pgn_file)
-                                    app.log_message(
-                                        f"  - [FALHA] Anotacoes [%...] nao voltaram "
-                                        f"intactas da traducao: \"{original[:60]}\""
-                                    )
                                     continue
+                                translation, corrigidos, consertos = resultado
                                 move_fixes += corrigidos
+                                prose_fixes += consertos
                                 app.translation_cache[original] = translation
                                 translated_map[original] = translation
                                 save_status = save_translation(
                                     cursor, original, translation, target_language,
-                                    source_language,
+                                    source_language, run_id=run_id,
                                 )
                                 if save_status == "inserted":
                                     translated_count += 1
@@ -611,61 +1018,49 @@ def run_translation(
                                 f"  - Aviso: divisao do lote falhou "
                                 f"({len(originals)} comentarios), traduzindo individualmente."
                             )
-                            for original, masked, tokens in grupo_items:
+                            # Garantia B4: o disjuntor (B3) alcanca este ramo. Sem isto, a
+                            # rede caindo DEPOIS de um desalinhamento custava 3 tentativas
+                            # x 30 s por comentario, para o lote inteiro, sem que nada
+                            # abortasse — o unico caminho fora do alcance do disjuntor
+                            # (ROADMAP 28.1). Tres seguidos sem resposta valem tres lotes
+                            # mortos; um grupo em que algum respondeu zera o contador.
+                            sem_resposta_seguidas = 0
+                            respondidos = 0
+                            for posicao, (original, masked, tokens) in enumerate(grupo_items):
                                 if app.cancel_flag.is_set():
                                     canceled = True
                                     conn.commit()
                                     app.log_message("Traducao cancelada pelo usuario.")
                                     return
                                 api_started = time.perf_counter()
-                                translated = translate_text(
-                                    masked,
-                                    target_language,
-                                    app.log_message,
-                                    app.cancel_flag,
-                                    session=http_session,
-                                    pacer=pacer,
-                                    source_language=source_language,
-                                )
+                                translated = traduzir(masked, [contexto_de(original)])
                                 batch_api_time += time.perf_counter() - api_started
                                 batch_api_requests += 1
                                 if translated:
-                                    translation = apply_automatic_substitutions(
-                                        translated, automatic_rules
-                                    )
-                                    translation, corrigidos = fix_move_notation(
-                                        original,
-                                        translation,
-                                        source_language,
-                                        target_language,
-                                    )
-                                    # A mesma verificacao do caminho do lote, e
-                                    # nao por zelo: uma correcao que so
+                                    respondidos += 1
+                                    sem_resposta_seguidas = 0
+                                    # As mesmas etapas do caminho do lote, e
+                                    # nao por zelo: uma verificacao que so
                                     # existisse num dos dois daria uma execucao
                                     # cujo resultado depende de a rede ter
                                     # respondido alinhada — a licao da secao
                                     # 10.4 do ROADMAP.
-                                    translation, intactas = restore_annotations(
-                                        translation, tokens
-                                    )
-                                    if not intactas:
+                                    resultado = concluir(translated, original, masked, tokens)
+                                    if resultado is None:
                                         failed_count += 1
                                         failed_files.add(pgn_file)
-                                        app.log_message(
-                                            f"  - [FALHA] Anotacoes [%...] nao "
-                                            f"voltaram intactas da traducao: "
-                                            f"\"{original[:60]}\""
-                                        )
                                         wait_seconds = pacer.next_delay()
                                         time.sleep(wait_seconds)
                                         batch_wait_time += wait_seconds
                                         continue
+                                    translation, corrigidos, consertos = resultado
                                     move_fixes += corrigidos
+                                    prose_fixes += consertos
                                     app.translation_cache[original] = translation
                                     translated_map[original] = translation
                                     save_status = save_translation(
                                         cursor, original, translation, target_language,
-                                        source_language,
+                                        source_language, run_id=run_id,
                                     )
                                     # Comita AQUI, e nao no fim do lote
                                     # (garantia C3). O primeiro INSERT abre a
@@ -694,9 +1089,46 @@ def run_translation(
                                         f"  - [FALHA] Nao foi possivel traduzir: "
                                         f"\"{original[:60]}\""
                                     )
+                                    sem_resposta_seguidas += 1
+                                    limite = MAX_CONSECUTIVE_FAILED_BATCHES
+                                    if sem_resposta_seguidas >= limite:
+                                        # Os que nao foram tentados continuam no
+                                        # idioma original E sao contados (T2/T3):
+                                        # abortar nao e esquecer.
+                                        restantes = len(grupo_items) - posicao - 1
+                                        failed_count += restantes
+                                        app.log_message(
+                                            f"[ABORTADO] {sem_resposta_seguidas} "
+                                            f"comentarios seguidos sem resposta da API "
+                                            f"no modo individual; {restantes} restantes "
+                                            f"do lote ficam no idioma original. "
+                                            f"Verifique a conexao e reprocesse depois."
+                                        )
+                                        aborted_by_api = True
+                                        conn.commit()
+                                        break
                                 wait_seconds = pacer.next_delay()
                                 time.sleep(wait_seconds)
                                 batch_wait_time += wait_seconds
+                            if aborted_by_api:
+                                break
+                            if respondidos:
+                                consecutive_failed_batches = 0
+                            else:
+                                # Um grupo pequeno (1 ou 2) que nao respondeu a
+                                # nada nao chega ao limite acima, mas e um lote
+                                # morto como os outros.
+                                consecutive_failed_batches += 1
+                                limite = MAX_CONSECUTIVE_FAILED_BATCHES
+                                if consecutive_failed_batches >= limite:
+                                    app.log_message(
+                                        f"[ABORTADO] {consecutive_failed_batches} lotes "
+                                        f"seguidos sem resposta da API. Verifique a "
+                                        f"conexao e reprocesse depois."
+                                    )
+                                    aborted_by_api = True
+                                    conn.commit()
+                                    break
 
                         wait_seconds = pacer.next_delay()
                         time.sleep(wait_seconds)
@@ -783,6 +1215,21 @@ def run_translation(
             # encontra o resto no cache e completa (ROADMAP 18).
             posicoes = info.get("occurrences") or []
             if posicoes:
+                # A posicao de cada comentario (O5, ROADMAP 28.8), AQUI e nao
+                # na primeira passada: e a vez do arquivo, o texto ja esta na
+                # mao e a gravacao das ocorrencias e logo abaixo — a FEN e uma
+                # coluna delas. Cancelavel entre partidas; ~2 s por 800 KB.
+                fens = None
+                if calcular_fen:
+                    inicio_fen = time.perf_counter()
+                    fens = compute_comment_fens(
+                        content, posicoes, should_cancel=app.cancel_flag.is_set
+                    )
+                    com_fen = sum(1 for fen in fens if fen)
+                    app.log_message(
+                        f"  - Posicoes (FEN) calculadas: {com_fen}/{len(posicoes)} "
+                        f"em {time.perf_counter() - inicio_fen:.1f} s"
+                    )
                 ids_por_texto = resolve_comment_ids(
                     cursor,
                     target_language,
@@ -790,9 +1237,11 @@ def run_translation(
                     source_language,
                 )
                 gravadas, sem_linha = record_occurrences(
-                    cursor, pgn_file, posicoes, ids_por_texto
+                    cursor, pgn_file, posicoes, ids_por_texto, fens=fens
                 )
                 conn.commit()
+                if gravadas:
+                    arquivos_revisaveis.append(os.path.abspath(pgn_file))
                 sufixo = (
                     f" ({sem_linha} sem traducao no banco)" if sem_linha else ""
                 )
@@ -827,6 +1276,7 @@ def run_translation(
                     cancel_flag=app.cancel_flag,
                 ):
                     generated_files += 1
+                    arquivos_gerados.append(os.path.abspath(output_pgn))
                     app.log_message(f"  - Arquivo traduzido gerado: {output_pgn}")
 
         conn.commit()
@@ -849,8 +1299,37 @@ def run_translation(
         app.log_message(f"Traducoes reutilizadas do cache: {cache_count}")
         app.log_message(f"Comentarios que falharam: {failed_count}")
         app.log_message(f"Arquivos PGN traduzidos gerados: {generated_files}")
+        if llm is not None:
+            # O que o modelo custou, em tokens e em dolares — estimado antes,
+            # real agora: a fatura e do provedor, mas o numero que a explica
+            # fica no log da execucao (ROADMAP 28.7).
+            app.log_message(f"{llm.spec.label} ({llm.model}): {llm.usage.summary()}")
+            app.log_message(describe_outcome(llm.model, custo_estimado, llm.usage))
+        if anchors_resent or anchors_rejected:
+            # O portao de ancoras (T6) so tem o que dizer com modelo de
+            # linguagem, e so quando agiu: um "0" fixo faria o usuario procurar
+            # o que nao houve.
+            app.log_message(
+                f"Lances reescritos pelo modelo: {anchors_resent} comentario(s) "
+                f"reenviado(s) sozinho(s), {anchors_rejected} recusado(s) e "
+                f"deixado(s) no idioma original"
+            )
         if corrige_lances:
             app.log_message(f"Lances com a letra da peca corrigida: {move_fixes}")
+        if names_resent:
+            # Nomes de jogador que a maquina engoliu junto com o sentinela e
+            # que voltaram sem mascara numa segunda requisicao (X4). So quando
+            # houve — e o numero que diz se a mascara esta custando caro.
+            app.log_message(
+                f"Comentarios reenviados sem a mascara de nomes: {names_resent}"
+            )
+        if prose_fixes:
+            # So quando houve: parte dos consertos e de um par de idiomas, e um
+            # "0" fixo faria quem traduz para o italiano procurar o que nao ha.
+            app.log_message(
+                f"Consertos de prosa (espaco do lance, hifen peca-casa, U+200B, "
+                f"preposicao final): {prose_fixes}"
+            )
         if total_semicolon:
             # So quando existe (garantia X3): um "0 ignorados" fixo faria o
             # usuario procurar um problema que nao ha — o mesmo criterio da
@@ -889,6 +1368,21 @@ def run_translation(
         # Com o disjuntor a execucao passa por aqui tambem (`aborted_by_api`), e
         # ai o `finally` a devolve ao repouso — nada foi concluido.
         completed = not aborted_by_api
+
+        # O que a janela principal precisa para "Revisar as pendentes desta
+        # execucao" e "Abrir pasta" (ROADMAP 28.10): os arquivos com posicoes
+        # gravadas — os unicos que o filtro do editor conhece — e os gerados.
+        # Registrado mesmo interrompida pelo disjuntor ou com falhas: o que foi
+        # traduzido esta no banco e e exatamente o que ha para revisar. So o
+        # cancelamento nao chega aqui (`return` no laco), e ai a ultima execucao
+        # completa continua valendo.
+        if arquivos_revisaveis:
+            app.last_run = {
+                "files": list(arquivos_revisaveis),
+                "generated": list(arquivos_gerados),
+                "target_language": target_language,
+                "completed": completed,
+            }
 
         if not canceled:
             # A linha dos lances so aparece quando houve o que corrigir: uma
@@ -954,7 +1448,13 @@ def run_translation(
                 )
 
     except Exception as e:
+        crashed = True
         app.log_message(f"[ERRO GERAL] {e}")
+        # O traceback vai para o log, como o relator de callbacks do Tk ja faz
+        # (`window_utils`): so `str(e)` de um `IndexError` no meio de um livro
+        # nao diz em qual das etapas ele nasceu, e o log e o unico artefato que
+        # sobra depois (ROADMAP 28.1).
+        app.log_message(traceback.format_exc().rstrip())
         # A lista de falhas desta execucao, ANTES de a excecao levar tudo. O que
         # existia antes deste registro era pior do que nao ter lista: a da
         # execucao anterior continuava valendo, e "Reprocessar Falhas" reprocessava
@@ -976,12 +1476,46 @@ def run_translation(
                 app.log_message(f"[ERRO] Falha ao fechar banco de dados: {e}")
         http_session.close()
 
+        # A linha da execucao fecha com conexao PROPRIA (garantia Z5): a do
+        # pipeline acabou de ser fechada acima, e pode ter morrido junto com a
+        # excecao que trouxe a execucao ate aqui — uma transacao aberta numa
+        # conexao quebrada e o pior lugar para gravar o desfecho. Cinco
+        # desfechos, e a ordem importa: a excecao vence tudo; o cancelamento
+        # vence o disjuntor (um "Cancelar" depois do aborto continua sendo a
+        # decisao do usuario); com falhas e "falhou", sem falhas "concluiu".
+        if run_id is not None:
+            if crashed:
+                desfecho = RUN_CRASHED
+            elif canceled:
+                desfecho = RUN_CANCELED
+            elif aborted_by_api:
+                desfecho = RUN_ABORTED
+            elif failed_count:
+                desfecho = RUN_FAILED
+            else:
+                desfecho = RUN_COMPLETED
+            try:
+                registro = initialize_database(app.output_db)
+                try:
+                    finish_translation_run(
+                        registro.cursor(), run_id, desfecho, translated_count, failed_count
+                    )
+                    registro.commit()
+                finally:
+                    registro.close()
+            except Exception as exc:  # pragma: no cover - defensivo
+                # Registrar e conveniencia: uma execucao concluida nao vira erro
+                # porque o desfecho dela nao coube no banco. A proxima execucao
+                # a marca `crashed`, que e o que ela parece de fora.
+                app.log_message(f"[AVISO] Nao foi possivel registrar o fim da execucao: {exc}")
+
         # A barra termina num estado que significa algo: cheia quando a execucao
         # concluiu, vazia quando nao — cancelada, interrompida pelo disjuntor ou
         # morta por excecao. Congelada no meio ela dizia "estou trabalhando" para
         # sempre, e era o unico sinal na tela que continuava mentindo depois do
         # dialogo de aviso.
         app.root.after(0, lambda v=1.0 if completed else 0.0: app.progress.set(v))
+        set_progress_text(app, "Concluída" if completed else "")
 
         app.is_processing = False
         app.pause_flag.clear()

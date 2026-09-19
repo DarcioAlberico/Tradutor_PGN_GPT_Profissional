@@ -26,7 +26,7 @@ from difflib import SequenceMatcher
 import re
 
 from .annotation_mask import COMMAND_TAG_RE
-from .chess_notation import move_anchors
+from .chess_notation import format_anchor, move_anchors
 from .chess_terms import find_suspect_terms
 
 
@@ -41,7 +41,10 @@ from .chess_terms import find_suspect_terms
 #
 # **Mexer em qualquer heuristica deste arquivo obriga a subir este numero**, e o
 # `Termos-suspeitos.txt` conta como heuristica.
-QUALITY_HEURISTICS_VERSION = 1
+#
+# Versao 2 (2026-09-14, ROADMAP 28.2 camada 1): tres heuristicas de prosa com
+# escopo de par (`_prose_warnings`) e 35 formas novas no `Termos-suspeitos.txt`.
+QUALITY_HEURISTICS_VERSION = 2
 
 QUALITY_REPORT_HEADERS = [
     "id",
@@ -122,12 +125,6 @@ def eval_symbols(text):
             achados[simbolo] += quantos
             restante = restante.replace(simbolo, " ")
     return achados
-
-
-def format_anchor(anchor):
-    """A ancora de lance como se le: `('xd4', '', '+')` -> `xd4+`."""
-    corpo, igual, fim = anchor
-    return f"{corpo}{igual}{fim}"
 
 
 def _sample(items):
@@ -241,6 +238,64 @@ def _terminology_warnings(original, translated, source_language, target_language
     ]
 
 
+# ----------------------------------------------------------------------------
+# Heuristicas de prosa (ROADMAP 28.2, camada 1). Sao as primeiras com escopo
+# de PAR: a primeira le o ORIGINAL em ingles, e por isso so vale com origem
+# `en` ou nao declarada — "after" so e ingles, e uma origem declarada que nao
+# seja ingles a desliga. As outras duas leem so a traducao, por destino.
+#
+# Cada uma foi medida contra as decisoes HUMANAS do banco de desenvolvimento
+# (linhas cujo primeiro evento do historico nao e da sessao de IA de
+# 2026-08-01): marcadas -> editadas / aceitas.
+#
+#   `after` no fim do original, "depois" sem "de" no fim da traducao   124 / 1
+#   "Brancas"/"Pretas" com maiuscula no meio da frase                    10 / 0
+#   "as brancas sao/sejam melhores" (a convencao e "estao")               8 / 1
+#
+# "ele" para o lado (`he`/`his` no original) ficou de FORA: 6 / 5 — metade
+# eram pessoas de verdade, entrevistas e nomes proprios. A regra de 16.3.
+# ----------------------------------------------------------------------------
+_ORIGINAL_ENDS_IN_AFTER = re.compile(r"\bafter\W*$", re.IGNORECASE)
+_AFTER_ADVERBS = re.compile(
+    r"\b(?:immediately|shortly|soon|long)\s+after\W*$", re.IGNORECASE
+)
+# "depois de" termina em "de", entao este padrao ja nao o casa — uma primeira
+# versao tinha um lookbehind para isso, e a mutacao mostrou que era redundante.
+_TRANSLATION_ENDS_IN_DEPOIS = re.compile(r"\bdepois\W*$", re.IGNORECASE)
+_SIDE_CAPITALIZED_MID_SENTENCE = re.compile(
+    r"\b(?:das|as|pelas|nas|\u00e0s|para as|contra as|que as|e as|com as|se as|"
+    r"quando as|enquanto as|onde as|porque as|mas as|ou as) (?:Brancas|Pretas)\b"
+)
+_SIDE_ARE_BETTER = re.compile(
+    r"\b(?:brancas|pretas) (?:[e\u00e9]|s[a\u00e3]o|seria|seriam|era|eram|sejam|seja) "
+    r"(?:\w+ )?(?:melhor|melhores|pior|piores)\b",
+    re.IGNORECASE,
+)
+
+
+def _prose_warnings(original, translated, source_language, target_language):
+    """As tres heuristicas de prosa, so para o destino `pt`."""
+    if target_language != "pt":
+        return []
+    avisos = []
+    if (
+        (not source_language or source_language == "en")
+        and _ORIGINAL_ENDS_IN_AFTER.search(original)
+        and not _AFTER_ADVERBS.search(original)
+        and _TRANSLATION_ENDS_IN_DEPOIS.search(translated)
+    ):
+        avisos.append(
+            "Fragmento terminado em 'after' saiu em 'depois' sem o 'de'."
+        )
+    if _SIDE_CAPITALIZED_MID_SENTENCE.search(translated):
+        avisos.append("'Brancas'/'Pretas' com maiúscula no meio da frase.")
+    if _SIDE_ARE_BETTER.search(translated):
+        avisos.append(
+            "'as brancas são melhores': a convenção é 'estão' (vantagem é estado)."
+        )
+    return avisos
+
+
 def evaluate_translation_quality(
     original,
     translated,
@@ -307,6 +362,9 @@ def evaluate_translation_quality(
 
     warnings.extend(
         _terminology_warnings(original, translated, source_language, target_language)
+    )
+    warnings.extend(
+        _prose_warnings(original, translated, source_language, target_language)
     )
 
     return warnings
@@ -420,8 +478,17 @@ def summarize_quality_warnings(rows):
     return summary
 
 
-def find_first_quality_warning(rows, start_index=0):
+def find_first_quality_warning(rows, start_index=0, include_verified=True):
+    """A primeira linha com aviso a partir de `start_index`, ou `None`.
+
+    `include_verified=False` pula as linhas verificadas (garantia F28): o
+    "Proximo aviso QA" e uma fila de trabalho, e uma linha que o revisor ja
+    aprovou nao e trabalho — a nao ser que ele esteja olhando justamente as
+    verificadas, e ai quem chama passa `True`.
+    """
     for index, row in enumerate(rows[start_index:], start=start_index):
+        if not include_verified and len(row) > 3 and row[3] == 1:
+            continue
         warnings = row_quality_warnings(row)
         if warnings:
             return index, row, warnings

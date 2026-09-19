@@ -42,8 +42,11 @@ from .glossario import (
     update_glossary_entry_by_entry,
     validate_glossary_entry,
 )
+from .db_tools import preview_automatic_rule_impact
 from .settings import load_settings
 from .editor_common import (
+    DESTRUCTIVE_COLOR,
+    DESTRUCTIVE_HOVER_COLOR,
     ERROR_TEXT_COLOR,
     MUTED_TEXT_COLOR,
     OK_TEXT_COLOR,
@@ -60,6 +63,7 @@ from .editor_common import (
     window_safe_geometry,
 )
 from .editor_widgets import (
+    attach_tooltip,
     flash_message,
     render_row_buttons,
     restore_sash,
@@ -261,6 +265,27 @@ class GlossaryEditorState:
         self.validation_lookup = None
 
 
+def duplicate_extras_indices(entries, shown_indices):
+    """As copias A MAIS dos pares repetidos entre os indices exibidos (S22).
+
+    Para cada par `(original, substituicao)` que aparece mais de uma vez na
+    lista exibida, ficam de fora a PRIMEIRA copia em ordem de arquivo e entram
+    as outras. Apagar todas as copias — que e o que "excluir as exibidas" diria
+    ao pe da letra com o filtro "Duplicadas", ja que ele mostra cada copia —
+    apagaria a regra; a duplicata e o excesso, nao o par. Pura, e devolve os
+    indices em `entries`, em ordem.
+    """
+    vistos = set()
+    extras = []
+    for index in sorted(shown_indices):
+        pair = glossary_entry_pair(entries[index])
+        if pair in vistos:
+            extras.append(index)
+        else:
+            vistos.add(pair)
+    return extras
+
+
 class GlossaryEditor:
     """A janela de edicao do glossario.
 
@@ -335,17 +360,35 @@ class GlossaryEditor:
         self.win.columnconfigure(0, weight=1)
         self.win.rowconfigure(0, weight=1)
 
+    @staticmethod
+    def pane_color():
+        return "#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#d1d5db"
+
+    def apply_pane_color(self, _mode=None):
+        try:
+            self.main_pane.configure(bg=self.pane_color())
+        except tk.TclError:  # a janela ja foi destruida
+            pass
+
     def build_list_pane(self):
         """Painel esquerdo: paginacao, busca, filtros, ordem e a lista."""
-        pane_bg = "#2b2b2b" if ctk.get_appearance_mode() == "Dark" else "#d1d5db"
         self.main_pane = tk.PanedWindow(
             self.win,
             orient=tk.HORIZONTAL,
             sashwidth=8,
             sashrelief=tk.FLAT,
             bd=0,
-            bg=pane_bg,
+            bg=self.pane_color(),
         )
+        # O `PanedWindow` e Tk puro e nao repinta sozinho quando o tema troca —
+        # e agora o tema troca de dentro do programa, pela tela de
+        # Configuracoes (28.10), nao so pelo Windows. O mesmo gancho do editor
+        # de traducoes, com a mesma tolerancia: sem o registrador, a janela
+        # fica com a cor do tema anterior ate ser reaberta.
+        try:
+            ctk.AppearanceModeTracker.add(self.apply_pane_color, self.win)
+        except Exception:  # pragma: no cover - versao sem o registrador
+            pass
         self.main_pane.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 6))
 
         list_frame = ctk.CTkFrame(self.main_pane, corner_radius=8, width=420)
@@ -399,6 +442,19 @@ class GlossaryEditor:
             else "Todas"
         )
         self.filter_segment.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 6))
+        # So com o filtro "Duplicadas" e so quando ha copia a mais na lista
+        # (ROADMAP 28.9, item 5): fora disso o botao nao existe, em vez de
+        # existir desabilitado explicando uma condicao. `grid_remove` guarda a
+        # posicao; ele volta na mesma linha, entre o filtro e a ordem.
+        self.btn_delete_shown_duplicates = ctk.CTkButton(
+            list_frame,
+            text="",
+            fg_color=DESTRUCTIVE_COLOR,
+            hover_color=DESTRUCTIVE_HOVER_COLOR,
+            command=self.delete_shown_duplicates,
+        )
+        self.btn_delete_shown_duplicates.grid(row=7, column=0, sticky="ew", padx=10, pady=(0, 6))
+        self.btn_delete_shown_duplicates.grid_remove()
 
         sort_bar = ctk.CTkFrame(list_frame, fg_color="transparent")
         sort_bar.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 6))
@@ -433,7 +489,16 @@ class GlossaryEditor:
             padx=10,
             pady=(10, 2),
         )
-        self.orig_text = ctk.CTkTextbox(detail_frame, height=120, wrap=tk.WORD)
+        # A letra dos dois textos, com `Ctrl+roda` e `Ctrl+±` como no outro
+        # editor (ROADMAP 28.9, item 5); o tamanho e lembrado.
+        tamanho = self.editor_settings.get("font_size", 12)
+        if not isinstance(tamanho, int) or isinstance(tamanho, bool):
+            tamanho = 12
+        self.font_size = max(9, min(24, tamanho))
+        self.text_font = ctk.CTkFont(size=self.font_size)
+        self.orig_text = ctk.CTkTextbox(
+            detail_frame, height=120, wrap=tk.WORD, font=self.text_font
+        )
         self.orig_text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
 
         ctk.CTkLabel(detail_frame, text="Substituir por:").grid(
@@ -443,7 +508,9 @@ class GlossaryEditor:
             padx=10,
             pady=(0, 2),
         )
-        self.new_text = ctk.CTkTextbox(detail_frame, height=120, wrap=tk.WORD)
+        self.new_text = ctk.CTkTextbox(
+            detail_frame, height=120, wrap=tk.WORD, font=self.text_font
+        )
         self.new_text.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 8))
 
         type_bar = ctk.CTkFrame(detail_frame, fg_color="transparent")
@@ -538,6 +605,14 @@ class GlossaryEditor:
         )
         self.btn_promote_conflict.grid(row=0, column=1, sticky="e", padx=(6, 0))
         self.btn_keep_conflict = ctk.CTkButton(self.conflict_bar, text="Manter esta", width=110)
+        attach_tooltip(
+            self.btn_promote_conflict,
+            "Esta regra passa a vencer as concorrentes; nenhuma é apagada (S10)",
+        )
+        attach_tooltip(
+            self.btn_keep_conflict,
+            "Esta regra fica e as concorrentes são APAGADAS do glossário",
+        )
         self.btn_keep_conflict.grid(row=0, column=2, sticky="e", padx=(6, 0))
         self.conflict_bar.grid_remove()
 
@@ -648,6 +723,11 @@ class GlossaryEditor:
         self.win.bind("<Alt-Right>", lambda _event: (self.step_entry(1), "break")[1])
         self.win.bind("<Control-Prior>", lambda _event: (self.change_page(-1), "break")[1])
         self.win.bind("<Control-Next>", lambda _event: (self.change_page(1), "break")[1])
+        # Zoom dos dois textos, as mesmas tres teclas e a roda do outro editor.
+        self.win.bind("<Control-plus>", lambda _event: (self.adjust_font(1), "break")[1])
+        self.win.bind("<Control-equal>", lambda _event: (self.adjust_font(1), "break")[1])
+        self.win.bind("<Control-minus>", lambda _event: (self.adjust_font(-1), "break")[1])
+        self.win.bind("<Control-MouseWheel>", self.zoom_with_wheel)
         self.win.protocol("WM_DELETE_WINDOW", self.close_editor)
 
     def load_first_entry(self, initial_original=None, initial_replacement=None):
@@ -666,11 +746,25 @@ class GlossaryEditor:
         # que nomeiam a regra em conflito.
         flash_message(self.msg_label, self.win, text, text_color=color)
 
+    def adjust_font(self, delta):
+        self.font_size = max(9, min(24, self.font_size + delta))
+        self.text_font.configure(size=self.font_size)
+        self.save_editor_settings()
+
+    def zoom_with_wheel(self, event):
+        """Um entalhe da roda vale um ponto, como no editor de traducoes."""
+        self.adjust_font(1 if getattr(event, "delta", 0) > 0 else -1)
+        return "break"
+
     def save_editor_settings(self):
         save_window_section(
             self.settings,
             "glossary_editor",
-            {"filter": self.filter_segment.get(), "sort": self.sort_text.get()},
+            {
+                "filter": self.filter_segment.get(),
+                "sort": self.sort_text.get(),
+                "font_size": self.font_size,
+            },
             window=self.win,
             sashes=(("main_sash_x", self.main_pane, 0),),
         )
@@ -1012,7 +1106,7 @@ class GlossaryEditor:
             )
         # O indice de validacao e derivado de `entries`; invalida junto.
         self.state.validation_lookup = None
-        self.file_label.configure(text=f"Arquivo: Substituicoes.txt")
+        self.file_label.configure(text="Arquivo: Substituicoes.txt")
 
     def current_validation_lookup(self):
         if self.state.validation_lookup is None:
@@ -1109,6 +1203,71 @@ class GlossaryEditor:
         )
         self.list_count_label.configure(text=f"{len(self.state.filtered_indices)} exibidas")
         self.update_page_controls()
+        self.update_delete_shown_duplicates_button()
+
+    def shown_duplicate_extras(self):
+        if self.filter_segment.get() != "Duplicadas":
+            return []
+        return duplicate_extras_indices(self.state.entries, self.state.filtered_indices)
+
+    def update_delete_shown_duplicates_button(self):
+        extras = self.shown_duplicate_extras()
+        if not extras:
+            self.btn_delete_shown_duplicates.grid_remove()
+            return
+        plural = "cópia repetida exibida" if len(extras) == 1 else "cópias repetidas exibidas"
+        self.btn_delete_shown_duplicates.configure(text=f"Excluir as {len(extras)} {plural}")
+        self.btn_delete_shown_duplicates.grid()
+
+    def delete_shown_duplicates(self):
+        """Apaga as copias a mais dos pares exibidos, com backup e confirmacao
+        proprios (garantia S22). Uma exclusao em massa e acao destrutiva nova
+        (22.12): nao herda o `askyesno` curto da exclusao de uma regra, e o
+        backup vem ANTES da pergunta, com o caminho nela (a regra de Z1)."""
+        extras = self.shown_duplicate_extras()
+        if not extras:
+            self.show_message("Nenhuma cópia repetida na lista exibida")
+            return None
+        try:
+            backup_path = create_glossary_backup()
+        except Exception as exc:
+            messagebox.showerror("Erro", f"Erro ao criar backup:\n{exc}", parent=self.win)
+            return None
+        if not messagebox.askyesno(
+            "Excluir cópias repetidas",
+            (
+                f"Excluir {len(extras)} cópia(s) repetida(s) das entradas exibidas?\n\n"
+                "A primeira cópia de cada par fica; só o excesso sai. "
+                "Um backup acabou de ser criado em:\n"
+                f"{backup_path}"
+            ),
+            parent=self.win,
+        ):
+            self.show_message(f"Exclusão cancelada. Backup em {os.path.basename(backup_path)}")
+            return None
+        apagar = set(extras)
+        restantes = [
+            entry for index, entry in enumerate(self.state.entries) if index not in apagar
+        ]
+        try:
+            save_glossary_entries(restantes)
+        except Exception as exc:
+            messagebox.showerror("Erro", f"Erro ao excluir as cópias:\n{exc}", parent=self.win)
+            return None
+        self.load_rows_from_file()
+        self.state.selected_index = None
+        self.set_dirty(False)
+        self.update_app_glossary()
+        self.apply_filter()
+        if self.state.filtered_indices:
+            self.select_entry(self.state.filtered_indices[0])
+        else:
+            self.clear_form()
+        self.show_message(
+            f"{len(extras)} cópia(s) repetida(s) excluída(s). "
+            f"Backup em {os.path.basename(backup_path)}"
+        )
+        return len(extras)
 
     def build_row_button(self, parent, _visible_index, entry_index):
         button = ctk.CTkButton(
@@ -1305,51 +1464,102 @@ class GlossaryEditor:
             self.show_message("Corrija os campos obrigatórios", ERROR_COLOR)
             return
 
-        try:
-            if self.state.selected_index is None:
-                result = add_glossary_entry(
-                    orig, new, rule_type=rule_type, priority=priority, scope=scope
-                )
-                self.load_rows_from_file()
-                self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
-                self.show_message(
-                    "Entrada adicionada"
-                    if result["status"] == "inserted"
-                    else "Entrada já existia",
-                    OK_COLOR if result["status"] == "inserted" else WARNING_COLOR,
-                )
-            else:
-                # Pelo estado exibido, nao pela posicao guardada: o arquivo pode
-                # ter mudado por fora desde que esta entrada foi selecionada, e
-                # ai o indice aponta para a vizinha (garantia S6).
-                result = update_glossary_entry_by_entry(
-                    self.current_baseline_entry(),
-                    orig,
-                    new,
-                    rule_type=rule_type,
-                    index_hint=self.state.selected_index,
-                    priority=priority,
-                    scope=scope,
-                )
-                self.load_rows_from_file()
-                if result is None:
-                    self.report_entry_vanished()
-                    return
-                self.state.selected_index = result["index"]
-                self.show_message("Entrada salva")
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Erro ao salvar glossário:\n{exc}", parent=self.win)
-            return
+        def gravar():
+            try:
+                if self.state.selected_index is None:
+                    result = add_glossary_entry(
+                        orig, new, rule_type=rule_type, priority=priority, scope=scope
+                    )
+                    self.load_rows_from_file()
+                    self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
+                    self.show_message(
+                        "Entrada adicionada"
+                        if result["status"] == "inserted"
+                        else "Entrada já existia",
+                        OK_COLOR if result["status"] == "inserted" else WARNING_COLOR,
+                    )
+                else:
+                    # Pelo estado exibido, nao pela posicao guardada: o arquivo pode
+                    # ter mudado por fora desde que esta entrada foi selecionada, e
+                    # ai o indice aponta para a vizinha (garantia S6).
+                    result = update_glossary_entry_by_entry(
+                        self.current_baseline_entry(),
+                        orig,
+                        new,
+                        rule_type=rule_type,
+                        index_hint=self.state.selected_index,
+                        priority=priority,
+                        scope=scope,
+                    )
+                    self.load_rows_from_file()
+                    if result is None:
+                        self.report_entry_vanished()
+                        return
+                    self.state.selected_index = result["index"]
+                    self.show_message("Entrada salva")
+            except Exception as exc:
+                messagebox.showerror("Erro", f"Erro ao salvar glossário:\n{exc}", parent=self.win)
+                return
 
-        self.set_form_baseline(orig, new, rule_type, priority, scope)
-        self.set_dirty(False)
-        self.update_app_glossary()
-        self.apply_filter()
-        if (
-            self.state.selected_index is not None
-            and self.state.selected_index < len(self.state.entries)
-        ):
-            self.select_entry(self.state.selected_index)
+            self.set_form_baseline(orig, new, rule_type, priority, scope)
+            self.set_dirty(False)
+            self.update_app_glossary()
+            self.apply_filter()
+            if (
+                self.state.selected_index is not None
+                and self.state.selected_index < len(self.state.entries)
+            ):
+                self.select_entry(self.state.selected_index)
+
+        self.confirm_promotion_then(orig, new, rule_type, priority, scope, gravar)
+
+    def promotes_to_automatic(self, orig, new, rule_type):
+        """Gravar este formulario cria um comportamento automatico NOVO?
+
+        Sim quando o tipo e `automatic` e a linha de base nao era esta mesma
+        regra automatica: uma entrada nova, uma sugestao promovida, ou uma
+        automatica cujo texto mudou (que e outra regra com o mesmo tipo).
+        Salvar de novo uma automatica que nao mudou nao pergunta nada — nao ha
+        impacto novo a mostrar.
+        """
+        if rule_type != GLOSSARY_RULE_AUTOMATIC:
+            return False
+        base = self.form_baseline
+        return not (
+            base["type"] == GLOSSARY_RULE_AUTOMATIC
+            and (base["orig"], base["new"]) == (orig, new)
+        )
+
+    def confirm_promotion_then(self, orig, new, rule_type, priority, scope, gravar):
+        """Grava direto, ou mede o impacto e grava so se o usuario confirmar.
+
+        E a garantia S20 (ROADMAP 28.5): promover a `automatic` mostra antes
+        quantas traducoes pendentes a regra alteraria e dez delas. A medicao
+        roda fora da thread do Tk, entao `gravar` e uma continuacao e nao um
+        `return` — e enquanto ela roda o formulario continua sujo, que e o
+        estado verdadeiro: nada foi gravado ainda.
+        """
+        if not self.promotes_to_automatic(orig, new, rule_type):
+            gravar()
+            return
+        self.measure_promotion_then(orig, new, rule_type, priority, scope, gravar)
+
+    def measure_promotion_then(self, orig, new, rule_type, priority, scope, gravar):
+        """A medicao de S20 sem a pergunta "e promocao?" — quem chama ja sabe."""
+        def decidido(promover):
+            if not self.win.winfo_exists():
+                return
+            if promover:
+                gravar()
+            else:
+                self.show_message("Promoção cancelada; nada foi gravado", WARNING_COLOR)
+
+        preview_automatic_rule_impact(
+            self.app,
+            (orig, new, rule_type, priority, scope),
+            parent=self.win,
+            on_decision=decidido,
+        )
 
     def save_as_new(self):
         orig, new = self.current_pair()
@@ -1367,29 +1577,39 @@ class GlossaryEditor:
             self.show_message("Corrija os campos obrigatórios", ERROR_COLOR)
             return
 
-        try:
-            result = add_glossary_entry(
-                orig, new, rule_type=rule_type, priority=priority, scope=scope
-            )
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Erro ao salvar nova entrada:\n{exc}", parent=self.win)
-            return
+        def gravar():
+            try:
+                result = add_glossary_entry(
+                    orig, new, rule_type=rule_type, priority=priority, scope=scope
+                )
+            except Exception as exc:
+                messagebox.showerror(
+                    "Erro", f"Erro ao salvar nova entrada:\n{exc}", parent=self.win
+                )
+                return
 
-        self.load_rows_from_file()
-        if result["status"] == "unchanged":
-            self.show_message("Entrada já existia", WARNING_COLOR)
+            self.load_rows_from_file()
+            if result["status"] == "unchanged":
+                self.show_message("Entrada já existia", WARNING_COLOR)
+            else:
+                self.show_message("Nova entrada salva")
+            # Vale para os dois casos: a entrada existente e a recem inserida sao
+            # localizadas do mesmo jeito. `len(entries) - 1` so acertava porque a
+            # insercao acrescenta no fim, e errava quando ela nao acontecia.
+            self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
+            self.set_form_baseline(orig, new, rule_type, priority, scope)
+            self.set_dirty(False)
+            self.update_app_glossary()
+            self.apply_filter()
+            if self.state.selected_index is not None:
+                self.select_entry(self.state.selected_index)
+
+        # "Salvar como nova" sempre cria uma entrada, entao uma automatica aqui e
+        # sempre uma regra automatica nova — a linha de base nao conta.
+        if rule_type == GLOSSARY_RULE_AUTOMATIC:
+            self.measure_promotion_then(orig, new, rule_type, priority, scope, gravar)
         else:
-            self.show_message("Nova entrada salva")
-        # Vale para os dois casos: a entrada existente e a recem inserida sao
-        # localizadas do mesmo jeito. `len(entries) - 1` so acertava porque a
-        # insercao acrescenta no fim, e errava quando ela nao acontecia.
-        self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
-        self.set_form_baseline(orig, new, rule_type, priority, scope)
-        self.set_dirty(False)
-        self.update_app_glossary()
-        self.apply_filter()
-        if self.state.selected_index is not None:
-            self.select_entry(self.state.selected_index)
+            gravar()
 
     def delete_current(self):
         index = self.state.selected_index
@@ -1614,6 +1834,12 @@ class GlossaryEditor:
         if self.state.dirty and not self.confirm_discard_changes():
             return
         self.save_editor_settings()
+        # A lista do rastreador e de CLASSE: sem tirar o desta janela, cada
+        # abrir-e-fechar deixaria mais um la (a mesma razao do editor, F18).
+        try:
+            ctk.AppearanceModeTracker.remove(self.apply_pane_color)
+        except Exception:  # pragma: no cover - versao sem o registrador
+            pass
         self.win.destroy()
 
 

@@ -208,12 +208,37 @@ else:
 # fallback e continua correta (garantia E4), so que pior.
 hiddenimports += ["chardet"]
 
+# O motor do corretor de prosa (ROADMAP 26) e o SEGUNDO import condicional
+# (`try: from spylls.hunspell import Dictionary`, em prose_spellcheck). A
+# analise estatica tambem o encontra — o build de 2026-08-03 levou 38 modulos
+# dele sem ninguem pedir —, mas so se o interpretador que roda o PyInstaller o
+# tiver: um build a partir de um ambiente sem `spylls` saia sem corretor, em
+# silencio, com os dicionarios embutidos e ninguem para le-los (ROADMAP 28.1).
+# Declarar e avisar e o que transforma esse silencio num aviso; os `.dic` de
+# exemplo que o pacote traz (en, ru, sv) ficam de fora — o corretor usa os de
+# `dicionarios/`.
+try:
+    import spylls.hunspell  # noqa: F401
+except ImportError:
+    print(
+        "AVISO: `spylls` nao esta instalado neste interpretador. O executavel "
+        "sai SEM o corretor de prosa, mesmo com os dicionarios embutidos. "
+        "Instale-o (`uv sync`) e reconstrua."
+    )
+else:
+    hiddenimports += ["spylls.hunspell"]
+
 # Excluidos por medicao, e nao por palpite: nenhum dos dois e carregado ao
 # importar o programa, e juntos custavam 36 dos 85 MB do primeiro build. Eles
 # entram como dependencias **opcionais** de quem o programa usa de verdade —
 # numpy pelo PIL, cryptography pelo urllib3 — e as duas funcionam sem eles. O
 # PIL fica: o customtkinter o importa na carga.
 excludes = ["numpy", "cryptography"]
+# `chess` (python-chess) fica FORA do executavel por licenca: e GPL-3.0-ou-
+# posterior, e o tabuleiro do editor (ROADMAP 28.8) e conforto opcional. Quem
+# roda do fonte e o tem instalado ve o quadro; o `.exe` sai sem ele e a licenca
+# do programa nao muda. O codigo importa o pacote na hora e trata a ausencia.
+excludes += ["chess"]
 
 
 a = Analysis(

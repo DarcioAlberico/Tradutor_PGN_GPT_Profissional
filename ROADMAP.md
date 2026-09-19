@@ -5,6 +5,10 @@ Registro das melhorias do programa. Cada item traz o motivo, o impacto medido
 verificacao mostrou que a analise estava errada, caso em que o erro fica no
 proprio item.
 
+**Pendente: a secao 28** (revisao de 2026-09-14), que e plano e nao
+entrega — quinze itens medidos (28.1 a 28.5 ja feitos), com a ordem em 28.15 e as garantias planejadas
+na secao 11 da SPEC. Ate ela, o registro estava assim:
+
 **Nada pendente.** O item 19.11 (corretor ortografico de prosa), que era o
 unico nao entregue do registro inteiro, saiu na secao 26 em 2026-08-03. A secao
 22 (revisao de UI) foi concluida nos itens 22.1 a 22.14, em 2026-07-31 e
@@ -7568,3 +7572,1839 @@ erros de Tcl**.
 
 Fica registrado porque a conclusao errada era barata de tirar e cara de desfazer:
 o proximo a ver esses 24 tracebacks nao precisa refazer o A/B.
+
+---
+
+## 28. Revisao de 2026-09-14 — o teto do programa, medido
+
+Pedido do usuario: uma analise profunda de tudo que pode ser implementado e
+melhorado, na interface e na produtividade, com as ferramentas certas e duas
+revisoes criticas independentes, gerando roadmap e especificacao de
+implementacao. **Nada desta secao esta implementado.** Ela e o plano; cada
+item diz o que foi confirmado com a funcao real, o que foi medido e em que
+base, e o que e so desenho.
+
+**O metodo.** Cinco varreduras paralelas e independentes, cada uma com um
+recorte e a mesma proibicao (so leitura, nenhuma janela, nenhuma suite, banco
+aberto em `mode=ro`): falhas silenciosas no pipeline e no banco; custo em
+gestos das tres janelas (o `edit_window.py` lido inteiro); arquitetura das
+quatro evolucoes grandes; engenharia e empacotamento; e — a que mais pesou —
+**a qualidade da traducao automatica medida linha a linha no banco de
+desenvolvimento** (6.500 traducoes en -> pt do "The Sicilian Dragon: Move by
+Move"), reconstruindo a saida da maquina a partir do `comment_history`
+(`previous_translation` da primeira edicao de cada linha, 3.075 linhas; as
+demais nunca foram editadas). Depois, duas revisoes criticas independentes
+do rascunho, com lentes opostas — o tradutor que usa o programa oito horas
+por dia e o mantenedor que vai sustentar cada item —, e uma rodada de
+medicao para responder ao que elas exigiram. Somadas, as duas fizeram 48
+objecoes; o que cada uma derrubou esta dito no item que mudou.
+
+**A ressalva que condiciona toda a secao, e que a primeira revisao critica
+apontou:** das 3.685 edicoes do historico, **3.420 sao de 2026-08-01** — a
+revisao de terminologia feita numa sessao de IA. Uma "precisao" medida contra
+essas edicoes e a IA conferindo a propria convencao. Por isso a precisao de
+cada detector foi **remedida contra decisoes humanas**: as 784 linhas cujo
+PRIMEIRO evento do historico e de outro dia (280 editadas pelo humano, 504
+aceitas como estavam). E esse o numero que vale em cada item abaixo; o
+numero sobre o banco inteiro esta dito como tal.
+
+**Quatro afirmacoes das varreduras nao sobreviveram a conferencia**, e ficam
+registradas porque a conclusao errada era barata de tirar:
+
+- "O corretor de prosa nunca funciona no executavel, porque o `.spec` nao
+  declara `spylls`." O `.spec` nao declara — mas o `PYZ-00.toc` do build de
+  2026-08-03 tem **38 entradas** de `spylls`: o PyInstaller seguiu o `import`
+  a partir do interpretador que rodou o build, que tinha o pacote. O que
+  sobrevive e a versao fraca, e ela e um bug (28.1).
+- "Lotes `|||` podem trocar o conteudo entre comentarios sem aviso" — e
+  verdade por construcao, e a reproducao com resposta fabricada e real.
+  Medido no banco de dev: **zero** linhas cujos lances do original e da
+  traducao nao se intersectam, e uma anomalia de tamanho (`", and"` -> `"e"`,
+  razao 0,2), que e traducao normal. Risco de desenho com incidencia zero em
+  6.500 linhas, nao bug critico (28.12).
+- "Uma memoria de traducao por lances e numeros poupa muito num livro cheio
+  de moldes" — a hipotese da primeira analise. Medido: **4 grupos, 5
+  linhas**. Foi cortado (28.13).
+- "Mascarar a citacao de partida inteira e o que o tradutor de livro faz."
+  Medido nas linhas verificadas: o revisor **manteve** a sede em 54 e a
+  **traduziu** em 26 (Berna, Amsterda, Sao Paulo, Breslavia), e
+  `correspondence` -> "correspondencia" (33 vezes) nao e sede. A mascara
+  ficou so nos nomes (28.3).
+
+**O tema que domina a revisao:** o programa protege com rigor o que e
+notacao e trata a prosa como caixa preta. A medicao mostra que a caixa preta
+tem forma: das 6.500 linhas, **1.677 (25,8 %) tem um defeito detectavel por
+regra simples**, e o QA de hoje ve 359 delas. Desses 1.677 defeitos, ~1.270
+tem conserto deterministico (28.2 e 28.4), ~400 so viram aviso (`game` ->
+"jogo", `the exchange` -> "troca", "ele" — porque a distincao e semantica), e
+das 2.999 linhas que a revisao editou **1.419 nao tem defeito detectavel por
+regra nenhuma** — estilo e reformulacao. Esse ultimo numero e o teto das
+regras, e e o argumento do provedor de modelo de linguagem (28.7), que agora
+tem uma regua para ser medido antes de ser adotado.
+
+**Numeros do glossario desta secao** (medidos em 2026-09-14 com
+`load_glossary_entry_details`): 6.071 regras — 5.622 `suggestion`, 399
+`automatic`, 50 `cleanup`. Os 7.105 / 147 / 6.958 das secoes 14 a 16 sao de
+julho, antes da revisao de terminologia.
+
+### 28.1 Bugs confirmados nesta revisao — CONCLUIDO (2026-09-14)
+
+Cada um reproduzido com a funcao real ou conferido em artefato; nenhum
+depende de rede.
+
+1. **`spylls` esta em `requirements.txt` e nao esta em `pyproject.toml`, em
+   `uv.lock` (zero ocorrencias) nem no `.spec`.** Confirmado: o `.venv` do
+   `uv` nao tem o modulo (`ModuleNotFoundError`), e `uv run` — o caminho do
+   README — abre o programa sem corretor, com a janela dizendo "sem
+   dicionario"; `ProseSpellcheckTests` e pulada por `SkipTest` sem nada
+   ficar vermelho. O build do `.exe` so leva o corretor se o interpretador
+   que roda o PyInstaller tiver o pacote; um `uv run python -m PyInstaller`
+   sairia sem ele, em silencio. Correcao: declarar em `pyproject.toml`,
+   rodar `uv lock`, e no `.spec` avisar quando `import spylls` falha no
+   interpretador do build — um aviso distinto do que ele ja da quando falta
+   o par `.dic/.aff`. Garantia planejada **I8**.
+2. **`load_settings` trata qualquer `OSError` como "arquivo nao existe"**
+   (`settings.py`, o `except` da leitura). Reproduzido com `PermissionError`
+   injetado numa leitura de `write_main_window_settings`: o arquivo que tinha
+   rascunho, lista de falhas (T4) e preferencias virou
+   `{'main_window': {'target_language': 'es'}}`. E o mesmo desfecho do BOM
+   (12.1), por outro caminho — e no Windows um antivirus tocando o `.json`
+   por uma fracao de segundo e rotina. **A correcao do rascunho estava
+   errada** ("so `FileNotFoundError` vira `{}`; o resto sobe"): a segunda
+   revisao critica contou seis chamadores de `load_settings`, inclusive a
+   abertura do programa e a thread do rascunho — uma excecao ali derruba a
+   abertura ou some numa thread. A regra certa e do lado da ESCRITA:
+   `update_settings` nunca grava por cima de um arquivo que existe e nao
+   pode ser lido; um arquivo ilegivel (`OSError`) faz a gravacao desistir com
+   aviso, e um arquivo invalido (`JSONDecodeError`, `UnicodeDecodeError`) e
+   renomeado para `.corrompido-<data>` antes de o programa seguir com `{}`,
+   com aviso pelo canal S5. Os leitores continuam degradando para `{}`.
+   Garantia planejada **M3**.
+3. **O `except Exception` de `run_translation` grava so `str(e)`**, sem
+   traceback, ao contrario do relator de callbacks do Tk (`window_utils`),
+   que grava `format_exception`. Um `IndexError` no meio de um livro vira
+   uma linha de log sem dizer em qual das etapas. Correcao: uma linha.
+4. **`ROW_COLOR` e importado de `editor_common` e redefinido em
+   `edit_window.py:104`** (ruff F811). Hoje os dois valores sao iguais; o dia
+   em que a paleta central mudar, o editor fica com a cor velha sem erro.
+5. **O disjuntor B3 nao conta o caminho do desalinhamento** — LEITURA,
+   confirmada por duas varreduras e nao reproduzida: `consecutive_failed_batches`
+   so e alimentado no ramo "a API nao respondeu"; o ramo B2 (comentario a
+   comentario, `translation_worker.py:640-700`) so faz `failed_count += 1`,
+   e pode gastar 3 x 30 s por comentario com a rede caida sem que o
+   disjuntor dispare. O teste que o confirma e o mesmo que o corrige.
+   Garantia planejada **B4**.
+6. **"Aplicar Automaticas" reescreve linhas ja verificadas.**
+   `_automatic_rules_query` (`database.py:2688`) filtra por par e origem e
+   **nao** por `verified = 0`. Promover uma regra na linha 500 e clicar a
+   ferramenta reescreve as 499 que o humano ja aprovou. Confirmado por
+   leitura da consulta; e o que faz 28.5 ser pre-requisito de qualquer
+   promocao de regra.
+7. Miudezas de engenharia: `requires-python = ">=3.8"` contra 3.13 fixado
+   (nao ha 3.8 nesta maquina; "roda em 3.8" e leitura); nenhum
+   `[tool.ruff]` no `pyproject.toml` (34 avisos E/F, 4 em producao);
+   `test_core.py` com 18.278 linhas e 151 classes; 32 das 857 funcoes do
+   pacote tem anotacao de tipo.
+
+**Feito no mesmo dia, e tres coisas sairam diferentes do plano acima:**
+
+- **M3 (item 2) e uma regra da ESCRITA, nao um `except` mais estreito.**
+  `update_settings` passou a ler com `_read_settings_for_update`, que tem
+  tres desfechos e nenhum e "fingir que o arquivo nao existe": inexistente ->
+  `{}`; ilegivel (`OSError`) -> aviso e a excecao sobe (quatro dos cinco
+  chamadores ja a tratavam — o rotulo do rascunho diz "Falha ao salvar" —, e
+  o quinto, o "Remover a lista?" de Reprocessar Falhas, passou a tratar);
+  invalido (JSON,
+  bytes ou um nao-objeto) -> renomeado para `.corrompido-<data>` ao lado,
+  aviso com o caminho, e a gravacao segue com `{}`. `load_settings` continua
+  tolerante para quem so le. O aviso vai por um canal proprio
+  (`set_settings_warning_handler`), registrado em `app.py` como o do
+  glossario (S5): log sempre, dialogo uma vez por mensagem. A leitura e em
+  bytes, de proposito: um byte invalido no meio do arquivo e "corrompido", e
+  decodificar no `open` o confundiria com "ilegivel".
+- **B4 (item 5) tem duas regras, nao uma, e moveu o zeramento do disjuntor.**
+  No ramo individual, tres comentarios seguidos sem resposta abortam e os
+  restantes do lote sao contados como falha (T2/T3 — abortar nao e esquecer);
+  um grupo pequeno (1 ou 2) que nao respondeu a nada conta como lote morto; e
+  um grupo em que algum respondeu zera a conta. Para a segunda regra
+  funcionar, `consecutive_failed_batches = 0` saiu de "a API respondeu" e foi
+  para "a API respondeu ALINHADO" — antes, o lote desalinhado zerava o contador
+  ANTES de saber se estava vivo, e um grupo pequeno morto nunca contava. Foi o
+  teste que mostrou: 4 lotes enviados onde o limite e 3.
+- **`ROW_COLOR` (item 4): venceu a paleta central, nao a copia.** O plano dizia
+  "apagar a importacao"; a memoria de 22.9 diz o contrario — os pares de cor
+  vivem em `editor_common.py`. A redefinicao local e que saiu.
+
+O resto saiu como planejado: `spylls` em `pyproject.toml` e `uv.lock` (o
+`uv lock` tambem atualizou `requests` 2.32 -> 2.34 e `urllib3`, que estavam
+soltos no lock), `.venv` sincronizado, o `.spec` importa `spylls.hunspell` e
+avisa quando nao consegue — um aviso distinto do que ele ja dava para o par
+`.dic/.aff`; o `[ERRO GERAL]` grava `traceback.format_exc()`;
+`requires-python` para `>=3.10`; `[tool.ruff.lint]` explicito com E741 permitido
+so nos testes; 14 avisos corrigidos pelo `ruff --fix` (imports mortos,
+f-string sem placeholder), dois `l` renomeados em producao, um `lambda`
+atribuido e uma variavel morta nos testes. O item 6 (a ferramenta "Aplicar
+Automaticas" sem filtro de `verified`) **nao** entrou aqui, como o plano ja
+dizia: e o 28.5, item 1.
+
+**O que a verificacao fixou.** Quatro classes novas em `test_core.py`
+(`SettingsWriteSafetyTests`, 5 testes; `IndividualFallbackBreakerTests`, 4;
+`WorkerTracebackTests`, 1; `ProseSpellcheckDependencyTests`, 3), e nove
+mutacoes — as tres de M3, a do traceback e as cinco de B4 — todas mortas na
+primeira passada. Uma armadilha do harness custou uma rodada: `run_worker`
+grava `self.PGN`, e o da classe-base tem exatamente tres comentarios — o
+limite do disjuntor —, entao "chamou 1 + 3 vezes" era verdade com e sem a
+correcao (o padrao 1 da memoria de testes). O teste passou a escrever um PGN
+de oito. **E a suite inteira travou por 40 minutos**: o teste do traceback
+forca o `[ERRO GERAL]`, que chama `messagebox.showerror`, e o `run_worker` do
+harness so silenciava `showinfo` e `showwarning` — o `FakeRoot.after` executa
+na hora e o dialogo modal ficou esperando um clique (a mesma armadilha que o
+`setUp` de `TranslationWorkerTests` ja descrevia desde o 2.9). Sozinho, o
+teste passava em 0,04 s; so na suite, com um root Tk criado por um teste
+anterior, o dialogo bloqueia. O harness passou a silenciar os tres.
+`ROW_COLOR` nao tem teste: quem o protege e o `ruff` (F811), que a
+configuracao nova torna parte do projeto. As garantias I8, M3 e B4 migraram
+para a secao 9 da SPEC.
+
+### 28.2 O aviso de qualidade ve 359 das 1.677 linhas que tem defeito — CONCLUIDO (2026-09-14)
+
+**Medido no banco de dev**, uniao de 33 detectores por regra (regex no
+original e na traducao, o par generalizando o formato do
+`Termos-suspeitos.txt`): 1.677 linhas na saida da maquina; o QA de hoje
+(`evaluate_translation_quality`) marca 359, das quais 348 estao na uniao.
+Os detectores por volume, com a precisao **contra decisoes humanas** (linhas
+marcadas cujo primeiro evento e do humano: editadas / aceitas):
+
+| defeito | linhas (maquina) | humano: edit/aceit | QA hoje | glossario hoje |
+|---|---|---|---|---|
+| fragmento terminado em `after` -> "depois" sem "de" | 527 | 124 / 1 (99 %) | nao | nao: e fim de texto, o glossario e substring |
+| `game` -> "jogo" | 492 | — | nao | 186 regras, 113 `automatic`; ~100 usos legitimos |
+| `White`/`Black` sem traduzir | 272 | 19 / 1 (95 %) | sim | 6 regras, 1 `automatic` |
+| `move` -> "movimento"/"jogada" | 169 | 12 / 1 (92 %) | nao | `automatic` existe para "movimento" |
+| "ele" para as brancas/pretas (`he`/`his` no original) | 131 | 6 / 5 (55 %) | nao | — |
+| `cavalo-d5`, `peao-b2` (hifen do ingles `d5-knight`) | 116 | 14 / 0 (100 %) | nao | — |
+| `the exchange` -> "troca" (e "qualidade") | 106 | 3 / 1 | nao | 98 regras para "troca" generico |
+| `endgame` -> "final de jogo" | 81 | 8 / 0 (100 %) | nao | `automatic` existe |
+| reticencia colada (`9...d5`) onde o original tinha espaco | 80 | 3 / 2 | nao | — |
+| `resign` -> "renunciar"/"desistir" | 75 | 2 / 0 | nao | 3 `suggestion` |
+| abertura no masculino ("o Dragao", "Acelerado") | 73 | 17 / 0 (100 %) | nao | — |
+| "Brancas"/"Pretas" com maiuscula no meio da frase | 67 | 10 / 0 (100 %) | nao | — |
+| `check` -> "cheque"/"verificacao" | 43 | — | so "cheque" | `automatic` existe para "cheque" |
+| "sao/sejam melhores" (convencao: estao) | 37 | 8 / 1 (89 %) | nao | — |
+| `U+200B` (espaco de largura zero) que a API insere | 30 | 3 / 3 | nao | — |
+| ~19 formas menores (arquivo, limas, quadrado, ritmo, alfinete, bifurcar, sorteio, comercio, nitido, lado do rei, pedaco, lacuna...) | ~130 | 22 / 0 | 11 formas | parcial |
+
+Somando os detectores: 270 linhas marcadas no padrao humano, **252
+editadas e 18 aceitas (93 %)**, contra uma taxa de edicao humana geral de
+36 %. E o ranking do que a revisao de fato trocou (diff token a token, banco
+inteiro): `'' -> 'de'` 532 vezes; `o jogo -> a partida` 92;
+`movimentos -> lances` 86; `troca -> qualidade` 85; `Black -> as pretas` 71;
+`Brancas -> brancas` 62; `sao -> estao` 52; `cheque -> xeque` 27.
+
+**Uma ressalva sobre a coluna "glossario hoje":** as regras `automatic` que
+"existem" foram promovidas em 2026-08-01, DEPOIS da execucao que gerou estas
+traducoes (2026-07-28). Nao ha evidencia de que o pipeline deixe de
+aplica-las; ha evidencia de que o banco de dev nao as recebeu. E o 28.1
+item 6 e o motivo de nao aplica-las em massa hoje.
+
+**O que o item faz**, em duas camadas (a terceira, o glossario, e 28.5):
+
+1. **QA** (`review_quality.py` e `Termos-suspeitos.txt`): as ~19 formas
+   menores com precisao humana medida acima de 90 % entram na lista; e tres
+   heuristicas que a lista nao expressa — `after$` no original com
+   `depois$` na traducao (99 %); "Brancas/Pretas" com maiuscula fora do
+   inicio (100 %); "sao/sejam melhores" (89 %). **"ele" para o lado fica
+   fora** (55 %: entrevistas e pessoas — a mesma regra de 16.3). Sao as
+   primeiras heuristicas com escopo de PAR (`en>pt`): a SPEC 10 diz que a
+   simetria coluna x tela (Q3) so estara testada quando existir uma, e o
+   teste e parte deste item. A versao das heuristicas sobe (Q2) e o banco
+   reavalia na abertura. **Com uma condicao que a primeira revisao critica
+   impos:** o filtro "Avisos QA" e o "Proximo aviso QA" (F7) passam a
+   mostrar **so pendentes por padrao** — sem isso, reavaliar o banco real
+   marcaria milhares de linhas ja verificadas e o "Proximo aviso" pararia
+   em linha aprovada (F28).
+2. **Normalizacoes deterministicas guiadas pelo original**, depois das
+   regras automaticas e antes de gravar, como `fix_move_notation`: restaurar
+   o espaco da reticencia e do numero de lance conforme o original (80 + 5
+   linhas); `(cavalo|bispo|torre|dama|rei|peao|peoes)-([a-h][1-8]?)` ->
+   `\1 de \2` **so com destino `pt`** (116 linhas; nenhum original portugues
+   usa o hifen); remover `U+200B` (30 — os humanos aceitaram 3 porque o
+   caractere e invisivel, e por isso e limpeza e nao aviso). Cada uma e uma
+   funcao pura num `prose_fixes.py` novo, com teste de mutacao. E **uma
+   passada sobre o banco gravado**, no mesmo caminho de P4 (11): a secao 11
+   nasceu porque P3 corrigia so traducao nova e 4.144 linhas ficaram
+   erradas; nao se repete.
+
+Garantias planejadas: **Q4** (as tres heuristicas e a lista ampliada, cada
+uma com a precisao humana registrada), **F28** (avisos e "Proximo aviso" so
+pendentes por padrao), **P5** (as normalizacoes so agem onde o original
+prova a forma — nunca inventam espaco nem hifen) e **P6** (a passada sobre o
+banco alcanca o que ja esta gravado, com historico).
+
+**A camada 1 (o QA) foi feita no mesmo dia, depois da 2.** O que a medicao
+decidiu, forma a forma:
+
+- **35 formas novas no `Termos-suspeitos.txt`**, cada uma com o numero no
+  proprio arquivo. Medidas de dois jeitos: contra as decisoes humanas
+  (`move` -> "movimento" 8/0, `endgame` -> "final de jogo" 7/0, `trade` ->
+  "comercio"/"negociar" 7/0, `for the exchange` -> "troca" 2/0) e, onde nao
+  havia amostra humana, lendo o que cada uma marca na saida da maquina, como
+  16.1 fez (`resign` -> "renunciar" 13/13 erro, `check` -> "verificacao"
+  11/11, `sharp` -> "nitido" 5/5, `pin` -> "imobilizacao" 6/6 e a revisao
+  trocou todas por "cravada", `kingside` -> "lado do rei" 5/5 por "ala do
+  rei"). `the exchange` entrou **so com contexto** — `for/up/down/win/lose/
+  sacrifice the exchange`, `exchange sacrifice` — porque sem ele a precisao
+  humana e 60 % ("to exchange the knight" e troca mesmo, como 16.1 ja dizia).
+  **Quatro candidatas lidas ficaram de fora**: `game` -> "jogo" (39/14,
+  74 %), `move` -> "jogada" (4/1), `the exchange` -> "troca" sem contexto
+  (3/2) e `fork` -> "bifurcacao" (2 linhas, as duas "fork in the road").
+- **Tres heuristicas de prosa** em `review_quality._prose_warnings`, so para
+  o destino `pt`: `after` no fim do original com "depois" sem "de" no fim da
+  traducao (124/1), "Brancas/Pretas" com maiuscula no meio da frase (10/0) e
+  "as brancas sao/sejam melhores" (8/1). **"ele" para o lado ficou de fora**
+  (6/5 — entrevistas e pessoas), pela regra de 16.3. A primeira e a
+  **primeira heuristica com escopo de PAR** do programa: le o original em
+  ingles, entao vale com origem `en` ou nao declarada e e desligada por uma
+  origem declarada que nao seja ingles; a SPEC 10 dizia que a simetria
+  coluna x tela (Q3) so estaria testada quando isso existisse, e agora esta —
+  o veredito e o mesmo dos dois lados para `en`, para `""` e para `es`, onde
+  ele muda.
+- **A versao das heuristicas subiu para 2** (Q2): o banco reavalia na
+  abertura, com barra.
+- **F28**: "Avisos QA" passou a listar so as pendentes — um filtro
+  `pending_warnings` novo no banco, com a coluna correspondente no resumo por
+  status (o `EXPLAIN QUERY PLAN` continua em `COVERING INDEX`, o que 22.13
+  perdeu uma vez), o rodape conta essas, e F7 pula as verificadas **salvo no
+  filtro "Verificadas"**, onde elas sao justamente o trabalho. "Exportar QA"
+  e "Reavaliar QA" continuam alcancando tudo. Nenhum controle novo na tela:
+  o par filtro + F7 ja expressa "so pendentes" e "as verificadas", e 22.10
+  mediu que nao ha largura para um terceiro.
+
+Medido: a versao 2 marca **1.254 linhas da saida da maquina** (a 1: 359),
+com **96 % de precisao contra as decisoes humanas** (181 editadas, 7
+aceitas; a taxa geral de edicao humana e 36 %). Hoje, 107 linhas — 92
+pendentes na fila e 15 verificadas que F28 deixa fora dela.
+
+**O que a verificacao fixou.** `ProseQualityHeuristicsTests` (9 testes,
+inclusive a simetria Q3 por origem e a lista do que entrou e do que ficou de
+fora), `PendingOnlyQaFilterTests` (3, com o plano de consulta) e
+`PendingOnlyQaFilterWindowTests` (2, na janela real: o filtro esconde a
+verificada; F7 a pula e a acha no filtro "Verificadas"). Onze mutacoes
+mortas; **duas sobreviveram a primeira passada**: um lookbehind redundante
+no padrao de "depois" — "depois de" termina em "de" e nunca casou —, que
+saiu do codigo em vez de ganhar teste; e "prosa roda fora do pt", porque o
+teste italiano usava texto que nao casava os padroes portugueses de qualquer
+jeito — ganhou tres casos que casam. Q4 e F28 migraram para a secao 9 da
+SPEC.
+
+**A camada 2 foi feita antes da 1, no mesmo dia.** O que a medicao decidiu
+e o que saiu diferente do plano:
+
+- **As formas coladas nunca vem do livro** — `10...d5`, `...Cd3` e `12h5`
+  somam 111 ocorrencias na saida da maquina e **zero** no original. Ainda
+  assim a regra so repoe o espaco quando o original tem a forma espacada para
+  o MESMO lance (numero e ancora, a ancora sendo o corpo sem a letra da peca,
+  como em `chess_notation`): e o que a torna incapaz de inventar (P5). A
+  primeira versao repunha 62 das 111; as 49 restantes eram a maquina colando
+  dos DOIS lados ("playing ... b5" -> "jogar...b5"), e o original prova
+  tambem o espaco de antes. Com isso, 111 de 111.
+- **O hifen so na casa completa.** `peca-coluna` ("peoes-c") aparece 3 vezes
+  e a revisao nao a resolveu com "de"; fica de fora. Na casa completa, 128
+  ocorrencias em 131 linhas, guiadas pela casa que o original tem em
+  `casa-peca` (413).
+- **`U+200B` so quando o original nao tem nenhum** (68 contra 0), e os
+  espacos que sobram colapsam. Os humanos aceitaram 3 linhas com ele porque
+  e invisivel — por isso e limpeza e nao aviso.
+- **A passada sobre o banco (P6) e a ferramenta "Consertar Prosa"**, ao lado
+  de "Corrigir Lances" e pelo mesmo caminho dela — `analyze/apply_move_notation_updates`
+  ganharam `only_pending` e `history_action`, e a funcao injetada e
+  `normalize_prose` (as tres normalizacoes mais a preposicao de 28.4). Duas
+  diferencas de P4, e as duas sao o item: o escopo e `verified = 0` — uma linha
+  que o revisor aprovou como esta nao e reescrita por aqui —, e nao rotula
+  origem nenhuma (rotular e a declaracao de "Corrigir Lances"). Backup antes,
+  previa com exemplos, historico `prose_fix` (que a janela de historico agora
+  nomeia; `move_notation` tambem estava sem rotulo), reavaliacao do aviso (R6),
+  cache em memoria limpo, guarda T5.
+
+Medido no banco de dev: `normalize_prose` altera **731 das 6.500 linhas** na
+saida da maquina; hoje, 84 — 81 pendentes que a ferramenta reescreve e 3
+verificadas que ela deixa (as que a revisao aprovou com o defeito). Zero em
+italiano.
+
+**O que a verificacao fixou.** `ProseNormalizationTests` (8 testes) e
+`ProseInDatabaseTests` (5: previa sem gravar e so pendentes, aplicacao com
+historico e verificada intacta, recusa, backup e cache, "nada a fazer"), o
+"Consertar Prosa" na lista de T5 em `test_main_window`, e doze mutacoes — sete
+de P5, quatro de P6 e uma do worker. **Duas sobreviveram a primeira passada**,
+as duas pelo padrao 3 da memoria de testes (o cenario cai numa guarda vizinha
+com o mesmo observavel): "espaco antes da reticencia inventado" passava porque
+o unico caso com a traducao colada a palavra anterior tambem tinha o espaco no
+original, e "numero colado sem conferir o original" passava porque os casos
+negativos caiam todos na regra da reticencia. Viraram dois casos novos, e o
+primeiro obrigou a alargar o padrao do original (`playing... b5`, reticencia
+colada a palavra, tambem registra a ancora). P5 e P6 migraram para a secao 9
+da SPEC.
+
+**O que fica de fora, dito por extenso:** `game` -> "jogo" (492) e
+`the exchange` -> "troca" (106) nao tem regra segura — ~100 e ~30 usos sao
+legitimos ("a pleasant game", "troca de pecas") e a distincao e semantica;
+viram aviso QA com lista de excecoes e contexto (`sacrifice/up/down/win/lose
+the exchange`), nunca regra automatica. Uma medicao de precisao no banco de
+dev nao e um teste da suite: o que migra para a secao 9 e "a heuristica X
+marca Y e nao marca Z", e os numeros ficam aqui.
+
+### 28.3 O nome do jogador vai para a API e volta traduzido — CONCLUIDO (2026-09-14)
+
+Medido: 771 citacoes `A. Sobrenome-B. Sobrenome, Sede Ano` em 770 linhas. A
+maquina traduziu o **nome** em 19 (E. Can -> "E. Pode", K. Lie -> "K.
+Mentira", J. Hammer -> "J. Martelo", S. Conquest -> "S. Conquista") e foi
+inconsistente na sede em 15 (Copenhaga/Copenhague, Reykjavik/Reiquiavique,
+Leon -> "Leao").
+
+**O rascunho propunha mascarar a citacao inteira, e as duas revisoes
+criticas derrubaram isso com o banco:** nas linhas verificadas o revisor
+manteve a sede em 54 e traduziu em 26 (exonimos: Berna, Amsterda, Praga,
+Belgrado), `correspondence` e "correspondencia", e 11 comentarios sao SO
+citacao (mascarados, iriam para a API como um sentinela sozinho). Congelar a
+citacao criaria ~250 edicoes novas por livro.
+
+O que fica: mascarar **so os nomes** (`[A-Z]\. ?[\w'-]+-[A-Z]\. ?[\w'-]+`)
+com o mecanismo de X1 — sentinela antes da API, restauracao verificada —, e a
+sede continua indo para a maquina, com uma tabela de exonimos como regras
+`automatic` de escopo `pt` no glossario do usuario (Moscow -> Moscou,
+Copenhagen -> Copenhague, correspondence -> correspondencia) para as 15
+inconsistencias. **Antes de declarar a garantia, uma medicao que falta:** a
+taxa de sobrevivencia do sentinela `⟦n⟧` no MEIO da frase, em 200 linhas
+reais — as anotacoes `[%...]` ficam na borda do comentario, o nome fica
+dentro da prosa, e um sentinela engolido transforma "nome errado" em
+"comentario falhou" (T2/T3), que e pior. Se a taxa passar de 1 %, o item
+vira aviso QA em vez de mascara. Garantia planejada **X4**.
+
+**Feito no mesmo dia, e a medicao nao aconteceu — o desenho mudou para nao
+precisar dela.** A tentativa: 200 comentarios reais com citacao, nomes
+mascarados, enviados pelas funcoes reais do pipeline em 10 lotes, no ritmo
+do `RequestPacer`. O endpoint respondeu `429` e continuou respondendo `429`
+por mais de uma hora, a uma requisicao de uma linha — nao ha como medir
+sobrevivencia de sentinela contra um servidor que nao responde, e isso
+proprio e um dado: esta na SPEC 10, em "Rede".
+
+O que tirou a medicao do caminho critico foi trocar a consequencia de um
+sentinela de nome engolido. A mascara de anotacoes (X1) tem de virar falha,
+porque uma anotacao corrompida nao pode ser gravada; um nome que a maquina
+traduziu e o defeito que existia ANTES do item, e e menor do que um
+comentario inteiro no idioma original. Entao o worker, quando a restauracao
+falha e havia nome na mascara, **reenvia o comentario sozinho, com as
+anotacoes ainda mascaradas e os nomes crus** (`resend_without_names`), e so
+uma anotacao que ainda falte nessa segunda volta e falha. O custo de um
+sentinela engolido passou de "comentario perdido" para "uma requisicao a
+mais e o comportamento anterior" — e o resumo conta ("Comentarios
+reenviados sem a mascara de nomes: N"), que e a medicao que faltava, feita
+pela proxima execucao real. Se N passar de 1 % dos comentarios com citacao,
+a decisao registrada acima continua valendo: vira aviso QA.
+
+O padrao (`PLAYER_PAIR_RE`, em `annotation_mask`): inicial de uma ou duas
+letras, ponto, espaco opcional, sobrenome com uma particula opcional ("N. De
+Firmian", "L. Van Wely"), hifen, o segundo nome, e **a virgula logo depois**
+— e ela que separa uma citacao de qualquer outro par com hifen ("compare G.
+Sax-G. Mohr for details" nao e mascarado). Medido no banco de dev: casa as
+821 citacoes e zero falso positivo. Os nomes entram na MESMA lista de tokens
+das anotacoes e voltam pela mesma restauracao verificada — nao ha um segundo
+mecanismo. A sede nao e mascarada, como decidido acima; a tabela de exonimos
+ficou de fora: e regra do glossario do USUARIO, e o `Substituicoes.txt` dele
+esta com edicoes proprias fora do repositorio — nao e este item que mexe la.
+
+As tres etapas entre a resposta da API e a restauracao (regras automaticas,
+lances, prosa) viraram uma funcao local do worker (`acabar`), porque passaram
+a existir em tres lugares: os dois caminhos e o reenvio.
+
+**O que a verificacao fixou.** `PlayerNameMaskTests` (5) e
+`WorkerPlayerNameTests` (5: o nome nunca chega a API e volta byte a byte; o
+sentinela engolido custa uma segunda requisicao com o nome cru; sem anotacao
+a segunda volta e o comportamento antigo e e gravada; com anotacao que ainda
+falta, e falha; uma anotacao engolida NAO ganha segunda chance). Oito
+mutacoes, uma sobrevivente na primeira passada — o teste do falso positivo
+usava um par sem iniciais, que nao casaria de qualquer jeito (padrao 4 da
+memoria de testes: o exemplo nao exercita a regra) — e ganhou "compare G.
+Sax-G. Mohr for details". X4 migrou para a secao 9 da SPEC.
+
+### 28.4 O fragmento que termina em preposicao perde a preposicao — CONCLUIDO (2026-09-14)
+
+E o defeito numero um do livro e o item de melhor retorno por linha de
+codigo da secao: 1.552 originais terminam em preposicao ou conjuncao porque
+o comentario e um fragmento e o lance vem no movetext. Com `after` no fim
+(677 originais) a maquina devolveu "depois" sem "de" em 527, e `'' -> 'de'`
+e a substituicao mais frequente da revisao (532); contra o humano, 124 de
+125. `on`, `into`, `for` repetem o padrao em menor escala; `with` quase nao
+(11 de 354). **Um** `after` e adverbial ("doesn't lose immediately after")
+e ate nele o revisor pos "depois de"; a excecao entra mesmo assim — "shortly
+after", "soon after" existem em outros livros.
+
+A correcao e deterministica e nao depende da API: uma tabela por idioma de
+destino num `prose_fixes.py` (`depois$ -> depois de`, `em`, `para`,
+`contra`...), aplicada so quando o original termina na preposicao
+correspondente e nao ha adverbio antes dela. **Nao** e uma extensao do
+formato do glossario com `$` — a segunda revisao critica mostrou que isso
+entraria em S3/S10/S12, no editor, no CSV e na semente, para meia duzia de
+preposicoes de um idioma. A alternativa do lance-fantasma (enviar `... after
+1 e4` e remover depois) fica registrada e nao entra: o lance inserido vira
+ancora a mais na traducao e cai em Q1 e no portao de 28.7. Garantia
+planejada **P7**. Ganho neste livro: ~450 linhas que deixam de ser editadas
+(~3,7 h por livro, a 30 s por linha).
+
+**Feito no mesmo dia.** A tabela tem UMA linha, e a medicao e que decidiu: por
+palavra final do original, a maquina so erra `after` (532 de 680 terminam em
+"depois" sem "de"; 90 em "apos", certo; 52 ja em "depois de"). `with` (354),
+`by`, `to`, `for`, `than`, `due to` saem com a preposicao certa — a lista
+"`em`, `para`, `com`, `contra`" do plano nao tinha nada para corrigir e nao
+entrou. `before` termina um original em 6.500. A excecao adverbial e uma lista
+de quatro (`immediately`, `shortly`, `soon`, `long`; 2 ocorrencias); `right
+after` e `just after` ficam de fora dela porque sao "logo depois de".
+
+O modulo e `prose_fixes.py` (`fix_trailing_preposition`, pura, mesma forma de
+`fix_move_notation`), chamado nos dois caminhos do worker depois dos lances e
+antes de restaurar as anotacoes; o resumo ganha a linha "Preposicoes finais
+repostas", so quando houve. A origem nao declarada ("Detectar") nao desliga a
+regra — o que a decide e a palavra final do original, e `after` so e ingles;
+uma origem declarada que nao seja `en` desliga. Contraprova no banco de dev:
+a funcao muda 530 das 532 linhas na saida da maquina (as 2 sao a excecao), 82
+das de hoje (3 verificadas — as que a revisao deixou passar), nunca uma que
+termina em "depois de" ou "apos", e zero com destino `it`.
+
+**O que ficou de fora na hora:** as 82 linhas ja gravadas. A passada sobre o
+banco saiu horas depois como "Consertar Prosa" (P6, 28.2 camada 2), uma
+ferramenta para todas as normalizacoes — e nao uma por regra.
+
+**O que a verificacao fixou.** `TrailingPrepositionTests` (5 testes) e
+`WorkerTrailingPrepositionTests` (1 teste que percorre o caminho do lote E o
+individual, com o PGN de saida conferido), e sete mutacoes — as cinco da
+funcao e uma por caminho do worker — todas mortas. P7 migrou para a secao 9
+da SPEC.
+
+### 28.5 O glossario: aplicar com escopo, promover com impacto, sugerir do historico — CONCLUIDO (2026-09-14)
+
+Tres coisas, em ordem de dependencia:
+
+1. **"Aplicar Automaticas" com escopo** — "so pendentes" (padrao) e "so
+   este arquivo", e nunca mais sobre `verified = 1` sem pedir. E a correcao
+   do 28.1 item 6 e o pre-requisito de tudo abaixo. Garantia planejada
+   **S19**.
+2. **Promover uma regra a `automatic` mostra o impacto antes.**
+   `analyze_automatic_translation_updates` (`database.py:2765`) ja calcula;
+   o item e liga-la ao editor de glossario: "esta regra alteraria N linhas
+   pendentes; ver dez" — **em `background_task` com cancelamento**, porque
+   2.7 mediu 38 s segurando a interface numa varredura parecida. E o
+   mecanismo que a memoria da revisao de terminologia pediu: nao aplicar em
+   massa sem ver. Garantia planejada **S20**.
+3. **Sugerir regra a partir do historico.** O ranking "o que a revisao
+   trocou" existe como script e nao existe no programa. Depois de 300 linhas
+   de um livro novo, uma ferramenta "Trocas repetidas nesta obra" lista os
+   pares mais frequentes do diff token a token do `comment_history` do
+   arquivo, diz se ja ha regra (automatica / sugestao / nenhuma) e oferece
+   criar a `automatic` e aplica-la as pendentes do arquivo. E o unico item
+   da secao que vale para qualquer motor, qualquer livro e qualquer par, e
+   que capitaliza o trabalho enquanto ele acontece. Garantia planejada
+   **S21**.
+
+Com os tres, as promocoes que a medicao sustenta entram **como regras
+multipalavra**, nao palavra inteira: `Black esta` -> `as pretas estao`,
+`Black tem` -> `as pretas tem`, `White renunciou` -> `as brancas
+abandonaram` (24 vezes no diff), "final de jogo" -> "final", `Dragao
+Acelerado` -> `Dragao Acelerada` no glossario do usuario (o Gambito, o
+Ataque e o Sistema sao masculinos — nao e regra geral). A revisao critica
+mostrou o que a palavra inteira faria: `Black esta bem` -> `as pretas esta
+bem`, e a memoria de 2026-08-01 ja tinha visto isso ao ensaiar as
+automaticas em massa. Medido: as 399 automaticas de hoje, aplicadas sobre a
+saida da maquina das linhas editadas, deixam 232 iguais a revisao, 517 mais
+perto e **60 mais longe**.
+
+**Feito no mesmo dia, e quatro coisas sairam diferentes do plano acima.**
+
+- **O escopo nao e um dialogo de escolha: e o que a tela mostra.** O
+  plano dizia "so pendentes" e "so este arquivo" como opcoes. A ferramenta
+  do editor ja seguia o filtro de origem pela regra "reescrever o que o
+  usuario nao ve e alteracao que ele nao pediu", e o arquivo entrou pela
+  mesma regra: com "cap03.pgn" escolhido, e o capitulo 3 que e reescrito.
+  As verificadas ficam de fora SEMPRE, na janela principal e no editor, com
+  uma excecao: no filtro "Verificadas" — o unico em que a lista as mostra
+  — o editor pergunta (sim/nao/cancelar) se elas entram. O dialogo de
+  confirmacao nomeia o escopo inteiro ("idioma atual (pt), origem Ingles,
+  arquivo cap01.pgn, so pendentes"), e o `WHERE` e um so
+  (`_automatic_rules_query`) para a previa e a aplicacao, pela razao que a
+  correcao de lances ja tinha escrito: dois criterios nao quebram, eles
+  discordam. Medido no banco de dev: as 903 regras automaticas do par
+  (399 linhas do arquivo, com `@casa@` expandido) alterariam 39 das 6.500
+  linhas, **9 delas verificadas** — e o tamanho do bug do 28.1 item 6 na
+  amostra; a varredura completa custa 5,7 s.
+- **A promocao nao tem botao proprio: e o "Salvar" com o tipo
+  "Automatica".** A previa (`preview_automatic_rule_impact`, em
+  `db_tools`) roda quando gravar cria um comportamento automatico NOVO —
+  entrada nova, sugestao promovida, ou automatica cujo texto mudou; salvar
+  de novo uma automatica igual (prioridade, escopo) nao pergunta nada,
+  porque nao ha impacto novo a mostrar. E a MESMA varredura de "Aplicar
+  Automaticas", com a regra sozinha, `@casa@` expandido, so pendentes e no
+  escopo de idioma da regra (`en>pt` varre o par; `pt` varre o destino;
+  `*` varre tudo), por `run_with_progress`. O dialogo traz o numero, dez
+  exemplos e a frase "as verificadas nao entram nesta contagem nem em
+  Aplicar Automaticas". Recusar nao grava e o formulario continua sujo;
+  uma medicao que FALHA tambem nao grava — "nao consegui medir" nao e
+  licenca para uma regra que reescreve sem perguntar. E a previa
+  mostrou uma coisa que o plano nao sabia: as promocoes multipalavra
+  recomendadas acima, `Black esta` -> `as pretas estao`, saem **"As
+  pretas estao"** no meio da frase, porque a substituicao herda a caixa do
+  texto casado (`case_adjusted_replacement`) e `Black` comeca em
+  maiuscula. A regra nao e viavel como esta escrita; a previa e
+  exatamente onde isso aparece antes de virar 399 linhas.
+- **"Trocas repetidas nesta obra" mora no editor de TRADUCOES, ao lado do
+  seletor de arquivo**, e nao no de glossario: o assunto e a obra, e o
+  seletor que diz qual e a obra esta la. O botao so habilita com um
+  arquivo escolhido. A janela e modeless (a lista do editor continua
+  clicavel, e "Ver exemplo" a usa pelo `jump_to_id` do "Ir para ID"), e o
+  arquivo e o par sao fixados na abertura, como o id no historico. A conta
+  (`repeated_edits.py`, puro) e um diff por TOKEN de cada edicao humana
+  (`edit`/`edit_verify` com mudanca de texto — as acoes do programa ficam
+  de fora, senao a ferramenta sugeriria ao usuario a regra que ele ja tem)
+  e conta so os blocos `replace`: insercao pura (`'' -> 'de'`, a troca mais
+  frequente da revisao) nao e regra de nada, porque regra precisa de um
+  texto para casar. Duas contagens por par, ocorrencias e linhas
+  distintas. A coluna "regra" nao compara strings: aplica cada regra
+  candidata com `apply_substitution` — a do pipeline — ao texto de antes
+  e le o que sai. Isso deu tres estados que o plano nao previa e que o
+  banco de dev tem: **"sugestao"** quando a regra produz exatamente o que
+  o revisor escreveu (`o jogo -> a partida`, 94 vezes); **"sugestao
+  (produz 'As pretas')"** quando ela dispara e produz outra coisa
+  (`Black -> as pretas`, 73 vezes — a mesma caixa herdada de cima);
+  **"sugestao (nao altera o texto)"** quando ela casa e nao muda nada —
+  `Brancas -> brancas` esta no glossario do usuario e e inerte, porque a
+  substituicao recapitaliza o que ela mesma baixou; foram 63 edicoes a
+  mao para uma regra que existe. "Criar automatica e aplicar" e a previa
+  de S20 (com escopo `origem>destino` do editor, ou so o destino em
+  "Todos"), a gravacao no glossario, o aviso ao editor pelo mesmo canal do
+  editor de glossario, e "Aplicar Automaticas" restrito a esta regra e a
+  este arquivo (S19). Medido: 3.736 edicoes humanas com mudanca de texto
+  no unico arquivo com ocorrencias, 2.011 pares distintos, 0,04 s a
+  consulta e 0,21 s o ranking; dos 40 listados, 27 sem regra, 12 com
+  sugestao e 1 com automatica (`cheque -> xeque`, 27 edicoes que a regra
+  nao alcancou — e o que "Aplicar Automaticas" alcanca).
+- **A promocao em massa das regras multipalavra NAO foi feita**, pelo
+  achado da caixa acima e porque o `Substituicoes.txt` do usuario esta
+  com edicoes proprias fora do repositorio (o mesmo motivo do 28.3): as
+  regras entram pela ferramenta nova, uma a uma, vendo o impacto. `Dragao
+  Acelerado -> Dragao Acelerada` continua valendo como recomendacao.
+
+**O que a verificacao fixou.** Em `test_core.py`:
+`AutomaticRulesScopeTests` (9: o banco sem pedir nada continua varrendo
+tudo; `only_pending` poupa a verificada na previa E na aplicacao; o arquivo
+restringe; um arquivo desconhecido casa zero; a ferramenta por padrao muda
+so as pendentes e o dialogo diz "so pendentes"; alcanca as verificadas so
+com `include_verified`; nomeia o arquivo e fica dentro dele; regras
+explicitas nao carregam o glossario; o texto do escopo),
+`PromotionPreviewTests` (7: numero e amostra com a saida real do pipeline;
+a conta passa por `run_with_progress`; recusar; regra sem escopo varre
+tudo; regra que nao muda nada ainda pergunta; medicao que falha nao
+promove; `@casa@` expandido), `RepeatedEditsTests` (11) e
+`FileEditEventsTests` (2). Em `test_editor_windows.py`:
+`AutomaticRulesScopeInTheEditorTests` (5: padrao sem arquivo nem
+verificadas e sem pergunta; o arquivo viaja; em "Verificadas" pergunta, e
+sim/nao/cancelar fazem o que dizem), `GlossaryPromotionPreviewTests` (6:
+promover mede e grava no sim; recusar nao grava e o formulario fica sujo;
+automatica inalterada nao mede; texto mudado mede; sugestao nunca mede;
+"Salvar como nova" mede) e `RepeatedEditsWindowTests` (9: botao
+desabilitado sem arquivo; sem arquivo o metodo explica; o botao cabe
+inteiro na faixa de 320 px e nao esmaga o menu; a lista traz par, contagem
+e "sem regra"; com a regra diz "automatica" e desabilita o criar; arquivo
+sem edicao diz por que esta vazio; "Ver exemplo" posiciona o editor; criar
+mede, grava com escopo `en>pt`, avisa o editor e oferece aplicar SO esta
+regra SO neste arquivo; recusar a medicao nao grava). 49 testes. **27
+mutacoes**, duas sobreviventes na primeira passada e uma com trecho
+ambiguo: as duas eram o padrao 4 da memoria de testes (o cenario nao
+exercitava a clausula — `update_translation_by_id` nao grava historico
+quando nem texto nem status mudam, entao "edicao sem mudanca de texto"
+nunca existiu no banco do teste; e todas as linhas do teste tinham a mesma
+origem, entao o filtro de origem nunca decidia nada), e o trecho ambiguo
+era o padrao 5 (`if only_pending:` existe duas vezes em `database.py`).
+Cenarios corrigidos, as tres morreram. S19, S20 e S21 migraram para a
+secao 9 da SPEC.
+
+### 28.6 Descartar o que a maquina deixou, e reverter uma execucao — CONCLUIDO (Z4 e Z5, 2026-09-15)
+
+O 18.7 explicou por que "reverter a execucao de ontem" ficou de fora. As
+duas revisoes criticas concordaram numa coisa: 90 % do valor e a rede de
+seguranca para 28.7, e ela cabe num item pequeno.
+
+**Primeiro, "Descartar as traducoes nao revisadas deste arquivo"**: apaga as
+linhas cujas ocorrencias sao so daquele arquivo E `verified = 0` E
+`review_status = ''` E nota vazia E sem entrada em `comment_history` — "a
+linha que nenhum humano tocou". As tres clausulas alem do historico existem
+porque status e nota **nao gravam historico** (SPEC 10). A clausula das
+ocorrencias existe porque a segunda revisao critica mostrou o buraco do
+desenho original: uma linha inserida ao traduzir o livro A e reaproveitada
+pelo livro B tem ocorrencias de B, e apaga-la encurta a obra de B (O3). Backup
+antes, palavra digitada (Z1/Z2), ocorrencias junto (O4), cache em memoria
+limpo, guarda T5. Garantia planejada **Z4**.
+
+**Depois, a tabela de execucoes** (`translation_runs`: inicio, fim, desfecho
+em `completed | failed | canceled | aborted | crashed`, par, caminho,
+provedor, contagens, log), com `comments.inserted_run_id` gravado so no
+INSERT, a linha aberta antes da primeira passada e fechada no `finally` com
+conexao propria (o `finally` do worker ja fecha a do pipeline), varredura na
+abertura para marcar `crashed` o que ficou sem fim, e "Reverter execucao"
+com o MESMO criterio de Z4 mais `inserted_run_id = ?`. `PRAGMA foreign_keys`
+nunca e ligado (o `ON DELETE CASCADE` da tabela e inerte), entao as
+ocorrencias sao apagadas explicitamente; "Zerar Traducoes" passa a derrubar
+`translation_runs` junto (Z3); um backup anterior a este schema restaurado
+por cima migra com `inserted_run_id` nulo, e so linhas gravadas depois sao
+reversiveis (o mesmo texto de O2). Lista das ultimas 30 execucoes em
+"Estatisticas do BD" (relatorio, F24). Garantia planejada **Z5**.
+
+**Z4 feito em 2026-09-15, e tres coisas sairam diferentes do plano.**
+
+- **Mora no editor de traducoes, sob o seletor de arquivo, e nao em
+  "Ferramentas".** Pela regra que pos "Trocas repetidas" ali: o assunto e a
+  obra, e o seletor que diz qual e a obra esta la. O botao so habilita com
+  um arquivo escolhido — sem arquivo o alvo seria o banco inteiro, e para
+  isso existe "Zerar Traducoes", com o nome que diz o que faz. Em vermelho,
+  com o mesmo par de cores dos dois "Zerar", que por isso saiu de
+  `main_window` para a paleta central (`editor_common`). Linha propria sob
+  o menu: ao lado de "Trocas repetidas" os dois esmagariam o menu na faixa
+  de 320 px, e a medicao de S21 (o botao inteiro na faixa minima, o menu com
+  pelo menos 100 px) foi repetida para ele.
+- **O par entra no criterio.** O plano falava so no arquivo; a ferramenta
+  segue S19 e apaga so o destino da janela e a origem do filtro — o que o
+  usuario nao ve nao e apagado por ele. O `WHERE` e um so para contar e
+  apagar (`_unreviewed_file_rows_query`), e os ids sao colhidos antes do
+  primeiro `DELETE`: apagar as ocorrencias primeiro esvaziaria a clausula
+  "tem ocorrencia neste arquivo" do segundo, e nenhum comentario sairia —
+  o teste que faz isso e o das ocorrencias orfas. Em lotes de 900 pelo
+  limite de parametros de sempre, e um teste com 905 linhas confere que o
+  segundo lote existe.
+- **Depois de apagar, a janela refaz o menu de arquivos, e nao so a lista.**
+  Um capitulo cujas linhas eram todas da maquina deixa de ter ocorrencia
+  nenhuma e deixa de ser uma obra; sem refazer o menu ele continuaria
+  escolhido, apontando para uma lista vazia sem explicacao — o desfecho que
+  `refresh_file_filter` existe para impedir. O historico que poupa a linha
+  e QUALQUER historico, inclusive o de "Corrigir Lances" e "Consertar
+  Prosa": o criterio erra para o lado de apagar menos, e o caso que importa
+  (28.7: traduzir, olhar, descartar) nao passa por ferramenta nenhuma.
+
+**O que a verificacao fixou.** Em `test_core.py`:
+`DiscardUnreviewedRowsTests` (8: o cenario da SPEC — cinco marcas, sobra
+exatamente cada uma; a reusada fica com as duas ocorrencias; as ocorrencias
+das apagadas vao junto e o filtro do editor ve as cinco que ficaram; a
+verificada por importacao, sem historico, fica pela clausula `verified`; a
+verificada e devolvida a pendente fica pelo historico; o outro arquivo nao e
+tocado; o par da tela decide; 905 linhas somem inteiras) e
+`DiscardUnreviewedToolTests` (5: backup antes da pergunta e nomeado nela; a
+pergunta diz o arquivo e o numero; "nao" deixa banco e cache; "sim" apaga so
+as duas nao revisadas, limpa o cache e devolve 2; nada a descartar = nem
+pergunta nem backup, e o aviso nomeia o arquivo). Em `test_editor_windows.py`:
+`DiscardUnreviewedInTheEditorTests` (9: desabilitado sem arquivo; vermelho
+como os "Zerar"; sem arquivo o metodo explica; arquivo, par e janela viajam;
+T5 recusa durante a traducao; capitulo todo da maquina sai do menu e a lista
+recomeca em "Todos"; uma linha poupada mantem o arquivo no menu; nada
+apagado deixa a lista como estava; o botao cabe na faixa de 320 px). 22
+testes. **13 mutacoes**, uma sobrevivente na primeira passada: tirar a
+clausula `verified` nao derrubava nada, porque verificar pela janela grava
+historico e a linha caia na clausula vizinha (padrao 4 da memoria de
+testes); a linha importada ja verificada, sem historico, e o cenario que a
+clausula decide sozinha — escrito, a mutacao morreu. Z4 migrou para a secao
+9 da SPEC (secao 4, ao lado de Z1-Z3 e O4).
+
+**Z5 feito em 2026-09-15, e quatro coisas sairam diferentes do plano.**
+
+- **Sempre a execucao MAIS RECENTE, sem lista para escolher.** O caso que a
+  ferramenta serve e "traduzi, olhei, nao quero"; uma execucao antiga tem
+  linhas que as seguintes reaproveitaram (e, pela clausula do arquivo de
+  fora, poupadas), entao "reverter a de anteontem" quase nunca apaga o que
+  o usuario imagina. As ultimas 30 saem no relatorio de estatisticas, com
+  a mais recente em cima, para conferir antes.
+- **Mora na fileira dos botoes de execucao, ao lado de "Revisar pendentes",
+  e nao em "Ferramentas"**: e o outro desfecho do mesmo olhar, e a grade
+  esta cheia (16 = 4 x 4 com Configuracoes). Vermelho como os "Zerar";
+  sempre habilitado, porque a ultima execucao pode ser de outra sessao —
+  e a pergunta que diz qual e. Empacotado por ultimo, some antes dos
+  outros numa janela estreita (a regra de 22.10). Guarda T5 pela lista
+  de `MassWriteGuardTests`.
+- **A linha da execucao abre DEPOIS da primeira passada**, e nao antes: e
+  ali que se sabe quais arquivos a execucao tem, e os arquivos sao o que
+  a clausula "ocorrencia em arquivo FORA da execucao" usa — gravados como
+  JSON e lidos por `json_each`, porque uma pasta inteira pode ter mais
+  arquivos que o limite de parametros. Dois capitulos da MESMA execucao
+  repetindo um comentario nao poupam a linha; um livro de outra, sim.
+- **A varredura do que ficou `running` roda no inicio da execucao
+  seguinte**, e nao na abertura do programa: o worker e o unico escritor,
+  nunca ha duas execucoes ao mesmo tempo, e assim o registro nao precisa de
+  gancho na abertura (que ja tem tres tarefas de fundo). O `finally` fecha a
+  linha com conexao PROPRIA e a ordem dos desfechos e: excecao > cancelado >
+  disjuntor > com falhas > concluida. `save_translation(run_id=)` carimba
+  SO o caminho `inserted` — a vazia preenchida ja existia. O provedor sai
+  de `translation_api.TRANSLATION_PROVIDER` ("google-gtx"); o de 28.7 grava
+  o seu.
+
+Schema 10: `CREATE TABLE translation_runs` + `ALTER TABLE comments ADD
+inserted_run_id`; nada reconstroi `comments`. As linhas anteriores ficam
+nulas e sao reversiveis so por Z4. "Zerar Traducoes" derruba a tabela (Z3
+estendido). **O que a verificacao fixou.** Em `test_core.py`:
+`TranslationRunRecordTests` (6: abrir/fechar com desfecho e contagens,
+desfecho invalido recusado; lista da mais recente e limitada; a aberta vira
+`crashed` na seguinte e a fechada nao e tocada; so o INSERT carimba —
+vazia preenchida e `unchanged` ficam nulos; um banco na versao 9 ganha a
+coluna e a tabela; Zerar derruba as execucoes), `RevertRunRowsTests` (5: o
+cenario da SPEC com OITO insercoes — duas limpas somem e cada marca poupa a
+sua, inclusive a verificada SEM historico e a linha da execucao anterior no
+mesmo livro; as ocorrencias vao junto; repeticao entre capitulos da mesma
+execucao nao poupa; execucao sem carimbo nao apaga nada; 905 linhas somem
+inteiras), `RevertRunToolTests` (8: backup antes da pergunta e nomeado nela;
+a pergunta descreve a execucao; "nao" deixa banco e cache; "sim" apaga so
+as intocadas e limpa o cache; sem execucao nem pergunta nem backup; nada a
+reverter na segunda vez sem backup novo; a mais recente e nao a antiga; o
+relatorio lista as execucoes da mais nova para a mais velha e sobrevive sem
+a chave) e `WorkerRunRecordTests` (4: concluida com as insercoes
+carimbadas; com falhas e `failed` contando; excecao vira `crashed` pela
+conexao propria; traduzir-reverter-traduzir carimba com a segunda). Em
+`test_main_window.py`, `RevertRunButtonTests` (2) e a entrada na lista T5.
+25 testes. **13 mutacoes, 3 sobreviventes na primeira passada**, os tres do
+padrao 4 da memoria de testes: a clausula `verified` (verificar pela janela
+grava historico — o cenario que faltava e a importada ja verificada, o
+mesmo sobrevivente de Z4), a clausula `inserted_run_id` (a linha da outra
+execucao estava em outro ARQUIVO, e a clausula vizinha a poupava — o
+cenario e a execucao anterior do MESMO livro) e "a mais recente" (o teste
+tinha uma execucao so). Os tres cenarios escritos, as tres morreram.
+
+### 28.7 O modelo de linguagem: primeiro o piloto, depois o provedor — o piloto RODOU (2026-09-15); os TRES provedores e o dialogo do motor FEITOS (2026-09-16); o portao de ancoras (T6) e a estimativa de custo (M7) FEITOS (2026-09-18); a leitura cega continua devida
+
+O motor e o endpoint `gtx` nao oficial do Google, e so ele
+(`translation_api.py`). O projeto se chama "GPT" e nao ha modelo de linguagem
+em lugar nenhum. O 28.2 mede o que isso custa; a primeira revisao critica
+mediu o que o programa nao mede: **o humano aceita 64 % das linhas sem
+editar** (504 de 784). E essa a regua.
+
+**O que muda para quem usa**, dito antes do desenho: a traducao passa a
+saber xadrez e a receber o seu glossario antes de traduzir, em vez de
+depois; custa dinheiro por livro (a conta abaixo); e nunca troca de motor
+sem perguntar.
+
+**Passo 0 — o piloto, antes de qualquer codigo de produto.** Um script (um
+dia, centavos de dolar): 200 comentarios do livro de dev, estratificados —
+100 fragmentos terminados em preposicao, 50 longos, 50 com citacao —,
+traduzidos pelo modelo com o prompt abaixo, e avaliados de tres jeitos: os
+33 detectores de 28.2; o portao de ancoras (lance perdido ou inventado); e
+**a leitura cega do usuario**, Google e modelo lado a lado sem rotulo,
+marcando "aceito sem editar". Barra: **>= 80 % aceitas sem editar** (contra
+64 % hoje) e **zero** divergencia de ancora que o portao nao pegue. O piloto
+tambem mede o que o desenho chuta: tokens por linha, `cache_read_input_tokens`
+(o prefixo minimo cacheavel e de 512 a 4.096 tokens conforme o modelo — as
+399 regras automaticas podem ficar abaixo e nao cachear), sobrevivencia do
+sentinela `⟦n⟧` dentro de JSON, e taxa de lote cortado por `max_tokens`.
+**O piloto decide 28.5 item 3, metade de 28.2 camada 2** (`U+200B`, hifen e
+reticencia colada sao artefatos do `gtx`; um modelo instruido nao os
+produz) **e se o provedor e construido.**
+
+**Custo por livro, estimado e a calibrar no piloto** (92 mil palavras de
+original, ~125 mil tokens de entrada; saida em portugues ~180 mil; mais o
+prompt de sistema cacheado e as sugestoes por lote): da ordem de **US$ 3 a
+5 com `claude-sonnet-5`** (US$ 2 / 10 por milhao de tokens) e **US$ 8 a 12
+com `claude-opus-5`** (US$ 5 / 25). Contra 40 a 70 horas de revisao por
+livro, o custo nao e a variavel de decisao; qualidade e controle sao.
+Politica de dados: o texto e obra protegida — a retencao do provedor fica
+registrada no item quando ele for feito (o `gtx` nao tem contrato nenhum).
+
+**O provedor, se o piloto passar.** Interface `TranslationProvider` com o
+`gtx` como implementacao padrao **byte a byte identica** — os 70 pontos dos
+testes que substituem `translation_worker.translate_text` continuam valendo
+porque o provedor resolve o nome na chamada, nao no import — e um provedor
+Anthropic. B2 (desalinhamento), B3 (disjuntor), W2 (ritmo) e C4
+(cancelamento em cada tentativa e espera) passam a ser **contratos do
+provedor**, com o mesmo teste falso para os dois. Decisoes:
+
+- **SDK `anthropic`, nao `requests` direto**: a referencia da API e explicita
+  em nao misturar os dois num projeto Python, e o SDK traz retry, tipos de
+  erro e streaming prontos. O preco e o `.spec`: o SDK 1.x traz `httpx2` e
+  `pydantic`, e o tamanho do `dist/` e medido antes e depois — se passar de
+  +20 MB, a decisao volta aqui.
+- **Modelo padrao `claude-opus-5`**, que e o padrao da referencia; o piloto
+  roda os dois e o usuario escolhe pelo numero.
+- **Lote como JSON numerado por saida estruturada** (`output_config.format`,
+  ou `strict: true` na ferramenta com `tool_choice: auto` e instrucao) — o
+  `tool_choice` forcado do rascunho ja foi removido no Fable 5.1 e nao e o
+  caminho duravel. `validate_batch_response` exige cada id exatamente uma
+  vez; `stop_reason == "max_tokens"` **redivide o lote** como B1, em vez de
+  cair no individual (40 requisicoes); `refusal` e tratado; 529 entra nos
+  status com retry (hoje `RETRYABLE_STATUS` nao o tem).
+- Prompt de sistema com a tabela `PIECE_LETTERS` do par (uma fonte so, a de
+  `chess_notation`), a terminologia da semente do par, e as regras duras:
+  nao mudar casa, numero de lance, NAG, simbolo nem o conteudo de `⟦n⟧`;
+  nao acrescentar nem remover lances; os itens sao vizinhos de leitura —
+  usar como contexto, traduzir cada um sozinho. **E o lance seguinte ao
+  `}`** (e o anterior) como contexto de cada item: sao ~20 bytes lidos na
+  mesma passada que extrai o texto, nao exigem segurar o PGN pela fase da
+  API (D5), e sao o que mais ajuda um fragmento terminado em "after".
+- Glossario em dois niveis: as 399 `automatic` do par no bloco de sistema
+  com `cache_control` (medir se cacheia); as `suggestion` **selecionadas
+  por casamento no texto do lote** (`find_glossary_matches`, que o editor
+  ja roda), ate 80 regras — as 5.622 inteiras seriam dezenas de milhares de
+  tokens por requisicao.
+- **A mascara X1 continua antes; as regras automaticas continuam depois** (o
+  modelo e palpite; a regra e decisao do usuario). Sentinelas podem voltar
+  como `⟦` no JSON — `json.loads` resolve, nunca casar a string crua.
+- **Portao de ancoras** (`strict_move_anchors`): `move_anchors(original) !=
+  move_anchors(traducao)` -> uma retentativa individual, depois falha
+  T2/T3 — `fix_move_notation` so troca letra, nao pega lance reescrito.
+- Chave de API **fora** do `settings.json`: arquivo proprio na pasta de
+  dados, cifrado com DPAPI (`CryptProtectData` via `ctypes` — confirmado
+  headless, e `ctypes` ja esta no `PYZ`), `ANTHROPIC_API_KEY` vence, o log
+  so ve `****wxyz`. **DPAPI e por conta do Windows**: o `.exe` portatil
+  levado a outra maquina nao decifra — "decifrar falhou" pede a chave de
+  novo sem apagar o resto, e I6/I7 dizem isso.
+- Custo estimado **depois da carga do cache** (antes, incluiria o que o
+  cache ja tem), num dialogo bloqueante por ponte para a thread do Tk (C1);
+  no fim, "estimado -> real". Sem chave: dialogo **antes** de iniciar,
+  nunca troca de motor em silencio (a licao de M1).
+
+Garantias planejadas **T6** (provedor estrito nunca grava ancora
+divergente), **K1** (a chave nunca aparece inteira em log, settings ou
+dialogo — testavel por amostra nos tres) e **B5** (lote JSON: cada id
+exatamente uma vez, ou o lote e desalinhado). E o maior item da secao:
+provedor, configuracao, chave, dialogo de custo, ponte C1 e testes.
+
+**O script do passo 0 existe: `ferramentas/piloto_llm.py`** (2026-09-15),
+cinco subcomandos — `amostrar`, `traduzir`, `avaliar`, `folha`, `apurar` —
+e 23 testes das partes puras mais o fluxo inteiro de `traduzir` com um
+cliente falso (`tests/test_piloto_llm.py`). So a chamada de rede fica sem
+teste. A saida vai para `piloto/`, fora do repositorio: a amostra sao 200
+comentarios do livro, obra protegida. O que ja foi medido SEM chave:
+
+- **A amostra e mais dura do que o banco.** Das 200 linhas, 188 foram
+  julgadas por humano (a preferencia do sorteio) e o Google foi aceito sem
+  editar em **68 delas — 36 %**, contra os 64 % do banco inteiro. E o
+  esperado: os tres estratos sao os que a revisao mais edita, e a barra dos
+  80 % foi posta contra os 64 %. A comparacao que decide e PAREADA, linha
+  a linha, na leitura cega — o modelo tem de bater o Google nas mesmas
+  linhas, e nao a media do banco.
+- **O Google "de hoje" nao e o de agosto.** O texto gravado e o que a
+  maquina produziu antes de `normalize_prose` existir: 87 das 200 linhas
+  tem aviso QA, 63 delas o `after` -> `depois` sem `de`. Passado pelo
+  pipeline de hoje (`google-hoje`, so a normalizacao de prosa), sobram 30
+  avisos e **37 das 120 linhas editadas pelo humano ficam identicas ao que
+  ele escreveu** — eram 2. E a medida do que 28.4 e 28.2 camada 2 valem
+  neste livro, e e contra esse Google que a folha cega compara.
+- **Contexto de lances: 198 das 200 linhas** encontradas no PGN, apesar do
+  arquivo so com `
+` e do `K.Shiven` que a extracao separa em `K. Shiven`
+  — o casamento aceita qualquer espaco (ou nenhum) entre palavras.
+- Ancoras de lance: zero divergencias no Google. E o numero contra o qual o
+  portao do modelo tem de dar zero tambem.
+
+Decisoes de desenho do script que o provedor herda se o piloto passar:
+bloco de sistema em duas partes com `cache_control` (regras duras + letras
+das pecas + terminologia da semente; e as 903 `automatic` do par com
+`@casa@` expandido, ~30 mil caracteres — acima do prefixo minimo de cache);
+lote de 20 itens em JSON numerado por `output_config.format` com esquema
+estrito; `antes`/`depois` com o lance vizinho; sugestoes casadas no texto do
+lote (ate 80, `@casa@` de fora); mascara X1 antes e `restore_annotations`
+depois, com sentinela engolido contando como falha do item; regras
+automaticas e `fix_move_notation` depois da API; o que faltou no lote e
+reenviado sozinho uma vez (B1/B2); `normalize_prose` e RODADA mas so
+CONTADA — "em quantos itens ela mudaria algo" e a pergunta de 28.2 camada 2
+sobre um modelo instruido. Precos de `PRECOS` sao os da referencia da API em
+2026-06 e a fatura e que confirma.
+
+**O piloto rodou em 2026-09-15 com `claude-opus-5`** (a chave entrou como
+variavel de ambiente; o script nunca a imprime). O que a avaliacao
+AUTOMATICA mediu, nas mesmas 200 linhas, contra os dois Googles:
+
+| motor | com aviso QA | ancora divergente | iguais ao humano (das 120 editadas) |
+|---|---|---|---|
+| google (gravado em agosto) | 87 | 0 | 2 |
+| google-hoje (`normalize_prose`) | 30 | 0 | 37 |
+| claude-opus-5 | **1** | 0 | 20 |
+
+- **Os avisos quase somem: 87 -> 30 -> 1.** O unico e "Traducao igual ao
+  original" numa citacao — um modelo instruido nao produz o `depois` sem
+  `de`, o `Brancas` no meio da frase nem a terminologia fora do glossario. A
+  pergunta de 28.2 camada 2 ("em quantos itens `normalize_prose` mudaria
+  algo") deu **1 em 200**: os artefatos sao mesmo do `gtx`.
+- **Zero divergencia de ancora, zero sentinela perdido** (53 itens
+  mascarados), zero lote cortado por `max_tokens`, zero reenvio individual,
+  zero lance que `fix_move_notation` ainda precisou corrigir. O portao T6 nao
+  teve o que pegar.
+- **"Iguais ao humano" cai de 37 para 20**, e isso NAO e o numero que decide:
+  o modelo escreve diferente do revisor sem escrever errado, e a similaridade
+  media (0,83 contra 0,93) mede a mesma coisa. So a leitura cega diz se a
+  linha diferente e aceitavel sem editar — e a regua dos 80 % e essa.
+- **Custo e mecanica**: 10 requisicoes de 20 itens, 257 s no total (26 s por
+  lote), 36.844 tokens de entrada (13.190 lidos do cache — 36 %; o bloco de
+  sistema cacheou como o desenho previa) e 21.823 de saida: 184 e 109 por
+  linha. **US$ 0,67 pelas 200 linhas**, que extrapola para **US$ 25 a 30 por
+  livro de 7.500** — acima da estimativa de US$ 8 a 12, porque a saida em
+  portugues custa 5x a entrada e o desenho tinha subestimado o tamanho dela.
+  Continua fora da variavel de decisao: sao 40 a 70 horas de revisao.
+
+**A leitura cega continua sendo sua** — `piloto/folha-cega-claude-opus-5.csv`
+e `python ferramentas/piloto_llm.py apurar` — e continua decidindo 28.5 item
+3 e se o modelo vira o motor PADRAO de alguem. O que mudou em 2026-09-16 e
+que o provedor foi construido ANTES do numero, por pedido: o usuario quis
+entrar com as chaves do Claude, do ChatGPT e do DeepSeek em Configuracoes e
+escolher o motor a cada "Iniciar tradução". A rede de seguranca ja existia
+(Z4/Z5), e o custo de uma execucao e o de um livro, nao o de um desenho.
+
+**Feito em 2026-09-16 — o que foi construido, e o que o desenho acima
+previa e nao foi.**
+
+- **Tres provedores, dois protocolos** (`llm_providers.py`): Claude pela API
+  da Anthropic com o SDK (`output_config` com o esquema do lote,
+  `cache_control` nos blocos de sistema — a chamada que o piloto provou);
+  ChatGPT e DeepSeek pelo `chat/completions` com `requests`
+  (`response_format: json_object`; a OpenAI pede `max_completion_tokens`, a
+  DeepSeek `max_tokens`). O SDK e o extra `llm` do `pyproject` (o CI o
+  instala); sem ele o Claude e recusado antes de a execucao comecar. Os
+  nomes dos modelos sao campos livres com padrao (`claude-opus-5`, `gpt-5`,
+  `deepseek-chat`): os provedores trocam de modelo mais depressa do que o
+  programa lanca versao, e a tela diz onde conferir. **Conferido com uma
+  requisicao real ao Claude** pelo codigo de produto: dois comentarios com
+  sentinela e a regra `rook -> torre`, resposta alinhada, sentinela intacto,
+  1.357 tokens lidos do cache.
+- **A costura e a do Google, e essa e a decisao central.** O desenho pedia
+  uma interface `TranslationProvider` com B2/B3/W2/C4 como contratos; o que
+  se fez e menor e mais seguro: o worker tem UMA porta (`traduzir`), o
+  provedor de modelo recebe o mesmo texto com ` ||| `, manda o JSON numerado,
+  confere cada id (B5) e devolve o texto juntado na ORDEM DOS IDS; o id que
+  faltou volta VAZIO, e `misaligned_batch_part` passou a acusar a parte
+  vazia em qualquer tamanho (antes o piso de 40 caracteres a deixava passar
+  — um Google que devolvesse vazio para `", and"` gravava vazio). Nada do
+  pipeline mudou de lugar, e os 70 pontos de teste que substituem
+  `translate_text` continuam valendo porque a porta resolve o nome na
+  chamada. O que NAO se ganhou com isso: o contexto de lances
+  (`antes`/`depois`) do piloto, que a costura de texto nao carrega; o
+  prompt aceita os campos vazios.
+- **O prompt e o do piloto** (`llm_prompt.py`, importado pelos dois):
+  generalizado para qualquer par (`PIECE_LETTERS` da origem e do destino;
+  par fora da tabela recebe "mantenha a notacao"; origem vazia e "o idioma
+  do original"), com a instrucao do JSON no texto para os provedores sem
+  esquema. Regras `automatic` do par no bloco de sistema e sugestoes que
+  casam no lote (ate 80), como no piloto.
+- **Chaves (K1)**: `api_keys.py`, arquivo `chaves-api.json` na pasta de
+  dados, DPAPI por `ctypes` (`CryptProtectData`, sem dialogo), variavel de
+  ambiente vence, `mask_api_key` = `****wxyz`. A tela nunca le a chave para
+  o campo; o placeholder diz o estado. Fora do Windows o arquivo diz
+  `"cifra": "nenhuma"` (o CI headless roda nos dois). Um 401 e fatal para a
+  execucao — o provedor para de chamar e o disjuntor encerra.
+- **A tela** ganhou a secao "Modelos de linguagem" (chave + modelo por
+  provedor, "apagar" como caixa a parte) e o corpo virou rolavel: cinco
+  secoes requerem ~1.000 px, e a tela de um notebook nao tem isso; os
+  botoes ficam fora do rolo. **O dialogo** "Motor de tradução" (M6) aparece
+  so com chave, sempre com chave, tambem no "Reprocessar falhas", com o
+  motor da execucao anterior pre-selecionado e o provedor sem chave
+  desligado e dito. A execucao grava `provedor:modelo` (Z5).
+- **Nao feito, e dito na SPEC 3.8**: o portao estrito de ancoras (T6); a
+  estimativa de custo antes de iniciar (o log mostra tokens no fim); os
+  `fallbacks` de recusa da Anthropic (zero recusas em 200 linhas);
+  `logging`. **Custo medido por linha** no piloto: US$ 0,0034 com o Opus —
+  ~US$ 25 por livro de 7.500.
+- Testes: 27 headless em `test_llm.py` (chaves, prompt, os dois protocolos
+  com sessao/cliente falsos, 401, 429 com retentativa, cancelamento), 4 do
+  worker (provedor responde tudo e assina a execucao; parte vazia reenviada
+  sozinha; provedor indisponivel aborta antes da primeira linha; Google
+  continua o padrao) e 7 de janela (tela e dialogo). Mutacao: tirar a regra
+  da parte vazia derruba dois testes.
+
+**Feito em 2026-09-18 — o portao de ancoras e a estimativa de custo, os dois
+"nao feitos" de 2026-09-16.**
+
+- **T6, o portao de ancoras**, e uma comparacao e uma segunda chance.
+  Depois de `acabar` (regras automaticas, P3, P5), o worker compara as
+  ancoras do texto ENVIADO — limpo e mascarado, o que o modelo viu — com as
+  da resposta (`chess_notation.anchor_divergence`, que faz a MESMA conta do
+  aviso Q1 do QA: `format_anchor` saiu de `review_quality` para la, para
+  haver uma definicao so). Divergiram, o comentario e reenviado sozinho uma
+  vez; divergiram de novo, ou o reenvio nao veio, e falha T2/T3, com
+  `sumiu f3; apareceu f6` no log e o comentario no idioma original no PGN.
+  O que mudou de lugar para isso: o trecho entre a resposta da API e a
+  gravacao, que existia DUAS vezes (lote e individual) e estava prestes a
+  ganhar uma terceira verificacao em cada, virou uma funcao so, `concluir`
+  — portao, restauracao verificada das anotacoes (X1) e reenvio sem a
+  mascara de nomes (X4), que agora tambem passa pelo portao (sem outra
+  chance: ele ja e a segunda). Uma verificacao que so existisse num dos dois
+  caminhos daria uma execucao cujo resultado depende de a rede ter
+  respondido alinhada — a licao de 10.4, agora com o desenho que a impede.
+  **O Google fica fora do portao, com o numero de 28.2**: 6 divergencias em
+  6.500 linhas, quatro o numero colado que P5 desfaz e uma um defeito do
+  original; para ele um portao so tiraria da tela linhas que o revisor
+  conserta em segundos. O resumo do log ganhou uma linha, so quando houve:
+  "Lances reescritos pelo modelo: N reenviado(s) sozinho(s), M recusado(s)".
+- **M7, a estimativa**, e uma regra de tres com a data escrita. O worker a
+  faz DEPOIS da carga do cache (o que ja esta no banco nao vai para a API e
+  nao entra na conta — antes do cache ela cobraria o que o programa nao vai
+  pagar) e ANTES de abrir a linha da execucao (Z5): conta os comentarios que
+  vao mesmo ser enviados, ja limpos, e estima tokens e dolares com o que o
+  piloto mediu — 36.844 tokens de entrada (13.190 do cache) e 21.823 de
+  saida para 40.426 caracteres de original, ou seja 0,91 e 0,54 por
+  caractere, 36 % da entrada em cache. Nos 200 comentarios do piloto a
+  estimativa da US$ 0,67, que foi o real. A pergunta e um `askyesno` levado
+  a thread do Tk por `confirm_on_main_thread` (um `after(0)` e um `Event`;
+  garantia C1) — "Nao" nao envia nada nem abre execucao; com tudo em cache,
+  ou com o Google, nao ha pergunta. No fim, "estimado ~US$ X, real US$ Y".
+  **A tabela de precos (`llm_costs.PRICE_TABLE`) e das paginas dos tres
+  provedores em 2026-09-18**, com `PRICES_DATED` no texto do dialogo e do
+  log: nove modelos da Anthropic, treze da OpenAI (a familia `gpt-5.x` ate o
+  `gpt-5.6`), e a DeepSeek, que em 2026-09-14 passou a atender
+  `deepseek-v4-pro` e os nomes antigos pelo V4.1-Flash ao preco dele (pico;
+  fora do pico cobra a metade). O casamento e pelo id exato ou pelo id com
+  uma data atras (`claude-opus-5-20260401`); `gpt-5-mini` NAO e `gpt-5`. Um
+  modelo fora da tabela recebe os tokens e "sem preco na tabela" — nunca um
+  numero inventado. Para o custo real ser UMA conta nos dois protocolos,
+  `Usage.input_tokens` passou a ser a entrada NAO cacheada (o
+  `prompt_tokens` da OpenAI/DeepSeek inclui o cache e o provedor o desconta;
+  a Anthropic ja separa) e `Usage` ganhou `cache_write_tokens`.
+- **O padrao da DeepSeek mudou de `deepseek-chat` para `deepseek-flash`**:
+  e o nome que a documentacao do provedor da como o atual; o antigo era
+  palpite, e um teste novo exige que os tres padroes tenham preco na tabela
+  (um padrao sem preco mostraria "sem preco" na primeira execucao de todo
+  mundo).
+- Testes: 6 de notacao (`anchor_divergence` e a descricao), 5 do worker para
+  T6 (a recusa, a segunda chance que acerta, o caminho individual, o reenvio
+  sem nomes, o Google fora), 4 do worker para M7 (ordem cache -> estimativa
+  -> execucao e "com tudo em cache nao pergunta", a recusa, o Google nao
+  pergunta, estimado -> real), 7 de custo e 1 de `Usage` (mais duas
+  assercoes no teste da Anthropic). **16 mutacoes, 16 mortas** (portao mudo; portao no Google; sem segunda chance; segunda chance
+  sem portao; reenvio sem nomes sem portao; individual sem `concluir`; nao
+  pergunta; pergunta com zero; conta o cache; ponte ignora a resposta;
+  recusa nao cancela; real sem cache; prefixo cru; estimativa sem desconto;
+  resumo mudo; linha final muda). O `WorkerFallbackHarness` substitui
+  `messagebox.askyesno` (padrao "sim"; `ask_yes_no=` para recusar ou ler a
+  pergunta) — sem isso um provedor falso abriria um dialogo modal de verdade
+  e a suite pararia, a armadilha de 2026-09-14 de novo.
+- **Nao feito**: os `fallbacks` de recusa da Anthropic (zero recusas em 200
+  linhas) e a leitura cega — que continua sua.
+
+**Feito em 2026-09-18, segunda parte — o que o piloto tinha e o produto nao.**
+
+- **O contexto de lances (B6).** O piloto mandava `antes`/`depois` em 198 de
+  200 itens e o worker mandava vazio — o numero de 1 aviso QA foi medido COM
+  contexto. Agora `pgn_utils.move_context`/`extract_comment_contexts` (o
+  mesmo padrao de lance do piloto, que passou a importar dali para medir o
+  que o produto manda) da a cada comentario distinto o ultimo lance antes e o
+  primeiro depois, numa janela de 80 caracteres por lado; a primeira passada
+  os extrai so com modelo de linguagem (`with_contexts=llm is not None` — o
+  Google nao paga), e o worker os passa pela porta `traduzir(texto,
+  contextos)` no lote, no individual, no reenvio do portao e no reenvio sem
+  nomes. **Uma mutacao sobreviveu e derrubou a regra**: a primeira versao
+  cortava a janela na chave do comentario vizinho, e o cenario certo — dois
+  comentarios seguidos, `{First} {Second}` — mostrou que o segundo perdia o
+  `1. e4` que os dois anotam. A regra que ficou apaga os comentarios inteiros
+  da janela e so corta o pedaco de um vizinho maior do que ela. Medido no
+  livro: 6.495 de 6.500 distintos com contexto; na amostra do piloto, os
+  mesmos 198 de 200, e as duas linhas que mudaram pegavam um lance de DENTRO
+  do comentario vizinho.
+- **O lote cortado divide-se, como o log prometia e o codigo nao fazia.**
+  `max_tokens` estava em 8.000 no produto e em 16.000 no piloto — e o limite
+  conta o pensamento do modelo (adaptativo por padrao no Opus 5; os
+  `reasoning tokens` da OpenAI entram em `max_completion_tokens`), entao os
+  zero cortes do piloto foram medidos com o dobro. Alinhado em 16.000. E a
+  resposta cortada, ou recusada (`stop_reason: refusal` na Anthropic; o
+  campo `refusal` do `chat/completions`), deixou de voltar `None` — que o
+  worker le como rede caida: 20 comentarios falhados e um passo do disjuntor
+  — e passou a dividir o lote ao meio ate o item sozinho (`_translate_parts`,
+  a regra B1 pela API que a exige). O item recusado sozinho volta vazio (o
+  caminho de B2), e as metades que sairam certas ficam em `_divided`: quando
+  o worker reenviar o grupo item a item, esses vem da memoria sem requisicao
+  — 10 requisicoes para isolar um recusado num lote de 20, em vez de 1 lote
+  perdido ou 30 requisicoes.
+- Testes: 6 de `pgn_utils` (vizinhos, comentario vizinho apagado, dois
+  seguidos, vizinho maior que a janela, primeira ocorrencia, so com a
+  flag), 6 de `llm_providers` (contexto por item e tamanho errado, corte
+  dividido, recusa isolada sem pagar duas vezes, memoria apagada no lote
+  novo, `max_tokens` do piloto), 3 do worker (lote e individual com
+  contexto, Google sem). **16 mutacoes, 16 mortas** depois da sobrevivente
+  virar regra.
+
+**Feito em 2026-09-18, terceira parte — "Testar chaves e modelos" (K2).** O
+limite da SPEC dizia que a tela nao consulta a lista de modelos do provedor,
+e o preco disso era descobrir uma chave colada errada ou um nome aposentado
+no meio de uma execucao, depois do dialogo de custo, como 401/404 fatal.
+`llm_providers.check_credentials` faz uma requisicao GRATUITA — a API de
+modelos: `client.models.retrieve` pelo SDK da Anthropic, `GET /models/{id}`
+na OpenAI, e na DeepSeek, que documenta so a lista, um 404 no id cai em
+`GET /models` e o nome e procurado nela (o veredito lista os ids quando nao
+acha). O botao fica na secao dos modelos da tela de Configuracoes, testa
+cada provedor que tem chave (a digitada vale sobre a gravada, sem gravar
+nada), diz "sem chave" dos outros, roda na thread de fundo com o resultado
+voltando por fila e `after` agendado da thread do Tk (a armadilha de 28.13:
+um `after` chamado de dentro da thread nao funciona fora do `mainloop`), e
+nunca mostra a chave (K1). 7 testes headless + 2 de janela; 7 mutacoes
+mortas (404 sem lista, nome fora da lista aceito, 403 ignorado, sem chave
+perguntando, chave no texto, NotFound como chave, lista vazia como "fora").
+
+### 28.8 O tabuleiro — CONCLUIDO (2026-09-15)
+
+O revisor decide "qual bispo", "que coluna", "troca ou qualidade" olhando a
+posicao — hoje em outro programa, em ~10 % das linhas. A SPEC declarou
+"validar lances" como nao-objetivo e recusou uma coluna FEN nula (18.1);
+este item cria a coluna quando o worker passa a escreve-la. E conforto, nao
+velocidade (~1 h por livro de alt-tab), e por isso vem depois de 28.7.
+
+**Medido no PGN real do usuario** (842 KB, 99 partidas, 35.593 lances,
+7.487 comentarios), com `python-chess` 1.11.2 e um visitor sem arvore —
+e reproduzido de forma independente pela segunda revisao critica:
+
+| metodo | tempo (melhor de 3) | pico |
+|---|---|---|
+| `board.copy()` ao entrar em cada variante | 10,16 s | 5,5 MB |
+| desfazer o lance ao entrar, refazer ao sair (sem copia) | **1,54 s** | — |
+
+FENs identicas nos dois metodos nas 7.487 posicoes, inclusive com `[FEN]`
+inicial e variante aninhada; **alinhamento por texto com a extracao do
+programa: 7.487 de 7.487**. Extrapolado: 40 MB ~ 70 s, em segundo plano e
+cancelavel. O detalhe que decide a correcao da variante rapida: ao entrar
+numa variante guarda-se o lance desfeito E a profundidade da pilha; ao sair
+desfazem-se os lances DA VARIANTE ate a profundidade guardada e so entao o
+lance volta. A variante "obvia" (usar o tabuleiro que o `visit_board` da)
+erra 1.805 de 7.487 — todo comentario no inicio de variante.
+
+**Dois achados que so a medicao deu:**
+
+- O PGN do usuario usa **so `\r`** como fim de linha (exportacao ChessBase).
+  `read_pgn_text` preserva isso (G1), e o leitor por linhas do `python-chess`
+  ve um arquivo de uma linha e devolve zero partidas **sem erro**. O parser
+  recebe uma copia com `\r` normalizado; o arquivo gravado nao muda.
+- **`python-chess` e GPL-3.0-ou-posterior** (metadados do pacote). O
+  repositorio nao tem `LICENSE`. A decisao das duas revisoes criticas, e a
+  que fica: `python-chess` como dependencia **opcional, excluida do
+  `.spec`** (`excludes`), o tabuleiro so existe quando o modulo esta
+  instalado, o `.exe` sai sem ele e a licenca do programa nao muda. O
+  usuario principal roda do fonte (`python PGN_Tradutor_Pro.py`) e tem o
+  pacote; quem usa o `.exe` nao ve o quadro. O `san_board.py` proprio (~350
+  linhas, cravada na desambiguacao) fica registrado e nao e feito.
+
+Desenho: `pgn_positions.py` (visitor; alinhamento por texto em sequencia,
+**ressincronizado por partida** — um lance ilegal faz o parser pular a
+variante e so aquela partida fica sem FEN dali em diante; nunca uma FEN no
+comentario errado), `occurrences.fen` nula sem backfill (O2), parsing na vez
+do arquivo depois dos lotes (D5), `fen: true` nas configuracoes com o log
+oferecendo desligar, e um `tk.Canvas` de 8 x 24 px com glifos Unicode num
+quadro colapsavel do painel de sugestoes (F20: cabe nos 300 px). Garantia
+planejada **O5**.
+
+**Feito em 2026-09-15 (schema 11), e o que a implementacao achou que a
+medicao anterior nao tinha dito.**
+
+- **O detalhe da profundidade e mais fundo do que o texto acima diz.** A
+  primeira versao desfazia UM lance ao sair da variante — e uma variante
+  tem varios. O tabuleiro ficava dentro dela para o resto da partida, o
+  `push` seguinte falhava por lance impossivel, e o erro ENGOLIDO deixava a
+  partida sem FEN dali em diante: 692 de 7.487 na primeira medicao, sem
+  nenhum erro na tela. Correcao: `len(board.move_stack)` guardado ao entrar,
+  `pop` ate ele ao sair; e o `try` em volta do visitor saiu — um lance que
+  o parser aceitou e empurravel, e um erro ali e erro DESTE codigo. 7.426
+  FENs, multiconjunto identico ao do metodo com `board.copy()`.
+- **O alinhamento por texto tem tres regras, e a ORDEM delas decide.** O
+  parser junta dois `{}` seguidos do mesmo lance num texto so; a regra "o
+  texto do parser contem o da extracao" resolve isso, mas conferida DEPOIS
+  da busca para a frente ela chegava tarde: um pedaco curto (":",
+  "Instead") tambem existe sozinho mais adiante, a busca o casava la e
+  deixava 245 comentarios atras do ponteiro. Igual no ponteiro, contido no
+  ponteiro, depois busca ate 60 a frente. **7.473 de 7.487 em 1,8 s** (os
+  14 sao comentarios que o parser pendura num lance nulo `--`; ficam sem
+  quadro, nunca com o quadro errado).
+- **A contagem de partidas da extracao estava errada para o PGN do usuario
+  — desde a secao 18.** `^[Event` com MULTILINE nao ve a linha que termina
+  em `\r` sozinho, e as 7.487 ocorrencias do livro eram todas "partida 1"
+  no rotulo do editor; o prefixo de linha das tags tinha o mesmo defeito.
+  Corrigidos os dois (`pgn_utils`), com teste em `\r` e em `\r\n`: 99
+  partidas, e o alinhamento passou a ressincronizar por partida de verdade.
+- **O quadro nasce FECHADO.** Aberto, os 230 px (titulo + 192 de tabuleiro)
+  deixavam a lista de sugestoes com 40 px na altura de sempre do painel
+  (563) — uma sugestao e meia, para servir os ~10 % das linhas em que a
+  posicao decide. Fechado sobra a linha do titulo com "Brancas/Pretas
+  jogam", que e o sinal de que ha posicao; um clique abre, e a escolha e
+  lembrada com as outras do editor. A opcao `board.fen` entrou na tela de
+  Configuracoes (M4 a enumera), com o texto dizendo se o pacote esta
+  instalado.
+- **Custo de memoria medido, e nao o do plano:** o `python-chess` monta a
+  arvore de UMA partida por vez, e a maior do livro mais duas copias do
+  texto dao 16 MB de pico no PGN de 842 KB — por arquivo, solto em seguida.
+  O teste que mede "o worker nao segura todos os arquivos" roda com a opcao
+  desligada, senao mediria a arvore.
+
+**O que a verificacao fixou.** Em `test_core.py`: `PgnPositionsWalkTests`
+(5, pulados sem o pacote: FENs iguais ao metodo com copia e na ordem do
+arquivo, com variante de varios lances desfeita inteira; `\r` sozinho;
+duas partidas; cancelar; a extracao inteira casa), `PgnPositionsAlignTests`
+(8, puros: ordem, pulo e ressincronizacao — inclusive dois "Diagram"
+seguidos —, o juntado, o pedaco curto que a busca casaria longe, nunca em
+texto diferente, busca limitada, partida a partida contra a sequencia
+global, sem pacote), `FenBoardRowsTests` (3), `OccurrenceFenTests` (3:
+gravada ao lado e nulo continua nulo; o arquivo do filtro vence; banco na
+versao 10 ganha a coluna), `WorkerFenTests` (3: gravadas e no log; opcao
+desligada grava nulo e cala; sem pacote avisa UMA vez e aponta
+Configuracoes) e o teste de `\r` em `ReadingContextTests`. Em
+`test_editor_windows.py`, `EditorBoardTests` (7: so com FEN; o arquivo do
+filtro decide; nasce fechado e a escolha e lembrada; limpar esconde;
+acompanha o tema; cabe nos 308 px; aberto no tamanho minimo nenhum botao sai
+do painel). 30 testes. **17 mutacoes, 17 mortas** (uma so depois de dois
+cenarios novos: "nunca por partida" sobrevivia porque o teste tinha as duas
+partidas com o mesmo texto casavel — o cenario e o "Diagram" que so a
+partida 2 tem).
+
+### 28.9 O editor: o que ainda custa gestos — CONCLUIDO (itens 1 a 3 em 2026-09-15; 4 a 6 em 2026-09-16)
+
+A varredura de UX leu o `edit_window.py` inteiro e concluiu que os cinco
+gestos mais repetidos (abrir, editar, salvar e verificar, avancar, aplicar
+sugestao) **ja custam um gesto cada**. A primeira revisao critica cortou
+tres dos itens do rascunho com o banco: `review_status` esta vazio nas
+6.500 linhas e `reviewer_note` em todas — um atalho para "Rejeitar"/"Em
+duvida" serve a um fluxo que este revisor nunca usou; botoes desabilitados
+com lista vazia e digitos monoespacados sao cosmeticos. O que fica, por
+retorno:
+
+1. **`Alt+1` a `Alt+9` aplicam a sugestao N** do painel, sem mouse. Hoje o
+   duplo clique e um gesto, mas exige a mao no mouse no meio da digitacao.
+2. **Selecionar uma sugestao realca onde ela vai bater** no texto — so
+   "Aplicar todas" tem previa (F11). Uma tag mais forte sobre os trechos da
+   sugestao selecionada, reaproveitando `find_glossary_matches`; prioridade
+   de tag decidida contra `find_match`.
+3. **`Ctrl+M` marca a linha aberta para o lote** (o `Text` do Tk nao tem
+   `<Control-m>`; conferido em `text.tcl`) e a caixa de marcar passa de 24
+   para 32 px.
+4. **Tooltips** para os controles sem palavra (`▤/▥`, "B", "Aa", "A-/A+",
+   "?", "Priorizar esta"/"Manter esta"): um `Toplevel` sem decoracao com
+   `after` de 500 ms, utilitario em `editor_widgets.py`, destruido com a
+   janela pai e pintado pelo tema (F18). E o que 22.8 deixou de fora por
+   falta de largura, e nao gasta largura.
+5. **Editor de glossario**: botao condicional "Excluir as N duplicadas
+   exibidas" quando o filtro "Duplicadas" esta ativo, com backup e
+   confirmacao proprios (a decisao de 22.12 pedia exatamente isso); e
+   `Ctrl+roda`/`Ctrl+±` nos dois textos, como no outro editor.
+6. Para o fim: atalhos `<Control-R>`/`<Control-D>` (keysym maiusculo com
+   Shift; `<Control-Shift-r>` nunca dispara no Windows) para rejeitar e por
+   em duvida **avancando so pelo atalho** — os botoes continuam como F12
+   fixou; botoes desabilitados sem linha aberta (o teste parte da lista
+   vazia E depois carrega uma linha, senao nao testa nada); `Consolas` nos
+   dois rotulos de contagem do rodape; separador entre os quatro botoes de
+   edicao e os quatro de qualidade na segunda fileira.
+
+Todo bind novo entra em `KEYBOARD_SHORTCUTS`, senao o teste de F18 fica
+vermelho — e uma garantia existente que o item toca. Garantias planejadas
+**F29** (1 a 3) e **S22** (5).
+
+**Itens 1 a 3 feitos em 2026-09-15 (F29), com tres coisas diferentes do
+plano.**
+
+- **O numero da sugestao entrou no ROTULO do botao**, e nao so na lista do
+  "?". `Alt+3` so serve a quem sabe que aquela e a terceira, e contar
+  botoes com o dedo e mais lento do que o duplo clique que o atalho vem
+  substituir. Da decima em diante nao ha numero: nao existe `Alt+10`, e um
+  "10." sem tecla seria a promessa que F18 existe para impedir. `Alt+N` sem
+  a sugestao N diz "Não há sugestão N" em vez de nao fazer nada — a mesma
+  regra de T5, um gesto que acontece e nao responde parece travamento.
+- **O realce e do PRIMEIRO casamento, e so dele.** O plano dizia "os
+  trechos da sugestao selecionada"; `apply_one` troca `count=1`, e pintar
+  todos prometeria uma substituicao que o botao nao faz. A tag nova
+  (`glossary_selected`) fica **acima** de `glossary_hit` e de `find_match`
+  e **abaixo** de `find_current`: a sugestao escolhida e a intencao mais
+  recente, mas a ocorrencia atual da busca continua sendo o unico lugar
+  onde a tecla seguinte vai agir. Como e Tk puro, ela entrou tambem em
+  `apply_theme_colors` — senao ficaria com a cor do tema da abertura
+  (F18), que e o defeito que 22.8 veio consertar.
+- **`Ctrl+M` marca a linha ABERTA, e a caixa da lista acompanha.** Pelo id,
+  como `toggle_row_selection`, e com `sync_row_checkboxes` logo depois: as
+  duas sao a mesma marca, e a caixa que nao acompanha e a divergencia que
+  R6 descreve noutro lugar. Sem linha aberta ele explica. A caixa passou de
+  24 para 32 px (`ROW_CHECKBOX_SIZE`), com `checkbox_width`/`checkbox_height`
+  e nao so `width` — o `width` do `CTkCheckBox` e a largura do widget, e
+  sozinho nao aumenta o alvo.
+
+**O que a verificacao fixou.** Em `test_editor_windows.py`,
+`KeyboardSuggestionAndBatchTests` (14: `Alt+N` aplica a enesima; as nove
+teclas estao ligadas; `Alt+7` sem a setima explica; os botoes trazem "1." e
+"2."; a decima nao traz numero; selecionar realca so o casamento que
+`apply_one` troca, com os acertos comuns intactos; trocar a selecao move o
+realce; recarregar as sugestoes limpa; a ordem das quatro tags; a repintura
+do tema alcanca a tag nova; `Ctrl+M` marca e a caixa acompanha; de novo
+desmarca; sem linha aberta explica; `Ctrl+M` de dentro do texto chega a
+janela sem inserir nada; a caixa tem 32 px). A tabela `KEYBOARD_SHORTCUTS`
+passou a aceitar uma TUPLA de sequencias num rotulo so ("Alt+1 a Alt+9"), e
+os dois testes de F18 — todo listado esta ligado, todo ligado esta listado —
+continuam sendo a conferencia. **10 mutacoes, nenhuma sobrevivente.** Os
+itens 4 a 6 e o 5 (S22) continuam plano.
+
+**Itens 4 a 6 feitos em 2026-09-16, com o que a medicao mudou.**
+
+- **Dicas** (`editor_widgets.Tooltip`/`attach_tooltip`): `Toplevel` sem
+  decoracao, `CTkLabel` com cores em par, 500 ms, some no `<Leave>`, no
+  clique e no `<Destroy>` do controle — este ultimo e o que cancela o
+  timer, porque a janela filha morre com o pai de qualquer jeito. Nos seis
+  controles sem palavra do editor e nos dois do conflito do glossario.
+- **"Excluir as N copias repetidas exibidas"**: o plano dizia "excluir as
+  N exibidas", e o filtro "Duplicadas" mostra TODAS as copias de um par —
+  excluir as exibidas apagaria a regra. Fica a primeira copia em ordem de
+  arquivo e sai o excesso; a busca restringe; backup antes da pergunta com
+  o caminho nela. S22 foi escrita assim. `Ctrl+roda`/`Ctrl+±` nos dois
+  textos do glossario, tamanho lembrado em `glossary_editor.font_size`.
+- **`Ctrl+Shift+R`/`Ctrl+Shift+D`** (`<Control-R>`/`<Control-D>`, na
+  tabela de F18): gravam e andam pelo `navigate` de sempre, salvo quando a
+  linha saiu do filtro — ai quem ocupou o lugar ja e a proxima (F15). Os
+  botoes de status dormem sem linha aberta, acordados DEPOIS de o id ser
+  trocado (o rotulo de status e pintado antes disso, e la os botoes veriam
+  a linha anterior). **`Consolas` so no rotulo da posicao**: no das
+  contagens, o pior caso do rodape (seis contagens de seis digitos) em
+  monoespacada estoura a faixa minima e rouba 69 px do rotulo vizinho —
+  medido pelo teste de F20, que ficou vermelho na primeira tentativa.
+  Separador de 2 px entre edicao e qualidade na segunda fileira.
+
+**O que a verificacao fixou.** Em `test_editor_windows.py`: `TooltipTests`
+(7: todo controle sem palavra tem dica; aparece depois do atraso e some no
+`hide`; sair antes cancela; destruir com timer pendente cancela; destruir
+leva a janela; cores em par; os do conflito do glossario),
+`DeleteShownDuplicatesTests` (5: a pura mantem a primeira copia e so entre
+os exibidos; o botao so com o filtro e com o numero; apaga so o excesso com
+backup e "sim"; "nao" deixa tudo e o backup existe; a busca restringe),
+`GlossaryEditorZoomTests` (2) e `ReviewStatusShortcutTests` (9: rejeita e
+anda enquanto o botao fica; duvida e anda; no fim fica; sem linha nao
+grava; linha que saiu do filtro nao anda uma a mais; teclas ligadas e na
+tabela; botoes dormem e acordam partindo da lista vazia; Consolas so na
+posicao; separador entre os grupos). 23 testes. **15 mutacoes, 15 mortas**
+(duas so depois de cenario novo: o `<Destroy>` — a janela filha ja morria
+com o pai, o que sobra e o timer — e o `navigate` incondicional, que so o
+filtro "Verificadas" com a linha saindo expoe).
+
+### 28.10 A janela principal e as configuracoes — CONCLUIDO (2026-09-15; o menu foi cortado, FEN e provedor esperam 28.8 e 28.7)
+
+- **O menu do rascunho foi cortado.** `tk.Menu` no Windows tem a barra
+  desenhada pelo sistema, sem tema (F18 ficaria falsa no tema escuro), e
+  `test_main_window.py` localiza os botoes pela arvore de `CTkButton` em 18
+  pontos. Mover os dois "Zerar" para fora da grade e a unica parte com
+  valor, e ela cabe sem menu: uma fileira propria embaixo, rotulada
+  "Acoes irreversiveis", e a grade dos 12 restantes em dois tamanhos (os de
+  todo dia maiores).
+- **"Revisar as pendentes desta execucao"** ao terminar: abre o editor com
+  o filtro de arquivo no que acabou de ser traduzido e status "Pendentes".
+  E a porta de entrada do dia. Junto, "Abrir pasta".
+- **A barra de progresso ganha texto.** O worker ja mede tudo ("Tempos do
+  lote" no log): "Lote 37/125 - 2.410/6.500 - ~1 min" ao lado da barra.
+- **Tela de Configuracoes**: `wrap_columns`, `utf8_bom`, tema
+  (Claro/Escuro/Sistema), pasta de dados (mostrar e abrir), FEN ligada ou
+  desligada (28.8), provedor e chave (28.7). Hoje as duas primeiras so
+  existem no JSON editado a mao — o mesmo JSON que o Bloco de Notas ja
+  apagou uma vez (12.1). **Sem vender o BOM como o conserto do ChessBase**:
+  a memoria de 2026-08-03 registra que aquele caso foi resolvido pela
+  promocao para UTF-8 (24), e que `utf8_bom` sozinho nunca resolveria. O
+  seletor de tema nao e barato: so o editor de traducoes tem
+  `AppearanceModeTracker`; glossario, estatisticas e historico leem o tema
+  uma vez ao construir e precisam repintar. Garantia planejada **M4** (toda
+  opcao do JSON tem um lugar na tela, e a tela grava por `update_settings`
+  — testavel enumerando as chaves contra os widgets).
+
+**Os dois primeiros feitos em 2026-09-15 (M5). Tres decisoes que o plano
+nao tinha.**
+
+- **"Revisar pendentes" abre o arquivo que TEM POSICOES, e no destino da
+  EXECUCAO.** O worker grava `app.last_run` (`files`, `generated`,
+  `target_language`, `completed`) e so lista os arquivos cujas posicoes
+  foram registradas: sao os unicos que o filtro do editor conhece, e
+  oferecer um arquivo que o seletor nao tem seria abrir a lista inteira
+  fingindo que e a obra. O destino e o da execucao porque o radio pode ter
+  mudado depois dela — a revisao e do que foi gravado. Com mais de um
+  arquivo, abre no primeiro e o log diz onde estao os outros (no seletor).
+  O `TranslationEditor` ganhou tres opcionais (`source_file`,
+  `status_filter`, `target_language`) aplicados ANTES da primeira pagina,
+  pela mesma razao que o filtro por arquivo ja era restaurado ali: depois,
+  a janela abriria na lista inteira e recarregaria em seguida.
+- **Os dois botoes e o texto da barra nao ganharam linha propria: eles
+  entraram na FILEIRA que ja existia**, a do "Iniciar/Pausar/Cancelar". O
+  plano dizia "ao lado da barra", e a medicao mostrou o preco: a janela
+  principal nao tem folga vertical nenhuma — o log e o ultimo a receber
+  espaco —, e uma fileira nova de 32 px derrubava o log de **33 px para
+  1 px**, com o fim dele deixando de ser alcancavel (F23 vermelha). E a
+  familia "correto e nao cabe na tela" do 22.10, agora na vertical. Na
+  fileira dos botoes o custo e zero, e a ordem de empacotamento segue a
+  regra de la: os tres novos sao empacotados por ULTIMO e a direita, entao
+  numa janela estreita quem some e o atalho para a revisao, e nunca o
+  "Cancelar". Dois testes guardam isto: o log continua com mais de 24 px e
+  com o fim alcancavel, e na largura MINIMA os quatro botoes de execucao
+  cabem inteiros.
+- **Os dois botoes acordam em `reset_buttons`.** E o
+  metodo que roda no fim de TODA execucao (inclusive a que falhou e a que o
+  disjuntor interrompeu), entao e o unico lugar em que o estado deles nao
+  pode ficar para tras. Nascem desabilitados: antes da primeira execucao
+  nao ha o que revisar nem que pasta abrir. "Abrir pasta" prefere a do PGN
+  gerado — e ele que vai para o ChessBase —, e cai na do original quando
+  nenhum saiu. Uma execucao interrompida pelo disjuntor ou com falhas
+  TAMBEM e registrada: o que foi traduzido esta no banco e e exatamente o
+  que ha para revisar; so o cancelamento nao chega la, e ai a ultima
+  execucao completa continua valendo.
+- **O texto da barra e uma funcao pura** (`format_progress_status`), e nao
+  um `f-string` dentro do laco: assim ele e conferido sem worker. "Arquivo
+  2/5 · Lote 37/125 · 2.410/6.500 · ~3 min"; o "Arquivo" so aparece com
+  mais de um (num livro de um capitulo e ruido), e a estimativa so com pelo
+  menos um comentario feito E pelo menos um faltando — no comeco nao ha de
+  onde tirar a conta e no fim ela e zero. O `~` e a honestidade da conta: o
+  cache faz um comentario custar milissegundos e a media vira otimista. No
+  fim a barra escreve "Concluída" ou nada, pelo mesmo motivo que ela ja ia
+  a 100 % ou a 0 — o texto congelado no meio era o ultimo sinal da tela que
+  continuava mentindo depois do dialogo.
+
+**O que a verificacao fixou.** Em `test_core.py`: `ProgressStatusTests` (7:
+a linha completa; um arquivo so esconde o "Arquivo"; sem estimativa antes do
+primeiro e depois do ultimo; a regra de tres; as unidades do `~`; o canal do
+rotulo tolera um app sem rotulo e escreve pela thread do Tk) e
+`LastRunRecordTests` (5: a execucao completa e registrada com arquivos,
+gerados e destino; o rotulo passa por "Lote 1/1 · 1/2" e termina em
+"Concluída"; cancelar antes do primeiro arquivo deixa o registro anterior;
+um arquivo que nao pode ser relido nao registra nada; um PGN sem comentario
+tambem nao). Em `test_main_window.py`, `LastRunEntryPointTests` (10:
+nascem desabilitados; uma execucao os acorda; `reset_buttons` os mantem em
+dia; revisar abre no arquivo, em "Pendentes" e no destino da execucao
+contra um radio ja trocado; com varios abre no primeiro e diz; sem execucao
+explica; a pasta preferida e a do gerado, e a do original quando nao ha;
+uma pasta que nao abre avisa; o rotulo nasce vazio sob a barra). Em
+`test_main_window.py`, `HarnessTeardownTests` (2, e o assunto e a suite):
+`tkinter.after_cancel` le o script do `after` com `splitlist(...)[0]` para
+apagar o comando ANTES de cancelar o timer; quando o script e uma lista Tcl
+de varias palavras — alguem agendou com argumentos — esse `[0]` e uma tupla
+e o `deletecommand` levanta `TypeError`, que o `except tk.TclError` da
+desmontagem nao pegava. O sintoma era um erro numa classe sem relacao com o
+assunto, so na suite COMPLETA, e o timer continuava vivo; a correcao cai no
+`after cancel` de Tcl puro, que e o que de fato para o callback. Em
+`test_editor_windows.py`, `EditorOpenedOnARunTests` (6: sem argumentos abre
+como sempre; os tres valores chegam; o destino da execucao vence o radio; a
+primeira pagina ja obedece; status desconhecido cai em "Todas"; arquivo que
+nao existe mais cai em "Todos os arquivos"). 28 testes. **23 mutacoes**,
+tres sobreviventes na primeira passada: o registro sem arquivo revisavel
+(o cenario que faltava e o arquivo ilegivel na releitura — o `except` que
+ja existia), o destino da execucao contra o radio (o cenario tinha os dois
+iguais, padrao 4 da memoria de testes) e a ordem feito/total no rotulo (so
+visivel a meio caminho, porque no fim os dois numeros sao o mesmo). Os tres
+cenarios escritos, as tres morreram.
+
+**A tela de Configuracoes, feita em 2026-09-15 (M4).** `settings_window.py`,
+botao "Configurações" na grade de Ferramentas — o decimo sexto, que fecha o
+4 x 4 sem custar a fileira que esta janela nao tem (o mesmo motivo pelo qual
+os dois "Zerar" NAO ganharam a fileira propria do plano: 14 + 2 seriam cinco
+fileiras, e a medicao de M5 mostrou que uma a mais derruba o log). Tres
+secoes: gravacao (`utf8_bom` como caixa, `wrap_columns` como campo validado
+por `settings.parse_wrap_columns`, a MESMA regra do leitor do JSON, com a
+recusa escrita na tela e nada gravado), aparencia (Sistema/Claro/Escuro,
+aplicado DEPOIS de gravar e so quando mudou; `app.py` liga o tema gravado
+antes do primeiro widget) e pasta de dados (o `describe_data_dir` do log e um
+"Abrir pasta", sem campo: a pasta e decidida antes de o programa abrir, e a
+tela diz como muda-la). Gravacao por `settings.write_settings_sections`, que
+e o `write_main_window_settings` generalizado para duas secoes numa releitura
+(R4). `settings.USER_OPTION_SECTIONS` e a lista que M4 enumera; `main_window`
+e `editor_drafts` ficam de fora de proposito — sao estado, nao escolha. FEN
+(28.8) e provedor/chave (28.7) entram quando existirem. **O seletor de tema
+custou menos que o plano temia**: as janelas de historico, estatisticas e
+trocas repetidas usam cores em tupla (claro, escuro) do `editor_common`, que
+o CustomTkinter repinta sozinho; o unico Tk puro que lia o tema uma vez era
+o `PanedWindow` do glossario, e ele ganhou o mesmo gancho do editor (F18),
+retirado ao fechar. Medido: a janela requer 580 x 504 com as ajudas
+requebradas em 540 px; minimo 600 x 520, e um teste confere o requerido
+contra o minimo. 13 testes de janela (`SettingsWindowTests`) e 5 puros
+(`UserOptionSettingsTests`); oito mutacoes, oito mortas (tema sempre
+aplicado; tema antes de gravar; substituir a secao em vez de mesclar; sem
+tema na abertura; zero recusado; gancho do glossario que fica; controle sem
+registro; tema sem validar).
+
+### 28.11 Engenharia — CONCLUIDO (CI, divisao dos testes, fachada do db_tools e tipos em 2026-09-16; logging em 2026-09-18)
+
+Zero horas de revisao por livro; fica no fim da ordem e nao compete com os
+itens de produto. **Depende de 28.1 item 1**: um CI com `uv sync` sem
+`spylls` no `pyproject` roda o corretor pulado.
+
+- **CI**: nao ha `.github/`. Um workflow em `windows-latest` (tem sessao de
+  desktop; os testes de janela rodam), com `uv sync`, `compileall`, `ruff`,
+  a suite (teto de 25 min: 514 s aqui num runner de dois nucleos e
+  apertado) e um job de build do PyInstaller publicando `dist/` como
+  artefato. Nao bloqueante por duas semanas.
+- **`test_core.py`** dividido em 12 modulos por dominio (banco, ocorrencias,
+  glossario, worker, API, ferramentas, PGN, notacao, editor, settings, QA,
+  corretor) mais um `tests/helpers.py` com os `Fake*` e o
+  `WorkerFallbackHarness`. Nao muda teste nenhum; muda o ciclo "mudei uma
+  funcao, rodo os testes dela". Um `compileall tests` depois de cada
+  arquivo extraido pega o `import` que ficou para tras.
+- **`db_tools.py`** (2.318 linhas) e uma gaveta de seis assuntos sem nada em
+  comum alem do menu; extrair CSV/TMX, qualidade e estatisticas, com o
+  modulo original como fachada (o padrao `app.py -> app_actions.py`). Os
+  outros tres gigantes **nao**: `database.py` e coeso (tudo fala `cursor`),
+  `edit_window.py` ja e a classe que o 3.1 fez de proposito, e
+  `run_translation` (874 linhas) so deve ser fatiada depois de reunir o
+  estado num objeto — o mesmo caminho que `EditorState` percorreu.
+- **Tipos**: 32 de 857 funcoes anotadas. Comecar por `database.py` e
+  `translation_api.py`, `mypy` nao bloqueante. Transversal; nao tem prazo.
+- `[tool.ruff]` explicito no `pyproject.toml` e `ruff --fix` nos 14
+  corrigiveis; `requires-python` para `>=3.10` — o metadado deixa de
+  prometer o que ninguem testa.
+- `logging` no lugar da fila propria: ganho parcial (niveis, `assertLogs`);
+  a fila continua necessaria como ponte de thread. Nao urgente.
+
+**Feito em 2026-09-16.**
+
+- **CI** em `.github/workflows/testes.yml`: `windows-latest` (os testes de
+  janela precisam de sessao de desktop), `uv sync --extra tabuleiro` (para
+  os testes do tabuleiro rodarem), `compileall`, `ruff`, `mypy` nos modulos
+  anotados (nao bloqueante), suite headless (teto 10 min) e suite de
+  janelas (teto 25 min, `continue-on-error` ate 2026-09-30 — duas semanas
+  para provar que fica verde sem flake antes de barrar merge), e um job de
+  build do PyInstaller que confere o `.exe` e o glossario inicial dentro de
+  `_internal/` e publica `dist/` como artefato por 14 dias. `pytest`,
+  `ruff`, `mypy` e `types-requests` entraram como grupo `dev` do
+  `pyproject` (o `uv sync` os instala; o `.exe` nao os leva) — antes o
+  `pytest` era o da maquina, e o CI nao teria com o que rodar.
+- **`test_core.py` (21.246 linhas, 182 classes) dividido em 12 modulos por
+  dominio** — `test_banco`, `test_ocorrencias`, `test_glossario`,
+  `test_worker`, `test_api`, `test_ferramentas`, `test_pgn`, `test_notacao`,
+  `test_editor`, `test_settings`, `test_qa`, `test_corretor` — mais
+  `tests/helpers.py` com os `Fake*`, o `WorkerFallbackHarness`, os PGN de
+  amostra e o sandbox por modulo (`setup_module_sandbox`, chamado pelo
+  `setUpModule` de cada um). Feito por script sobre a AST (cada classe com
+  os comentarios que a antecedem; os nomes dos helpers que cada modulo usa
+  viram o `from helpers import`; `ruff --fix` tira os imports que sobraram),
+  e conferido do jeito que importa: **1.126 testes antes, 1.126 depois**,
+  cada modulo verde sozinho e todos juntos. Um teste dependia do arquivo
+  pelo nome (o de mojibake nos fontes lia `tests/test_core.py`); passou a
+  varrer `tests/*.py`. O modulo de uma funcao roda em segundos: `test_api`
+  0,4 s, `test_glossario` 2 s, `test_worker` 24 s (e o que tem I/O).
+- **`db_tools.py` (3.003 linhas) virou fachada**: `db_backup.py` (copia,
+  nome unico, validacao e restauracao — 200 linhas), `db_export.py` (CSV e
+  TMX, leitura, analise, gravacao e exportacao — 551) e `db_stats.py`
+  (calculo, relatorio, tabelas, descricao das execucoes — 304) sao as
+  partes PURAS, sem Tk; `db_tools` (2.064) re-exporta cada nome e guarda a
+  orquestracao com `messagebox`, `filedialog` e `run_with_progress`. A
+  fronteira foi escolhida pelo que os testes SUBSTITUEM: `db_tools.messagebox`,
+  `db_tools.run_with_progress`, `db_tools.ask_typed_confirmation` sao os
+  dublês da suite, entao quem os usa fica em `db_tools` — mover a
+  orquestracao junto quebraria os dublês em silencio. Um teste ja estava
+  quebrado desse jeito e nao sabia: trocava `db_tools.EXPORT_CHUNK` para
+  ver a progressao da exportacao, e a funcao le a constante do modulo dela;
+  passou a trocar em `db_export` e a exigir progressao no meio (antes
+  passava sem ver nada — o padrao 1 da memoria de testes).
+- **Tipos, o comeco**: `translation_api.py` anotado inteiro (`LogMessage`
+  e o `Protocol` `CancelFlag` dizem o que o worker entrega pela forma, nao
+  pelo tipo — o `threading.Event` do app e o `SimpleNamespace` dos testes
+  servem), `[tool.mypy]` no `pyproject` com `files` listando so os modulos
+  anotados, `mypy` verde neles e nao bloqueante no CI.
+- **`database.py` anotado inteiro (2026-09-16)**: as 85 funcoes, mais
+  `word_count.py` (que ele importa e cujo `WordCounts` ele devolve). Os
+  tipos dizem o que o modulo SABE: uma linha do SQLite e `tuple[Any, ...]`
+  (o driver nao sabe mais que isso, e um `TypedDict` por consulta seria
+  inventar), os `WHERE` por partes devolvem `(sql, params)`, as ferramentas
+  em massa devolvem `Stats`, e progresso e cancelamento sao `Callable` — a
+  mesma escolha de `LogMessage`. O `mypy` passou a exigir anotacao completa
+  nos modulos listados (`disallow_untyped_defs`, `follow_imports = silent`):
+  uma funcao nova em `database.py` sem tipos e erro, e o resto do pacote e
+  seguido para resolver nomes sem ser cobrado. Duas mudancas de codigo, as
+  duas sem efeito: `int(valor)` com `valor` possivelmente `None` virou um
+  `if` explicito (o `TypeError` capturado escondia o caso), e
+  `fetch_export_rows` materializa `only_ids` uma vez antes de contar e
+  passar. **O que os tipos nao pegam**: `fetchone()[0]` e `Any`, entao um
+  `-> int` numa funcao que devolve `COUNT(*)` e uma afirmacao, nao uma
+  verificacao (`--warn-return-any` acusa dez delas); vale como documentacao
+  e como contrato para quem chama, e os testes continuam sendo o que prova o
+  valor. Proximos, sem prazo: `pgn_utils.py` e `glossario.py`.
+- **O `ruff` 0.16 trocou o conjunto padrao de regras** — achado ao rodar o
+  lint pelo `uv run` (que instala o `ruff` do lock, 0.16.8) em vez do da
+  maquina (0.15): **272 apontamentos** (BLE001, I001, RUF012, S110, DTZ...)
+  num codigo que estava limpo. O comentario do `[tool.ruff.lint]` dizia "o
+  que ja rodava por padrao, agora escrito" e nao escrevia o `select`; agora
+  escreve (`E4`, `E7`, `E9`, `F`). Sem isso o primeiro CI teria falhado no
+  lint por uma mudanca de ferramenta, nao de codigo.
+- **`logging`, feito em 2026-09-18 — e a fila continua.** `app_log.py`: o
+  logger `tradutor_pgn` com um `Handler` que leva cada registro a fila do
+  widget (a ponte de thread de sempre, C1) e ao arquivo da execucao, no
+  mesmo `[HH:MM:SS] texto`; `app.log_message` continua sendo a porta de
+  todo modulo e de todo teste, e por dentro vira `LOGGER.log(nivel, texto)`
+  com o nivel INFERIDO do prefixo que o programa ja escreve (`[ERRO`,
+  `[ABORTADO]` = erro; `[FALHA]`, `[AVISO]`, `ATENCAO` = aviso) — ninguem
+  trocou uma chamada. O que se ganhou: nivel por mensagem e `assertLogs`;
+  um handler so, com lock, onde duas threads podiam escrever o arquivo ao
+  mesmo tempo; e **o que as bibliotecas dizem** — o SDK da Anthropic e o
+  `requests` avisam de retentativas e erros pelo `logging`, e antes ninguem
+  ouvia; a partir de WARNING entram no log como `[AVISO] anthropic._base_client:
+  ...`, com o nome de quem falou. Um app por vez: `install` tira o handler
+  do app anterior (a suite de janelas cria um por teste). 9 testes headless
+  em `test_log.py`, 8 mutacoes mortas; os testes de janela do log passaram
+  sem mudar uma linha.
+
+**O primeiro CI de verdade (PR #4, 2026-09-18), e o que ele ensinou.** Dois
+checks verdes em 11,5 min: compileall, ruff, mypy, a suite sem janela (1.252
+em 107 s), a suite de janelas (532 s) e o build do PyInstaller como
+artefato. Mas o verde do check escondia o que o `continue-on-error` deixa
+passar: **8 testes de janela falharam no runner**, e nenhum era defeito do
+programa.
+
+- **Sete medem pixels numa tela que o runner nao tem.** O runner do GitHub e
+  1024 x 768; o editor de glossario tem minimo 1040 x 640 e nao cabe, e o que
+  se mediu la foi a janela espremida — rotulo de conflito nao mapeado, painel
+  da lista 320 em vez de 330, quadro 382 em vez de 379, log sem altura, fim
+  do log inalcancavel. Os numeros desses testes foram medidos a 1920 x 1080 e
+  so valem onde a janela cabe: `gui_harness.needs_room` os pula com a tela
+  dita por extenso quando ela e menor que `SCREEN_NEEDED = (1100, 740)` — o
+  minimo da maior janela mais bordas e barra de tarefas, nao um numero
+  inventado. Mudar a resolucao do runner nao e caminho: e o pedido aberto
+  mais antigo do `runner-images`, sem solucao documentada.
+- **Um foi o `tk.Tk()` do SEGUNDO teste da suite** falhando com `invalid
+  command name "tcl_findLibrary"` (o `init.tcl` nao carregado) — e os 541
+  seguintes criaram o interpretador sem problema. Transiente do runner:
+  `gui_harness.criar_root` tenta uma segunda vez, e uma falha persistente
+  propaga como antes.
+- **Um susto que nao era defeito**: o relatorio do pytest mostrava as
+  mensagens do programa em "Captured log call", como se o logger
+  `tradutor_pgn` propagasse para a raiz. Nao propaga: o pytest 9 pendura o
+  handler de captura DIRETAMENTE em todo logger com `propagate = False`
+  (`catching_logs` percorre o `loggerDict`). Mesmo assim o handler da raiz
+  passou a ignorar os registros do proprio programa (`third_party_only`):
+  um `propagate` ligado por quem quer que seja nunca duplica uma linha.
+
+Dois testes sem janela guardam o harness (o `needs_room` pula a 1024 x 768 e
+roda a 1920 x 1080; o `Tk()` sai na segunda tentativa e a falha persistente
+propaga). A `continue-on-error` da suite de janelas continua ate 2026-09-30.
+
+### 28.12 O lote `|||` alinha por posicao, e so por posicao — CONCLUIDO (2026-09-15)
+
+`split_batch_translation` aceita a resposta quando o **numero** de partes
+bate; nada confere que a parte `i` e a traducao do comentario `i`. Com uma
+resposta fabricada em que a maquina reordena duas frases vizinhas, os dois
+comentarios trocam de conteudo, `restore_annotations` aprova (as sentinelas
+de cada um voltaram) e o QA nao marca nada quando nao ha lance no texto.
+**Medido no banco de dev: incidencia zero** — nenhuma linha cujos lances
+(ancoras de `chess_notation`) nao se intersectam com os do original; e uma
+so anomalia de razao de tamanho fora de `[0,3; 3,0]` em palavras, `", and"`
+-> `"e"`, que e traducao normal. Fica registrado como risco de desenho,
+resolvido por construcao em 28.7 (ids no JSON). Para o `gtx`, uma defesa
+barata: razao de tamanho de cada parte contra o original fora de
+`[0,3; 3,0]` **so para originais com 40 caracteres ou mais** (o mesmo piso
+do QA) -> tratar como desalinhado (B2). Sem o piso, o unico falso positivo
+medido derrubaria um lote inteiro de 40 para o modo individual.
+
+**Feito em 2026-09-15.** `pgn_utils.misaligned_batch_part(parts, originals)`
+(pura: indice da primeira parte fora da razao, ou `None`) e chamada no worker
+logo depois de `split_batch_translation`, contra os textos MASCARADOS — os
+que foram para a API, para a sentinela pesar o mesmo dos dois lados — e
+manda o lote para o ramo individual que ja existia, com uma linha de log
+propria dizendo qual parte estourou. Remedido antes de fixar o intervalo: a
+razao real em palavras fica entre 0,50 e 1,83 (em caracteres, 0,62 a 1,65)
+nos 6.500 do banco de dev acima do piso, entao `[0,3; 3,0]` nao pega linha
+nenhuma de verdade. **O que o teste ensinou e o plano nao dizia:** a parte
+que ENGOLIU a vizinha tem razao perto de 2 e cabe na folga; quem denuncia a
+fusao e a parte vazia (razao zero), e numa fusao com a contagem certa sempre
+sobra uma. A troca de ordem entre partes de tamanho parecido continua
+invisivel, como registrado — e o limite declarado, e fica para os ids de
+28.7. Tres testes em `test_core.py` (a fusao pelo vazio; o piso e as bordas
+0,25/3,08 contra 0,33/3,0; o worker com contagem certa e tamanhos errados
+gravando cada comentario com a SUA traducao em 1 + N requisicoes e
+nomeando a parte no log). Seis mutacoes, seis mortas (minimo a zero, maximo
+a 100, piso a zero, piso invertido, caracteres no lugar de palavras, `return
+None`).
+
+### 28.13 Memoria de traducao: o que a medicao derrubou — o painel CONCLUIDO (2026-09-16)
+
+A primeira analise propunha uma memoria fuzzy por lances e numeros, e a
+varredura de arquitetura desenhou coluna, backfill e reidratacao para ela.
+Medido nos 6.217 originais distintos: normalizando lances e numeros de
+lance, **4 grupos e 5 linhas**. Acrescentando citacao, numeros soltos,
+simbolos e a pontuacao das pontas: 167 grupos e 280 linhas — mas **120 dos
+167 sao so caixa ou pontuacao** ("The better move" / "The better move,"),
+linhas de duas a quatro palavras cuja edicao custa dez segundos; 1.724
+palavras de 91.604 (1,9 %). E "sem revisao" era falso: a linha reidratada
+nasce de um molde que pode ser traducao de maquina nao verificada (35 grupos
+com a mesma frase traduzida de dois jeitos), entao nasceria pendente de
+qualquer forma. Coluna nova, backfill de 200 mil linhas e um modulo de
+reidratacao por menos de uma hora por livro: **cortado.**
+
+O que sobra, pequeno: um painel "Traducoes semelhantes" no quadro das
+sugestoes, consultando o FTS5 que ja existe (termos filtrados por
+frequencia via `fts5vocab`, confirmado no SQLite 3.45.3 do Python 3.13;
+top-5 por `SequenceMatcher`; numa thread com contador de geracao, o padrao
+de F8), so por par (R9), duplo clique aplica como um passo de desfazer
+(F14). Medido: 99 linhas nao verificadas tem um vizinho verificado a
+`ratio >= 90` — e o que o painel oferece. Sem FTS5 o painel diz "indice
+indisponivel". Garantia planejada **F30**.
+
+**Feito em 2026-09-16, e o que mudou do desenho.**
+
+- **Sem thread, e a medicao decidiu.** O plano dizia "numa thread com
+  contador de geracao, o padrao de F8", e a thread existiu por um dia. Tres
+  defeitos, na ordem em que a suite os mostrou: (1) F8 devolve o resultado
+  com `self.win.after` de dentro da thread, que so funciona com a thread
+  principal DENTRO do `mainloop` — na suite, que bombeia com `update()`,
+  levanta `RuntimeError` engolido e o painel nunca aparecia; trocado por
+  fila + `after` da thread do Tk. (2) A thread abria o banco por
+  `open_database`, que liga o WAL e espera ate 30 s por um escritor; presa
+  atras de uma transacao dos testes, cada limpeza de sandbox esperava 5 s
+  por ela (dezenas de testes a 6,2 s no `--durations`), a suite de janelas
+  foi de 9 para 50 minutos, com `PermissionError` de limpeza e um `Can't
+  find a usable tk.tcl` por exaustao; trocado por
+  `database.open_database_readonly` (`mode=ro` pela URI com o caminho
+  percent-encoded, sem PRAGMA, 50 ms). (3) O que decidiu: `Windows fatal
+  exception 0x80000003` no meio da suite, com o coletor de lixo rodando na
+  thread da consulta (o `SequenceMatcher` aloca muito) e finalizando
+  `Variable`s do Tk de janelas ja destruidas — Tcl chamado fora da thread
+  dele. Isso nao se conserta com desenho: qualquer thread que aloque
+  bastante pode ser a que o coletor escolhe. **Tudo isso para esconder 21
+  ms** (medido) num carregamento de linha que ja faz cinco consultas dessa
+  ordem. A consulta roda na thread do Tk, pela conexao so de leitura que
+  nao espera; nao ha fila, geracao, `join` nem resposta atrasada. O
+  `open_database_readonly` ficou, com dois testes (le e nao escreve; com um
+  escritor em `BEGIN EXCLUSIVE` responde em menos de 1 s). O rascunho (F8)
+  continua em thread porque no programa de verdade a thread principal esta
+  no `mainloop` — mas o mesmo risco de coletor vale para ele, e fica
+  registrado.
+- **Piso absoluto na frequencia dos termos.** "Mais de 5 % das linhas" num
+  banco de 40 linhas sao duas: toda palavra que aparece tres vezes virava
+  "comum", inclusive a unica ponte entre duas frases parecidas. Teto =
+  max(20, 5 %).
+- **Nasce fechado, sob o tabuleiro**, pela razao dele (a lista de sugestoes
+  nao tem altura para dois paineis abertos); o titulo diz quantas ha, um
+  clique mostra de onde veio, o duplo clique aplica (F14).
+- Medido no banco de dev: **21 ms por consulta**, 99 de 400 linhas nao
+  verificadas com vizinho a `ratio >= 0,6`.
+
+**O que a verificacao fixou.** Em `test_core.py`, `SimilarTranslationsTests`
+(7: a mais parecida primeiro e o resto fora — propria linha, sem traducao,
+outro par; "Origem: Todos" decide so pelo destino; palavra comum nao guia a
+consulta; sem FTS5 e `None`; limite e piso; candidata pelos termos abaixo do
+piso nao entra; empate = verificada primeiro). Em `test_editor_windows.py`,
+`EditorSimilarTests` (7: lista a vizinha e some sem ela; nasce fechado e a
+escolha e lembrada; duplo clique aplica como um Ctrl+Z; limpar esconde; so o
+par aberto viaja para a consulta; sem FTS5 o titulo diz; cabe nos 308 px) e
+`ReadOnlyConnectionTests` em `test_banco.py` (2). 16 testes. **11 mutacoes, 11 mortas** (duas so depois de cenario novo:
+o piso — a candidata "longe" nem chegava ao FTS — e o limpar).
+
+### 28.14 O que nao muda, e por que
+
+- Sem `tkinterdnd2` (22.12): `askopenfilenames` cobre a selecao multipla
+  sem dependencia, e entra em 28.10.
+- Sem aplicar as 5.622 sugestoes em massa: o caminho e S20 (impacto antes
+  de promover) e o glossario no prompt (28.7).
+- Sem regra automatica para `game -> jogo` e `exchange -> troca`: a
+  medicao mostrou os dois com legitimos demais (16.3 de novo).
+- Sem menu na janela principal, sem mascara de sede, sem memoria por
+  lances, sem `san_board.py`, sem `$` no formato do glossario — cada um
+  derrubado acima, com o numero.
+- A estimativa de tokens e o custo por livro de 28.7 sao calibrados no
+  piloto, nao inventados aqui; e o modelo padrao e o da referencia oficial
+  ate o piloto dizer outra coisa.
+
+### 28.15 Ordem recomendada
+
+A conta e horas de revisao por livro, com o perfil deste (2.999 linhas
+editadas; ~30 s poupados por linha que deixa de precisar de edicao):
+
+1. **28.7 passo 0, o piloto** (um dia, centavos). Decide o resto.
+2. **28.1** (bugs; um dia) -> **28.4** (~3,7 h por livro; um dia) ->
+   **28.2 camada 2** e **28.3** (~1,5 h por livro) -> **28.2 camada 1** com
+   F28.
+3. **28.5** (escopo, impacto, regra do historico; ~3 h por livro com as
+   promocoes) -> **28.6 Z4** (a rede de seguranca) -> **28.9 itens 1 a 3** e
+   **28.10 progresso e "Revisar as pendentes desta execucao"**.
+4. **28.7 provedor**, se o piloto passou (~14 h por livro se 80 % das
+   linhas sairem aceitaveis) -> **28.12** -> **28.10 configuracoes**.
+5. **28.8** (tabuleiro, opcional e fora do `.exe`) -> **28.6 Z5** ->
+   **28.13** -> **28.9 itens 4 a 6** -> **28.11**.
+
+**Regra de merge entre os itens que sobem `SCHEMA_VERSION`** (28.6 e
+28.8): cada migracao e um `ALTER TABLE`/`CREATE TABLE` barato, nenhuma
+reconstroi `comments`, e o numero e reservado no merge, nunca no branch. Um
+backup NOVO restaurado num programa VELHO carimba `user_version` para baixo
+sem avisar — limite pre-existente que dois schemas novos tornam mais
+provavel, e que fica registrado na SPEC 10. **O 10 e de Z5 e o 11 de 28.8
+(os dois em 2026-09-15).**

@@ -20,7 +20,9 @@ integralmente lances, variantes e metadados, com:
 - uma etapa de revisao humana assistida.
 
 Nao-objetivos: jogar xadrez, validar legalidade de lances, editar a arvore de
-variantes.
+variantes. Mostrar a posicao de um comentario (O5) nao muda isto: a FEN e
+calculada por um pacote opcional, gravada como texto e desenhada — o programa
+continua sem julgar lance nenhum.
 
 ---
 
@@ -53,7 +55,7 @@ toca.
 
 | Artefato | Papel | Versionado |
 |---|---|---|
-| `traducoes.db` | Cache de traducoes + historico de edicoes | Nao |
+| `traducoes.db` | Cache de traducoes + historico de edicoes + ocorrencias (com a FEN, O5) + registro de execucoes (Z5) | Nao |
 | `traducoes.db` (`PRAGMA user_version`) | Versao do schema; migracao so roda quando desatualizada | — |
 | `comments_fts` (dentro do `traducoes.db`) | Indice de busca FTS5, mantido por gatilhos (R8) | Nao |
 | `occurrences` (dentro do `traducoes.db`) | Onde cada comentario foi lido: arquivo, partida, indice e lance (O1) | Nao |
@@ -64,7 +66,7 @@ toca.
 | `glossario.db` (`source_path`, `source_hash`) | De qual arquivo ele veio: caminho relativo ao proprio banco e hash do conteudo | — |
 | `pgn_tradutor_pro_settings.json` | Estado da UI e rascunhos de edicao | Nao |
 | `backups/` | Copias automaticas do glossario e do banco, com retencao (S8) | Nao |
-| `logs/` | Log por execucao de traducao (`traducao-<carimbo>.log`), com retencao | Nao |
+| `logs/` | Log por execucao de traducao (`traducao-<carimbo>.log`, `[HH:MM:SS] texto`; pelo `logging`, com o que as bibliotecas avisam a partir de WARNING — ROADMAP 28.11), com retencao | Nao |
 | `spelling_ssp/spelling.ssp` | Dicionario de nomes proprios do "Normalizar PGN" — dado de PROGRAMA, vai dentro do pacote | Sim |
 | `spelling.db` (na pasta de dados) | Indice SQLite derivado dele, construido na primeira normalizacao (D6). Fica com os dados porque e escrita: na pasta do programa, um `Program Files` o barraria e a normalizacao ficaria no caminho lento para sempre | Nao |
 | `tradutor_pgn/Substituicoes-inicial.txt` (no pacote) | Copia do glossario feita no build; a primeira execucao a instala na pasta de dados quando nao ha glossario la | — |
@@ -73,6 +75,31 @@ toca.
 O `pgn_tradutor_pro_settings.json` guarda tambem a lista de arquivos que ficaram
 com comentarios sem traduzir na ultima execucao, usada pelo "Reprocessar Falhas"
 (garantia T4), e as escolhas da janela principal (garantia M1).
+
+**Garantia M4 — toda opcao do usuario tem um lugar na tela de Configuracoes.**
+O arquivo tem duas familias de chaves: o que a janela grava sozinha
+(`main_window`, `editor_drafts`, a lista de falhas) e o que o usuario ESCOLHE
+(`output.utf8_bom`, `output.wrap_columns`, `appearance.theme`). A segunda
+familia e `settings.USER_OPTION_SECTIONS`, e cada chave dela tem um controle
+na tela "Configurações" da janela principal (ROADMAP 28.10) — um teste
+enumera as chaves contra os controles, entao uma opcao nova nao nasce so no
+JSON. A tela le o arquivo ao abrir e grava no Salvar por `update_settings`
+(R4): um rascunho que o editor gravou enquanto ela estava aberta sobrevive. A
+largura da requebra e validada pela mesma regra do leitor do JSON
+(`parse_wrap_columns`: vazio ou 0 desliga, minimo `MIN_WRAP_COLUMNS`), e uma
+recusa e escrita na propria tela, nao num dialogo. O tema e aplicado DEPOIS de
+gravado e so quando mudou; ao abrir, o programa liga o tema gravado antes de
+qualquer widget nascer. A pasta de dados aparece com o modo (`describe_data_dir`)
+e um "Abrir pasta", e nao se edita: ela e decidida antes de o programa abrir
+(`PGN_TRADUTOR_DATA`, `app_paths`), e a tela diz isso em vez de fingir um
+campo. O que a tela NAO diz: que o BOM resolve os acentos no ChessBase — aquele
+caso foi resolvido pela promocao para UTF-8, e o texto da opcao descreve so o
+que o BOM faz.
+
+Trocar o tema de dentro do programa repinta os widgets CTk sozinho; o Tk puro
+precisa de gancho, e ha dois: o editor de traducoes (F18) e o `PanedWindow` do
+editor de glossario, que lia o tema uma vez ao construir e agora acompanha pelo
+`AppearanceModeTracker`, com o gancho retirado ao fechar.
 
 **Garantia M1 — a janela principal reabre no que foi escolhido.** Idioma de
 origem, idioma de destino, caminho e "processar subdiretorios" sao gravados
@@ -83,6 +110,59 @@ resultado — decide o `sl=` da API e liga a correcao das letras dos lances (P3)
 e o padrao dele, "Detectar", e justamente o valor que deixa as duas desligadas.
 Resetando a cada abertura, esquecer um clique custa uma execucao inteira
 traduzida no escuro, e nada denuncia isso depois: o PGN gerado parece pronto.
+
+**Garantia M5 — a barra diz onde a execucao esta, e o fim dela abre a
+revisao.** Sob a barra de progresso ficam o texto dela e os dois botoes da
+execucao (ROADMAP 28.10).
+
+O texto e "Arquivo 2/5 · Lote 37/125 · 2.410/6.500 · ~3 min". O "Arquivo" so
+aparece com mais de um — num livro de um capitulo e ruido — e a estimativa so
+com pelo menos um comentario feito E pelo menos um faltando: no comeco nao ha
+de onde tirar a conta, no fim ela e zero. O `~` e a honestidade da conta, que e
+uma regra de tres sobre o que ja passou e fica otimista quando o cache responde
+por muitos. Terminada a execucao o texto diz "Concluída" ou fica vazio, pela
+mesma razao que a barra vai a 100 % ou a 0 (T3): um sinal congelado no meio
+continua dizendo "estou trabalhando" depois do dialogo.
+
+**"Revisar pendentes"** abre o editor de traducoes no arquivo que acabou de ser
+traduzido, com o status "Pendentes" e o destino DA EXECUCAO — o radio da janela
+pode ter mudado depois dela, e a revisao e do que foi gravado. Os arquivos
+oferecidos sao os que tiveram POSICOES registradas: sao os unicos que o filtro
+do editor conhece, e oferecer outro seria abrir a lista inteira fingindo que e
+a obra. Com mais de um, abre no primeiro e o log diz que os outros estao no
+seletor. **"Abrir pasta"** abre a do PGN gerado — e ele que vai para o
+ChessBase — e cai na do original quando nenhum saiu.
+
+Os tres — o texto e os dois botoes — moram na FILEIRA dos botoes de execucao, e
+nao numa linha propria: a janela principal nao tem folga vertical, o log e o
+ultimo a receber espaco, e uma fileira nova de 32 px o derrubava de 33 px para
+1 px, com o fim dele deixando de ser alcancavel (F23). Sao empacotados por
+ultimo e a direita, pela regra de F20: `pack` nao desenha o que sobra, e numa
+janela estreita quem some tem de ser o atalho para a revisao, nunca o
+"Cancelar".
+
+Os dois botoes nascem desabilitados e sao reavaliados em `reset_buttons`, que
+roda no fim de TODA execucao. Uma execucao com falhas ou interrompida pelo disjuntor
+tambem conta: o que foi traduzido esta no banco e e o que ha para revisar. So o
+cancelamento nao registra nada, e ai a ultima execucao completa continua
+valendo.
+
+
+**Garantia M6 — o motor e escolhido a cada "Iniciar tradução", e nunca em
+silencio.** Com pelo menos uma chave de API configurada (secao 3.8), o clique
+abre o dialogo "Motor de tradução": Google (o de sempre, gratuito) e cada
+provedor de modelo de linguagem com o modelo que a tela de Configuracoes
+gravou; um provedor SEM chave aparece desligado e diz "sem chave —
+Configurações", em vez de sumir. O escolhido na execucao anterior vem
+pre-selecionado — e so isso: nada e escolhido por ninguem, e Cancelar nao
+comeca nada. Sem chave nenhuma o dialogo nao aparece, porque o Google e o
+unico motor e a pergunta seria um clique por nada. "Reprocessar falhas"
+pergunta do mesmo jeito. Um provedor cujo pacote falta (o `anthropic`, para
+o Claude) e recusado ANTES de a execucao comecar, com a instrucao de
+instalar; e uma chave apagada entre o dialogo e o worker aborta a execucao
+com `[ERRO]` no log — o motor nunca troca sozinho (a licao de M1). A escolha
+fica em `main_window.translation_provider` e o registro da execucao (Z5)
+grava `provedor:modelo`, entao "Reverter execucao" sabe de quem foi.
 
 **Garantia M2 — um BOM no arquivo de configuracoes nao apaga nada.** A leitura e
 `utf-8-sig` e a gravacao e `utf-8`: aceita-se o BOM, nao se escreve um. O arquivo
@@ -225,6 +305,20 @@ exatamente o numero esperado de partes, o lote e descartado e os comentarios
 sao traduzidos individualmente. Nunca se atribui uma traducao a um comentario
 sem certeza de alinhamento.
 
+A contagem e a primeira peneira; a razao de tamanho e a segunda (ROADMAP
+28.12). Com o numero certo de partes, cada parte e comparada, em palavras,
+com o texto ENVIADO na mesma posicao (mascarado, como foi para a API): uma
+razao fora de `[0,3; 3,0]` num original de 40 caracteres ou mais
+(`BATCH_PART_MINIMUM_LENGTH`, o mesmo piso do QA) e desalinhamento, com o
+mesmo destino da contagem errada, e o log diz qual parte estourou. Medido no
+banco de dev, a razao real fica entre 0,50 e 1,83 nos originais acima do
+piso, entao a folga nao derruba lote nenhum de verdade; abaixo do piso a
+razao nao diz nada (`", and"` -> `"e"` e 0,5). O que a segunda peneira pega
+e a fusao — uma parte engoliu a vizinha e a vizinha voltou vazia; quem
+denuncia e a VAZIA, porque a dobrada fica perto de 2 e cabe na folga. O que
+ela nao pega e a troca de ordem entre partes de tamanho parecido: isso so os
+ids do lote JSON resolvem por construcao (B5, 28.7).
+
 **Garantia B3 — falha de API nao e desalinhamento.** O caminho individual so e
 acionado quando a resposta **veio** e nao pode ser realinhada. Se a chamada em si
 falhou, os comentarios do lote sao contados como falha de uma vez: repeti-los um
@@ -270,6 +364,42 @@ nao ha de onde derivar —, e uma procedencia inventada apareceria no filtro por
 arquivo como uma obra que ninguem traduziu. As linhas antigas ganham a primeira
 ocorrencia quando o PGN delas for processado de novo, e ate la aparecem so em
 "Todos os arquivos".
+
+**Garantia O5 — a FEN de uma ocorrencia e a da posicao do comentario, e so
+por texto casado.** `occurrences.fen` (schema 11, ROADMAP 28.8) e escrita pelo
+worker na vez do arquivo, depois dos lotes e junto com as ocorrencias, quando
+a opcao "Tabuleiro" esta ligada (padrao) E o `python-chess` esta instalado.
+O pacote e GPL-3.0-ou-posterior e por isso e **opcional** (`pyproject`,
+extra `tabuleiro`) e **excluido do `.exe`**; sem ele o worker avisa uma vez
+por execucao, diz onde desligar, e grava nulo. O calculo (`pgn_positions`)
+anda a arvore que o `python-chess` le SEM copiar o tabuleiro: ao entrar numa
+variante o lance principal e desfeito, e ao sair desfaz-se ATE A PROFUNDIDADE
+em que a variante comecou — desfazer um lance so deixava o tabuleiro dentro
+da variante para o resto da partida (692 de 7.487 FENs na primeira medicao;
+7.426 com a correcao, conferidas uma a uma contra o metodo com copia). O
+comentario chega a FEN **so por texto igual**, em sequencia e por partida:
+igual no ponteiro; contido no texto do ponteiro (o parser junta dois `{}`
+do mesmo lance, que estao na mesma posicao); ou o proximo igual ate 60 a
+frente. Nada casou: sem FEN, e nunca a FEN de um texto diferente. Medido no
+PGN real (99 partidas, 7.487 comentarios): **7.473 casados em 1,8 s**; os 14
+que faltam sao comentarios que o parser pendura num lance nulo `--` ou funde
+de outro jeito, e ficam sem quadro. O parser recebe o texto com `\r`
+normalizado — a exportacao do ChessBase usa so `\r`, e o leitor por linhas
+devolvia zero partidas sem erro. As linhas anteriores ao schema 11 ficam
+nulas, sem backfill, pela razao de O2.
+
+No editor, o quadro (`board_widget`, um `tk.Canvas` de 8 x 24 px com glifos
+Unicode, sem `python-chess`) vive sob os botoes do painel de sugestoes e so
+existe quando a ocorrencia da linha — a do arquivo do filtro, quando ha — tem
+FEN; nasce FECHADO, com o titulo dizendo o lado a jogar, e a escolha de
+abri-lo e lembrada: aberto por padrao, os 230 px deixavam a lista de
+sugestoes com 40 px (medido) — a familia "correto e nao cabe" (22.10).
+Acompanha o tema pela mesma chamada dos campos de texto (F18).
+
+O que o alinhamento achou de tabela: a contagem de partidas de
+`comment_reading_context` (`^[Event` com MULTILINE) nao via a linha que
+termina em `\r` sozinho, e no PGN real toda ocorrencia era "partida 1";
+corrigido, com a mesma correcao no prefixo de linha que reconhece as tags.
 
 "Detectar" nao e um idioma: as linhas que ele produz ficam com a origem **nao
 informada**, o mesmo estado das linhas gravadas antes de o programa perguntar. E
@@ -360,8 +490,9 @@ nunca chama esse caminho.
 
 **Garantia T5 — nenhuma ferramenta de escrita em massa roda durante uma
 traducao.** "Restaurar BD", "Importar CSV", "Aplicar Automaticas", "Corrigir
-Lances", "Zerar Traducoes" e "Zerar Glossario" recusam com uma mensagem enquanto
-o worker esta ativo. A pior era a restauracao: substituir o banco enquanto o
+Lances", "Zerar Traducoes", "Zerar Glossario", "Reverter execucao" e, no
+editor, "Descartar nao revisadas" recusam com uma mensagem enquanto o worker
+esta ativo. A pior era a restauracao: substituir o banco enquanto o
 worker grava produz um arquivo que nao e nem o backup nem a execucao, com o cache
 em memoria apontando para linhas que ja nao existem.
 
@@ -689,7 +820,93 @@ interrompidas, deixam o banco incompleto. Oferecer um botao que nao pode ser
 honrado seria pior do que nao oferecer, porque o usuario clicaria achando que
 parou. A confirmacao avisa disso antes de comecar, e ela e a hora de desistir.
 
----
+### 3.8 Motores de traducao: o Google e os modelos de linguagem
+
+O motor de sempre e o endpoint `gtx` do Google, sem chave e sem custo
+(`translation_api`). Desde o ROADMAP 28.7 ha tres provedores de modelo de
+linguagem — **Claude** (API da Anthropic, pelo SDK `anthropic`, extra `llm`),
+**ChatGPT** (OpenAI) e **DeepSeek**, os dois ultimos pelo mesmo protocolo
+`chat/completions`, por `requests` — e a escolha e feita a cada execucao (M6).
+O piloto (ROADMAP 28.7, passo 0) mediu o que se ganha: nas mesmas 200 linhas,
+o Claude deixou **1 aviso QA contra 30 do Google de hoje**, zero divergencia de
+ancora, zero sentinela perdido, por US$ 0,67; a leitura cega do usuario ainda
+decide se a linha diferente e aceitavel sem editar.
+
+**A costura e a do Google, de proposito.** O worker nao sabe qual motor
+respondeu: monta o lote com ` ||| ` (B1), chama UMA funcao, divide e confere
+a resposta (B2, B5), aplica a mascara X1 antes e as regras automaticas, a
+correcao de lances (P3) e a prosa (P5) depois, conta falhas (T2/T3) e desarma
+pelo disjuntor (B3/B4) — tudo igual. O provedor de modelo (`llm_providers`)
+so troca o que vai no fio: um JSON numerado no lugar do texto corrido, um
+bloco de sistema FIXO com as regras duras, as letras das pecas do par
+(`PIECE_LETTERS`, a mesma fonte de P3), a terminologia da semente e as regras
+`automatic` do par (no Anthropic com `cache_control`: no piloto, 36 % da
+entrada veio do cache), e as sugestoes do glossario que CASAM no texto do lote
+(ate 80), e **o lance anterior e o seguinte de cada comentario no arquivo**
+(`antes`/`depois`, garantia B6) — o contexto que o piloto tinha e que, ate
+2026-09-18, o worker nao mandava. O prompt mora em `llm_prompt` e e o MESMO
+que o piloto usa — uma mudanca de prompt e medida pelo piloto antes de valer
+aqui —, e o `max_tokens` tambem e o do piloto (16.000; o limite conta o
+pensamento do modelo). Uma resposta cortada por esse limite, ou recusada, e um
+problema do CONTEUDO do lote e nao da conexao: o provedor divide o lote ao meio
+e tenta cada metade, ate o item sozinho (B1 pela API que a exige); o item que
+sobra sozinho recusado volta vazio, e os que sairam certos das metades ficam na
+memoria do lote — quando o worker os reenviar sozinhos, nao pagam de novo.
+
+**Garantia K1 — a chave de API nunca aparece inteira em log, configuracoes
+ou dialogo.** As chaves ficam em `chaves-api.json` na pasta de dados, fora
+do `settings.json` (que e JSON editado a mao, vai para backup e ja foi aberto
+no Bloco de Notas), cifradas com o DPAPI do Windows por `ctypes` — so esta
+conta, nesta maquina; fora do Windows o arquivo diz `"cifra": "nenhuma"` e
+guarda base64. Uma variavel de ambiente (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`) vence o arquivo. A tela de
+Configuracoes nunca LE a chave para o campo: o campo nasce vazio, o
+placeholder diz o estado ("não configurada", "gravada ****wxyz", "do
+ambiente", "ilegível nesta máquina"), o que se digita e gravado e sai do
+campo, e "apagar" e uma caixa a parte; "Testar chaves e modelos" (K2) confere
+o que esta nos campos por uma requisicao gratuita e mostra so o veredito. O
+log da execucao mostra
+`chave ****wxyz` e o resumo de tokens; o dialogo mostra o modelo. Um 401 e
+FATAL para a execucao: o provedor para de chamar a API, cada lote volta
+`None` e o disjuntor (B3) encerra com o motivo no log — insistir seria pagar
+por requisicoes que ninguem vai atender.
+
+**Garantia T6 — com um modelo de linguagem, um lance reescrito nunca chega
+ao banco.** Depois das regras automaticas, da correcao de lances (P3) e da
+prosa (P5), o worker compara as ancoras de lance do texto ENVIADO — limpo e
+mascarado, o que o modelo viu — com as da resposta (`anchor_divergence`, a
+mesma conta do aviso Q1 do QA, de proposito). Divergiram, o comentario e
+reenviado sozinho UMA vez (um modelo nao e deterministico, e o que errou no
+lote costuma acertar sozinho); divergiram de novo, ou o reenvio nao veio, e
+falha (T2/T3): o comentario fica no idioma original, contado e informado com
+o que sumiu e o que apareceu (`sumiu f3; apareceu f6`). O reenvio sem a
+mascara de nomes (X4) passa pelo mesmo portao, sem outra chance — ele ja e a
+segunda. As tres verificacoes (portao, restauracao das anotacoes, reenvio de
+nomes) moram numa funcao so, `concluir`, usada pelo caminho do lote e pelo
+individual — a licao da secao 10.4 do ROADMAP. **O Google fica fora do
+portao**, com numero: 6 divergencias em 6.500 linhas do banco de
+desenvolvimento, quatro delas o numero colado ao lance que P5 ja desfaz e uma
+um defeito do original; para ele o aviso Q1 na revisao e a medida certa, e um
+portao so tiraria da tela linhas que o revisor edita em segundos.
+
+**Garantia M7 — a primeira requisicao a um modelo so sai depois da
+estimativa.** Depois da carga do cache — o que ja esta no banco nao vai para
+a API e nao entra na conta — e antes de abrir a linha da execucao (Z5), o
+worker conta os comentarios que vao mesmo ser enviados (limpos, como a API os
+recebe), estima tokens e dolares (`llm_costs`: uma regra de tres calibrada no
+piloto — 0,91 token de entrada e 0,54 de saida por caractere de original, 36 %
+da entrada lida do cache — e uma tabela de precos com data, `PRICES_DATED`)
+e pergunta num `askyesno` levado a thread do Tk pela ponte
+`confirm_on_main_thread` (C1). "Nao" nao envia nada nem abre execucao; com
+tudo em cache, e com o Google, nao ha pergunta. Um modelo fora da tabela
+recebe os tokens e "sem preco na tabela" — nunca um numero inventado. No fim
+o log escreve "estimado ~US$ X, real US$ Y", o real calculado sobre o que o
+provedor contou (`Usage.input_tokens` e a entrada NAO cacheada nos dois
+protocolos; leitura e escrita do cache tem preco proprio).
+
+**O que nao esta feito, e esta dito**: os `fallbacks` de recusa da API da
+Anthropic (o piloto nao teve nenhuma em 200 linhas; uma recusa hoje e uma
+falha de lote, que o worker trata como a rede caida).
 
 ## 4. Zerar o banco e zerar o glossario
 
@@ -735,7 +952,72 @@ sobrevivente passaria a apontar para a PRIMEIRA traducao gravada depois do
 zeramento — o comentario errado, no arquivo certo, sem nada acusando na tela. A
 tabela e derrubada com as outras e recriada vazia pela migracao.
 
-Nenhuma das duas roda com uma traducao em andamento — e nenhuma das outras
+**Garantia Z4 — "Descartar nao revisadas" apaga so a linha que nenhum humano
+tocou, e so deste arquivo.** E a terceira ferramenta destrutiva, e a unica com
+alvo menor do que o banco: mora no editor de traducoes, sob o seletor de
+arquivo, em vermelho, e joga fora o que um motor deixou num livro para que ele
+possa ser traduzido de novo — a rede de seguranca do ROADMAP 28.6 para trocar
+de motor (28.7). Uma linha do arquivo e poupada por qualquer uma de cinco
+marcas: `verified = 1`; `review_status` preenchido; nota preenchida; qualquer
+entrada em `comment_history`; uma ocorrencia em OUTRO arquivo. Status e nota
+sao clausulas proprias porque **nao gravam historico** (secao 10): so o
+historico deixaria passar a linha que o revisor rejeitou sem editar. A
+clausula do outro arquivo existe porque a linha inserida ao traduzir o livro
+A e reaproveitada pelo livro B tem ocorrencias de B, e apaga-la encurtaria a
+obra de B (O3). O historico e QUALQUER historico, inclusive o das ferramentas
+de escrita em massa — o criterio erra para o lado de apagar menos. O par e o
+da tela (S19): o destino da janela e a origem do filtro.
+
+Contar e apagar usam o MESMO `WHERE` (`_unreviewed_file_rows_query`), pela
+razao da correcao de lances: dois criterios discordam, e aqui a discordancia
+seria o dialogo prometer um numero e o banco perder outro. As ocorrencias das
+linhas apagadas vao junto, por `DELETE` explicito — `PRAGMA foreign_keys`
+nunca e ligado, e o `ON DELETE CASCADE` da tabela e inerte —, e os ids sao
+colhidos antes do primeiro `DELETE`, porque apagar as ocorrencias primeiro
+esvaziaria a clausula "tem ocorrencia neste arquivo" do segundo. Segue Z1, Z2
+e Z3 passo a passo: backup antes da pergunta com o caminho nela, palavra
+digitada, sem cancelamento no meio, cache em memoria limpo. Sem arquivo
+escolhido o botao fica desabilitado — para o banco inteiro existe "Zerar
+Traducoes", com o nome que diz o que faz. Depois, a lista do editor e refeita
+do zero e o menu de arquivos tambem: um capitulo cujas linhas eram todas da
+maquina deixa de ser uma obra e cai em "Todos os arquivos".
+
+**Garantia Z5 — "Reverter execucao" apaga so o que a ultima execucao inseriu
+e Z4 permite.** E a quarta ferramenta destrutiva, e a que fecha o ciclo de
+trocar de motor (ROADMAP 28.6 e 28.7): traduzir, olhar, jogar fora. Cada
+execucao do worker abre uma linha em `translation_runs` (inicio, fim, desfecho
+em `completed | failed | canceled | aborted | crashed`, par, caminho,
+provedor, arquivos, contagens, log) depois da primeira passada — quando ja se
+sabe QUAIS arquivos ela tem — e antes do primeiro INSERT, comitada na hora;
+`comments.inserted_run_id` e gravado SO no caminho `inserted` de
+`save_translation` (uma linha vazia preenchida ja existia, e a execucao
+trouxe o texto, nao a linha). O `finally` do worker fecha a linha com conexao
+PROPRIA — a do pipeline pode ter morrido com a excecao —, e a excecao vence o
+cancelamento, que vence o disjuntor, que vence "com falhas"; o inicio da
+execucao seguinte marca `crashed` toda linha que ficou em `running`, porque o
+worker e o unico escritor e nunca ha duas execucoes ao mesmo tempo.
+
+O criterio e o de Z4 com `inserted_run_id = ?` no lugar da ocorrencia no
+arquivo: verificada, com status, com nota, com QUALQUER historico ou usada por
+um arquivo FORA da execucao — cada marca poupa a linha, e os arquivos da
+execucao (gravados como JSON e lidos por `json_each`) sao o que decide "fora".
+Dois capitulos da mesma execucao repetindo um comentario nao poupam a linha;
+um livro de outra execucao, sim. Contar e apagar usam o mesmo `WHERE`
+(`_revertible_run_rows_query`), os ids sao colhidos antes do primeiro `DELETE`
+e as ocorrencias vao junto, como em Z4. E sempre a execucao MAIS RECENTE do
+banco, desta sessao ou de outra, e nao uma escolhida numa lista: uma execucao
+antiga tem linhas que as seguintes reaproveitaram, e "reverter a de
+anteontem" quase nunca apaga o que o usuario imagina; as ultimas 30 estao no
+relatorio de estatisticas, para conferir qual e a mais recente antes. A
+pergunta descreve a execucao (numero, data, desfecho, par, arquivos, motor) e
+o numero de linhas; segue Z1, Z2 e Z3 passo a passo. "Zerar Traducoes"
+derruba `translation_runs` junto: uma execucao apontando para ids que o
+`AUTOINCREMENT` vai reusar seria "reverter" apagando as linhas erradas. As
+linhas gravadas antes da versao 10 do banco (e as importadas, e as das
+ferramentas) tem `inserted_run_id` nulo e nao sao reversiveis por execucao —
+so por Z4; nao ha de onde derivar uma procedencia que nao foi gravada.
+
+Nenhuma das quatro roda com uma traducao em andamento — e nenhuma das outras
 ferramentas de escrita em massa tambem (garantia T5, secao 3.4).
 
 ---
@@ -1033,6 +1315,18 @@ Se a entrada nao existir mais como estava, **nada e gravado** e o usuario e
 avisado. Escrever na posicao antiga sobrescreveria a entrada vizinha em
 silencio.
 
+**Garantia S20 — gravar como `automatic` mede o impacto antes.** Quando o
+"Salvar" ou o "Salvar como nova" criam um comportamento automatico novo — entrada
+nova com o tipo, sugestao promovida, ou automatica cujo texto mudou —, o editor
+conta, fora da thread do Tk, quantas traducoes PENDENTES do escopo de idioma da
+regra ela alteraria, mostra ate dez pela saida real do pipeline (`@casa@`
+expandido, caixa herdada e tudo) e so grava no "sim". Recusar deixa o
+formulario sujo, que e o estado verdadeiro; uma medicao que falha nao grava.
+Salvar de novo uma automatica igual (so prioridade ou escopo) nao pergunta: nao
+ha impacto novo a mostrar. E o mecanismo que a revisao de terminologia pediu —
+nao aplicar em massa sem ver — e foi ele que mostrou que `Black esta -> as
+pretas estao` sai "As pretas estao" no meio da frase (ROADMAP 28.5).
+
 **Garantia S7 — entradas nao tem espaco nas pontas.** Padrao e substituicao sao
 normalizados na gravacao. Um espaco no fim do padrao e consumido pelo casamento
 mas nao devolvido pela substituicao, colando duas palavras:
@@ -1118,6 +1412,41 @@ antigo e sai da lista na troca) e volta para a primeira pagina — a pagina 40 d
 par anterior nao quer dizer nada no novo. Com um filtro de origem ativo,
 "Aplicar automaticas" fica restrito a ele: reescrever tambem as linhas das outras
 linguas seria uma alteracao em massa que o usuario nao pediu nem consegue ver.
+
+**Garantia S19 — "Aplicar automaticas" reescreve o que a lista mostra, e as
+verificadas so quando o escopo pede.** O arquivo do filtro entra pela mesma
+regra da origem, e as linhas verificadas ficam de fora por padrao — na janela
+principal sempre, e no editor salvo no filtro "Verificadas", o unico em que a
+lista as mostra; ali a ferramenta pergunta (sim = pendentes e verificadas; nao
+= so pendentes; cancelar = nada) antes de varrer. O dialogo de confirmacao
+nomeia o escopo inteiro. Antes, promover uma regra na linha 500 e clicar a
+ferramenta reescrevia as 499 que o revisor ja tinha aprovado (ROADMAP 28.5).
+
+**Garantia S21 — "Trocas repetidas nesta obra" diz o que a revisao mais trocou
+neste arquivo e se ja ha regra.** Ao lado do seletor de arquivo, habilitado so
+com um arquivo escolhido. Lista os pares `antes -> depois` mais frequentes das
+edicoes HUMANAS (`edit`, `edit_verify`, com mudanca de texto) das linhas do
+arquivo e do par, por diff de tokens e so blocos de troca — insercao pura nao e
+regra de nada. A coluna "regra" e decidida pela substituicao do pipeline sobre
+o texto de antes: "sugestao" quando produz o que o revisor escreveu, "sugestao
+(produz 'X')" quando produz outra coisa, "sugestao (nao altera o texto)" quando
+casa e nao muda nada, "sem regra". "Criar automatica e aplicar" passa pela previa
+de S20, grava a regra com o escopo do par do editor e aplica com S19 so essa
+regra e so esse arquivo. A janela e modeless e fixa arquivo e par na abertura,
+como o historico fixa o id (R3).
+
+**Garantia S22 — "Excluir as N copias repetidas exibidas" apaga so o
+excesso dos pares exibidos, com backup antes da pergunta.** O botao so
+existe com o filtro "Duplicadas" ativo e quando ha copia a mais na lista
+(ROADMAP 28.9, item 5); fora disso nao aparece, em vez de aparecer
+desabilitado explicando uma condicao. O que ele apaga e o EXCESSO: o filtro
+mostra cada copia de um par repetido, e "excluir as exibidas" ao pe da letra
+apagaria a regra — fica a primeira copia em ordem de arquivo, saem as
+outras, e a busca ativa restringe o que conta (`duplicate_extras_indices`,
+pura). E uma exclusao em massa, acao destrutiva nova (22.12): backup do
+glossario ANTES da pergunta, com o caminho nela (a regra de Z1), e a
+gravacao faz o backup dela por cima. Os dois textos do glossario ganharam
+`Ctrl+roda`/`Ctrl+±` com o tamanho lembrado, como no outro editor.
 
 **Garantia O3 — com um arquivo escolhido, a lista e a obra em ordem de
 leitura.** Um terceiro seletor, "Arquivo", lista as obras do par (as que tem
@@ -1242,6 +1571,74 @@ substituicao desloca as faixas da primeira, e a previa mostra o texto depois de
 todas. E por palavra, e nao por caractere — `torre` -> `Torre` como um `T` trocado
 no meio de uma palavra pintada de igual nao e o que o revisor precisa ver.
 
+**Garantia F29 — a sugestao tem numero, a selecionada se ve no texto, e a
+linha se marca pelo teclado.** Tres gestos que custavam a mao no mouse no meio
+da digitacao (ROADMAP 28.9):
+
+- **`Alt+1` a `Alt+9` aplicam a sugestao N**, e o numero fica no ROTULO do
+  botao — um atalho que so existe na lista do "?" e um atalho que ninguem usa
+  (F18). Da decima em diante nao ha numero, porque nao existe `Alt+10` e um
+  "10." sem tecla seria a promessa errada. `Alt+N` sem a sugestao N diz isso;
+  um gesto que acontece e nao responde parece travamento.
+- **A sugestao selecionada e realcada no texto**, no PRIMEIRO casamento e so
+  nele — que e exatamente o que "Aplicar selecionada" troca. Ate aqui so
+  "Aplicar todas" tinha previa (F11). A tag fica acima de `glossary_hit` e de
+  `find_match` e abaixo de `find_current`: a sugestao escolhida e a intencao
+  mais recente, mas a ocorrencia atual da busca continua sendo o unico lugar em
+  que a tecla seguinte vai agir. Sendo Tk puro, ela e repintada na troca de
+  tema junto com as outras (F18).
+- **`Ctrl+M` marca (ou desmarca) a linha ABERTA para o lote**, pelo id, e a
+  caixa da lista acompanha na mesma chamada — as duas sao a mesma marca. A
+  caixa tem 32 px, e nao os 24 padrao: e o unico alvo de clique da lista que
+  nao e o botao inteiro.
+- **Os controles sem palavra tem dica** (ROADMAP 28.9, item 4): `▤/▥`, "A-",
+  "A+", "B", "Aa", "?" e, no glossario, "Priorizar esta"/"Manter esta" — um
+  `Toplevel` sem decoracao com um `CTkLabel` de cores em par (troca com o
+  tema, F18), que nasce meio segundo depois do `<Enter>`, some no `<Leave>`,
+  no clique e no `<Destroy>` do controle (o timer e cancelado junto). E o
+  que 22.8 deixou de fora por falta de largura, e nao gasta largura.
+- **`Ctrl+Shift+R` rejeita e `Ctrl+Shift+D` poe em duvida ANDANDO uma
+  linha** (item 6); os botoes continuam parados na linha, como F12 fixou. O
+  keysym e o maiusculo com Shift (`<Control-R>`, `<Control-D>`):
+  `<Control-Shift-r>` nunca dispara no Windows, e as minusculas sao do
+  `Text`. Se a linha saiu do filtro ao mudar de status, quem ocupou o lugar
+  dela ja e a proxima (F15) e o atalho nao anda. Sem linha aberta os tres
+  botoes de status dormem. O rotulo da posicao do rodape e `Consolas` — o
+  plano pedia nos dois rotulos de contagem, e a medicao disse nao: o das
+  contagens no pior caso estoura a faixa minima e rouba 69 px do vizinho
+  (F20). Um separador de 2 px divide os quatro botoes de edicao dos quatro
+  de qualidade na segunda fileira.
+
+**Garantia F30 — "Semelhantes" consulta so o par aberto, na thread do Tk,
+sem esperar por escritor nenhum.** E o que sobrou da "memoria de traducao"
+depois da medicao (ROADMAP 28.13): sob o quadro do tabuleiro, as ate cinco
+linhas do mesmo par cujo original mais se parece com o aberto, com a traducao
+delas — 99 linhas nao verificadas do banco de dev tem um vizinho verificado a
+90 %. `database.find_similar_translations` pede ao FTS5 as candidatas pelos
+termos RAROS do original (o `fts5vocab` da a frequencia; termo em mais de 5 %
+das linhas, com piso absoluto de 20 para o banco pequeno, nao distingue nada),
+o `SequenceMatcher` ordena (`quick_ratio` como filtro, `ratio` como medida,
+pela razao da quase-igualdade do QA), abaixo de 0,6 nao entra, a propria
+linha nunca entra, sem traducao nao serve, e no empate a verificada vem
+primeiro. So o par (R9): o destino da linha e a origem do filtro. Medido no
+banco de dev: **21 ms por consulta**, 99 de 400 linhas nao verificadas com
+vizinho.
+
+**Sincrona, e a medicao e a razao.** O plano pedia uma thread com contador
+de geracao, e ela existiu por um dia: custou tres defeitos que so a suite
+completa mostrou — o `after` chamado de dentro da thread so funciona com a
+thread principal no `mainloop`; a conexao da thread dormia ate 30 s atras de
+um escritor e cada teste esperava 5 s por ela (9 minutos viraram 50); e o
+coletor de lixo rodando NA thread finalizava `Variable`s do Tk de janelas ja
+destruidas — Tcl fora da thread dele, "Windows fatal exception 0x80000003"
+no meio da suite. Tudo para esconder 21 ms num carregamento que ja faz cinco
+consultas dessa ordem. A consulta abre o banco por `open_database_readonly`
+(`mode=ro`, 50 ms de espera, sem PRAGMA): ocupado, o painel nao aparece
+nesta linha, e a interface nunca para atras de um escritor. Sem FTS5 o
+titulo diz "indice FTS5 indisponivel". Nasce fechado, pela razao do
+tabuleiro; um clique numa semelhante mostra de onde veio, e o duplo clique a
+poe na linha aberta como UM passo de desfazer (F14).
+
 **Garantia F10 — `verified` e `review_status` andam em lockstep.** Uma linha nao
 verificada pode estar **rejeitada** ou **em duvida**, com uma nota do revisor:
 "pendente/verificada" nao expressa "voltar aqui com o autor". `verified` continua
@@ -1349,8 +1746,11 @@ eram invisiveis, e a correcao de cada uma tem uma regra propria:
 
 - **Os atalhos tem uma lista**, aberta por `F1` ou pelo botao "?" do
   rodape — os dois, porque um atalho para descobrir atalhos so serve a quem ja
-  os descobriu. Eram treze quando a garantia nasceu; sao vinte desde 22.11. A
-  lista e uma tabela com a sequencia do Tk ao lado do rotulo, e dois testes a
+  os descobriu. Eram treze quando a garantia nasceu; sao 22 rotulos e 30 teclas
+  desde 28.9. A
+  lista e uma tabela com a sequencia do Tk ao lado do rotulo — um rotulo pode
+  cobrir varias teclas ("Alt+1 a Alt+9", F29), e ai a sequencia e uma tupla e
+  cada tecla dela e uma promessa. Dois testes a
   comparam com os binds reais **nos dois sentidos**: um atalho ligado e nao
   listado falha tanto quanto um listado e nao ligado. E o que impede a lista de
   virar documentacao errada. O `Ctrl+B` era o unico recurso do programa sem
@@ -1931,19 +2331,27 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | E4 | A codificacao escolhida decodifica o arquivo inteiro | Bug: UTF-16 lido como UTF-8, com NUL entre as letras |
 | G2 | Saida sem `U+FFFD` | Mesmo bug |
 | B1 | `BATCH_MAX_CHARS < MAX_TRANSLATE_CHARS` | Acoplamento fragil entre modulos |
-| B2 | Desalinhamento -> traducao individual | — |
+| B2 | Desalinhamento -> traducao individual: contagem de partes errada, ou parte com razao de tamanho em palavras fora de `[0,3; 3,0]` contra o texto enviado (originais de 40 caracteres ou mais) | Risco de desenho: o lote `\|\|\|` alinhava so por posicao (ROADMAP 28.12) |
 | B3 | Falha de API nao vira reprocessamento comentario a comentario | Bug: um lote morto custava ~1 h de requisicoes inuteis |
+| B4 | O disjuntor alcanca o ramo comentario a comentario: tres seguidos sem resposta abortam, um grupo pequeno morto conta como lote, e um grupo vivo zera a conta | Bug: depois de um desalinhamento, a rede caida custava 3 x 30 s por comentario sem que B3 disparasse — o unico caminho fora do alcance do disjuntor (ROADMAP 28.1) |
+| B5 | Um lote JSON dos modelos de linguagem e aceito so se cada id aparece exatamente uma vez; o id que faltou volta como parte VAZIA, que B2 acusa em qualquer tamanho; a resposta embaralhada sai na ordem dos ids; uma resposta cortada por `max_tokens` ou recusada divide o lote ao meio ate o item sozinho (nunca `None`, que e a rede caida), e as metades que sairam certas nao sao pagas de novo quando o worker reenvia sozinho | Risco: a razao de tamanho de B2 nao ve a troca de ordem entre partes parecidas; so os ids resolvem; e um lote cortado tratado como rede caida derrubava 20 comentarios e contava no disjuntor (ROADMAP 28.7) |
+| B6 | Com um modelo de linguagem, cada item do lote (e cada reenvio sozinho) vai com o lance anterior e o seguinte do ARQUIVO — os de fora das chaves, os comentarios vizinhos apagados da janela —, da primeira ocorrencia do texto; o Google nao recebe contexto e a primeira passada nao o extrai | Custo: o piloto foi medido com contexto (198 de 200) e o worker mandava os campos vazios (ROADMAP 28.7) |
 | W2 | Backoff exponencial, e o ritmo cai ao ver 429 | Risco: intervalo agressivo sem defesa contra limite de taxa |
 | T1 | Nao sobrescrever traducao existente | — |
 | T2 | Falhas contabilizadas e exibidas | Bug: sucesso reportado com PGN bilingue |
 | T4 | A lista de falhas sobrevive a execucao, e so ela e reprocessada | Custo: reexecutar tudo por causa de dois arquivos |
 | T5 | Nenhuma ferramenta de escrita em massa roda durante uma traducao | Bug: restaurar um backup durante uma execucao produz um banco que nao e nem um nem outro |
+| T6 | Com um modelo de linguagem, uma traducao cujas ancoras de lance diferem das do texto enviado nunca e gravada: um reenvio sozinho, depois falha (T2/T3) com o que sumiu e o que apareceu no log; o reenvio sem nomes (X4) passa pelo mesmo portao; os dois caminhos (lote e individual) fazem as mesmas verificacoes, e o Google fica fora | Risco: um modelo pode "corrigir" o lance que julga errado, e o texto le bem e diz outra coisa — o erro mais grave que um comentario de xadrez pode ter (ROADMAP 28.7) |
 | P1 | O par (original, origem, destino) e a identidade da traducao | Limite: o mesmo texto em duas linguas era uma linha so |
 | P2 | Declarar o idioma adota o cache existente em vez de paga-lo de novo | Risco: a mudanca de chave cobrar 201.607 traducoes ja feitas |
+| P5 | As normalizacoes de prosa — espaco entre numero/reticencia e lance, `cavalo-d5` -> `cavalo de d5`, `U+200B` — so agem onde o original prova a forma (mesmo lance, mesma casa, nenhum `U+200B` la), e o hifen so com destino `pt` | Bug: 111 lances colados, 131 hifens e 68 espacos de largura zero na saida da maquina, zero no original; a revisao consertava um a um (ROADMAP 28.2) |
+| P6 | "Consertar Prosa" aplica as mesmas normalizacoes (e P7) as traducoes PENDENTES ja gravadas do par, com backup, historico `prose_fix` e reavaliacao do aviso; uma linha verificada nunca e tocada por ela | Limite: a secao 11 nasceu porque P3 so alcancava a traducao nova e 4.144 linhas ficaram erradas; as normalizacoes nascem com a passada (ROADMAP 28.2) |
+| P7 | Um fragmento cujo original termina em `after` sai em "depois de", nunca em "depois" — so quando o original prova a forma, sem adverbio antes dela, e so no par medido | Bug: 532 de 680 fragmentos saiam sem o "de", e `'' -> 'de'` era a troca mais frequente da revisao (ROADMAP 28.4) |
 | O1 | O banco registra onde cada comentario foi lido: arquivo, partida, indice e lance | Limite: `ORDER BY id` nao e ordem de leitura de obra nenhuma |
 | O2 | O contexto entra ao lado da traducao (N para 1), e nunca e inventado | Risco: o arquivo na chave faria a revisao ser feita uma vez por livro |
 | O3 | Com um arquivo escolhido, a lista e a obra em ordem de leitura, cada comentario uma vez | Limite: nao havia como revisar um livro na ordem em que ele se le |
 | O4 | "Zerar Traducoes" leva as ocorrencias junto | Risco: o `AUTOINCREMENT` reinicia, e a ocorrencia velha aponta para a traducao nova |
+| O5 | A FEN de uma ocorrencia e a da posicao do comentario, inclusive dentro de variante (desfeita ate a profundidade de entrada), atribuida so por texto igual, em sequencia e por partida; sem `python-chess` (opcional, fora do `.exe`) ou com a opcao desligada fica nula; o quadro do editor so aparece com FEN e nasce fechado | Custo: ~10 % das linhas exigem olhar a posicao, ate aqui em outro programa (ROADMAP 28.8) |
 | F1 | Trocar a orientacao dos dois textos nao perde o que esta sendo editado | Risco: reconstruir os paineis apaga texto, desfazer e selecao no meio de uma edicao |
 | F2 | A linha da lista diz status, aviso e origem, e o marcador vem da coluna | Limite: achar as linhas com aviso exigia trocar o filtro e perder a obra de vista |
 | F3 | "Voltar" restaura a linha E os filtros que a traziam | Limite: usar a busca como concordancia descartava a pagina, sem volta |
@@ -1962,6 +2370,8 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | F16 | Uma mensagem de status nao e apagada pelo timer da anterior, e o tempo de tela cresce com o texto | Bug: duas mensagens em menos de 1,5 s davam meio segundo a segunda; e a frase de 73 caracteres tinha o tempo de "Salvo" |
 | F17 | Nenhum campo depende do placeholder para ser identificado | Bug: o CustomTkinter nao mostra placeholder em campo com `textvariable`, e o buscar-e-substituir eram dois campos anonimos lado a lado |
 | F18 | Os atalhos aparecem na janela, o foco tem borda, o "B" ligado se ve nos dois temas e a troca de tema repinta o Tk puro | Bug: treze atalhos so no fonte (um deles sem nenhum caminho de descoberta), foco invisivel, "B" ligado igual ao desligado no escuro, e meia janela no tema antigo |
+| F29 | `Alt+1` a `Alt+9` aplicam a sugestao N (numerada no proprio botao ate a nona), `Ctrl+M` marca a linha aberta e a caixa da lista acompanha, e a sugestao selecionada e realcada no trecho que "Aplicar selecionada" vai trocar — o primeiro, e so ele | Custo: aplicar uma sugestao exigia a mao no mouse no meio da digitacao, e so "Aplicar todas" tinha previa (ROADMAP 28.9) |
+| F30 | "Semelhantes" lista ate cinco linhas do par aberto (destino da linha, origem do filtro) por termos raros do FTS5 e `SequenceMatcher` >= 0,6, na thread do Tk (21 ms) por uma conexao so de leitura que nao espera; o duplo clique aplica como um passo de desfazer; sem FTS5 o titulo diz | Custo: 99 linhas nao verificadas do banco de dev tem um vizinho verificado a 90 % e o revisor nao o via; a versao em thread custou 3 defeitos de suite, inclusive um crash do Tcl (ROADMAP 28.13) |
 | F19 | As cores de rotulo passam 4,5:1 nos dois temas, e o status de revisao aparece em palavras | Bug: as quatro cores semanticas reprovavam (o ambar dos avisos a 1,55:1), e rejeitada/em-duvida era so a cor de uma borda |
 | F20 | Cada rotulo de acao carrega o objeto dela, a largura minima da janela e a SOMA dos minimos dos paineis, e nada e desenhado fora da faixa em que vive | Bug: tres botoes "Limpar" e quatro "Página"; e a 1120 px o painel de sugestoes ficava com 109 dos 300 que declara, dois botoes do lote saiam da barra e o campo de pagina media 11 px |
 | F21 | Toda acao repetida do fluxo tem atalho, a nota do revisor e gravada como o texto, e o clique numa linha poe o foco onde se vai digitar | Custo: em "Todas" eram dois acordes por linha; a nota digitada era descartada em silencio ao navegar; e "Verificar" em lote voltava ao topo da pagina |
@@ -1970,9 +2380,15 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | F24 | A janela de estatisticas nao aceita edicao, nem por evento virtual, e exporta as tabelas em CSV | Bug: Ctrl+V/X/K/D/O/T/H editavam um relatorio que o docstring declara imutavel; e as tabelas de orcamento so saiam em texto corrido |
 | F25 | Restaurar uma versao do historico pergunta antes, e a janela diz o que mudou entre as duas | Risco: a unica restauracao do programa sem confirmacao, com os dois botoes colados no "Fechar" e nenhum diff pintado |
 | F26 | O historico lista as ALTERACOES, e a versao da traducao automatica e sempre recuperavel | Bug: 90% das linhas abriam em "nenhuma alteracao registrada" e 607 das 889 entradas mostravam o mesmo texto dos dois lados — nao havia como voltar ao que a maquina produziu |
+| F27 | O corretor de prosa marca erro de digitacao, e nunca xadrez | Limite: os erros de digitacao da revisao chegavam ao proximo leitor (ROADMAP 26) |
+| F28 | "Avisos QA" lista so as pendentes com aviso, o rodape conta essas, e F7 pula as verificadas — salvo no filtro "Verificadas", onde elas sao o trabalho; "Exportar QA" e "Reavaliar QA" continuam alcancando tudo | Risco: o aviso e sobre o texto e nao sabe quem o revisou; cada versao nova das heuristicas devolveria a fila as linhas ja aprovadas — 15 de 107 no banco de dev (ROADMAP 28.2) |
 | S16 | O dialogo de zerar o glossario conta o que apaga, por tipo, e a semente nao "volta" depois | Bug: anunciava 7.325 regras e apagava 5.910; e zerar deixava a sessao sem sugestao nenhuma e a abertura seguinte com 232 |
 | S17 | O "Teste rápido" do glossario usa a conversao do pipeline, e nao os pares crus | Bug: prioridade descartada, escopo ignorado, `@casa@` inerte e so a primeira ocorrencia trocada — a previa contradizia o banner S9 ao lado dela |
 | S18 | O editor de glossario anda pelo teclado: achar, andar pela lista filtrada e virar pagina | Custo: dois atalhos contra os treze do outro editor, numa janela que existe para varrer 7 mil linhas |
+| S19 | "Aplicar Automaticas" tem escopo — par, arquivo do filtro e "so pendentes" por padrao; a verificada so entra quando o escopo pede, e o editor so pede no filtro "Verificadas", depois de perguntar | Bug: a consulta nao filtrava `verified`, e promover uma regra na linha 500 reescrevia as 499 aprovadas — 9 das 39 alteraveis no banco de dev (ROADMAP 28.5) |
+| S20 | Gravar uma regra como `automatic` (nova, promovida ou com o texto mudado) mede antes quantas pendentes do escopo dela mudariam, mostra dez pela saida real do pipeline, fora da thread do Tk, e so grava no "sim" — medicao que falha nao grava | Risco: a memoria da revisao de terminologia pediu "nao aplicar em massa sem ver"; `Black esta -> as pretas estao` sai "As pretas estao" e so a previa mostra (ROADMAP 28.5) |
+| S21 | "Trocas repetidas nesta obra" lista os pares `antes -> depois` mais frequentes das edicoes humanas do arquivo, diz se ja ha regra pelo que a regra PRODUZ (cobre / produz outra coisa / nao altera / sem regra), e "Criar automatica e aplicar" passa por S20 e aplica com S19 so a regra e so o arquivo | Custo: 94 `o jogo -> a partida` e 63 `Brancas -> brancas` digitados um a um, o segundo com uma regra inerte no glossario (ROADMAP 28.5) |
+| S22 | "Excluir as N copias repetidas exibidas" so existe com o filtro "Duplicadas" e copia a mais na lista; apaga so o excesso dos pares exibidos (a primeira copia fica), respeita a busca, e faz backup do glossario antes da pergunta com o caminho nela | Custo: excluir oito duplicatas eram oito ciclos de clique + Excluir + Sim (22.12; ROADMAP 28.9) |
 | P3 | As letras dos lances vem do original, numa passagem so | Bug: `Rd1` (Torre) traduzido como `Rd1` (Rei) |
 | P4 | A correcao alcanca tambem o que ja estava gravado | Limite: P3 so valia para traducao nova, e 4.144 linhas ficariam erradas |
 | S1 | Matches disjuntos | Bug: `"de de de"` -> `"dede"` |
@@ -1997,6 +2413,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | R6 | Cache de avisos nao diverge | Risco da coluna materializada |
 | Q1 | Lance perdido e anotacao rompida geram aviso | Medicao: 401 erros de terminologia contra 11 linhas marcadas, intersecao zero |
 | Q2 | As heuristicas de QA tem versao, e muda-las reavalia o banco | Risco: a melhoria violar R6 nas 200 mil linhas ja avaliadas |
+| Q4 | Tres heuristicas de prosa para o destino `pt` — `after` no fim do original com "depois" sem "de" no fim da traducao (so com origem `en` ou nao declarada), "Brancas/Pretas" com maiuscula no meio da frase, "as brancas sao/sejam melhores" — e 35 formas novas no `Termos-suspeitos.txt`; "ele" para o lado, `game` -> "jogo", `the exchange` -> "troca" sem contexto e `fork` -> "bifurcacao" ficam de fora | Limite: o QA via 359 das 1.677 linhas com defeito detectavel; a versao 2 ve 1.254 da saida da maquina, com 96 % de precisao contra as decisoes humanas — 181 editadas, 7 aceitas (ROADMAP 28.2) |
 | Q3 | A avaliacao de QA na tela usa o par de idiomas da LINHA, e sem linha aberta nao ha veredito | Bug: "QA: sem avisos" em verde numa linha que a lista marcava com "⚠ QA"; e "traducao vazia" anunciado com o editor vazio |
 | R7 | A lista carrega o item clicado | Bug: clicar em B carregava C |
 | R9 | O editor mostra um par de idiomas de cada vez | Queixa de uso: revisar em espanhol achando que era italiano |
@@ -2005,14 +2422,25 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | Z1 | O backup vem antes da pergunta, e o caminho dele aparece nela | Risco: a unica volta atras depender de o que vem depois do "Apagar" |
 | Z2 | Apagar exige a palavra digitada, e o botao parece inerte ate la | Risco: "Sim" a um pixel do "Nao" para 201 mil traducoes |
 | Z3 | Zerar um nao toca no outro, e leva junto historico, indice e cache | Risco: o cache em memoria reviver o que foi apagado |
+| Z5 | "Reverter execucao" apaga so o que a execucao MAIS RECENTE inseriu (`inserted_run_id`, gravado so no INSERT) e que nao tem marca de humano nem uso por arquivo fora da execucao; as ocorrencias vao junto; a linha da execucao abre antes do primeiro INSERT e fecha no `finally` com conexao propria e o desfecho certo; a seguinte marca `crashed` o que ficou aberto; "Zerar Traducoes" leva a tabela | Risco: trocar de motor (28.7) sem poder desfazer exatamente o que UMA execucao trouxe, em varios arquivos de uma vez (ROADMAP 28.6) |
+| Z4 | "Descartar nao revisadas" apaga so as linhas do arquivo do filtro sem historico, nao verificadas, sem status, sem nota e cujas ocorrencias sao so desse arquivo, no par da tela, com backup antes da pergunta e palavra digitada; as ocorrencias vao junto, o cache e limpo e a lista e o menu de arquivos sao refeitos | Risco: trocar de motor (28.7) sem poder jogar fora o que o motor velho deixou num livro sem perder uma linha revisada (ROADMAP 28.6) |
 | N1 | So as cinco tags mudam; lances, variantes e comentarios saem identicos | Risco: a lista de tags vivia em dois lugares |
 | C1 | Trabalho pesado roda fora da thread do Tk, e a resposta volta nela | Bug: "Aplicar automaticas" segurava a janela por 38 s |
 | C3 | Nenhuma transacao de escrita atravessa uma chamada de rede, e um lock vira mensagem | Bug: worker travava o "Salvar" do editor por um lote inteiro |
 | C4 | "Cancelar" e conferido dentro do laco de tentativas, antes de cada uma e antes de cada espera | Bug: `translate_text_chunk` nem recebia o flag; contra um endpoint que pendura a conexao, o clique ficava ate ~93 s sem efeito |
 | M1 | A janela principal reabre no que foi escolhido | Risco: "Detectar" volta sozinho e desliga a correcao de lances sem avisar |
 | M2 | Um BOM no arquivo de configuracoes nao apaga nada | Bug: um caractere invisivel zerava rascunhos, lista de falhas e preferencias |
+| M5 | A barra de progresso diz onde a execucao esta (arquivo, lote, comentarios e uma estimativa), e no fim "Revisar pendentes" abre o editor no arquivo traduzido, em "Pendentes" e no destino DA EXECUCAO, enquanto "Abrir pasta" abre a do PGN gerado — os tres na fileira dos botoes, sem custar altura ao log | Custo: traduzir e revisar sao o mesmo fluxo, e o segundo passo exigia abrir o editor, achar o arquivo no seletor e trocar o status; e a barra nao dizia quanto faltava (ROADMAP 28.10) |
+| M4 | Toda opcao do usuario (`USER_OPTION_SECTIONS`) tem um controle na tela de Configuracoes; a tela grava por `update_settings`, valida a requebra pela regra do leitor, aplica o tema so depois de gravar e o programa abre no tema gravado | Custo: `utf8_bom` e `wrap_columns` so existiam no JSON editado a mao — o mesmo que o Bloco de Notas ja apagou (ROADMAP 28.10) |
+| M6 | Com chave configurada, "Iniciar tradução" e "Reprocessar falhas" perguntam o motor SEMPRE (Google ou um modelo, o da ultima execucao pre-selecionado; provedor sem chave desligado e dito); sem chave nao perguntam; Cancelar nao comeca; SDK ausente e recusado antes; a execucao grava `provedor:modelo` | Risco: trocar de motor em silencio — a licao de M1 — numa execucao que custa dinheiro (ROADMAP 28.7) |
+| K1 | A chave de API nunca aparece inteira em log, configuracoes ou dialogo: vive em `chaves-api.json` cifrada (DPAPI), a tela nunca a le para o campo, o log ve `****wxyz`; a variavel de ambiente vence; um 401 para as chamadas da execucao | Risco: uma chave paga em texto claro num JSON que vai para backup e para o Bloco de Notas (ROADMAP 28.7) |
+| K2 | "Testar chaves e modelos" (Configuracoes) confere chave e nome do modelo de cada provedor que tem chave — a digitada vale sobre a gravada, sem gravar nada — por uma requisicao GRATUITA (a API de modelos; na DeepSeek, a lista), na thread de fundo com o resultado voltando pela fila; o provedor sem chave e dito; o veredito nunca contem a chave | Custo: uma chave colada errada ou um nome de modelo aposentado so apareciam no meio de uma execucao, depois do dialogo de custo, como 401/404 fatal (ROADMAP 28.7) |
+| K2 | "Testar chaves e modelos" (Configuracoes) confere chave e nome do modelo de cada provedor que tem chave — a digitada vale sobre a gravada, sem gravar nada — por uma requisicao GRATUITA (a API de modelos; na DeepSeek, a lista), na thread de fundo com o resultado voltando pela fila; o provedor sem chave e dito; o veredito nunca contem a chave | Custo: uma chave colada errada ou um nome de modelo aposentado so apareciam no meio de uma execucao, depois do dialogo de custo, como 401/404 fatal (ROADMAP 28.7) |
+| M7 | Com um modelo de linguagem, a primeira requisicao so sai depois de o usuario ver a estimativa — comentarios fora do cache, tokens e dolares quando o modelo tem preco na tabela datada — e responder "Sim" (dialogo na thread do Tk pela ponte, C1); "Nao" nao envia nada nem abre execucao; com tudo em cache, e com o Google, nao ha pergunta; o fim do log diz "estimado -> real" | Custo: uma execucao de livro custa dezenas de dolares, e o unico numero que o usuario via chegava no fim (ROADMAP 28.7) |
+| M3 | A gravacao nunca sobrescreve um arquivo que existe e nao pode ser lido; um arquivo invalido e posto de lado (`.corrompido-<data>`) antes de o programa seguir, e os dois casos sao avisados | Bug: um `PermissionError` transitorio na leitura virava `{}`, e a gravacao seguinte apagava rascunhos, lista de falhas e preferencias — o desfecho de M2 por outro caminho (ROADMAP 28.1) |
 | X1 | Anotacoes `[%...]` atravessam a traducao byte a byte, ou o comentario conta como falha | Bug: `[%cal Ra1h8]` virava `[%cal Ta1h8]`; `[%eval +0.35]` quebrado antes da API |
 | X2 | Comentario esvaziado pela limpeza sai do arquivo sem deixar `{}` | Sujeira: o PGN gerado saia pontilhado de `{}` |
+| X4 | O par de nomes de uma citacao de partida (`G. Sax-G. Mohr,`) atravessa a API mascarado pelo mesmo sentinela de X1 e volta byte a byte; a sede continua sendo traduzida; um sentinela de nome engolido custa UMA segunda requisicao sem a mascara de nomes, e so uma anotacao que ainda falte ai e falha | Bug: a maquina traduzia o nome em 19 de 821 citacoes ("E. Can" -> "E. Pode", "K. Lie" -> "K. Mentira", "J. Hammer" -> "J. Martelo") (ROADMAP 28.3) |
 | X3 | Comentarios `;` sao contados e anunciados | Bug de percepcao: PGN so com `;` respondia "nenhum comentario encontrado" |
 | D1 | O PGN traduzido e escrito numa passada, sem uma segunda copia dele na memoria | Perf: 15 mil comentarios em 3,2 MB custavam 26,9 s de copia; o custo cresce com o produto |
 | D2 | Cancelar interrompe a gravacao do PGN, e sem deixar arquivo pela metade | Bug: a fase nao olhava o `cancel_flag`, e "Cancelar" ficava sem efeito visivel |
@@ -2027,6 +2455,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | I4 | Desinstalar preserva a pasta de dados, a menos que o usuario peca o contrario | Risco: desinstalar para reinstalar apagaria o acervo (protegida por `instalador\verificar-ciclo.ps1`) |
 | I5 | A versao tem uma fonte so, e instalar uma mais velha por cima nao acontece em silencio | Bug: tres numeros que nao se falavam (0.2.1 no `pyproject`, 1.0 no TMX, 1.0.0 no instalador) e nenhuma protecao contra voltar no tempo |
 | I6 | A entrega portatil e a instalavel sao o MESMO executavel, e o que as separa e um arquivo ao lado dele | Risco: dois builds seriam duas coisas para testar, e a que ninguem roda quebra primeiro. O marcador nunca entra em `dist\` — o `.iss` empacota a pasta inteira, e ele faria a versao INSTALADA gravar dentro de `Program Files` |
+| I8 | `spylls` e dependencia declarada (`pyproject.toml`, `uv.lock`), e o `.spec` avisa quando o interpretador do build nao o tem | Bug: `uv sync` abria o programa sem corretor e a suite pulava os testes dele em silencio; o `.exe` so levava o corretor por acaso do interpretador (ROADMAP 28.1) |
 | I7 | O log nomeia o MODO, e nao so a pasta de dados | Risco: um `.exe` portatil e um instalado apontado por `PGN_TRADUTOR_DATA` podem gravar na mesma pasta por motivos diferentes, e so o modo explica o que a proxima atualizacao fara com o acervo |
 
 ---
@@ -2070,11 +2499,10 @@ X3). O que resta declarado como limite:
   comparacao byte a byte entre os spans dos dois lados e o que faz o legado
   corrompido aparecer no filtro "Avisos QA". Corrigi-lo continua sendo trabalho
   manual, uma linha por vez.
-- **O arquivo gerado sai com comentarios em linha unica**, fora do export
-  format de 80 colunas que editoras esperam. Requebrar na gravacao esta na
-  secao 19 do ROADMAP (item 13).
-- **UTF-8 com BOM e opt-in** (`output.utf8_bom`); o padrao continua sem BOM, e
-  quem le os PGN no ChessBase do Windows precisa ligar a opcao.
+- **O arquivo gerado sai com comentarios em linha unica por padrao**; a
+  requebra em 80 colunas (F9) e o UTF-8 com BOM sao opt-in, na tela de
+  Configuracoes (M4). O BOM nao e o conserto dos acentos no ChessBase: aquele
+  caso foi resolvido pela promocao para UTF-8, e a opcao so marca o arquivo.
 
 **Desempenho e escala**
 
@@ -2136,12 +2564,68 @@ X3). O que resta declarado como limite:
 
 **Rede**
 
-- Depende de um endpoint nao oficial, sujeito a bloqueio por volume.
+- Depende de um endpoint nao oficial, sujeito a bloqueio por volume. **Medido
+  em 2026-09-14**: uma medicao de 200 comentarios em 10 lotes, no ritmo do
+  proprio pipeline, encontrou (ou provocou) um `429` que durou mais de uma
+  hora — o `RequestPacer` desacelera, mas nao ha o que fazer alem de esperar.
+  A medicao do ROADMAP 28.3 ficou por isso para a proxima execucao real, que
+  a faz sozinha: o resumo conta os comentarios reenviados sem a mascara de
+  nomes.
 - **"Cancelar" nao alcanca o retry em andamento**: o laco de tres tentativas
   nao olha o `cancel_flag`, e contra um endpoint que pendura a conexao o clique
   pode esperar ~93 s por chunk (3 x 30 s de timeout + as esperas). Reproduzido
   com sessao falsa: cancelado na primeira tentativa, as tres rodaram.
   (ROADMAP 22.13)
+
+**Modelos de linguagem (secao 3.8)**
+
+- **O texto do livro vai para o provedor escolhido, sob os termos dele.** O
+  `gtx` nao tem contrato nenhum; a Anthropic, a OpenAI e a DeepSeek tem cada
+  uma a sua politica de retencao e de uso, e o programa nao a conhece nem a
+  escolhe — quem cola a chave aceita a do provedor. Uma obra protegida e uma
+  decisao de quem traduz, nao do programa.
+- **A chave cifrada com DPAPI nao viaja**: um `.exe` portatil levado a outra
+  maquina, ou outra conta de usuario, le "ilegível nesta máquina" e pede a
+  chave de novo. Fora do Windows o arquivo guarda base64 e diz isso.
+- **Os nomes dos modelos sao os que o provedor aceita HOJE**; o campo e livre
+  e um nome que deixou de existir e um 404 que aborta a execucao com o
+  motivo no log. O que a tela oferece contra isso e o botao "Testar chaves e
+  modelos" (K2): uma requisicao gratuita a API de modelos, que diz se a chave
+  e o nome valem — e para a DeepSeek, que documenta so a lista, o nome e
+  procurado nela. A tela nao preenche o nome sozinha.
+- **"Cancelar" nao alcanca a requisicao em voo** do modelo (ate 120 s de
+  `timeout`; o SDK da Anthropic ainda tenta 429 e 5xx duas vezes sozinho);
+  vale entre lotes e entre tentativas dos provedores por `requests`.
+- **A estimativa de custo (M7) e uma regra de tres, e a tabela de precos tem
+  data.** Os tokens por caractere vem do piloto com o `claude-opus-5`
+  (US$ 0,0034 por linha; ~US$ 25 por livro de 7.500) e valem como estimativa
+  para os tres provedores, cada um com o seu tokenizador; os precos sao os
+  das paginas dos provedores em `PRICES_DATED` (`llm_costs.PRICE_TABLE`), e
+  a DeepSeek ainda cobra a metade fora do horario de pico — a tabela traz o
+  pico. Um modelo fora da tabela (ou um nome novo) mostra tokens e "sem preco
+  na tabela"; a fatura do provedor e o que vale, e o log diz isso nas duas
+  pontas.
+- **O contexto de lances (B6) e uma janela de 80 caracteres** para cada lado,
+  com os comentarios vizinhos apagados: um comentario cujo lance de verdade
+  esta atras de um vizinho maior do que a janela vai sem contexto (5 dos
+  6.500 comentarios distintos do livro de desenvolvimento), e o piloto
+  mostrou que o prompt aceita o campo vazio.
+- **O portao de ancoras (T6) ve a ancora, nao a letra**: `Nf3 -> Bf3` passa
+  por ele, e e P3 quem corrige a letra pelo original — com o idioma de origem
+  declarado; em "Detectar" a letra trocada fica para o aviso Q4. E o portao e
+  estrito de proposito: um original malformado (`Ng5+which`, sem espaco, cujo
+  `+` nao entra na ancora do original) pode ser recusado nas duas tentativas
+  e ficar no idioma original para o revisor traduzir a mao — o preco de
+  nunca gravar um lance reescrito com cara de certo.
+
+**Suite de testes**
+
+- **Os testes que medem pixels pulam em telas menores que 1100 x 740**
+  (`gui_harness.needs_room`, `SCREEN_NEEDED`): a maior janela do programa
+  tem minimo 1040 x 640, e onde ela nao cabe o que se mede e a janela
+  espremida, nao o produto. O runner do GitHub tem 1024 x 768 e pula sete
+  testes; a maquina de desenvolvimento (1920 x 1080) roda todos. Um
+  notebook de 1366 x 768 roda todos tambem.
 
 **Idioma de origem**
 
@@ -2235,13 +2719,11 @@ X3). O que resta declarado como limite:
   marcada como verificada que gera aviso continua gerando: o aviso e sobre o
   texto, e "verificada" e sobre quem olhou. O editor mostra os dois, e o
   relatorio de QA separa por status.
-- **Nenhuma entrada do `Termos-suspeitos.txt` tem escopo de PAR.** Sao 24, todas
-  por destino (14 `pt`, 2 para cada uma das outras cinco linguas), entao com o
-  arquivo que vem no programa o idioma de ORIGEM nunca muda o resultado da
-  terminologia. Ele e passado a avaliacao mesmo assim, porque a coluna
-  materializada o passa e as duas tem de receber os mesmos argumentos (Q3) — mas
-  a simetria nao esta testada, e so estara quando existir uma entrada `en>pt`.
-  (ROADMAP 22.2)
+- **Nenhuma entrada do `Termos-suspeitos.txt` tem escopo de PAR** — sao 57,
+  todas por destino. A primeira heuristica que depende da ORIGEM e a de
+  `after`/"depois" (Q4, 28.2), e com ela a simetria coluna x tela (Q3) passou
+  a ter teste: o veredito e o mesmo dos dois lados para `en`, para origem nao
+  declarada e para `es`, onde ele muda. (ROADMAP 22.2, 28.2)
 - **A reavaliacao nao acontece quando so o `Termos-suspeitos.txt` e editado a
   mao.** A versao das heuristicas e uma constante no codigo (Q2), e nao um hash do
   arquivo: quem editar a lista tem de subir a constante ou clicar em "Reavaliar
@@ -2266,13 +2748,10 @@ X3). O que resta declarado como limite:
 
 **Fluxo de revisao (o que a secao 19 deixou de fora)**
 
-- **Nao ha corretor ortografico da PROSA traduzida.** O `spelling.ssp` que o
-  programa traz e dicionario de nomes proprios, para as tags; um corretor de
-  verdade precisa de um dicionario hunspell por idioma de destino e de uma
-  dependencia nova, que mudam o `requirements.txt` e o empacotamento. Nao ha
-  esqueleto nem botao desabilitado no lugar: um recurso que parece existir e nao
-  funciona e pior que a ausencia. Os erros de digitacao da revisao continuam
-  chegando ao proximo leitor. (ROADMAP 19.14)
+- **O corretor ortografico da prosa existe desde 2026-08-03** (ROADMAP 26,
+  garantia F27) e cobre um idioma: so `pt_BR` tem dicionario, e a janela diz
+  isso nos outros seis. A dependencia (`spylls`) esta declarada desde
+  2026-09-14 (garantia I8, ROADMAP 28.1).
 - **O status de revisao e a nota nao entram no historico de edicoes.** O
   `comment_history` e do TEXTO — quem mudou a traducao, quando, e para o que. Uma
   linha que foi rejeitada e depois aceita nao deixa rastro dessa ida e volta.
@@ -2345,6 +2824,38 @@ em janela real, headless ou por leitura de codigo, dito la item a item.
   rodape na largura minima, medido (F20); elas sao recibo de uma acao ja
   confirmada em dialogo (V1), e a contagem que fica mostra o resultado. (22.10)
 
+**Revisao de 2026-09-14 (ROADMAP 28) — limites confirmados, ainda sem correcao**
+
+Cada item e comportamento ATUAL, confirmado como a secao 28 descreve, e o
+numero e o do item que o resolve.
+
+- **"Aplicar Automaticas" nao filtrava `verified`** e reescrevia linhas que o
+  revisor ja tinha aprovado — resolvido em 28.5 (S19). Fica um limite menor: a
+  previa da ferramenta nao conta quantas verificadas ficaram de fora, porque
+  conta-las custaria a varredura completa que o escopo "so pendentes" existe
+  para evitar; quem quer alcanca-las usa o filtro "Verificadas" do editor.
+- **O aviso de qualidade ve 1.254 das 1.677 linhas com defeito detectavel por
+  regra** na saida da maquina do banco de dev (a versao 1 via 359). O que
+  sobra e o que nao tem regra segura: `game` -> "jogo" (74 % de precisao
+  humana), `the exchange` -> "troca" sem contexto (60 %), "ele" para o lado
+  (55 %). (28.2) O defeito mais frequente — o fragmento terminado
+  em `after` que saia "depois" sem "de" — esta corrigido no pipeline (P7,
+  28.4), e "Consertar Prosa" (P6) alcanca as linhas ja gravadas, menos as
+  verificadas: 3 no banco de dev, que a revisao aprovou com o defeito e a
+  ferramenta nao toca por desenho.
+- **O lote `|||` alinha por posicao, com a razao de tamanho como segunda
+  peneira** (B2, 28.12): a fusao de duas partes e pega pela parte vazia; a
+  troca de ordem entre partes de tamanho parecido nao e — incidencia medida
+  zero em 6.500 linhas, e so os ids do lote JSON (28.7) a resolvem por
+  construcao.
+- **Um backup NOVO restaurado num programa VELHO carimba `user_version`
+  para baixo sem avisar.** Pre-existente; os dois schemas novos da secao 28
+  (execucoes e FEN) tornam o caso mais provavel. (28.6, 28.8)
+- **O programa nao sabe quanto o humano aceita sem editar** — a unica
+  regua que mapeia qualidade de traducao para horas de revisao. Medido a
+  mao no banco de dev: 64 % (504 de 784 decisoes humanas). E a barra do
+  piloto de 28.7, e nao existe em "Estatisticas do BD". (28.7)
+
 **Procedencia (de onde cada traducao veio)**
 
 - **As linhas gravadas antes do schema 7 nao tem procedencia**, e nao vao ganhar
@@ -2374,9 +2885,12 @@ em janela real, headless ou por leitura de codigo, dito la item a item.
   partida. Um arquivo sem `[Event` conta como uma partida so; um com tags fora de
   ordem conta o que estiver escrito. Sao numeros para localizar o comentario na
   obra, e nao uma leitura da posicao — validar lance segue nao-objetivo (secao 1).
-- **Nao existe FEN por ocorrencia.** O esquema tem onde pendura-la, e nenhuma
-  coluna foi criada para ficar nula: uma coluna que ninguem escreve em 200 mil
-  linhas nao e preparo. (ROADMAP 18.1)
+- **A FEN por ocorrencia existe desde o schema 11 (O5), e e nula onde o
+  worker nao passou depois dela**: linhas antigas, importadas, ou gravadas
+  sem o `python-chess` — que fica fora do `.exe` por licenca. Catorze dos
+  7.487 comentarios do PGN real ficam sem FEN (o parser os pendura num lance
+  nulo `--`), e a memoria de pico do calculo e a da MAIOR partida do arquivo
+  mais duas copias do texto (16 MB no PGN de 842 KB). (ROADMAP 28.8)
 
 **Estrutura**
 
@@ -2402,7 +2916,47 @@ Declaradas aqui para que a secao 9 continue sendo apenas o que os testes ja
 protegem. Cada uma entra na secao 9 quando o item correspondente do ROADMAP
 estiver pronto e tiver teste que falhe sem a correcao.
 
-**Nenhuma pendente.** As nove garantias da revisao de 2026-07-31 — **F12**
+**Pendentes: as da secao 28 do ROADMAP (revisao de 2026-09-14), menos as tres
+de 28.1, a de 28.4, as quatro de 28.2, a de 28.3, as tres de 28.5, a
+primeira de 28.6, F29 (28.9) e M5 (28.10)** — I8, M3 e B4 migraram
+para a secao 9 em 2026-09-14, com 3, 5 e 4 testes e nove mutacoes sem
+sobrevivente; P7 no mesmo dia, com 6 testes e sete mutacoes; P5 e P6 no
+mesmo dia, com 8 e 5 testes e doze mutacoes (duas sobreviveram a primeira
+passada e viraram teste — as duas do padrao "o cenario cai numa guarda
+vizinha"); Q4 e F28 no mesmo dia, com 9 + 3 testes headless, 2 de janela e
+onze mutacoes (uma sobrevivente era um lookbehind redundante, que saiu);
+X4 no mesmo dia, com 11 testes e oito mutacoes; S19, S20 e S21 no mesmo
+dia, com 29 testes headless, 20 de janela e 27 mutacoes (duas sobreviveram a
+primeira passada, as duas do padrao "o cenario nao exercita a clausula", e
+morreram com o cenario certo); Z4 em 2026-09-15, com 13 testes headless, 9 de
+janela e 13 mutacoes (uma sobreviveu a primeira passada — a clausula
+`verified`, que o cenario nao exercitava porque verificar pela janela grava
+historico; a linha importada ja verificada e o cenario certo); F29 e M5 no
+mesmo dia, com 12 + 13 testes headless, 30 de janela e 33 mutacoes (tres
+sobreviveram a primeira passada, todas de cenario: o arquivo ilegivel na
+releitura, o destino da execucao contra um radio ja trocado, e a ordem
+feito/total — que no fim da execucao sao o mesmo numero); K1 e B5 em
+2026-09-16, com o provedor de 28.7 (27 testes headless em `test_llm.py`, 4 do
+worker, 7 de janela), mais M6, que nao estava planejada e nasceu do pedido de
+escolher o motor a cada execucao; **T6 em 2026-09-18**, com o teste que esta
+tabela pedia (provedor falso que devolve `Nf6` para `Nf3`: nada gravado, um
+falhado, PGN com o original) mais quatro — a segunda chance que acerta, o
+caminho individual, o reenvio sem nomes e o Google fora do portao — e 6 de
+notacao para `anchor_divergence`, 7 mutacoes mortas; e **M7** no mesmo dia,
+que nao estava planejada e nasceu do "estimativa de custo antes de iniciar"
+de 28.7, com 4 testes do worker, 7 de `llm_costs` e 9 mutacoes mortas; e
+**B6** (o contexto de lances) com a segunda metade de B5 (o lote dividido no
+corte e na recusa), no mesmo dia, com 6 testes de `pgn_utils`, 6 de
+`llm_providers`, 3 do worker e 16 mutacoes mortas — uma sobreviveu a primeira
+passada e derrubou a regra, nao o teste: "parar na chave" perdia o lance de
+dois comentarios seguidos, e virou "apagar o vizinho da janela".
+**Nenhuma garantia planejada esta pendente em 2026-09-18.** A regra para as
+proximas continua: cada uma entra aqui escrita como o teste que a fara migrar
+— "falha sem a correcao" —, e as que dependem de medicao no banco de dev
+dizem qual e o comportamento testavel e qual e o numero que fica so no
+ROADMAP.
+
+**Ate 2026-09-14 o registro era o seguinte.** As nove garantias da revisao de 2026-07-31 — **F12**
 (22.1), **Q3** (22.2), **F13** (22.3), **F14** (22.4), **F15** (22.5), **F16**
 (22.6), **F17** (22.7), **F18** (22.8) e **F19** (22.9) — migraram para a secao
 9 no mesmo dia, com 5, 6, 8, 6, 5, 11, 5, 13 e 10 testes e nove rodadas de
@@ -2440,10 +2994,11 @@ indice que se reconstroi quando o fonte muda. D1-D7 sao essas afirmacoes, e duas
 delas sao medidas com cronometro e `tracemalloc`, porque em teste de igualdade
 "correto e lento" e indistinguivel de "correto e rapido".
 
-**O item 11 da secao 19 (corretor ortografico de prosa) nao foi feito**, e nao
-declara garantia planejada: ele depende de escolher um dicionario e uma dependencia
-nova, que e decisao de quem mantem o programa e nao um desenho pendente. Esta como
-limite na secao 10.
+**O item 11 da secao 19 (corretor ortografico de prosa) foi feito em
+2026-08-03** (ROADMAP 26, garantia F27), depois de este paragrafo dizer que
+nao seria: a decisao de dicionario e dependencia foi tomada la. O que sobrou
+dele como limite (a dependencia nao declarada) esta na secao 10 e no
+ROADMAP 28.1.
 
 **As garantias do instalador (I1-I4, ROADMAP 21) estao na secao 9**, e duas delas
 sao protegidas por um teste que **nao** fica na suite: `pytest` nao tem como

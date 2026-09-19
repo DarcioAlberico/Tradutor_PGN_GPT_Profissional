@@ -320,7 +320,13 @@ def count_semicolon_comments(content: str) -> int:
 # linha porque e la que a tag mora — e a busca roda sobre o texto com os
 # comentarios apagados (ver `_blank_spans`), entao um `[Event` DENTRO de um
 # comentario nao vira partida nova.
-_GAME_START_RE = re.compile(r'^[ \t]*\[[ \t]*Event\b', re.MULTILINE)
+#
+# "Comeco da linha" inclui a linha que termina em `\r` sozinho: a exportacao
+# do ChessBase usa so `\r`, e `^` com MULTILINE so reconhece `\n` — no PGN
+# real do usuario (99 partidas) toda ocorrencia saia como "partida 1", e o
+# rotulo do editor dizia isso com confianca (achado ao alinhar as posicoes do
+# tabuleiro, ROADMAP 28.8).
+_GAME_START_RE = re.compile(r'(?:^|(?<=[\r\n]))[ \t]*\[[ \t]*Event\b')
 
 # Numero de lance no movetext: digitos seguidos de ponto (`12.`, `12...`, e
 # tambem `12 .`, que alguns exportadores escrevem). Tres recortes, e cada um pega
@@ -380,7 +386,9 @@ def _outside_movetext(content: str, pos: int) -> bool:
     e o resto de linha de um comentario `;`, que este programa nao traduz mas que
     continua sendo texto e nao movetext.
     """
-    inicio = content.rfind("\n", 0, pos) + 1
+    # `\r` tambem termina linha (a exportacao do ChessBase usa so ele): sem
+    # isto, num PGN assim o "prefixo da linha" era o arquivo inteiro.
+    inicio = max(content.rfind("\n", 0, pos), content.rfind("\r", 0, pos)) + 1
     prefixo = content[inicio:pos]
     return prefixo.lstrip().startswith("[") or ";" in prefixo
 
@@ -432,8 +440,57 @@ def comment_reading_context(content: str, spans):
 
 _COMMENT_RE = re.compile(r'\{(.*?)\}', re.DOTALL)
 
+# Um lance como esta escrito no PGN, com o numero quando o tem (`12. Nf3`,
+# `12...Nf6`, `O-O`, `exd5+`): e o contexto de leitura que o modelo de
+# linguagem recebe (ROADMAP 28.7) — o mesmo padrao do piloto, que mediu 198
+# de 200 comentarios com contexto.
+_CONTEXT_MOVE_RE = re.compile(
+    r"(?:\d+\.(?:\.\.)?\s*)?(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?|O-O(?:-O)?)[+#!?]*"
+)
+CONTEXT_WINDOW = 80
 
-def extract_comment_texts(content: str):
+
+def move_context(content: str, start: int, end: int):
+    """`(antes, depois)`: o ultimo lance antes de `start` e o primeiro depois de `end`.
+
+    So o que esta FORA de chaves: os comentarios inteiros dentro da janela de
+    80 caracteres sao apagados antes de procurar — um lance citado num
+    comentario vizinho ("Best was Bc4") nao e o lance do arquivo —, e o que
+    sobra de um comentario que comeca antes da janela (ou acaba depois dela)
+    e cortado no `}` (no `{`). Apagar, e nao cortar na chave: dois
+    comentarios seguidos anotam o MESMO lance, e o segundo tem de ve-lo.
+    Vazio quando nao ha lance na janela (o primeiro comentario de uma
+    partida, o ultimo antes do resultado).
+    """
+    antes = _COMMENT_RE.sub(" ", content[max(0, start - CONTEXT_WINDOW):start])
+    antes = antes.rsplit("}", 1)[-1]
+    depois = _COMMENT_RE.sub(" ", content[end:end + CONTEXT_WINDOW])
+    depois = depois.split("{", 1)[0]
+    lances_antes = _CONTEXT_MOVE_RE.findall(antes)
+    lances_depois = _CONTEXT_MOVE_RE.findall(depois)
+    return (
+        lances_antes[-1].strip() if lances_antes else "",
+        lances_depois[0].strip() if lances_depois else "",
+    )
+
+
+def extract_comment_contexts(content: str):
+    """`{texto: (antes, depois)}` da PRIMEIRA ocorrencia de cada comentario distinto.
+
+    A primeira, porque e uma por texto que o worker traduz (ROADMAP 20.3): o
+    "Diagram" repetido cem vezes ganha o contexto de onde apareceu primeiro, e
+    e o unico que a API ve. Custa ~20 bytes por comentario, lidos na mesma
+    passada que extrai o texto — nao exige segurar o PGN pela fase da API.
+    """
+    contextos = {}
+    for m in _COMMENT_RE.finditer(content):
+        texto = flatten_comment(m.group(1))
+        if texto and texto not in contextos:
+            contextos[texto] = move_context(content, m.start(), m.end())
+    return contextos
+
+
+def extract_comment_texts(content: str, with_contexts: bool = False):
     """So os TEXTOS dos comentarios e a contagem de `;`. A metade barata.
 
     A primeira passada da execucao precisa apenas disto: quantos comentarios ha
@@ -446,13 +503,18 @@ def extract_comment_texts(content: str):
     completa nas duas passadas, que custaria a parte cara duas vezes por arquivo.
     """
     textos = [flatten_comment(m.group(1)) for m in _COMMENT_RE.finditer(content)]
-    return {
+    info = {
         "comments": [texto for texto in textos if texto],
         "semicolon_comments": count_semicolon_comments(content),
     }
+    if with_contexts:
+        # So quando um modelo de linguagem vai usar (ROADMAP 28.7): o Google
+        # nao recebe contexto, e a primeira passada continua a metade barata.
+        info["contexts"] = extract_comment_contexts(content)
+    return info
 
 
-def extract_comment_texts_from_file(pgn_file: str, log_message=None):
+def extract_comment_texts_from_file(pgn_file: str, log_message=None, with_contexts=False):
     """Le o PGN e devolve so os textos. Ver `extract_comment_texts`.
 
     A codificacao e anunciada aqui, e nao na segunda passada: e o momento em que
@@ -464,7 +526,7 @@ def extract_comment_texts_from_file(pgn_file: str, log_message=None):
         if log_message:
             log_message(f"Arquivo: {os.path.basename(pgn_file)} | Codificacao detectada: {enc}")
 
-        return extract_comment_texts(content)
+        return extract_comment_texts(content, with_contexts=with_contexts)
 
     except Exception as e:
         if log_message:
@@ -591,22 +653,22 @@ def batch_index_groups(texts, max_chars=BATCH_MAX_CHARS):
     length = 0
 
     for index, text in enumerate(texts):
-        l = len(text)
+        tamanho = len(text)
         # Account for separator that will be inserted between items
         extra = _SEP_LEN if current else 0
-        if l > max_chars:
+        if tamanho > max_chars:
             if current:
                 groups.append(current)
             groups.append([index])
             current = []
             length = 0
-        elif length + extra + l > max_chars:
+        elif length + extra + tamanho > max_chars:
             groups.append(current)
             current = [index]
-            length = l
+            length = tamanho
         else:
             current.append(index)
-            length += extra + l
+            length += extra + tamanho
 
     if current:
         groups.append(current)
@@ -645,6 +707,60 @@ def split_batch_translation(translated_text, expected_count):
     if len(parts) == expected_count:
         return parts
 
+    return None
+
+
+# A contagem de partes so garante que o lote voltou com o NUMERO certo de
+# pedacos; nada confere que a parte `i` e a traducao do comentario `i`. Uma
+# resposta que funde dois comentarios vizinhos numa parte e devolve a outra
+# vazia — ou reordena — passa pela contagem e grava cada texto no lugar do
+# outro. Medido no banco de dev, incidencia zero em 6.500 linhas (ROADMAP
+# 28.12); e risco de desenho, e a defesa e barata: a razao de tamanho de cada
+# parte contra o original que ela deveria traduzir.
+#
+# Em PALAVRAS, e nao caracteres, porque e a unidade que a fusao e o vazio
+# deslocam. No banco de dev a razao fica entre 0,50 e 1,83 nos originais de 40
+# caracteres ou mais; [0,3; 3,0] deixa folga para a prosa normal ("as pretas
+# estao" para "Black is"). Quem denuncia a fusao e a parte VAZIA (razao zero),
+# nao a que dobrou: o dobro fica perto de 2 e cabe na folga — mas numa fusao com
+# a contagem certa sempre sobra uma vazia. O que a razao nao ve e a troca de
+# ordem entre duas partes de tamanho parecido; isso so os ids do lote JSON
+# resolvem, por construcao (28.7).
+#
+# O piso de 40 caracteres e o mesmo do QA (PROPORTION_MINIMUM_LENGTH): abaixo
+# dele a razao nao diz nada — `", and"` -> `"e"` e traducao normal com razao
+# 0,5, e sem o piso esse unico caso derrubaria um lote inteiro de 40 para o
+# modo individual.
+BATCH_PART_RATIO_MIN = 0.3
+BATCH_PART_RATIO_MAX = 3.0
+BATCH_PART_MINIMUM_LENGTH = 40
+
+
+def misaligned_batch_part(parts, originals):
+    """Indice da primeira parte cujo tamanho nao pode ser a traducao do original.
+
+    `parts` e a lista que `split_batch_translation` devolveu; `originals` sao os
+    textos ENVIADOS, na mesma ordem (mascarados, como foram para a API: a
+    sentinela pesa o mesmo dos dois lados). Devolve `None` quando toda parte
+    cabe na razao — ou quando nenhum original alcanca o piso. Um indice e o
+    sinal de desalinhamento (garantia B2): o worker descarta o lote e traduz
+    um a um, como ja faz com a contagem errada.
+    """
+    for index, (part, original) in enumerate(zip(parts, originals)):
+        # Uma parte VAZIA para um original que tem texto nunca e traducao,
+        # abaixo ou acima do piso: e o pedaco que a fusao engoliu — ou, no lote
+        # JSON dos modelos de linguagem (28.7), o id que a resposta nao trouxe
+        # e que o provedor devolve vazio de proposito para cair aqui.
+        if not part.strip() and original.strip():
+            return index
+        if len(original) < BATCH_PART_MINIMUM_LENGTH:
+            continue
+        palavras_originais = len(original.split())
+        if not palavras_originais:
+            continue
+        razao = len(part.split()) / palavras_originais
+        if razao < BATCH_PART_RATIO_MIN or razao > BATCH_PART_RATIO_MAX:
+            return index
     return None
 
 
