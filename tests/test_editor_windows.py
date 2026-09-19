@@ -31,7 +31,7 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 
-from gui_harness import DISPLAY, GuiTestCase
+from gui_harness import DISPLAY, GuiTestCase, needs_room
 from tradutor_pgn import (
     board_widget,
     database,
@@ -526,6 +526,7 @@ class GlossaryConflictEditorTests(EditorWindowTestCase):
                 return text
         return ""
 
+    @needs_room
     def test_the_losing_rule_names_the_one_that_wins(self):
         self.click(self.row_for("castle"))
 
@@ -534,6 +535,7 @@ class GlossaryConflictEditorTests(EditorWindowTestCase):
         self.assertIn("rook", aviso)
         self.assertIn("nunca é aplicada", aviso)
 
+    @needs_room
     def test_the_winning_rule_says_it_is_the_winner(self):
         self.click(self.row_for("rook"))
 
@@ -670,6 +672,7 @@ class GlossaryPriorityEditorTests(EditorWindowTestCase):
 
     # ------------------------------------------------ priorizar
 
+    @needs_room
     def test_promoting_resolves_the_conflict_without_deleting(self):
         """A diferenca em relacao a "Manter esta", que e o ponto do item."""
         self.click(self.row_for("castle"))
@@ -5009,6 +5012,7 @@ class LabelsAndWidthsFitTests(EditorWindowTestCase):
     # nao distinguiria minimo nenhum.
     LARGURA_FOLGADA = 1300
 
+    @needs_room
     def test_the_list_panel_comes_back_the_size_it_was_left(self):
         """Os limites do divisor eram numeros escolhidos a parte dos paineis.
 
@@ -7138,6 +7142,7 @@ class EditorBoardTests(EditorWindowTestCase):
         self.abrir("com posicao")
         self.assertTrue(self.editor.board_canvas.winfo_manager())
 
+    @needs_room
     def test_open_at_the_minimum_size_no_button_leaves_the_pane(self):
         """F20 na vertical: com o quadro aberto no tamanho minimo, os seis
         botoes do painel continuam inteiros dentro dele (quem encolhe e a

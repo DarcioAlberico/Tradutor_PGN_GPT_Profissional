@@ -2618,6 +2618,15 @@ X3). O que resta declarado como limite:
   e ficar no idioma original para o revisor traduzir a mao — o preco de
   nunca gravar um lance reescrito com cara de certo.
 
+**Suite de testes**
+
+- **Os testes que medem pixels pulam em telas menores que 1100 x 740**
+  (`gui_harness.needs_room`, `SCREEN_NEEDED`): a maior janela do programa
+  tem minimo 1040 x 640, e onde ela nao cabe o que se mede e a janela
+  espremida, nao o produto. O runner do GitHub tem 1024 x 768 e pula sete
+  testes; a maquina de desenvolvimento (1920 x 1080) roda todos. Um
+  notebook de 1366 x 768 roda todos tambem.
+
 **Idioma de origem**
 
 - A correcao das letras dos lances (P3 e P4) so roda com o idioma de origem

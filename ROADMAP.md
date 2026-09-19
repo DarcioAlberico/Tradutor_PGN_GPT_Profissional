@@ -9224,6 +9224,40 @@ itens de produto. **Depende de 28.1 item 1**: um CI com `uv sync` sem
   em `test_log.py`, 8 mutacoes mortas; os testes de janela do log passaram
   sem mudar uma linha.
 
+**O primeiro CI de verdade (PR #4, 2026-09-18), e o que ele ensinou.** Dois
+checks verdes em 11,5 min: compileall, ruff, mypy, a suite sem janela (1.252
+em 107 s), a suite de janelas (532 s) e o build do PyInstaller como
+artefato. Mas o verde do check escondia o que o `continue-on-error` deixa
+passar: **8 testes de janela falharam no runner**, e nenhum era defeito do
+programa.
+
+- **Sete medem pixels numa tela que o runner nao tem.** O runner do GitHub e
+  1024 x 768; o editor de glossario tem minimo 1040 x 640 e nao cabe, e o que
+  se mediu la foi a janela espremida — rotulo de conflito nao mapeado, painel
+  da lista 320 em vez de 330, quadro 382 em vez de 379, log sem altura, fim
+  do log inalcancavel. Os numeros desses testes foram medidos a 1920 x 1080 e
+  so valem onde a janela cabe: `gui_harness.needs_room` os pula com a tela
+  dita por extenso quando ela e menor que `SCREEN_NEEDED = (1100, 740)` — o
+  minimo da maior janela mais bordas e barra de tarefas, nao um numero
+  inventado. Mudar a resolucao do runner nao e caminho: e o pedido aberto
+  mais antigo do `runner-images`, sem solucao documentada.
+- **Um foi o `tk.Tk()` do SEGUNDO teste da suite** falhando com `invalid
+  command name "tcl_findLibrary"` (o `init.tcl` nao carregado) — e os 541
+  seguintes criaram o interpretador sem problema. Transiente do runner:
+  `gui_harness.criar_root` tenta uma segunda vez, e uma falha persistente
+  propaga como antes.
+- **Um susto que nao era defeito**: o relatorio do pytest mostrava as
+  mensagens do programa em "Captured log call", como se o logger
+  `tradutor_pgn` propagasse para a raiz. Nao propaga: o pytest 9 pendura o
+  handler de captura DIRETAMENTE em todo logger com `propagate = False`
+  (`catching_logs` percorre o `loggerDict`). Mesmo assim o handler da raiz
+  passou a ignorar os registros do proprio programa (`third_party_only`):
+  um `propagate` ligado por quem quer que seja nunca duplica uma linha.
+
+Dois testes sem janela guardam o harness (o `needs_room` pula a 1024 x 768 e
+roda a 1920 x 1080; o `Tk()` sai na segunda tentativa e a falha persistente
+propaga). A `continue-on-error` da suite de janelas continua ate 2026-09-30.
+
 ### 28.12 O lote `|||` alinha por posicao, e so por posicao — CONCLUIDO (2026-09-15)
 
 `split_batch_translation` aceita a resposta quando o **numero** de partes

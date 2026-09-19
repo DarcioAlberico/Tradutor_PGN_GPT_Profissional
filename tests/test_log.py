@@ -103,9 +103,14 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(self.drenar(), ["[ERRO] anthropic._base_client: boom"])
 
     def test_the_program_message_does_not_go_twice_through_the_root(self):
-        """`tradutor_pgn` nao propaga: o handler da raiz e so dos terceiros."""
+        """`tradutor_pgn` nao propaga, e mesmo que passe a propagar o handler
+        da raiz ignora o programa: uma linha, nunca duas."""
         app_log.log("[ERRO] uma vez")
         self.assertEqual(self.drenar(), ["[ERRO] uma vez"])
+        LOGGER.propagate = True
+        self.addCleanup(setattr, LOGGER, "propagate", False)
+        app_log.log("[ERRO] propagando")
+        self.assertEqual(self.drenar(), ["[ERRO] propagando"])
 
     def test_installing_for_a_second_app_moves_the_log_to_it(self):
         outro = app_falso()

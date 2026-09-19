@@ -59,20 +59,32 @@ def format_record(record: logging.LogRecord) -> str:
     texto = record.getMessage()
     if record.exc_info:
         texto += "\n" + logging.Formatter().formatException(record.exc_info)
-    if record.name == LOGGER.name or record.name.startswith(LOGGER.name + "."):
+    if _is_program_record(record):
         return texto
     rotulo = _LEVEL_LABELS.get(record.levelno, record.levelname)
     return f"[{rotulo}] {record.name}: {texto}"
 
 
-class AppLogHandler(logging.Handler):
-    """Leva cada registro para a fila do widget e para o arquivo da execucao."""
+def _is_program_record(record: logging.LogRecord) -> bool:
+    return record.name == LOGGER.name or record.name.startswith(LOGGER.name + ".")
 
-    def __init__(self, app: Any, level: int = logging.INFO) -> None:
+
+class AppLogHandler(logging.Handler):
+    """Leva cada registro para a fila do widget e para o arquivo da execucao.
+
+    `third_party_only`: o handler da raiz ignora os registros do proprio
+    programa, que ja passaram pelo handler do logger `tradutor_pgn` — assim
+    um `propagate` ligado por quem quer que seja nunca duplica uma linha.
+    """
+
+    def __init__(self, app: Any, level: int = logging.INFO, third_party_only: bool = False) -> None:
         super().__init__(level)
         self.app = app
+        self.third_party_only = third_party_only
 
     def emit(self, record: logging.LogRecord) -> None:
+        if self.third_party_only and _is_program_record(record):
+            return
         texto = format_record(record)
         self.app.log_queue.put(texto)
         handle = getattr(self.app, "_log_file_handle", None)
@@ -104,7 +116,7 @@ def install(app: Any) -> AppLogHandler:
     LOGGER.setLevel(logging.INFO)
     LOGGER.propagate = False
     LOGGER.addHandler(handler)
-    raiz.addHandler(AppLogHandler(app, THIRD_PARTY_LEVEL))
+    raiz.addHandler(AppLogHandler(app, THIRD_PARTY_LEVEL, third_party_only=True))
     return handler
 
 

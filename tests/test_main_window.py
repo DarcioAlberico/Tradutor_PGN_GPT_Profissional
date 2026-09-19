@@ -20,13 +20,14 @@ import time
 import tkinter as tk
 import types
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import customtkinter as ctk
 
 import gui_harness
-from gui_harness import GuiTestCase
+from gui_harness import GuiTestCase, needs_room
 from tradutor_pgn import app as app_module
 from tradutor_pgn import db_tools
 from tradutor_pgn.background_task import BackgroundTask, TaskCanceled
@@ -1333,6 +1334,7 @@ class LastRunEntryPointTests(MainWindowTestCase):
         self.assertEqual(self.app.progress_label.winfo_manager(), "pack")
         self.assertIs(self.app.progress_label.master, self.app.retry_button.master)
 
+    @needs_room
     def test_the_new_controls_cost_the_log_no_height(self):
         """A familia "correto e nao cabe na tela" (22.10), medida onde doi.
 
@@ -1919,6 +1921,7 @@ class LogDoesNotYankTheReaderBackTests(MainWindowTestCase):
         app_actions.update_log(self.app)
         self.pump()
 
+    @needs_room
     def test_following_the_end_keeps_following(self):
         self.encher(80)
         # Levado ao fim de proposito: a janela abre com varias mensagens de
@@ -2260,6 +2263,47 @@ class SettingsCredentialCheckTests(MainWindowTestCase):
         self.assertEqual(chamadas, [])
         self.assertEqual(janela.test_result_label.cget("text").count("sem chave"), 3)
         self.assertEqual(janela.btn_test_keys.cget("state"), "normal")
+
+
+class HarnessGateTests(unittest.TestCase):
+    """O que o primeiro CI ensinou ao harness (2026-09-18): os testes que
+    medem pixels pulam numa tela em que a maior janela nao cabe, e o `Tk()`
+    ganha uma segunda tentativa. Sem janela: a raiz e um dublê."""
+
+    def test_needs_room_skips_on_a_small_screen_and_runs_on_a_big_one(self):
+        chamadas = []
+
+        class Caso:
+            def __init__(self, largura, altura):
+                self.root = types.SimpleNamespace(
+                    winfo_screenwidth=lambda: largura, winfo_screenheight=lambda: altura
+                )
+
+            def skipTest(self, motivo):
+                raise unittest.SkipTest(motivo)
+
+            @gui_harness.needs_room
+            def medir(self):
+                chamadas.append("mediu")
+
+        with self.assertRaises(unittest.SkipTest) as ctx:
+            Caso(1024, 768).medir()
+        self.assertIn("tela 1024x768", str(ctx.exception))
+        self.assertIn("1100x740", str(ctx.exception))
+        self.assertEqual(chamadas, [])
+        Caso(1920, 1080).medir()
+        self.assertEqual(chamadas, ["mediu"])
+        self.assertEqual(Caso.medir.__name__, "medir", "o nome do teste sobrevive ao decorador")
+
+    def test_the_root_is_created_at_the_second_try_and_a_persistent_failure_propagates(self):
+        raiz = object()
+        with unittest.mock.patch.object(gui_harness.tk, "Tk", side_effect=[tk.TclError("tcl_findLibrary"), raiz]):
+            with unittest.mock.patch.object(gui_harness.time, "sleep"):
+                self.assertIs(gui_harness.criar_root(), raiz)
+        with unittest.mock.patch.object(gui_harness.tk, "Tk", side_effect=tk.TclError("de novo")):
+            with unittest.mock.patch.object(gui_harness.time, "sleep"):
+                with self.assertRaises(tk.TclError):
+                    gui_harness.criar_root()
 
 
 class ProviderDialogTests(MainWindowTestCase):

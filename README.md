@@ -47,6 +47,10 @@ Parte da suite abre as janelas de verdade e clica nos widgets (o editor de
 traducoes, o de glossario e a janela principal). Onde nao houver display, essas
 classes sao puladas e o restante roda normalmente.
 
+Sete testes que medem pixels pulam em telas menores que 1100 x 740 (a maior
+janela nao cabe) — e o caso do runner do GitHub, de 1024 x 768; a mensagem do
+skip diz a tela.
+
 Os testes sem janela estao divididos por dominio — `tests/test_banco.py`,
 `test_ocorrencias.py`, `test_glossario.py`, `test_worker.py`, `test_api.py`,
 `test_ferramentas.py`, `test_pgn.py`, `test_notacao.py`, `test_editor.py`,

