@@ -15,8 +15,10 @@ Tres passos, nesta ordem, parando no primeiro que falhar:
    o motor Claude, em silencio. A variavel `UV_PROJECT_ENVIRONMENT` vale so para
    o processo filho — no PowerShell, defini-la na sessao faria o `uv run` dos
    testes cair depois nesse ambiente sem pytest.
-2. **O instalador**, pelo Inno Setup (`instalador/PGN_Tradutor_Pro.iss`).
-3. **O zip portatil**, pelo `instalador/empacotar-portatil.py`.
+2. **O zip portatil**, pelo `instalador/empacotar-portatil.py` — que antes
+   confere que a pasta do programa so tem o `.exe` e o `_internal`: nenhuma
+   chave de API, banco ou glossario de quem construiu vai junto (I11).
+3. **O instalador**, pelo Inno Setup (`instalador/PGN_Tradutor_Pro.iss`).
 
 Tudo sai em `instalador/saida/`. So usa a biblioteca padrao: roda com qualquer
 Python 3, e o `uv` tem de estar no PATH.
@@ -84,8 +86,12 @@ def main(argv):
         print("ERRO: Inno Setup 6 (ISCC.exe) nao encontrado. Instale-o, ou rode")
         print("com --so-exe para gerar so o executavel.")
         return 1
-    _rodar("instalador (Inno Setup)", [iscc, "/Q", os.path.join("instalador", "PGN_Tradutor_Pro.iss")])
+    # O zip vem ANTES do instalador porque e o `empacotar-portatil.py` que
+    # confere a pasta do programa (so o `.exe` e o `_internal`, garantia I11):
+    # se ela tiver uma chave de API, um banco ou um marcador, nenhuma das duas
+    # entregas sai.
     _rodar("portatil (zip)", [sys.executable, os.path.join("instalador", "empacotar-portatil.py")])
+    _rodar("instalador (Inno Setup)", [iscc, "/Q", os.path.join("instalador", "PGN_Tradutor_Pro.iss")])
 
     # So o que ESTA rodada gravou: a pasta guarda as entregas de versoes
     # anteriores, e lista-las junto misturaria o novo com o velho.

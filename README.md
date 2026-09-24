@@ -143,7 +143,9 @@ explica onde os dados ficam e como atualizar sem perder o acervo.
 > **Nunca ponha um `portatil.txt` dentro de `dist\`.** O instalador empacota
 > aquela pasta inteira, e o marcador faria a versao instalada gravar dentro de
 > `Program Files`. O `empacotar-portatil.py` escreve o marcador direto no zip e
-> se recusa a rodar se achar um solto ali.
+> se recusa a rodar se achar na pasta do programa qualquer coisa alem do `.exe`
+> e do `_internal` — marcador, chave de API, banco, pasta `dados\` (I11). Como o
+> `gerar-entregas.py` faz o zip antes do instalador, a recusa barra os dois.
 
 ### Onde ficam os seus dados
 
@@ -230,6 +232,11 @@ silencio: o instalador pergunta, e numa instalacao silenciosa recusa.
   zip portatil depende de onde for descompactado.
 - **O tabuleiro do editor nao vem no executavel**: o python-chess e GPL e fica de
   fora de proposito (ver "O tabuleiro do editor (opcional)").
+- **Nenhuma chave de API vai junto.** Sem chave o programa traduz pelo Google;
+  para usar Claude, ChatGPT ou DeepSeek, cada usuario grava a propria chave em
+  Configuracoes, e ela fica cifrada para a conta do Windows dele. As entregas
+  0.4.0 foram varridas por formato de chave e pelo valor das chaves da maquina
+  que as construiu (ROADMAP 29.5).
 
 ## Normalizacao de metadados PGN
 

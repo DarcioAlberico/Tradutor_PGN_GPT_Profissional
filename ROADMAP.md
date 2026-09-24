@@ -9530,3 +9530,44 @@ do setuptools e do `--no-dev`, mortas.
   foram movidas para `instalador\saida\anteriores-2026-08-03\`, e as 0.3.0
   geradas neste dia, antes da troca, para a Lixeira. A tag `v0.4.0` marca o
   commit que gerou as entregas.
+
+### 29.5 As chaves de API nao vao nas entregas (I11)
+
+Pedido do usuario, junto com o 0.4.0: "nao e pra mandar as chaves de api
+juntos, os usuarios entram com as deles".
+
+**Como ja era.** As chaves moram na pasta de dados de quem as grava
+(`chaves-api.json`, cifradas pelo DPAPI para aquela conta, K1), e o `.spec` so
+empacota o que lista — nenhum arquivo da pasta de dados. A migracao da primeira
+execucao tambem nao copia chave de uma instalacao anterior: `first_run.USER_FILES`
+nao a tem.
+
+**O que faltava era uma trava.** O instalador e o zip levam
+`dist\PGN_Tradutor_Pro\` inteira, e uma `chaves-api.json`, um banco ou uma pasta
+`dados\` esquecidos ali — por exemplo, depois de abrir o `.exe` de `dist\` em
+modo portatil para testar — iriam para quem recebe. O `empacotar-portatil.py`
+passou a aceitar na pasta do programa SO o `.exe` e o `_internal` (uma lista do
+que pode, e nao do que nao pode: um arquivo de dados novo fica de fora sem
+ninguem lembrar dele), e o `gerar-entregas.py` roda o zip ANTES do instalador:
+se a pasta tiver qualquer outra coisa, nenhuma das duas entregas sai. A regra
+antiga, que so recusava o `portatil.txt`, esta contida nela.
+
+**Conferido nas entregas 0.4.0**, abrindo tudo — o CArchive do `.exe`, o PYZ
+modulo a modulo, o `base_library.zip` e o zip portatil: 3.385 pedacos, 89,5 MB
+descomprimidos. Nenhuma chave pelo FORMATO (`sk-ant-`, `sk-proj-`, `sk-...`) e
+nenhuma pelo VALOR das oito que esta maquina tem (as tres do `chaves-api.json`
+do projeto, decifradas e cifradas, e uma variavel de ambiente); nenhum arquivo
+com nome de dado de usuario. O varredor foi conferido com controles positivos:
+a chave falsa da sonda, dentro do script comprimido do `.exe` dela, e o texto
+`chaves-api.json` dentro dos modulos `api_keys` e `settings_window` do PYZ — os
+dois achados. O `.exe` 0.4.0 aberto na area de trabalho oculta cria a pasta de
+dados SEM `chaves-api.json`, e o LEIA-ME do zip ganhou a secao "CHAVES DE API":
+o programa nao vem com chave, sem chave traduz pelo Google, cada usuario grava
+a propria em Configuracoes, e a chave gravada nao abre em outra maquina ou
+conta.
+
+`DeliverableContentsTests` (5 testes): a pasta so com o programa passa; chave,
+banco, `dados\` e marcador sao todos nomeados; o `main()` do empacotador com uma
+`chaves-api.json` na pasta devolve 1 sem criar nem a pasta de saida; o zip roda
+antes do instalador; a migracao nao traz chave. Tres mutacoes — sem a
+conferencia, a chave permitida na lista, o instalador antes do zip —, mortas.

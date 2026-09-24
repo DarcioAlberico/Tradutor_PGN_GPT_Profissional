@@ -2,6 +2,9 @@
 
 Parte da divisao de `test_core.py` (ROADMAP 28.11); ver `tests/helpers.py`."""
 
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import re
@@ -16,6 +19,7 @@ from pathlib import Path
 
 import tradutor_pgn
 from tradutor_pgn import (
+    api_keys,
     app_paths,
     db_tools,
     first_run,
@@ -1082,6 +1086,80 @@ class BuildRecipeTests(unittest.TestCase):
         build = ci[ci.index("\n  build:"):]
 
         self.assertIn("instalador/gerar-entregas.py --so-exe", build)
+
+
+class DeliverableContentsTests(unittest.TestCase):
+    """Garantia I11: nenhuma chave de API — nem dado nenhum de quem construiu —
+    vai nas entregas; cada usuario grava a propria chave em Configuracoes.
+
+    O instalador e o zip levam a pasta do programa inteira, e quem confere o
+    que ha nela e o `empacotar-portatil.py`, que roda ANTES do instalador e so
+    aceita ali o `.exe` e o `_internal`: uma `chaves-api.json`, um banco ou uma
+    pasta `dados/` esquecidos em `dist/` barram as duas entregas (ROADMAP 29.5).
+    """
+
+    RAIZ = Path(__file__).resolve().parent.parent
+
+    @classmethod
+    def setUpClass(cls):
+        caminho = cls.RAIZ / "instalador" / "empacotar-portatil.py"
+        spec = importlib.util.spec_from_file_location("empacotar_portatil", caminho)
+        cls.empacotador = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.empacotador)
+
+    def _pasta_do_programa(self, tmp, *extras):
+        pasta = Path(tmp) / "PGN_Tradutor_Pro"
+        (pasta / "_internal").mkdir(parents=True)
+        (pasta / "PGN_Tradutor_Pro.exe").write_bytes(b"MZ")
+        for nome in extras:
+            if nome.endswith("/"):
+                (pasta / nome).mkdir()
+            else:
+                (pasta / nome).write_text("{}", encoding="utf-8")
+        return pasta
+
+    def test_the_program_folder_with_only_the_program_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pasta = self._pasta_do_programa(tmp)
+
+            self.assertEqual(self.empacotador.sobras_na_pasta_do_programa(str(pasta)), [])
+
+    def test_keys_data_and_the_marker_are_all_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pasta = self._pasta_do_programa(
+                tmp, api_keys.KEYS_FILENAME, "traducoes.db", "dados/", app_paths.PORTABLE_MARKER
+            )
+
+            self.assertEqual(
+                self.empacotador.sobras_na_pasta_do_programa(str(pasta)),
+                sorted([api_keys.KEYS_FILENAME, "traducoes.db", "dados", app_paths.PORTABLE_MARKER]),
+            )
+
+    def test_no_zip_is_started_when_a_key_file_is_there(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pasta = self._pasta_do_programa(tmp, api_keys.KEYS_FILENAME)
+            saida = Path(tmp) / "saida"
+            with unittest.mock.patch.object(self.empacotador, "DIST", str(pasta)), \
+                    unittest.mock.patch.object(self.empacotador, "SAIDA", str(saida)), \
+                    contextlib.redirect_stdout(io.StringIO()) as relato:
+                codigo = self.empacotador.main()
+
+            self.assertEqual(codigo, 1)
+            self.assertFalse(saida.exists(), "o zip nao pode nem comecar")
+            self.assertIn(api_keys.KEYS_FILENAME, relato.getvalue())
+
+    def test_the_zip_and_its_check_run_before_the_installer(self):
+        roteiro = (self.RAIZ / "instalador" / "gerar-entregas.py").read_text(encoding="utf-8")
+
+        self.assertLess(
+            roteiro.index('_rodar("portatil (zip)"'),
+            roteiro.index('_rodar("instalador (Inno Setup)"'),
+        )
+
+    def test_the_first_run_never_brings_a_key_file_from_beside_the_exe(self):
+        """A migracao de uma instalacao antiga copia o que esta ao lado do
+        `.exe`; uma chave ali nunca pode virar a chave de quem abriu."""
+        self.assertNotIn(api_keys.KEYS_FILENAME, first_run.USER_FILES)
 
 
 class FirstRunTests(unittest.TestCase):
