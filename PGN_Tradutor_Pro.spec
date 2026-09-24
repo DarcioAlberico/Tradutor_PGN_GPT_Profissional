@@ -1,7 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 """Receita do executavel para Windows.
 
-    python -m PyInstaller PGN_Tradutor_Pro.spec
+    python instalador/gerar-entregas.py
+
+O roteiro roda o PyInstaller num ambiente SO de execucao (`build/venv-exe`,
+montado do `uv.lock` com `--no-dev --extra llm`), e nao no interpretador de
+quem chama: o build leva tudo o que o interpretador tiver e a analise alcancar,
+e o `.venv` de desenvolvimento tem o mypy e o pytest (ver `excludes`), enquanto
+um Python global pode ter qualquer coisa.
 
 Sai em `dist/PGN_Tradutor_Pro/`, e a pasta esta COMPLETA — nada precisa ser
 copiado para dentro dela depois (ROADMAP 21). Ate a versao anterior era preciso
@@ -228,17 +234,50 @@ except ImportError:
 else:
     hiddenimports += ["spylls.hunspell"]
 
+# O SDK do Claude (ROADMAP 28.7) e o TERCEIRO import condicional (`import
+# anthropic` dentro das funcoes de `llm_providers`), e o unico que e extra
+# OPCIONAL do projeto: `uv sync` sem `--extra llm` nao o instala. O build do CI
+# saia assim, e no `.exe` escolher o Claude dava "O pacote 'anthropic' nao esta
+# instalado... Instale com: uv sync --extra llm" — um conselho que quem so tem
+# o executavel nao tem como seguir. ChatGPT e DeepSeek falam por `requests` e
+# nao dependem dele. A analise estatica o encontra quando ele esta instalado;
+# o que falta e o aviso quando nao esta.
+try:
+    import anthropic  # noqa: F401
+except ImportError:
+    print(
+        "AVISO: `anthropic` nao esta instalado neste interpretador. O executavel "
+        "sai SEM o motor Claude (ChatGPT e DeepSeek continuam). Construa com "
+        "`--extra llm` (ver o README, secao Executavel)."
+    )
+
 # Excluidos por medicao, e nao por palpite: nenhum dos dois e carregado ao
 # importar o programa, e juntos custavam 36 dos 85 MB do primeiro build. Eles
 # entram como dependencias **opcionais** de quem o programa usa de verdade —
 # numpy pelo PIL, cryptography pelo urllib3 — e as duas funcionam sem eles. O
-# PIL fica: o customtkinter o importa na carga.
+# PIL tambem nao vem mais: o customtkinter o importa num `try`, so para o
+# `CTkImage`, que o programa nao usa, e o ambiente so de execucao nao o tem.
 excludes = ["numpy", "cryptography"]
 # `chess` (python-chess) fica FORA do executavel por licenca: e GPL-3.0-ou-
 # posterior, e o tabuleiro do editor (ROADMAP 28.8) e conforto opcional. Quem
 # roda do fonte e o tem instalado ve o quadro; o `.exe` sai sem ele e a licenca
 # do programa nao muda. O codigo importa o pacote na hora e trata a ausencia.
 excludes += ["chess"]
+# O `setuptools` e do PyInstaller, e nao do programa. Entrava porque `urllib3`
+# e `httpx2` tentam `from backports import zstd` (opcional, num `try`) e a
+# analise achava esse `backports` na copia que o setuptools traz embutida. O
+# custo nao era so de tamanho (130 modulos): junto vinha o gancho
+# `pyi_rth_setuptools`, que importava o setuptools inteiro a CADA abertura do
+# programa, antes da primeira linha dele — ~0,3 s medidos em 2026-09-24. Sem
+# ele o import opcional falha como falha rodando do fonte, e o urllib3 so
+# deixa de oferecer zstd ao servidor.
+excludes += ["setuptools"]
+# As ferramentas do grupo `dev`, para quando o build sair do `.venv` de
+# desenvolvimento em vez do ambiente so de execucao que o README manda usar:
+# imports opcionais do pydantic (o plugin `pydantic.mypy`), do anyio e da linha
+# de comando do httpx2 puxavam o mypy compilado, o pygments e partes do pytest
+# para dentro do pacote — 86 MB contra 80 MB, medido em 2026-09-24.
+excludes += ["mypy", "pytest", "_pytest", "pygments"]
 
 
 a = Analysis(

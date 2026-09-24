@@ -63,10 +63,11 @@ jobs:
       - name: uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Dependencias + PyInstaller
-        run: |
-          uv sync
-          uv run --with pyinstaller python -m PyInstaller --noconfirm PGN_Tradutor_Pro.spec
+      # O MESMO roteiro do build local (ROADMAP 29): ambiente so de execucao
+      # (`--no-dev`) com o extra `llm`. Ate 2026-09-24 era `uv sync` + PyInstaller
+      # — o artefato saia com o mypy e o pytest dentro e sem o SDK do Claude.
+      - name: Executavel (instalador/gerar-entregas.py)
+        run: uv run --no-project python instalador/gerar-entregas.py --so-exe
 
       - name: O exe existe e a pasta esta completa
         shell: pwsh

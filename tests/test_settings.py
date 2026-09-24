@@ -1039,6 +1039,51 @@ class NoConsoleStartupTests(unittest.TestCase):
         self.assertEqual(resultado, "ok circle_shapes", resultado)
 
 
+class BuildRecipeTests(unittest.TestCase):
+    """Garantia I10: o executavel sai de um ambiente SO de execucao, com o SDK do
+    Claude, e sem o que e do build ou do desenvolvimento.
+
+    Medido em 2026-09-24: construido do `.venv` de desenvolvimento, o pacote
+    levava o mypy compilado, o pygments e partes do pytest (86 MB contra 80 MB);
+    o setuptools do proprio PyInstaller entrava com um gancho que o importava a
+    cada abertura (~0,3 s); e o build do CI saia sem o `anthropic` — o Claude
+    aparecia no dialogo do motor e era recusado na primeira traducao
+    (ROADMAP 29).
+    """
+
+    RAIZ = Path(__file__).resolve().parent.parent
+
+    def _ler(self, *partes):
+        return self.RAIZ.joinpath(*partes).read_text(encoding="utf-8")
+
+    def test_the_spec_excludes_setuptools_and_the_dev_tools(self):
+        spec = self._ler("PGN_Tradutor_Pro.spec")
+
+        self.assertIn('excludes += ["setuptools"]', spec)
+        self.assertIn('excludes += ["mypy", "pytest", "_pytest", "pygments"]', spec)
+
+    def test_the_spec_warns_when_the_claude_sdk_is_missing(self):
+        spec = self._ler("PGN_Tradutor_Pro.spec")
+
+        self.assertIn("    import anthropic  # noqa: F401", spec)
+        self.assertIn("AVISO: `anthropic` nao esta instalado", spec)
+
+    def test_the_build_script_uses_a_runtime_only_environment(self):
+        roteiro = self._ler("instalador", "gerar-entregas.py")
+
+        for pedaco in ('"--locked"', '"--no-dev"', '"--extra", "llm"', "UV_PROJECT_ENVIRONMENT=AMBIENTE"):
+            self.assertIn(pedaco, roteiro)
+        # A variavel vai no ambiente do FILHO, e nunca na sessao de quem chamou:
+        # no PowerShell ela faria o `uv run` dos testes cair num ambiente sem pytest.
+        self.assertNotIn("os.environ[\"UV_PROJECT_ENVIRONMENT\"]", roteiro)
+
+    def test_the_ci_builds_with_the_same_script(self):
+        ci = self._ler(".github", "workflows", "testes.yml")
+        build = ci[ci.index("\n  build:"):]
+
+        self.assertIn("instalador/gerar-entregas.py --so-exe", build)
+
+
 class FirstRunTests(unittest.TestCase):
     """A primeira execucao depois de instalar (ROADMAP 21)."""
 

@@ -2458,6 +2458,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | I8 | `spylls` e dependencia declarada (`pyproject.toml`, `uv.lock`), e o `.spec` avisa quando o interpretador do build nao o tem | Bug: `uv sync` abria o programa sem corretor e a suite pulava os testes dele em silencio; o `.exe` so levava o corretor por acaso do interpretador (ROADMAP 28.1) |
 | I7 | O log nomeia o MODO, e nao so a pasta de dados | Risco: um `.exe` portatil e um instalado apontado por `PGN_TRADUTOR_DATA` podem gravar na mesma pasta por motivos diferentes, e so o modo explica o que a proxima atualizacao fara com o acervo |
 | I9 | Sem console, biblioteca que escreve em `sys.stderr` nao derruba a abertura: o ponto de entrada da ao `stderr` `None` um destino mudo antes de qualquer import de terceiros | Bug: o customtkinter faz `sys.stderr.write` quando o Windows recusa as fontes dele (pasta do programa com mais de 188 caracteres); no `.exe` sem console isso era `AttributeError` dentro do import, e o programa nao abria (ROADMAP 29.1) |
+| I10 | O executavel sai de um ambiente so de execucao com o extra `llm` (`instalador\gerar-entregas.py`, tambem no CI), e o `.spec` exclui o setuptools e as ferramentas de desenvolvimento e avisa quando o `anthropic` falta | Bug: construido do `.venv` o pacote levava mypy, pygments e pytest (86 MB contra 80); o setuptools do PyInstaller custava ~0,3 s em toda abertura; o build do CI saia sem o Claude (ROADMAP 29.2) |
 
 ---
 
@@ -2903,6 +2904,11 @@ numero e o do item que o resolve.
   do lado do programa; o que da e instalar em caminho curto. A politica
   corporativa que bloqueia fontes fora de `Windows\Fonts` produz o mesmo efeito
   em qualquer pasta (por leitura, nao medido).
+- **Windows 10 ou 11, 64 bits.** O Python 3.13 embutido importa uma DLL que o
+  Windows 7 nao tem, e nao ha build de 32 bits. Em processador ARM, so o
+  Windows 11, que emula x64.
+- **O executavel nao e assinado**: o SmartScreen avisa na primeira execucao, e
+  antivirus podem desconfiar por heuristica. Assinar exige certificado pago.
 
 **Estrutura**
 

@@ -77,15 +77,24 @@ exige tipos em toda funcao nova deles.
 
 ## Executavel (rodar sem Python instalado)
 
-Gera um `.exe` para Windows que roda em maquinas sem Python. A receita esta em
-[PGN_Tradutor_Pro.spec](PGN_Tradutor_Pro.spec), com o motivo de cada decisao:
+Gera o `.exe` para Windows que roda em maquinas sem Python — e, com ele, o
+instalador e o zip portatil — num comando so:
 
 ```powershell
-python -m pip install pyinstaller
-python -m PyInstaller --noconfirm .\PGN_Tradutor_Pro.spec
+python .\instalador\gerar-entregas.py
 ```
 
-Sai em `dist\PGN_Tradutor_Pro\` (~77 MB), e **a pasta esta completa** — nao copie
+O roteiro ([instalador/gerar-entregas.py](instalador/gerar-entregas.py)) roda o
+PyInstaller num ambiente **so de execucao**, `build\venv-exe`, montado do
+`uv.lock` com `--no-dev --extra llm`: o executavel leva o SDK do Claude e nada
+das ferramentas de desenvolvimento. Nao rode o PyInstaller direto de um Python
+qualquer — ele leva tudo o que o interpretador tiver e a analise alcancar, e o
+`.venv` de desenvolvimento punha o mypy e o pytest dentro do pacote (ROADMAP
+29.2). Precisa do `uv` no PATH e, para o instalador, do Inno Setup 6; com
+`--so-exe` ele para depois do executavel. A receita do PyInstaller esta em
+[PGN_Tradutor_Pro.spec](PGN_Tradutor_Pro.spec), com o motivo de cada decisao.
+
+Sai em `dist\PGN_Tradutor_Pro\` (~79 MB), e **a pasta esta completa** — nao copie
 nada para dentro dela. O glossario, o dicionario de grafias, a semente e a lista
 de termos suspeitos ja vao embutidos em `_internal\`.
 
@@ -115,7 +124,8 @@ padrao do PyInstaller.
 ### As duas entregas
 
 O mesmo executavel vira duas coisas. **A diferenca entre elas e um arquivo
-vazio** — o `portatil.txt` ao lado do `.exe`:
+vazio** — o `portatil.txt` ao lado do `.exe`. O `gerar-entregas.py` gera as
+duas; os passos, separados, sao:
 
 ```powershell
 & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" .\instalador\PGN_Tradutor_Pro.iss
@@ -166,7 +176,7 @@ A receita esta em [instalador\PGN_Tradutor_Pro.iss](instalador/PGN_Tradutor_Pro.
 ISCC.exe .\instalador\PGN_Tradutor_Pro.iss
 ```
 
-Sai em `instalador\saida\` (~23 MB). Ele instala por usuario (sem pedir
+Sai em `instalador\saida\` (~26 MB). Ele instala por usuario (sem pedir
 administrador), cria os atalhos, **nao distribui nenhum arquivo de dados** e, ao
 desinstalar, pergunta antes de apagar a pasta de dados — com "Nao" como resposta
 padrao. Numa desinstalacao silenciosa nao ha pergunta, e os dados ficam.
@@ -208,13 +218,18 @@ silencio: o instalador pergunta, e numa instalacao silenciosa recusa.
   primeira execucao ("Windows protegeu o computador" -> "Mais informacoes" ->
   "Executar assim mesmo"), e alguns antivirus marcam executaveis do PyInstaller
   por heuristica. Assinar exige um certificado de codigo pago.
-- **E especifico de Windows x64**, porque o PyInstaller empacota para a
-  plataforma em que roda. Para outra plataforma, o build tem de acontecer nela.
+- **Roda em Windows 10 ou 11 de 64 bits sem instalar mais nada**: o Python, o
+  runtime do Visual C++ e o Tcl/Tk vao dentro da pasta (conferido binario a
+  binario, ROADMAP 29.3). Nao roda no Windows 7 nem em Windows de 32 bits; em
+  processador ARM, so no Windows 11, que emula x64. O PyInstaller empacota para
+  a plataforma em que roda: para outra, o build tem de acontecer nela.
 - **Prefira um caminho curto para a pasta do programa.** Com mais de 188
   caracteres o Windows recusa as fontes do customtkinter, e o programa abre com
   os cantos dos botoes um pouco serrilhados (ROADMAP 29.1). O instalador poe o
   programa em `%LOCALAPPDATA%\Programs` (ou em `Program Files`), longe disso; o
   zip portatil depende de onde for descompactado.
+- **O tabuleiro do editor nao vem no executavel**: o python-chess e GPL e fica de
+  fora de proposito (ver "O tabuleiro do editor (opcional)").
 
 ## Normalizacao de metadados PGN
 

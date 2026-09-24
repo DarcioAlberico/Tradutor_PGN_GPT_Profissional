@@ -9459,3 +9459,70 @@ customtkinter forcado a falhar — o `sys.stderr.write` que executa e o de
 producao, e o teste confere que a linha seguinte a ele rodou. Tres mutacoes:
 sem o conserto, e com o conserto DEPOIS do import do customtkinter, mortas;
 estender o conserto ao `stdout`, viva — e o controle, porque nao quebra nada.
+
+### 29.2 O build sai de um ambiente so de execucao (I10)
+
+O README mandava `python -m pip install pyinstaller` e `python -m PyInstaller`,
+e o PyInstaller leva tudo o que o interpretador tiver e a analise alcancar.
+Medido:
+
+| construido de | pacote | o que ia junto sem ninguem pedir |
+| --- | --- | --- |
+| `.venv` de desenvolvimento | 86 MB | mypy compilado (pelo plugin `pydantic.mypy`), pygments (pela linha de comando do httpx2), partes do pytest (pelo anyio) |
+| ambiente so de execucao | 80 MB | o setuptools do proprio PyInstaller |
+| idem, com o setuptools excluido | 79 MB | — |
+
+- **O setuptools e do PyInstaller**, e entrava porque `urllib3` e `httpx2`
+  tentam `from backports import zstd` e a analise achava esse `backports` na
+  copia embutida do setuptools. Junto vinha o gancho `pyi_rth_setuptools`, que
+  importa o setuptools inteiro **a cada abertura** do programa: ~0,3 s medidos
+  (`-X importtime`, tres rodadas). Excluido no `.spec`.
+- **O SDK do Claude faltava no build do CI** (`uv sync` sem `--extra llm`): o
+  Claude aparecia no dialogo do motor e a traducao era recusada com "Instale
+  com: uv sync --extra llm" — conselho que quem so tem o `.exe` nao tem como
+  seguir. O `.spec` agora avisa quando ele falta, como ja avisava do `spylls`
+  (I8).
+- **Um comando so**: `python instalador\gerar-entregas.py` monta
+  `build\venv-exe` a partir do `uv.lock` (`--no-dev --extra llm`), roda o
+  PyInstaller nele, compila o instalador e empacota o portatil. A variavel
+  `UV_PROJECT_ENVIRONMENT` vai no ambiente do processo filho e nunca na sessao:
+  no PowerShell, defini-la a mao faria o `uv run` dos testes cair depois num
+  ambiente sem pytest. O CI usa o mesmo roteiro (`--so-exe`).
+
+`BuildRecipeTests` (4 testes) guarda o `.spec`, o roteiro e o CI; as mutacoes
+do setuptools e do `--no-dev`, mortas.
+
+### 29.3 O que "qualquer maquina" quer dizer, medido
+
+- **Nada fora da pasta.** Auditoria das tabelas de importacao dos 95 binarios
+  do pacote (normal e delay-load, com `pefile`): todos x64; o que nao esta no
+  pacote e DLL do proprio Windows (21, conferidas pelo recurso de versao) ou API
+  set. O runtime do Visual C++ (`vcruntime140*.dll`) e o UCRT vao dentro — a
+  maquina nao precisa do redistribuivel. O unico apontamento, `propsys.dll` (de
+  `_wmi.pyd`), e falso: e componente do Windows desde o Vista e so tem "Windows
+  Search" no nome do produto.
+- **Windows 10 ou 11, 64 bits.** O Python 3.13 embutido importa
+  `api-ms-win-core-path-l1-1-0.dll`, que o Windows 7 nao tem; nao ha build de
+  32 bits. Em PC com processador ARM, so o Windows 11, que emula x64.
+- **Sem Python, sem uv, sem nada da maquina de desenvolvimento.** O `.exe` foi
+  aberto numa area de trabalho oculta do Windows (`CreateDesktop`: nada na tela,
+  foco intocado), com o PATH so das pastas do Windows, sem `PYTHON*`, `TCL*` nem
+  chaves de API, e `APPDATA`/`TEMP` numa pasta de teste. Instalado e portatil,
+  com e sem acento no caminho do programa, com acento no `TEMP` e na pasta de
+  dados: janela em 1,0 s, glossario inicial instalado, e `WM_CLOSE` fecha com
+  codigo 0.
+- **Por dentro do pacote**, uma sonda com o mesmo grafo de modulos do programa:
+  o corretor carrega o `pt_BR` (2,6 s) e reconhece "posição"; o `chardet`
+  detecta cp1252; o Tcl 8.6.15 e o do proprio pacote; OpenSSL 3.0.15; HTTPS de
+  verdade pelo `requests` (o Google devolveu "verificar") e pelo SDK do Claude
+  (401 com uma chave invalida, de proposito); python-chess ausente, como a
+  licenca pede.
+
+### 29.4 O que continua como estava
+
+- **Nao assinado**: o SmartScreen avisa na primeira execucao (README).
+- **A versao continua 0.3.0**, o numero da tag `v0.3.0` (2026-07-30), com 34
+  commits a mais. As entregas de agosto foram movidas para
+  `instalador\saida\anteriores-2026-08-03\` em vez de sobrescritas, porque tem
+  o mesmo nome. Subir a versao e decisao do usuario: duas linhas e reconstruir
+  (I5).
