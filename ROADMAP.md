@@ -9408,3 +9408,54 @@ backup NOVO restaurado num programa VELHO carimba `user_version` para baixo
 sem avisar — limite pre-existente que dois schemas novos tornam mais
 provavel, e que fica registrado na SPEC 10. **O 10 e de Z5 e o 11 de 28.8
 (os dois em 2026-09-15).**
+
+---
+
+## 29. O executavel para qualquer maquina Windows — CONCLUIDO (2026-09-24)
+
+Pedido do usuario: "cria o executavel pra rodar em qualquer maquina windows". O
+ultimo build era de 2026-08-03 (secao 27) e nao tinha nada da secao 28. Refazer
+o build foi a parte facil; o que esta secao registra e o que so apareceu rodando
+o `.exe` do jeito que uma maquina sem Python o roda.
+
+### 29.1 Uma pasta funda derrubava o programa na abertura (I9)
+
+O zip portatil extraido numa pasta de 191 caracteres **nao abria**: o PyInstaller
+mostrava "Unhandled exception in script" com `'NoneType' object has no attribute
+'write'`, e nada do programa chegava a rodar — nem a pasta `dados\` era criada.
+A mesma entrega numa pasta rasa abria em 1,0 s.
+
+A cadeia, com o traceback tirado de uma sonda sem console no mesmo caminho:
+
+1. o customtkinter, **no proprio import**, registra as fontes dele no Windows
+   (`AddFontResourceExW`);
+2. o Windows so registra fonte cujo caminho tem ate **255 caracteres** — medido
+   com o `.otf` dele em pastas de profundidade crescente: 255 registra, 257 nao
+   —, e a `CustomTkinter_shapes_font.otf` fica 67 caracteres dentro da pasta do
+   programa; ou seja, **pasta com mais de 188 caracteres**;
+3. quando o registro falha, o customtkinter avisa com `sys.stderr.write(...)` —
+   e no `.exe` sem console (e no `pythonw`) `sys.stderr` e `None`. O
+   `AttributeError` subia de dentro do import.
+
+O elo que e defeito e o terceiro. Os dois primeiros so pioram o desenho: sem a
+fonte de formas o customtkinter desenha cantos e circulos de outro jeito, um
+pouco serrilhado, e o programa funciona igual. Por leitura, e nao medido: a
+politica de Windows corporativo que bloqueia fontes fora de `Windows\Fonts`
+faz o passo 2 falhar em QUALQUER pasta — e derrubava o programa em toda
+maquina com ela ligada.
+
+**O conserto** fica no lugar mais cedo possivel: a primeira coisa do
+`PGN_Tradutor_Pro.py`, antes de qualquer import de terceiros, da ao
+`sys.stderr` um destino mudo (`os.devnull`) quando ele e `None`. So o `stderr`:
+o `stdout` `None` e como o glossario e as configuracoes sabem que nao ha
+console (S5), e nenhuma dependencia do pacote escreve direto nele — conferido
+por busca nas 24 que vao no `.exe`; as unicas escritas diretas em fluxo padrao
+sao quatro avisos do customtkinter, todos em `stderr`.
+
+**Verificado** com o `.exe` de verdade no mesmo caminho (abre em 1,0 s, cria
+`dados\`, fecha com codigo 0) e pela suite: `NoConsoleStartupTests` roda o ponto
+de entrada num processo filho SEM `stderr`, com o registro de fontes do
+customtkinter forcado a falhar — o `sys.stderr.write` que executa e o de
+producao, e o teste confere que a linha seguinte a ele rodou. Tres mutacoes:
+sem o conserto, e com o conserto DEPOIS do import do customtkinter, mortas;
+estender o conserto ao `stdout`, viva — e o controle, porque nao quebra nada.

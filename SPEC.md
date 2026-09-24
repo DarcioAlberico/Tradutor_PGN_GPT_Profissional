@@ -2457,6 +2457,7 @@ o intervalo e exatamente `TRANSLATION_REQUEST_DELAY_SECONDS`, como antes.
 | I6 | A entrega portatil e a instalavel sao o MESMO executavel, e o que as separa e um arquivo ao lado dele | Risco: dois builds seriam duas coisas para testar, e a que ninguem roda quebra primeiro. O marcador nunca entra em `dist\` — o `.iss` empacota a pasta inteira, e ele faria a versao INSTALADA gravar dentro de `Program Files` |
 | I8 | `spylls` e dependencia declarada (`pyproject.toml`, `uv.lock`), e o `.spec` avisa quando o interpretador do build nao o tem | Bug: `uv sync` abria o programa sem corretor e a suite pulava os testes dele em silencio; o `.exe` so levava o corretor por acaso do interpretador (ROADMAP 28.1) |
 | I7 | O log nomeia o MODO, e nao so a pasta de dados | Risco: um `.exe` portatil e um instalado apontado por `PGN_TRADUTOR_DATA` podem gravar na mesma pasta por motivos diferentes, e so o modo explica o que a proxima atualizacao fara com o acervo |
+| I9 | Sem console, biblioteca que escreve em `sys.stderr` nao derruba a abertura: o ponto de entrada da ao `stderr` `None` um destino mudo antes de qualquer import de terceiros | Bug: o customtkinter faz `sys.stderr.write` quando o Windows recusa as fontes dele (pasta do programa com mais de 188 caracteres); no `.exe` sem console isso era `AttributeError` dentro do import, e o programa nao abria (ROADMAP 29.1) |
 
 ---
 
@@ -2891,6 +2892,17 @@ numero e o do item que o resolve.
   7.487 comentarios do PGN real ficam sem FEN (o parser os pendura num lance
   nulo `--`), e a memoria de pico do calculo e a da MAIOR partida do arquivo
   mais duas copias do texto (16 MB no PGN de 842 KB). (ROADMAP 28.8)
+
+**Executavel (ROADMAP 29)**
+
+- **Pasta do programa com mais de 188 caracteres**: o Windows nao registra as
+  fontes do customtkinter (o `AddFontResourceExW` recusa caminho de arquivo
+  acima de 255 caracteres, medido; a fonte de formas fica 67 caracteres dentro
+  da pasta). O programa abre (I9), mas com os cantos e os circulos desenhados
+  sem a fonte — um pouco serrilhados. O limite e do Windows, e nao ha conserto
+  do lado do programa; o que da e instalar em caminho curto. A politica
+  corporativa que bloqueia fontes fora de `Windows\Fonts` produz o mesmo efeito
+  em qualquer pasta (por leitura, nao medido).
 
 **Estrutura**
 

@@ -5,8 +5,10 @@ Parte da divisao de `test_core.py` (ROADMAP 28.11); ver `tests/helpers.py`."""
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 import unittest.mock
@@ -957,6 +959,84 @@ class VersionTests(unittest.TestCase):
         fonte = (self.RAIZ / "tradutor_pgn" / "app.py").read_text(encoding="utf-8")
 
         self.assertIn('title(f"PGN Tradutor Pro {__version__}")', fonte)
+
+
+class NoConsoleStartupTests(unittest.TestCase):
+    """Garantia I9: sem console, biblioteca que escreve em `sys.stderr` nao
+    derruba a abertura.
+
+    No `.exe` (e no `pythonw`) `sys.stderr` e `None`, e o customtkinter escreve
+    avisos direto nele — inclusive DURANTE o import, quando o Windows recusa as
+    fontes que ele registra. Medido em 2026-09-24: o zip portatil extraido numa
+    pasta de 191 caracteres nao abria ("Unhandled exception in script": `'NoneType'
+    object has no attribute 'write'`). O Windows so registra fonte cujo caminho
+    tem ate 255 caracteres, e a do customtkinter fica 67 caracteres dentro da
+    pasta do programa (ROADMAP 29).
+
+    O teste reproduz a falha sem janela e sem pasta funda: um processo filho sem
+    `stderr` roda o ponto de entrada com o registro de fontes do customtkinter
+    forcado a falhar — e o `sys.stderr.write` que executa e o de producao.
+    """
+
+    RAIZ = Path(__file__).resolve().parent.parent
+
+    FILHO = textwrap.dedent(
+        """
+        import importlib.abc, importlib.machinery, runpy, sys, traceback
+
+        raiz, relatorio = sys.argv[1], sys.argv[2]
+        sys.path.insert(0, raiz)
+
+        class FontesRecusadas(importlib.abc.MetaPathFinder):
+            # Carrega o font_manager de verdade e so troca o registro de fontes
+            # por um que falha, como o Windows faz com caminho longo demais.
+            ALVO = "customtkinter.windows.widgets.font.font_manager"
+
+            def find_spec(self, nome, caminho, alvo=None):
+                if nome != self.ALVO:
+                    return None
+                spec = importlib.machinery.PathFinder.find_spec(nome, caminho)
+                executar = spec.loader.exec_module
+
+                def exec_module(modulo):
+                    executar(modulo)
+                    modulo.FontManager.load_font = staticmethod(lambda *a, **k: False)
+
+                spec.loader.exec_module = exec_module
+                return spec
+
+        sys.meta_path.insert(0, FontesRecusadas())
+        sys.stderr = None  # o que o `.exe` sem console e o `pythonw` tem
+        try:
+            runpy.run_path(raiz + "/PGN_Tradutor_Pro.py", run_name="sem_main")
+            from customtkinter.windows.widgets.core_rendering import DrawEngine
+            resultado = "ok " + DrawEngine.preferred_drawing_method
+        except BaseException:
+            resultado = traceback.format_exc()
+        with open(relatorio, "w", encoding="utf-8") as saida:
+            saida.write(resultado)
+        """
+    )
+
+    def test_the_entry_point_survives_customtkinter_warning_without_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            relatorio = os.path.join(tmp, "relatorio.txt")
+            processo = subprocess.run(
+                [sys.executable, "-c", self.FILHO, str(self.RAIZ), relatorio],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            self.assertTrue(
+                os.path.exists(relatorio),
+                f"o filho nao chegou ao fim (codigo {processo.returncode}): "
+                f"{processo.stdout} {processo.stderr}",
+            )
+            resultado = Path(relatorio).read_text(encoding="utf-8")
+
+        # `circle_shapes` prova que o aviso de producao foi escrito: e a linha
+        # seguinte ao `sys.stderr.write` no customtkinter.
+        self.assertEqual(resultado, "ok circle_shapes", resultado)
 
 
 class FirstRunTests(unittest.TestCase):

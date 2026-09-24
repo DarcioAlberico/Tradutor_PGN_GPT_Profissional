@@ -210,6 +210,11 @@ silencio: o instalador pergunta, e numa instalacao silenciosa recusa.
   por heuristica. Assinar exige um certificado de codigo pago.
 - **E especifico de Windows x64**, porque o PyInstaller empacota para a
   plataforma em que roda. Para outra plataforma, o build tem de acontecer nela.
+- **Prefira um caminho curto para a pasta do programa.** Com mais de 188
+  caracteres o Windows recusa as fontes do customtkinter, e o programa abre com
+  os cantos dos botoes um pouco serrilhados (ROADMAP 29.1). O instalador poe o
+  programa em `%LOCALAPPDATA%\Programs` (ou em `Program Files`), longe disso; o
+  zip portatil depende de onde for descompactado.
 
 ## Normalizacao de metadados PGN
 
