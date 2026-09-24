@@ -24,4 +24,4 @@ do instalador querem numeros, e um `0.3.0-beta` teria de ser traduzido em dois
 lugares diferentes para caber.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

@@ -201,7 +201,7 @@ seu acervo como cobaia.
 Ela vive num lugar so, `tradutor_pgn/__init__.py`:
 
 ```python
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 ```
 
 Dela saem o titulo da janela, o cabecalho do TMX exportado, o recurso de versao

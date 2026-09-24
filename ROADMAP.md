@@ -9521,8 +9521,12 @@ do setuptools e do `--no-dev`, mortas.
 ### 29.4 O que continua como estava
 
 - **Nao assinado**: o SmartScreen avisa na primeira execucao (README).
-- **A versao continua 0.3.0**, o numero da tag `v0.3.0` (2026-07-30), com 34
-  commits a mais. As entregas de agosto foram movidas para
-  `instalador\saida\anteriores-2026-08-03\` em vez de sobrescritas, porque tem
-  o mesmo nome. Subir a versao e decisao do usuario: duas linhas e reconstruir
-  (I5).
+- **A versao subiu para 0.4.0**, a pedido do usuario, no mesmo dia: o codigo
+  tinha 34 commits a mais que a tag `v0.3.0` (2026-07-30), e o build de agosto,
+  com o mesmo numero, esta instalado na maquina de desenvolvimento — o
+  instalador novo o substituiria sem que o numero dissesse nada. Foram as duas
+  linhas de I5 e um `uv lock` (o `uv.lock` guarda a versao do projeto, e o
+  `--locked` do roteiro recusa um lock desatualizado). As entregas de agosto
+  foram movidas para `instalador\saida\anteriores-2026-08-03\`, e as 0.3.0
+  geradas neste dia, antes da troca, para a Lixeira. A tag `v0.4.0` marca o
+  commit que gerou as entregas.

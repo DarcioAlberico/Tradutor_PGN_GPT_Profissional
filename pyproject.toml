@@ -1,6 +1,6 @@
 [project]
 name = "pgn-tradutor-pro"
-version = "0.3.0"  # espelha tradutor_pgn/__version__ (um teste guarda os dois)
+version = "0.4.0"  # espelha tradutor_pgn/__version__ (um teste guarda os dois)
 description = "Aplicacao para traduzir comentarios PGN com cache SQLite e glossario."
 readme = "README.md"
 requires-python = ">=3.10"  # o codigo roda em 3.13 (.python-version); 3.8 nunca foi testado
