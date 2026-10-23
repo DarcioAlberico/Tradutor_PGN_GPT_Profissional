@@ -15,48 +15,29 @@ import sys
 from .app_config import LANGUAGE_NAMES
 from .app_paths import data_path
 from .backup_retention import prune_glossary_backups
+from .glossary_types import (
+    GLOSSARY_PRIORITY_DEFAULT as GLOSSARY_PRIORITY_DEFAULT,
+    GLOSSARY_RULE_AUTOMATIC as GLOSSARY_RULE_AUTOMATIC,
+    GLOSSARY_RULE_CLEANUP as GLOSSARY_RULE_CLEANUP,
+    GLOSSARY_RULE_SUGGESTION as GLOSSARY_RULE_SUGGESTION,
+    GLOSSARY_RULE_TYPES as GLOSSARY_RULE_TYPES,
+    GLOSSARY_RULE_TYPE_ALIASES as GLOSSARY_RULE_TYPE_ALIASES,
+    GLOSSARY_SCOPE_ALL as GLOSSARY_SCOPE_ALL,
+    GLOSSARY_SCOPE_ANY as GLOSSARY_SCOPE_ANY,
+    GLOSSARY_SCOPE_SEPARATOR as GLOSSARY_SCOPE_SEPARATOR,
+    GLOSSARY_SCOPE_VARIABLES as GLOSSARY_SCOPE_VARIABLES,
+    _normalize_rule_type as _normalize_rule_type,
+    _rule_type_alias as _rule_type_alias,
+    normalize_glossary_priority as normalize_glossary_priority,
+    normalize_glossary_scope as normalize_glossary_scope,
+    normalize_glossary_text as normalize_glossary_text,
+)
 
 
 SUBSTITUTION_VARIABLES = {"substituições", "substituicoes"}
-GLOSSARY_RULE_SUGGESTION = "suggestion"
-GLOSSARY_RULE_CLEANUP = "cleanup"
-GLOSSARY_RULE_AUTOMATIC = "automatic"
-GLOSSARY_RULE_TYPES = (
-    GLOSSARY_RULE_SUGGESTION,
-    GLOSSARY_RULE_CLEANUP,
-    GLOSSARY_RULE_AUTOMATIC,
-)
 GLOSSARY_CSV_HEADERS = ["original", "replacement", "type", "priority", "lang"]
 GLOSSARY_DB_FILENAME = "glossario.db"
 GLOSSARY_SEED_FILENAME = "Substituicoes-semente.txt"
-
-# Prioridade explicita (ROADMAP 1.5, parte 2). Zero e "sem opiniao", e e o valor
-# de toda regra que nao foi tocada — por isso o formato do arquivo so escreve o
-# campo quando ele nao e zero: um glossario de 7 mil regras nao muda de tamanho
-# por causa de uma decisao tomada em quatro delas.
-GLOSSARY_PRIORITY_DEFAULT = 0
-
-# ============================================================================
-# Escopo de idioma (garantia S11, ROADMAP 15)
-#
-# O escopo nomeia **o idioma de DESTINO** para o qual a regra vale — `'pt'` —, ou
-# o par inteiro quando o erro e daquela traducao especifica — `'en>pt'`. Vazio
-# vale para todo par, que e o comportamento que o programa sempre teve.
-#
-# **Destino, e nao "o idioma do texto que a regra le".** A segunda leitura e mais
-# bonita (uma regra de limpeza le o comentario original, que esta no idioma de
-# ORIGEM) e e uma armadilha: um arquivo que declara `escopo = 'pt'` para as
-# milhares de regras que corrigem portugues desligaria, em silencio, todas as
-# regras de limpeza numa execucao en -> pt. Uniforme e sem excecao por tipo e o
-# que se pode explicar em uma frase.
-GLOSSARY_SCOPE_ALL = ""
-# Como se ESCREVE "vale para todo par" numa regra, quando o arquivo declara um
-# padrao. Sem isto nao haveria como dizer "esta e a excecao global" — a ausencia
-# do campo passou a significar "herda o padrao".
-GLOSSARY_SCOPE_ANY = "*"
-GLOSSARY_SCOPE_SEPARATOR = ">"
-# Nomes aceitos para o padrao do arquivo.
-GLOSSARY_SCOPE_VARIABLES = {"escopo", "escopo_padrao", "scope", "default_scope"}
 
 # Sobe quando o `glossario.db` ganha coluna, e tambem quando muda o significado
 # das marcas que dizem de onde ele veio. Um banco gravado por uma versao anterior
@@ -211,46 +192,6 @@ def _read_default_scope(code, path):
     return GLOSSARY_SCOPE_ALL
 
 
-# Como o tipo pode estar escrito no arquivo, que e editado a mao. O masculino
-# (`automatico`) faltava e e o erro mais facil de cometer — a regra virava
-# sugestao, deixava de rodar depois da API, e nada avisava (ROADMAP 14.6).
-GLOSSARY_RULE_TYPE_ALIASES = {
-    "sugestao": GLOSSARY_RULE_SUGGESTION,
-    "sugestão": GLOSSARY_RULE_SUGGESTION,
-    "sugestões": GLOSSARY_RULE_SUGGESTION,
-    "suggestion": GLOSSARY_RULE_SUGGESTION,
-    "limpeza": GLOSSARY_RULE_CLEANUP,
-    "limpar": GLOSSARY_RULE_CLEANUP,
-    "cleanup": GLOSSARY_RULE_CLEANUP,
-    "clean": GLOSSARY_RULE_CLEANUP,
-    "auto": GLOSSARY_RULE_AUTOMATIC,
-    "automatica": GLOSSARY_RULE_AUTOMATIC,
-    "automática": GLOSSARY_RULE_AUTOMATIC,
-    "automatico": GLOSSARY_RULE_AUTOMATIC,
-    "automático": GLOSSARY_RULE_AUTOMATIC,
-    "automatic": GLOSSARY_RULE_AUTOMATIC,
-}
-
-
-def _rule_type_alias(value):
-    """O tipo canonico de `value`, ou `None` quando ele nao e reconhecido.
-
-    Separado de `_normalize_rule_type` porque as duas perguntas sao diferentes:
-    aquela responde "com que tipo eu seguo em frente" (e o padrao serve), esta
-    responde "isto e um tipo que eu conheco" — que e o que permite avisar em vez
-    de degradar em silencio (garantia S13).
-    """
-    texto = "" if value is None else str(value).strip()
-    if not texto:
-        return None
-    canonico = GLOSSARY_RULE_TYPE_ALIASES.get(texto.casefold(), texto)
-    return canonico if canonico in GLOSSARY_RULE_TYPES else None
-
-
-def _normalize_rule_type(rule_type):
-    return _rule_type_alias(rule_type) or GLOSSARY_RULE_SUGGESTION
-
-
 def _raw_rule_type(item):
     """O tipo COMO ESTA ESCRITO na entrada, sem normalizar."""
     if isinstance(item, dict):
@@ -301,57 +242,12 @@ def _entry_rule_type(item):
     return GLOSSARY_RULE_SUGGESTION
 
 
-def normalize_glossary_priority(value):
-    """Prioridade como inteiro, ou o padrao quando o valor nao serve.
-
-    O `Substituicoes.txt` e o CSV sao editaveis a mao e sobrevivem a versoes do
-    programa: uma prioridade escrita como `"alta"` nao pode virar excecao no
-    meio da carga do glossario. Vale a mesma regra do `rule_type` — o que nao da
-    para entender vira o padrao.
-    """
-    if isinstance(value, bool) or value is None:
-        return GLOSSARY_PRIORITY_DEFAULT
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return GLOSSARY_PRIORITY_DEFAULT
-
-
 def _entry_priority(item):
     if isinstance(item, dict):
         return normalize_glossary_priority(item.get("priority"))
     if isinstance(item, (list, tuple)) and len(item) >= 4:
         return normalize_glossary_priority(item[3])
     return GLOSSARY_PRIORITY_DEFAULT
-
-
-def normalize_glossary_scope(value):
-    """O escopo como texto canonico: `''`, `'pt'` ou `'en>pt'`.
-
-    `'*'` vira `''` — as duas grafias dizem "todo par", e uma delas existe so
-    porque a ausencia do campo passou a significar "herda o padrao do arquivo".
-
-    Um codigo que o programa nao conhece **e preservado como esta**, e nao
-    degradado para "todo par". Degradar aqui seria o oposto do que a intencao
-    diz: quem escreveu `'ptt'` quis restringir, e transformar isso em "vale para
-    todos" espalharia a regra em vez de limita-la. A regra simplesmente nao casa
-    par nenhum, e a carga avisa (mesma escolha da garantia S13).
-    """
-    texto = "" if value is None else str(value).strip()
-    if not texto or texto == GLOSSARY_SCOPE_ANY:
-        return GLOSSARY_SCOPE_ALL
-    if GLOSSARY_SCOPE_SEPARATOR in texto:
-        origem, destino = texto.split(GLOSSARY_SCOPE_SEPARATOR, 1)
-        origem = origem.strip()
-        destino = destino.strip()
-        if origem == GLOSSARY_SCOPE_ANY:
-            origem = ""
-        if destino == GLOSSARY_SCOPE_ANY:
-            destino = ""
-        if not origem and not destino:
-            return GLOSSARY_SCOPE_ALL
-        return f"{origem}{GLOSSARY_SCOPE_SEPARATOR}{destino}"
-    return texto
 
 
 def scope_languages(scope):
@@ -1465,19 +1361,6 @@ def deduplicate_glossary_entries(entries):
         seen.add(pair)
         result.append(entry if keep_details else pair)
     return result
-
-
-def normalize_glossary_text(value):
-    """Remove espacos nas pontas de um lado da regra.
-
-    Um espaco no fim do padrao e consumido pelo casamento, mas a substituicao
-    normalmente nao o devolve — o resultado cola duas palavras
-    (`' a-coluna '` -> `' coluna a'` transforma "na a-coluna aberta" em
-    "na coluna aaberta"). Um espaco no inicio tambem desliga a checagem de
-    fronteira de palavra daquele lado. Nenhum dos dois efeitos e intencional,
-    entao as pontas sao normalizadas na gravacao.
-    """
-    return "" if value is None else str(value).strip()
 
 
 def add_glossary_entry(

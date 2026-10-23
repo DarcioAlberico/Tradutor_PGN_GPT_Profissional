@@ -135,6 +135,11 @@ def data_path(*partes):
     return os.path.join(data_dir(), *partes)
 
 
+def glossary_catalog_path():
+    """Catalogo autoritativo, isolado do cache legado `glossario.db`."""
+    return data_path("glossario-v2.db")
+
+
 def ensure_data_dir():
     """Garante que a pasta de dados existe, e devolve o caminho dela.
 
