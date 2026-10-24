@@ -345,6 +345,30 @@ class GlossaryCatalogConcurrencyTests(GlossaryCatalogMutationTests):
                          [("suggestion", "pt", 0), ("suggestion", "it", 1), ("cleanup", "pt", 2)])
         self.assertEqual(result.snapshot.entries[0].priority, 0)
 
+    def test_deduplicate_persists_normalized_survivor_before_restoring_unique_index(self):
+        with closing(sqlite3.connect(self.catalog.db_path)) as conn, conn:
+            conn.execute("DROP INDEX idx_glossary_canonical_identity")
+            conn.executemany(
+                """INSERT INTO glossary_entries
+                   (stable_id, original_text, replacement_text, rule_type, scope, position)
+                   VALUES (?, ?, ?, 'suggestion', ?, ?)""",
+                [
+                    ("raw-first", " knight ", " cavalo ", " pt ", 0),
+                    ("normalized-second", "knight", "cavalo", "pt", 1),
+                ],
+            )
+        result = self.catalog.deduplicate(1)
+        self.assertEqual([(entry.stable_id, entry.revision, entry.position)
+                          for entry in result.snapshot.entries], [("raw-first", 2, 0)])
+        self.assertEqual(result.snapshot.catalog_revision, 2)
+        with closing(sqlite3.connect(self.catalog.db_path)) as conn:
+            stored = conn.execute(
+                "SELECT original_text, replacement_text, scope FROM glossary_entries"
+            ).fetchone()
+        self.assertEqual(stored, ("knight", "cavalo", "pt"))
+        with self.assertRaises(glossary_catalog.GlossaryDuplicateError):
+            self.catalog.add(self.draft(scope="pt"), 2)
+
 
 class GlossaryCatalogMigrationTests(unittest.TestCase):
     def setUp(self):

@@ -369,7 +369,15 @@ class GlossaryCatalog:
             conn.execute("BEGIN IMMEDIATE")
             self._require_catalog_revision(conn, expected_catalog_revision)
             seen: set[tuple[str, str, str, str]] = set()
-            for entry in self._snapshot(conn).entries:
+            normalize: list[GlossaryEntry] = []
+            rows = conn.execute(
+                """SELECT stable_id, original_text, replacement_text, rule_type, scope,
+                          priority, position, revision, created_at, updated_at
+                   FROM glossary_entries ORDER BY position, id"""
+            ).fetchall()
+            fields = ("original_text", "replacement_text", "rule_type", "scope", "priority")
+            for row in rows:
+                entry = GlossaryEntry(**dict(row))
                 identity = canonical_identity(entry)
                 if identity in seen:
                     conn.execute(
@@ -377,6 +385,18 @@ class GlossaryCatalog:
                     )
                 else:
                     seen.add(identity)
+                    if any(row[field] != getattr(entry, field) for field in fields):
+                        normalize.append(entry)
+            for entry in normalize:
+                conn.execute(
+                    """UPDATE glossary_entries
+                       SET original_text = ?, replacement_text = ?, rule_type = ?,
+                           scope = ?, priority = ?, revision = revision + 1,
+                           updated_at = CURRENT_TIMESTAMP
+                       WHERE stable_id = ? AND revision = ?""",
+                    (entry.original_text, entry.replacement_text, entry.rule_type,
+                     entry.scope, entry.priority, entry.stable_id, entry.revision),
+                )
             self._compact_positions(conn)
             conn.execute(
                 """CREATE UNIQUE INDEX IF NOT EXISTS idx_glossary_canonical_identity
