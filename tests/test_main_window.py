@@ -62,6 +62,9 @@ class MainWindowTestCase(GuiTestCase):
 
     def setUp(self):
         super().setUp()
+        (Path(self.base) / "Substituicoes.txt").write_text(
+            "substituicoes = []\n", encoding="utf-8"
+        )
 
         # A limpeza da abertura sobe uma thread e varre `backups/` e `logs/`.
         # Aqui ela sai do caminho; tem teste proprio, que usa esta referencia.

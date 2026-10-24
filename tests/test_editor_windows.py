@@ -1526,6 +1526,7 @@ class CallbackErrorHookTests(unittest.TestCase):
         sys.argv[0] = str(base / "PGN_Tradutor_Pro.py")
         glossario._default_substitutions_path = lambda: str(base / "Substituicoes.txt")
         glossario._default_glossary_db_path = lambda: str(base / "glossario.db")
+        (base / "Substituicoes.txt").write_text("substituicoes = []\n", encoding="utf-8")
         settings.default_settings_path = lambda: str(base / "settings.json")
 
         # Na raiz de verdade, como em producao: o app substitui o relator que o

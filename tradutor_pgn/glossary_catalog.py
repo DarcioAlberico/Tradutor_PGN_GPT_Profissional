@@ -3,10 +3,12 @@
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
 import shutil
+import tempfile
 from typing import Callable, Sequence
 from uuid import uuid4
 
@@ -71,6 +73,14 @@ class MutationResult:
 
 
 @dataclass(frozen=True)
+class ExportResult:
+    path: str
+    catalog_revision: int
+    mirror_pending: bool = False
+    warning: str | None = None
+
+
+@dataclass(frozen=True)
 class GlossaryEntryDraft:
     original_text: str
     replacement_text: str
@@ -104,6 +114,8 @@ class MigrationReport:
     imported_count: int
     duplicates: tuple[MigrationDuplicate, ...] = ()
     backup_paths: tuple[str, ...] = ()
+    mirror_pending: bool = False
+    warning: str | None = None
 
 
 class GlossaryConflictError(Exception):
@@ -178,7 +190,7 @@ class GlossaryCatalog:
             raise
         return conn
 
-    def initialize(self) -> None:
+    def initialize(self) -> ExportResult | None:
         """Create the V2 schema once, preserving all existing records/revisions."""
         Path(self.db_path).resolve().parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect(create=True)) as conn, conn:
@@ -220,6 +232,98 @@ class GlossaryCatalog:
                 "INSERT OR IGNORE INTO glossary_metadata (key, value) VALUES (?, ?)",
                 (("schema_version", str(CATALOG_SCHEMA_VERSION)), ("catalog_revision", "1")),
             )
+        if self.mirror_path is not None and self._migration_completed():
+            return self.export_legacy()
+        return self.retry_pending_mirror()
+
+    @staticmethod
+    def _metadata(conn: sqlite3.Connection, key: str) -> str | None:
+        row = conn.execute(
+            "SELECT value FROM glossary_metadata WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else None
+
+    @staticmethod
+    def _set_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
+        conn.execute(
+            "INSERT INTO glossary_metadata (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+    def export_legacy(self, path: str | None = None) -> ExportResult:
+        """Publish the newest committed snapshot without replacing external edits."""
+        target = Path(path or self.mirror_path or "")
+        if not str(target) or target == Path("."):
+            raise ValueError("Legacy mirror path is required.")
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            snapshot = self._snapshot(conn)
+            known_hash = self._metadata(conn, "legacy_mirror_hash")
+            try:
+                actual_hash = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
+                if (known_hash is not None and actual_hash != known_hash) or (
+                    known_hash is None and actual_hash is not None
+                ):
+                    warning = "Espelho legado divergente; revisão externa preservada."
+                    self._set_metadata(conn, "mirror_pending", "1")
+                    self._set_metadata(conn, "mirror_error", warning)
+                    return ExportResult(str(target), snapshot.catalog_revision, True, warning)
+
+                # Import is local to keep the catalog independent of the legacy parser.
+                from .glossario import _serialize_entries
+
+                entries = [
+                    (e.original_text, e.replacement_text, e.rule_type, e.priority, e.scope)
+                    for e in snapshot.entries
+                ]
+                contents = _serialize_entries(entries).encode("utf-8")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temporary = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb", dir=target.parent, prefix=f".{target.name}.",
+                        delete=False,
+                    ) as stage:
+                        temporary = Path(stage.name)
+                        stage.write(contents)
+                        stage.flush()
+                        os.fsync(stage.fileno())
+                    # Detect an edit made while preparing the temporary file.
+                    latest_hash = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
+                    if latest_hash != actual_hash:
+                        warning = "Espelho legado divergente; revisão externa preservada."
+                        self._set_metadata(conn, "mirror_pending", "1")
+                        self._set_metadata(conn, "mirror_error", warning)
+                        return ExportResult(str(target), snapshot.catalog_revision, True, warning)
+                    os.replace(temporary, target)
+                finally:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
+                self._set_metadata(conn, "legacy_mirror_hash", hashlib.sha256(contents).hexdigest())
+                self._set_metadata(conn, "mirror_pending", "0")
+                self._set_metadata(conn, "mirror_error", "")
+                return ExportResult(str(target), snapshot.catalog_revision)
+            except OSError as exc:
+                warning = f"Espelho legado pendente ({type(exc).__name__})."
+                self._set_metadata(conn, "mirror_pending", "1")
+                self._set_metadata(conn, "mirror_error", warning)
+                return ExportResult(str(target), snapshot.catalog_revision, True, warning)
+
+    def retry_pending_mirror(self) -> ExportResult | None:
+        if self.mirror_path is None:
+            return None
+        with closing(self._connect()) as conn:
+            pending = self._metadata(conn, "mirror_pending")
+        return self.export_legacy() if pending == "1" else None
+
+    def _committed_result(
+        self, snapshot: CatalogSnapshot, entry: GlossaryEntry | None = None,
+    ) -> MutationResult:
+        if self.mirror_path is None:
+            return MutationResult(snapshot, entry)
+        mirror = self.export_legacy()
+        return MutationResult(snapshot, entry, mirror.mirror_pending, mirror.warning)
 
     def list_entries(self) -> CatalogSnapshot:
         """Read a coherent snapshot ordered by the stored presentation position."""
@@ -313,7 +417,8 @@ class GlossaryCatalog:
             except sqlite3.IntegrityError as exc:
                 raise GlossaryDuplicateError(canonical_identity(candidate)) from exc
             self._increment_catalog_revision(conn)
-            return MutationResult(self._snapshot(conn), self._entry(conn, candidate.stable_id))
+            result = MutationResult(self._snapshot(conn), self._entry(conn, candidate.stable_id))
+        return self._committed_result(result.snapshot, result.entry)
 
     def update(
         self, stable_id: str, expected_revision: int, changes: GlossaryEntryChanges,
@@ -345,7 +450,8 @@ class GlossaryCatalog:
                 self._require_entry_revision(conn, stable_id, expected_revision)
                 raise GlossaryConflictError(stable_id, expected_revision, None)
             self._increment_catalog_revision(conn)
-            return MutationResult(self._snapshot(conn), self._entry(conn, stable_id))
+            result = MutationResult(self._snapshot(conn), self._entry(conn, stable_id))
+        return self._committed_result(result.snapshot, result.entry)
 
     def delete(self, stable_id: str, expected_revision: int) -> MutationResult:
         """Remove exactly the requested revision and close the position gap."""
@@ -361,7 +467,8 @@ class GlossaryCatalog:
                 raise GlossaryConflictError(stable_id, expected_revision, None)
             self._compact_positions(conn)
             self._increment_catalog_revision(conn)
-            return MutationResult(self._snapshot(conn), old)
+            result = MutationResult(self._snapshot(conn), old)
+        return self._committed_result(result.snapshot, result.entry)
 
     def deduplicate(self, expected_catalog_revision: int) -> MutationResult:
         """Keep the first full identity of a current snapshot and compact order."""
@@ -403,7 +510,8 @@ class GlossaryCatalog:
                    ON glossary_entries(original_text, replacement_text, rule_type, scope)"""
             )
             self._increment_catalog_revision(conn)
-            return MutationResult(self._snapshot(conn))
+            result = MutationResult(self._snapshot(conn))
+        return self._committed_result(result.snapshot)
 
     @staticmethod
     def _backup_file(source: Path, *, database: bool = False) -> str:
@@ -563,6 +671,8 @@ class GlossaryCatalog:
                 conn.execute(
                     "INSERT INTO glossary_metadata (key, value) VALUES ('migration_completed', '1')"
                 )
+                self._set_metadata(conn, "legacy_mirror_hash", hashlib.sha256(backed_up_text).hexdigest())
+                self._set_metadata(conn, "mirror_pending", "1")
             if stage is not None:
                 with closing(catalog._connect()) as conn:
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -572,7 +682,11 @@ class GlossaryCatalog:
                     if self._migration_completed():
                         return MigrationReport(migrated=False, imported_count=0)
                     raise FileExistsError(f"Catalog appeared during migration: {destination}")
-            return MigrationReport(True, len(entries), duplicates, tuple(backup_paths))
+            mirror = self.export_legacy()
+            return MigrationReport(
+                True, len(entries), duplicates, tuple(backup_paths),
+                mirror.mirror_pending, mirror.warning,
+            )
         finally:
             if stage is not None:
                 for suffix in ("", "-wal", "-shm"):

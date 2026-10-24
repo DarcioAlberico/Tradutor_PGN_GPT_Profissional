@@ -12,6 +12,7 @@ import unittest.mock
 from pathlib import Path
 
 from tradutor_pgn import (
+    app_paths,
     db_tools,
     glossario,
     repeated_edits,
@@ -3659,6 +3660,86 @@ class LegacyMigrationAdapterTests(unittest.TestCase):
                     )
                 self.assertFalse(catalog.exists())
 
+
+class CatalogPipelineProjectionTests(unittest.TestCase):
+    def test_explicit_startup_migrates_once_and_repairs_pending_mirror(self):
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {app_paths.DATA_DIR_ENV: tmp}
+        ):
+            source = Path(tmp) / "Substituicoes.txt"
+            source.write_text("substituicoes = [('old', 'antigo')]\n", encoding="utf-8")
+            first = glossario.initialize_catalog_glossary()
+            catalog = glossario.GlossaryCatalog(
+                app_paths.glossary_catalog_path(), str(source)
+            )
+            self.assertTrue(first.migrated)
+            self.assertEqual([e.original_text for e in catalog.list_entries().entries], ["old"])
+            conn = catalog._connect()
+            try:
+                conn.execute("UPDATE glossary_metadata SET value = '1' WHERE key = 'mirror_pending'")
+                conn.commit()
+            finally:
+                conn.close()
+            second = glossario.initialize_catalog_glossary()
+            self.assertFalse(second.migrated)
+            self.assertTrue(source.exists())
+            self.assertEqual(load_glossary_entries(), [("old", "antigo")])
+
+    def test_default_loaders_keep_order_phases_scopes_and_ignore_changed_text(self):
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {app_paths.DATA_DIR_ENV: tmp}
+        ):
+            source = Path(tmp) / "Substituicoes.txt"
+            seed = Path(tmp) / "seed.txt"
+            seed.write_text("substituicoes = []\n", encoding="utf-8")
+            source.write_text(
+                "substituicoes = [\n"
+                "  ('foo', 'bar', 'cleanup', 2, 'pt'),\n"
+                "  ('bar', 'baz', 'automatic', 3, 'pt'),\n"
+                "  ('baz', 'qux', 'suggestion', 1, 'pt'),\n"
+                "  ('bar', 'italiano', 'automatic', 4, 'it'),\n"
+                "]\n",
+                encoding="utf-8",
+            )
+            expected_details = [
+                ("foo", "bar", "cleanup", 2, "pt"),
+                ("bar", "baz", "automatic", 3, "pt"),
+                ("baz", "qux", "suggestion", 1, "pt"),
+                ("bar", "italiano", "automatic", 4, "it"),
+            ]
+            self.assertEqual(load_glossary_entry_details(prefer_db=False), expected_details)
+            report = glossario.migrate_legacy_glossary(
+                legacy_db_path=str(Path(tmp) / "absent.db")
+            )
+            self.assertTrue(report.migrated)
+            self.assertEqual(load_glossary_entry_details(), expected_details)
+            self.assertEqual(load_glossary_entries(), [
+                ("foo", "bar"), ("bar", "baz"), ("baz", "qux"),
+                ("bar", "italiano"),
+            ])
+            cleanup = load_cleanup_substitutions(target_language="pt", seed_path=str(seed))
+            automatic_pt = load_automatic_substitutions(target_language="pt", seed_path=str(seed))
+            automatic_it = load_automatic_substitutions(target_language="it", seed_path=str(seed))
+            suggestions = load_suggestion_substitutions(target_language="pt", seed_path=str(seed))
+            self.assertEqual(clean_comment_for_translation("foo", cleanup), "bar")
+            self.assertEqual(apply_automatic_substitutions("bar", automatic_pt), "baz")
+            self.assertEqual(apply_automatic_substitutions("bar", automatic_it), "italiano")
+            self.assertEqual([rule[:2] for rule in suggestions], [("baz", "qux")])
+
+            ids = [entry.stable_id for entry in glossario.GlossaryCatalog(
+                app_paths.glossary_catalog_path()
+            ).list_entries().entries]
+            source.write_text("substituicoes = [('external', 'edit')]\n", encoding="utf-8")
+            self.assertEqual(load_glossary_entry_details(), expected_details)
+            self.assertEqual(
+                load_glossary_entry_details(prefer_db=False),
+                [("external", "edit", "suggestion", 0, "")],
+            )
+            self.assertEqual([entry.stable_id for entry in glossario.GlossaryCatalog(
+                app_paths.glossary_catalog_path()
+            ).list_entries().entries], ids)
+
+class LegacyMigrationValidationTests(unittest.TestCase):
     def test_migration_rejects_unknown_raw_phase_before_legacy_normalization(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

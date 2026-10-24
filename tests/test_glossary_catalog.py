@@ -224,7 +224,7 @@ class GlossaryCatalogSchemaTests(unittest.TestCase):
         self.assertFalse(Path(self.db_path).exists())
 
 
-class GlossaryCatalogMutationTests(unittest.TestCase):
+class GlossaryCatalogMutationFixture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -236,6 +236,90 @@ class GlossaryCatalogMutationTests(unittest.TestCase):
             original_text=original, replacement_text=replacement, **changes
         )
 
+
+class GlossaryCatalogMirrorTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.path = self.root / "Substituicoes.txt"
+        self.catalog = glossary_catalog.GlossaryCatalog(
+            str(self.root / "glossario-v2.db"), str(self.path)
+        )
+        self.catalog.initialize()
+
+    def metadata(self):
+        with closing(self.catalog._connect()) as conn:
+            return dict(conn.execute("SELECT key, value FROM glossary_metadata"))
+
+    def test_committed_mutations_export_latest_snapshot_and_leave_no_temp_file(self):
+        first = self.catalog.add(glossary_catalog.GlossaryEntryDraft("rook", "torre"), 1)
+        second = self.catalog.add(glossary_catalog.GlossaryEntryDraft(
+            "queen", "dama", rule_type="automatic", scope="pt", priority=3
+        ), 2)
+        self.assertFalse(second.mirror_pending)
+        self.assertEqual(
+            glossario._load_glossary_entry_details_from_file(str(self.path)),
+            [("rook", "torre", "suggestion", 0, ""),
+             ("queen", "dama", "automatic", 3, "pt")],
+        )
+        self.assertEqual(self.metadata()["mirror_pending"], "0")
+        self.assertEqual(list(self.root.glob(".Substituicoes.txt.*")), [])
+        self.catalog.update(first.entry.stable_id, 1,
+                            glossary_catalog.GlossaryEntryChanges(replacement_text="castelo"))
+        self.catalog.delete(second.entry.stable_id, 1)
+        self.assertEqual(glossario._load_glossary_entry_details_from_file(str(self.path)),
+                         [("rook", "castelo", "suggestion", 0, "")])
+
+    def test_replace_failure_keeps_committed_catalog_and_retries_on_initialize(self):
+        real_replace = os.replace
+        with patch.object(glossary_catalog.os, "replace", side_effect=OSError("secret-path")):
+            result = self.catalog.add(glossary_catalog.GlossaryEntryDraft("rook", "torre"), 1)
+        self.assertEqual(result.snapshot, self.catalog.list_entries())
+        self.assertTrue(result.mirror_pending)
+        self.assertNotIn("secret-path", result.warning or "")
+        self.assertEqual(self.metadata()["mirror_pending"], "1")
+        self.assertNotIn("secret-path", self.metadata()["mirror_error"])
+        self.assertFalse(self.path.exists())
+        self.assertEqual(list(self.root.glob(".Substituicoes.txt.*")), [])
+        with patch.object(glossary_catalog.os, "replace", wraps=real_replace):
+            self.catalog.initialize()
+        self.assertEqual(self.metadata()["mirror_pending"], "0")
+        self.assertEqual(glossario._load_glossary_entry_details_from_file(str(self.path)),
+                         [("rook", "torre", "suggestion", 0, "")])
+
+    def test_external_edit_after_migration_is_warned_and_preserved(self):
+        self.path.write_text("substituicoes = [('old', 'antigo')]\n", encoding="utf-8")
+        self.catalog.migrate_legacy(
+            lambda: glossario._load_glossary_entry_details_from_file(str(self.path)),
+        )
+        self.path.write_text("substituicoes = [('external', 'externo')]\n", encoding="utf-8")
+        result = self.catalog.add(glossary_catalog.GlossaryEntryDraft("new", "novo"), 1)
+        self.assertTrue(result.mirror_pending)
+        self.assertIn("diverg", (result.warning or "").lower())
+        self.assertIn("external", self.path.read_text(encoding="utf-8"))
+        reopening = self.catalog.initialize()
+        self.assertIn("external", self.path.read_text(encoding="utf-8"))
+        self.assertIn("diverg", (reopening.warning or "").lower())
+        self.assertEqual([entry.original_text for entry in self.catalog.list_entries().entries],
+                         ["old", "new"])
+
+    def test_edit_between_migration_commit_and_export_is_not_overwritten(self):
+        self.path.write_text("substituicoes = [('old', 'antigo')]\n", encoding="utf-8")
+        original_export = glossary_catalog.GlossaryCatalog.export_legacy
+
+        def edit_then_export(catalog, path=None):
+            self.path.write_text("substituicoes = [('external', 'externo')]\n", encoding="utf-8")
+            return original_export(catalog, path)
+
+        with patch.object(glossary_catalog.GlossaryCatalog, "export_legacy", edit_then_export):
+            self.catalog.migrate_legacy(
+                lambda: glossario._load_glossary_entry_details_from_file(str(self.path)),
+            )
+        self.assertIn("external", self.path.read_text(encoding="utf-8"))
+        self.assertEqual(self.metadata()["mirror_pending"], "1")
+
+class GlossaryCatalogMutationTests(GlossaryCatalogMutationFixture):
     def test_add_creates_uuid_initial_revision_and_increments_catalog_once(self):
         result = self.catalog.add(self.draft(" knight ", " cavalo ", scope=" pt "), 1)
         entry = result.entry
@@ -403,6 +487,7 @@ class GlossaryCatalogMigrationTests(unittest.TestCase):
             cache.execute("CREATE TABLE old_rules (original TEXT)")
             cache.execute("INSERT INTO old_rules VALUES ('Cache only')")
 
+        original_text = self.text_path.read_bytes()
         report = self.migrate()
 
         entries = self.catalog().list_entries().entries
@@ -425,7 +510,16 @@ class GlossaryCatalogMigrationTests(unittest.TestCase):
             [(1, 4, ("Knight", "Cavalo", "suggestion", "pt"))],
         )
         self.assertEqual(len(report.backup_paths), 2)
-        self.assertEqual(Path(report.backup_paths[0]).read_bytes(), self.text_path.read_bytes())
+        self.assertEqual(Path(report.backup_paths[0]).read_bytes(), original_text)
+        self.assertEqual(
+            glossario._load_glossary_entry_details_from_file(str(self.text_path)),
+            [
+                ("Knight", "Cavalo", "suggestion", 7, "pt"),
+                ("Knight", "Cavalo", "suggestion", 2, "it"),
+                ("Knight", "Cavalo", "cleanup", 3, "pt"),
+                ("Rook", "Torre", "automatic", 4, ""),
+            ],
+        )
         with closing(sqlite3.connect(report.backup_paths[1])) as backup:
             self.assertEqual(backup.execute("SELECT original FROM old_rules").fetchone()[0], "Cache only")
 

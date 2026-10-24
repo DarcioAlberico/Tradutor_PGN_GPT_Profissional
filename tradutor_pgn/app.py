@@ -7,7 +7,11 @@ import customtkinter as ctk
 from . import __version__, app_actions, app_log, app_paths, first_run
 from .app_config import LANGUAGE_NAMES
 from .editor_common import window_safe_geometry
-from .glossario import set_glossary_error_handler
+from .glossario import (
+    initialize_catalog_glossary,
+    report_glossary_error,
+    set_glossary_error_handler,
+)
 from .main_window import setup_main_ui
 from .settings import (
     appearance_mode_from_settings,
@@ -122,6 +126,13 @@ class PGNTranslatorApp:
             # degrada para "sem glossario" (garantia S5), que e recuperavel.
             self.log_message(f"[AVISO] Nao foi possivel preparar a pasta de dados: {exc}")
         self.log_message(first_run.describe_data_dir())
+
+        try:
+            glossary_initialization = initialize_catalog_glossary()
+            if glossary_initialization.warning:
+                report_glossary_error(glossary_initialization.warning)
+        except Exception as exc:
+            report_glossary_error(f"Erro ao inicializar o catálogo do glossário: {exc}")
 
         self.glossary_substitutions = app_actions.load_interactive_glossary(self)
         self.log_message(f"Glossário carregado: {len(self.glossary_substitutions)} entradas")

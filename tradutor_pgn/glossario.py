@@ -843,6 +843,21 @@ def migrate_legacy_glossary(path=None, catalog_path=None, legacy_db_path=None) -
     return GlossaryCatalog(catalog_path, path).migrate_legacy(load_entries, legacy_db_path)
 
 
+def initialize_catalog_glossary() -> MigrationReport:
+    """Run the one-time legacy migration, then repair any pending mirror."""
+    catalog_path = glossary_catalog_path()
+    if os.path.exists(catalog_path):
+        mirror = GlossaryCatalog(
+            catalog_path, _default_substitutions_path()
+        ).initialize()
+        return MigrationReport(
+            migrated=False, imported_count=0,
+            mirror_pending=mirror.mirror_pending if mirror else False,
+            warning=mirror.warning if mirror else None,
+        )
+    return migrate_legacy_glossary(catalog_path=catalog_path)
+
+
 def load_glossary_entries(path=None, deduplicate=True, prefer_db=True, db_path=None):
     """Carrega entradas persistentes do glossário sem depender de traducoes.db.
 
@@ -853,6 +868,15 @@ def load_glossary_entries(path=None, deduplicate=True, prefer_db=True, db_path=N
     """
     if path is None:
         path = _default_substitutions_path()
+
+    catalog_path = glossary_catalog_path()
+    if prefer_db and (
+        (_is_default_substitutions_path(path) and os.path.exists(catalog_path))
+        or (db_path is not None and os.path.abspath(db_path) == os.path.abspath(catalog_path))
+    ):
+        snapshot = GlossaryCatalog(catalog_path).list_entries()
+        entries = [(entry.original_text, entry.replacement_text) for entry in snapshot.entries]
+        return _deduplicate_entries(entries) if deduplicate else entries
 
     use_db = prefer_db and (
         db_path is not None or _is_default_substitutions_path(path)
@@ -881,6 +905,19 @@ def load_glossary_entry_details(path=None, deduplicate=True, prefer_db=True, db_
     """
     if path is None:
         path = _default_substitutions_path()
+
+    catalog_path = glossary_catalog_path()
+    if prefer_db and (
+        (_is_default_substitutions_path(path) and os.path.exists(catalog_path))
+        or (db_path is not None and os.path.abspath(db_path) == os.path.abspath(catalog_path))
+    ):
+        snapshot = GlossaryCatalog(catalog_path).list_entries()
+        entries = [
+            (entry.original_text, entry.replacement_text, entry.rule_type,
+             entry.priority, entry.scope)
+            for entry in snapshot.entries
+        ]
+        return _deduplicate_entries(entries) if deduplicate else entries
 
     use_db = prefer_db and (
         db_path is not None or _is_default_substitutions_path(path)
