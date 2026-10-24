@@ -3,6 +3,7 @@
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
+import os
 from pathlib import Path
 import sqlite3
 import shutil
@@ -312,6 +313,27 @@ class GlossaryCatalog:
             ):
                 raise ValueError("Migrated glossary contains an invalid scope.")
 
+    def _migration_completed(self) -> bool:
+        if not Path(self.db_path).exists():
+            return False
+        with closing(self._connect()) as conn:
+            tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            if not {"glossary_entries", "glossary_metadata"} <= tables:
+                raise ValueError("Incompatible glossary catalog schema.")
+            version = conn.execute(
+                "SELECT value FROM glossary_metadata WHERE key = 'schema_version'"
+            ).fetchone()
+            if version is None or version[0] != str(CATALOG_SCHEMA_VERSION):
+                raise ValueError("Incompatible glossary catalog version.")
+            marker = conn.execute(
+                "SELECT value FROM glossary_metadata WHERE key = 'migration_completed'"
+            ).fetchone()
+            return marker is not None and marker[0] == "1"
+
     def migrate_legacy(
         self,
         load_entries: Callable[[], Sequence[LegacyGlossaryEntry]],
@@ -321,25 +343,8 @@ class GlossaryCatalog:
         if self.mirror_path is None:
             raise ValueError("Legacy text path is required for migration backups.")
         source = Path(self.mirror_path)
-        if self.db_path and Path(self.db_path).exists():
-            with closing(self._connect()) as conn:
-                tables = {
-                    row[0] for row in conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type = 'table'"
-                    )
-                }
-                if not {"glossary_entries", "glossary_metadata"} <= tables:
-                    raise ValueError("Incompatible glossary catalog schema.")
-                version = conn.execute(
-                    "SELECT value FROM glossary_metadata WHERE key = 'schema_version'"
-                ).fetchone()
-                if version is None or version[0] != str(CATALOG_SCHEMA_VERSION):
-                    raise ValueError("Incompatible glossary catalog version.")
-                marker = conn.execute(
-                    "SELECT value FROM glossary_metadata WHERE key = 'migration_completed'"
-                ).fetchone()
-                if marker is not None and marker[0] == "1":
-                    return MigrationReport(migrated=False, imported_count=0)
+        if self._migration_completed():
+            return MigrationReport(migrated=False, imported_count=0)
         if not source.is_file():
             raise FileNotFoundError(f"Legacy glossary text is missing: {source}")
 
@@ -380,9 +385,12 @@ class GlossaryCatalog:
             if stage is not None:
                 with closing(catalog._connect()) as conn:
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                if destination.exists():
+                try:
+                    os.link(stage, destination)
+                except FileExistsError:
+                    if self._migration_completed():
+                        return MigrationReport(migrated=False, imported_count=0)
                     raise FileExistsError(f"Catalog appeared during migration: {destination}")
-                stage.replace(destination)
             return MigrationReport(True, len(entries), duplicates, tuple(backup_paths))
         finally:
             if stage is not None:

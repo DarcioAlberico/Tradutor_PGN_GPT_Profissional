@@ -1,11 +1,13 @@
 """Contracts for the authoritative glossary catalog, independent of the UI."""
 
 from dataclasses import FrozenInstanceError, replace
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import os
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -397,3 +399,26 @@ class GlossaryCatalogMigrationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "changed during migration"):
                 self.migrate()
         self.assertFalse(self.db_path.exists())
+
+    def test_concurrent_initial_migrations_publish_once_and_preserve_winner_id(self):
+        self.write_text("substituicoes = [('a', 'b')]\n")
+        rendezvous = threading.Barrier(2)
+        validate = glossary_catalog.GlossaryCatalog._validate_migration
+
+        def wait_before_publication(conn, expected):
+            validate(conn, expected)
+            rendezvous.wait(timeout=10)
+
+        with patch.object(
+            glossary_catalog.GlossaryCatalog, "_validate_migration",
+            side_effect=wait_before_publication,
+        ):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(self.migrate) for _ in range(2)]
+                reports = [future.result(timeout=20) for future in futures]
+
+        self.assertEqual(sorted(report.migrated for report in reports), [False, True])
+        entries = self.catalog().list_entries().entries
+        self.assertEqual(len(entries), 1)
+        stable_id = entries[0].stable_id
+        self.assertEqual([entry.stable_id for entry in self.catalog().list_entries().entries], [stable_id])

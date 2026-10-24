@@ -3621,6 +3621,23 @@ class FileEditEventsTests(unittest.TestCase):
 
 
 class LegacyMigrationAdapterTests(unittest.TestCase):
+    def test_migration_rejects_falsey_unknown_dict_phases(self):
+        for raw_type in (0, False):
+            with self.subTest(raw_type=raw_type), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "Substituicoes.txt"
+                source.write_text(
+                    f"substituicoes = [{{'original': 'a', 'replacement': 'b', 'type': {raw_type!r}}}]\n",
+                    encoding="utf-8",
+                )
+                catalog = root / "glossario-v2.db"
+                with self.assertRaisesRegex(ValueError, "Unknown legacy rule types"):
+                    glossario.migrate_legacy_glossary(
+                        path=str(source), catalog_path=str(catalog),
+                        legacy_db_path=str(root / "absent.db"),
+                    )
+                self.assertFalse(catalog.exists())
+
     def test_migration_rejects_unknown_raw_phase_before_legacy_normalization(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -826,7 +826,16 @@ def migrate_legacy_glossary(path=None, catalog_path=None, legacy_db_path=None) -
             )
             if not valid_pair:
                 raise ValueError(f"Invalid legacy entry at position {position}.")
-        unknown = unknown_rule_types(raw_items)
+        unknown = []
+        for item in raw_items:
+            if isinstance(item, dict):
+                raw_types = [item[key] for key in ("type", "rule_type") if key in item]
+            else:
+                raw_types = [item[2]] if len(item) >= 3 else []
+            for raw_type in raw_types:
+                text = "" if raw_type is None else str(raw_type).strip()
+                if text and _rule_type_alias(raw_type) is None and text not in unknown:
+                    unknown.append(text)
         if unknown:
             raise ValueError(f"Unknown legacy rule types: {', '.join(map(repr, unknown))}")
         return _load_glossary_entry_details_from_file(path, deduplicate=False)
