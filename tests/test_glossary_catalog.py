@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from uuid import UUID
 
 from tradutor_pgn import app_paths, glossario, glossary_types
 from tradutor_pgn import glossary_catalog
@@ -221,6 +222,128 @@ class GlossaryCatalogSchemaTests(unittest.TestCase):
         with self.assertRaises((sqlite3.OperationalError, FileNotFoundError)):
             self.catalog().list_entries()
         self.assertFalse(Path(self.db_path).exists())
+
+
+class GlossaryCatalogMutationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.catalog = glossary_catalog.GlossaryCatalog(str(Path(self.tmp.name) / "glossario-v2.db"))
+        self.catalog.initialize()
+
+    def draft(self, original="knight", replacement="cavalo", **changes):
+        return glossary_catalog.GlossaryEntryDraft(
+            original_text=original, replacement_text=replacement, **changes
+        )
+
+    def test_add_creates_uuid_initial_revision_and_increments_catalog_once(self):
+        result = self.catalog.add(self.draft(" knight ", " cavalo ", scope=" pt "), 1)
+        entry = result.entry
+        self.assertEqual(str(UUID(entry.stable_id)), entry.stable_id)
+        self.assertEqual((entry.original_text, entry.replacement_text, entry.scope),
+                         ("knight", "cavalo", "pt"))
+        self.assertEqual((entry.position, entry.revision, result.snapshot.catalog_revision), (0, 1, 2))
+        self.assertEqual(result.snapshot, self.catalog.list_entries())
+
+    def test_add_rejects_stale_catalog_and_full_identity_duplicate(self):
+        first = self.catalog.add(self.draft(), 1)
+        with self.assertRaises(glossary_catalog.GlossaryConflictError) as conflict:
+            self.catalog.add(self.draft("rook", "torre"), 1)
+        self.assertEqual((conflict.exception.stable_id, conflict.exception.expected_revision,
+                          conflict.exception.current_revision), (None, 1, 2))
+        with self.assertRaises(glossary_catalog.GlossaryDuplicateError):
+            self.catalog.add(self.draft(" knight ", " cavalo ", priority=9), 2)
+        self.assertEqual(self.catalog.list_entries(), first.snapshot)
+
+    def test_update_targets_id_and_revision_and_preserves_id(self):
+        first = self.catalog.add(self.draft(), 1).entry
+        other = self.catalog.add(self.draft("rook", "torre"), 2).entry
+        result = self.catalog.update(
+            first.stable_id, 1,
+            glossary_catalog.GlossaryEntryChanges(replacement_text=" corcel ", priority=7),
+        )
+        self.assertEqual((result.entry.stable_id, result.entry.revision, result.entry.replacement_text,
+                          result.entry.priority, result.snapshot.catalog_revision),
+                         (first.stable_id, 2, "corcel", 7, 4))
+        self.assertEqual(result.entry.created_at, first.created_at)
+        self.assertEqual(result.snapshot.entries[1], other)
+        with self.assertRaises(glossary_catalog.GlossaryConflictError) as conflict:
+            self.catalog.update(first.stable_id, 1,
+                                glossary_catalog.GlossaryEntryChanges(replacement_text="errado"))
+        self.assertEqual(conflict.exception.current_entry, result.entry)
+        self.assertEqual(self.catalog.list_entries(), result.snapshot)
+
+    def test_update_duplicate_identity_rolls_back_without_revision_increment(self):
+        first = self.catalog.add(self.draft(), 1).entry
+        second = self.catalog.add(self.draft("rook", "torre"), 2).entry
+        before = self.catalog.list_entries()
+        with self.assertRaises(glossary_catalog.GlossaryDuplicateError):
+            self.catalog.update(second.stable_id, 1, glossary_catalog.GlossaryEntryChanges(
+                original_text="knight", replacement_text="cavalo"
+            ))
+        self.assertEqual(self.catalog.list_entries(), before)
+        self.assertEqual(self.catalog.list_entries().entries[0].stable_id, first.stable_id)
+
+    def test_delete_requires_matching_revision_and_compacts_positions(self):
+        first = self.catalog.add(self.draft(), 1).entry
+        second = self.catalog.add(self.draft("rook", "torre"), 2).entry
+        third = self.catalog.add(self.draft("bishop", "bispo"), 3).entry
+        with self.assertRaises(glossary_catalog.GlossaryConflictError):
+            self.catalog.delete(second.stable_id, 2)
+        self.assertEqual(self.catalog.list_entries().catalog_revision, 4)
+        result = self.catalog.delete(second.stable_id, 1)
+        self.assertEqual(result.entry.stable_id, second.stable_id)
+        self.assertEqual(result.snapshot.catalog_revision, 5)
+        self.assertEqual([(entry.stable_id, entry.position) for entry in result.snapshot.entries],
+                         [(first.stable_id, 0), (third.stable_id, 1)])
+
+
+class GlossaryCatalogConcurrencyTests(GlossaryCatalogMutationTests):
+    def test_separate_instances_can_edit_different_entries_from_old_snapshot(self):
+        first = self.catalog.add(self.draft(), 1).entry
+        second = self.catalog.add(self.draft("rook", "torre"), 2).entry
+        other = glossary_catalog.GlossaryCatalog(self.catalog.db_path)
+        one = self.catalog.update(first.stable_id, 1,
+                                  glossary_catalog.GlossaryEntryChanges(priority=1))
+        two = other.update(second.stable_id, 1,
+                           glossary_catalog.GlossaryEntryChanges(priority=2))
+        self.assertEqual((one.snapshot.catalog_revision, two.snapshot.catalog_revision), (4, 5))
+        self.assertEqual([(entry.priority, entry.revision) for entry in two.snapshot.entries],
+                         [(1, 2), (2, 2)])
+
+    def test_same_entry_conflict_does_not_overwrite_or_delete(self):
+        entry = self.catalog.add(self.draft(), 1).entry
+        other = glossary_catalog.GlossaryCatalog(self.catalog.db_path)
+        updated = self.catalog.update(entry.stable_id, 1,
+                                      glossary_catalog.GlossaryEntryChanges(priority=8))
+        for action in (
+            lambda: other.update(entry.stable_id, 1, glossary_catalog.GlossaryEntryChanges(priority=3)),
+            lambda: other.delete(entry.stable_id, 1),
+        ):
+            with self.assertRaises(glossary_catalog.GlossaryConflictError) as conflict:
+                action()
+            self.assertEqual(conflict.exception.current_entry, updated.entry)
+        self.assertEqual(other.list_entries(), updated.snapshot)
+
+    def test_deduplicate_uses_complete_identity_and_rejects_stale_snapshot(self):
+        self.catalog.add(self.draft(scope="pt"), 1)
+        self.catalog.add(self.draft(scope="it"), 2)
+        self.catalog.add(self.draft(scope="pt", rule_type="cleanup"), 3)
+        with closing(sqlite3.connect(self.catalog.db_path)) as conn:
+            conn.execute("DROP INDEX idx_glossary_canonical_identity")
+            conn.execute("""INSERT INTO glossary_entries
+                (stable_id, original_text, replacement_text, rule_type, scope, priority, position)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                ("duplicate", "knight", "cavalo", "suggestion", "pt", 9, 7))
+        before = self.catalog.list_entries()
+        with self.assertRaises(glossary_catalog.GlossaryConflictError):
+            self.catalog.deduplicate(3)
+        self.assertEqual(self.catalog.list_entries(), before)
+        result = self.catalog.deduplicate(4)
+        self.assertEqual(result.snapshot.catalog_revision, 5)
+        self.assertEqual([(entry.rule_type, entry.scope, entry.position) for entry in result.snapshot.entries],
+                         [("suggestion", "pt", 0), ("suggestion", "it", 1), ("cleanup", "pt", 2)])
+        self.assertEqual(result.snapshot.entries[0].priority, 0)
 
 
 class GlossaryCatalogMigrationTests(unittest.TestCase):

@@ -70,6 +70,24 @@ class MutationResult:
     warning: str | None = None
 
 
+@dataclass(frozen=True)
+class GlossaryEntryDraft:
+    original_text: str
+    replacement_text: str
+    rule_type: str = GLOSSARY_RULE_SUGGESTION
+    scope: str = GLOSSARY_SCOPE_ALL
+    priority: int = GLOSSARY_PRIORITY_DEFAULT
+
+
+@dataclass(frozen=True)
+class GlossaryEntryChanges:
+    original_text: str | None = None
+    replacement_text: str | None = None
+    rule_type: str | None = None
+    scope: str | None = None
+    priority: int | None = None
+
+
 LegacyGlossaryEntry = tuple[str, str, str, int, str]
 
 
@@ -207,22 +225,165 @@ class GlossaryCatalog:
         """Read a coherent snapshot ordered by the stored presentation position."""
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN")
-            row = conn.execute(
-                "SELECT value FROM glossary_metadata WHERE key = 'catalog_revision'"
-            ).fetchone()
-            if row is None:
-                raise ValueError("Glossary catalog has no catalog_revision.")
-            rows = conn.execute(
-                """
-                SELECT stable_id, original_text, replacement_text, rule_type, scope,
-                       priority, position, revision, created_at, updated_at
-                FROM glossary_entries ORDER BY position, id
-                """
-            ).fetchall()
-            return CatalogSnapshot(
-                entries=tuple(GlossaryEntry(**dict(entry)) for entry in rows),
-                catalog_revision=int(row[0]),
+            return self._snapshot(conn)
+
+    @staticmethod
+    def _snapshot(conn: sqlite3.Connection) -> CatalogSnapshot:
+        row = conn.execute(
+            "SELECT value FROM glossary_metadata WHERE key = 'catalog_revision'"
+        ).fetchone()
+        if row is None:
+            raise ValueError("Glossary catalog has no catalog_revision.")
+        rows = conn.execute(
+            """
+            SELECT stable_id, original_text, replacement_text, rule_type, scope,
+                   priority, position, revision, created_at, updated_at
+            FROM glossary_entries ORDER BY position, id
+            """
+        ).fetchall()
+        return CatalogSnapshot(
+            entries=tuple(GlossaryEntry(**dict(entry)) for entry in rows),
+            catalog_revision=int(row[0]),
+        )
+
+    @staticmethod
+    def _entry(conn: sqlite3.Connection, stable_id: str) -> GlossaryEntry | None:
+        row = conn.execute(
+            """SELECT stable_id, original_text, replacement_text, rule_type, scope,
+                      priority, position, revision, created_at, updated_at
+               FROM glossary_entries WHERE stable_id = ?""", (stable_id,),
+        ).fetchone()
+        return GlossaryEntry(**dict(row)) if row is not None else None
+
+    @staticmethod
+    def _require_catalog_revision(conn: sqlite3.Connection, expected: int) -> None:
+        row = conn.execute(
+            "SELECT value FROM glossary_metadata WHERE key = 'catalog_revision'"
+        ).fetchone()
+        current = int(row[0]) if row is not None else None
+        if current != expected:
+            raise GlossaryConflictError(None, expected, current)
+
+    @staticmethod
+    def _require_entry_revision(
+        conn: sqlite3.Connection, stable_id: str, expected: int,
+    ) -> GlossaryEntry:
+        current = GlossaryCatalog._entry(conn, stable_id)
+        if current is None or current.revision != expected:
+            raise GlossaryConflictError(
+                stable_id, expected, current.revision if current else None, current,
             )
+        return current
+
+    @staticmethod
+    def _increment_catalog_revision(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "UPDATE glossary_metadata SET value = CAST(value AS INTEGER) + 1 "
+            "WHERE key = 'catalog_revision'"
+        )
+
+    @staticmethod
+    def _compact_positions(conn: sqlite3.Connection) -> None:
+        rows = conn.execute("SELECT id FROM glossary_entries ORDER BY position, id").fetchall()
+        conn.executemany(
+            "UPDATE glossary_entries SET position = ? WHERE id = ?",
+            ((position, row[0]) for position, row in enumerate(rows)),
+        )
+
+    def add(self, draft: GlossaryEntryDraft, expected_catalog_revision: int) -> MutationResult:
+        """Append a new entry only when the caller's catalog snapshot is current."""
+        candidate = GlossaryEntry(
+            stable_id=str(uuid4()), original_text=draft.original_text,
+            replacement_text=draft.replacement_text, rule_type=draft.rule_type,
+            scope=draft.scope, priority=draft.priority,
+        )
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._require_catalog_revision(conn, expected_catalog_revision)
+            position = conn.execute("SELECT COUNT(*) FROM glossary_entries").fetchone()[0]
+            try:
+                conn.execute(
+                    """INSERT INTO glossary_entries
+                       (stable_id, original_text, replacement_text, rule_type,
+                        scope, priority, position, revision)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 1)""",
+                    (candidate.stable_id, candidate.original_text, candidate.replacement_text,
+                     candidate.rule_type, candidate.scope, candidate.priority, position),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise GlossaryDuplicateError(canonical_identity(candidate)) from exc
+            self._increment_catalog_revision(conn)
+            return MutationResult(self._snapshot(conn), self._entry(conn, candidate.stable_id))
+
+    def update(
+        self, stable_id: str, expected_revision: int, changes: GlossaryEntryChanges,
+    ) -> MutationResult:
+        """Edit precisely one matching ID/revision; other entries may change concurrently."""
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            old = self._require_entry_revision(conn, stable_id, expected_revision)
+            values = {
+                name: getattr(changes, name) if getattr(changes, name) is not None else getattr(old, name)
+                for name in ("original_text", "replacement_text", "rule_type", "scope", "priority")
+            }
+            candidate = GlossaryEntry(
+                stable_id=stable_id, position=old.position, revision=old.revision,
+                created_at=old.created_at, updated_at=old.updated_at, **values,
+            )
+            try:
+                cursor = conn.execute(
+                    """UPDATE glossary_entries SET original_text = ?, replacement_text = ?,
+                       rule_type = ?, scope = ?, priority = ?, revision = revision + 1,
+                       updated_at = CURRENT_TIMESTAMP
+                       WHERE stable_id = ? AND revision = ?""",
+                    (candidate.original_text, candidate.replacement_text, candidate.rule_type,
+                     candidate.scope, candidate.priority, stable_id, expected_revision),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise GlossaryDuplicateError(canonical_identity(candidate)) from exc
+            if cursor.rowcount != 1:
+                self._require_entry_revision(conn, stable_id, expected_revision)
+                raise GlossaryConflictError(stable_id, expected_revision, None)
+            self._increment_catalog_revision(conn)
+            return MutationResult(self._snapshot(conn), self._entry(conn, stable_id))
+
+    def delete(self, stable_id: str, expected_revision: int) -> MutationResult:
+        """Remove exactly the requested revision and close the position gap."""
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            old = self._require_entry_revision(conn, stable_id, expected_revision)
+            cursor = conn.execute(
+                "DELETE FROM glossary_entries WHERE stable_id = ? AND revision = ?",
+                (stable_id, expected_revision),
+            )
+            if cursor.rowcount != 1:
+                self._require_entry_revision(conn, stable_id, expected_revision)
+                raise GlossaryConflictError(stable_id, expected_revision, None)
+            self._compact_positions(conn)
+            self._increment_catalog_revision(conn)
+            return MutationResult(self._snapshot(conn), old)
+
+    def deduplicate(self, expected_catalog_revision: int) -> MutationResult:
+        """Keep the first full identity of a current snapshot and compact order."""
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._require_catalog_revision(conn, expected_catalog_revision)
+            seen: set[tuple[str, str, str, str]] = set()
+            for entry in self._snapshot(conn).entries:
+                identity = canonical_identity(entry)
+                if identity in seen:
+                    conn.execute(
+                        "DELETE FROM glossary_entries WHERE stable_id = ?", (entry.stable_id,)
+                    )
+                else:
+                    seen.add(identity)
+            self._compact_positions(conn)
+            conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_glossary_canonical_identity
+                   ON glossary_entries(original_text, replacement_text, rule_type, scope)"""
+            )
+            self._increment_catalog_revision(conn)
+            return MutationResult(self._snapshot(conn))
 
     @staticmethod
     def _backup_file(source: Path, *, database: bool = False) -> str:
