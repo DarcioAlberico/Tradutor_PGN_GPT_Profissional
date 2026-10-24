@@ -3621,6 +3621,27 @@ class FileEditEventsTests(unittest.TestCase):
 
 
 class LegacyMigrationAdapterTests(unittest.TestCase):
+    def test_migration_uses_valid_fallback_for_falsey_type(self):
+        for raw_type in (0, False):
+            with self.subTest(raw_type=raw_type), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "Substituicoes.txt"
+                source.write_text(
+                    f"substituicoes = [{{'original': 'a', 'replacement': 'b', "
+                    f"'type': {raw_type!r}, 'rule_type': 'cleanup'}}]\n",
+                    encoding="utf-8",
+                )
+                catalog_path = root / "glossario-v2.db"
+
+                report = glossario.migrate_legacy_glossary(
+                    path=str(source), catalog_path=str(catalog_path),
+                    legacy_db_path=str(root / "absent.db"),
+                )
+
+                self.assertTrue(report.migrated)
+                entries = glossario.GlossaryCatalog(str(catalog_path)).list_entries().entries
+                self.assertEqual([entry.rule_type for entry in entries], ["cleanup"])
+
     def test_migration_rejects_falsey_unknown_dict_phases(self):
         for raw_type in (0, False):
             with self.subTest(raw_type=raw_type), tempfile.TemporaryDirectory() as tmp:
