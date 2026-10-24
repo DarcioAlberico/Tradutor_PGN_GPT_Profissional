@@ -1610,6 +1610,15 @@ class GlossaryEditor:
             messagebox.showerror("Erro", f"Erro ao deduplicar glossário:\n{exc}", parent=self.win)
             return
 
+        if not removed:
+            self.state.snapshot = result.snapshot
+            self.form_baseline["catalog_revision"] = result.snapshot.catalog_revision
+            self.show_message(
+                result.warning or "Nenhuma duplicata exata encontrada",
+                WARNING_COLOR if result.warning else OK_COLOR,
+            )
+            return
+
         self.show_message(f"{removed} duplicata(s) removida(s)")
         self.finish_mutation(result, self.state.selected_id)
 

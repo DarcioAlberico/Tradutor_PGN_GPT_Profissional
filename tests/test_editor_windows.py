@@ -601,6 +601,39 @@ class GlossaryRevisionEditorTests(EditorWindowTestCase):
         self.assertEqual(len(self.editor.state.entries), 4)
         self.assertTrue(self.dialogs.messages("warning"))
 
+    def test_dedup_without_duplicates_preserves_every_dirty_form_field(self):
+        self.editor.select_entry(1)
+        self.editor.set_text(self.editor.orig_text, "rascunho original")
+        self.editor.set_text(self.editor.new_text, "rascunho substituição")
+        self.editor.set_rule_type("cleanup")
+        self.editor.priority_text.set("17")
+        self.editor.scope_text.set("en>it")
+        self.editor.mark_dirty()
+        self.assertTrue(self.editor.state.dirty)
+        selection = (self.editor.state.selected_id, self.editor.state.selected_revision)
+        baseline = {key: value for key, value in self.editor.form_baseline.items() if key != "catalog_revision"}
+        prompts = len(self.dialogs.messages("askyesno"))
+
+        for _ in range(2):
+            self.editor.deduplicate_entries()
+            self.assertEqual(self.editor.current_pair(), ("rascunho original", "rascunho substituição"))
+            self.assertEqual(self.editor.current_rule_type(), "cleanup")
+            self.assertEqual(self.editor.priority_text.get(), "17")
+            self.assertEqual(self.editor.scope_text.get(), "en>it")
+            self.assertTrue(self.editor.state.dirty)
+            self.assertEqual((self.editor.state.selected_id, self.editor.state.selected_revision), selection)
+            self.assertEqual({key: value for key, value in self.editor.form_baseline.items() if key != "catalog_revision"}, baseline)
+        self.assertEqual(len(self.dialogs.messages("askyesno")), prompts)
+        self.assertEqual([entry.replacement_text for entry in self.catalog.list_entries().entries], ["torre", "torre", "dama"])
+
+    def test_new_draft_can_be_saved_after_dedup_without_duplicates(self):
+        self.editor.start_prefilled_entry("bishop", "bispo")
+        self.editor.deduplicate_entries()
+        self.assertTrue(self.editor.state.dirty)
+        self.editor.save_current()
+        self.assertEqual([entry.original_text for entry in self.catalog.list_entries().entries], ["rook", "rook", "queen", "bishop"])
+        self.assertEqual(self.dialogs.messages("warning"), [])
+
     def test_suggestion_pair_without_unique_record_cannot_delete(self):
         conn = initialize_database(self.db_path)
         save_translation(conn.cursor(), "a rook", "rook", "pt", "en")
