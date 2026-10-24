@@ -9,6 +9,7 @@ import types
 import tempfile
 import unittest
 import unittest.mock
+from contextlib import closing
 from pathlib import Path
 
 from tradutor_pgn import (
@@ -931,8 +932,9 @@ class GlossaryTests(unittest.TestCase):
             self.assertEqual(stats["duplicates"], 2)
             self.assertEqual(stats["invalid"], 1)
             self.assertEqual(
-                [(o, n) for o, n, _t, _p in stats["entries"]],
-                [("knight", "cavalo"), ("pawn", "peão")],
+                stats["entries"],
+                [("knight", "cavalo", "suggestion", 0, ""),
+                 ("pawn", "peão", "suggestion", 0, "")],
             )
 
     def test_glossary_is_independent_from_translation_database(self):
@@ -1123,6 +1125,102 @@ class GlossaryTests(unittest.TestCase):
                 load_glossary_entries(result["safety_backup_path"]),
                 [("current", "atual")],
             )
+
+
+class CatalogFileAdaptersTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.text = self.root / "Substituicoes.txt"
+        self.db_path = self.root / "glossario-v2.db"
+        self.csv = self.root / "import.csv"
+        for name, value in (("_default_substitutions_path", str(self.text)),
+                            ("glossary_catalog_path", str(self.db_path))):
+            patcher = unittest.mock.patch.object(glossario, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.text.write_text("escopo='pt'\nsubstituicoes=[('rook','torre')]\n", encoding="utf-8")
+        self.catalog = glossario.GlossaryCatalog(str(self.db_path), str(self.text))
+        glossario.migrate_legacy_glossary(str(self.text), str(self.db_path), str(self.root / "old.db"))
+
+    def test_v2_csv_preview_preserves_identity_scope_and_invalid_phase(self):
+        self.csv.write_text("original,replacement,type,priority,lang\n"
+                            "rook,torre,suggestion,9,pt\nrook,torre,cleanup,0,pt\n"
+                            "rook,torre,suggestion,0,it\nrook,castelo,suggestion,0,pt\n"
+                            "x,y,unknown,0,pt\n", encoding="utf-8")
+        analysis = glossario.analyze_glossary_csv_import(str(self.text), str(self.csv))
+        self.assertEqual([row.status for row in analysis["preview"].rows],
+                         ["duplicate", "new", "new", "conflict", "invalid"])
+        self.assertEqual(analysis["catalog_revision"], 1)
+        self.csv.write_text("original,replacement\nevil,changed\n", encoding="utf-8")
+        result = glossario.import_glossary_csv(str(self.text), str(self.csv), analysis=analysis)
+        self.assertEqual(result["inserted"], 2)
+        self.assertEqual([(e.rule_type, e.scope) for e in self.catalog.list_entries().entries],
+                         [("suggestion", "pt"), ("cleanup", "pt"), ("suggestion", "it")])
+        self.assertEqual(glossario.glossary_default_scope(), "pt")
+        with closing(sqlite3.connect(result["backup_path"])) as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM glossary_entries").fetchone()[0], 1)
+
+    def test_v2_import_rejects_stale_analysis_instead_of_overwriting_catalog(self):
+        from tradutor_pgn.glossary_catalog import GlossaryEntryDraft, GlossaryConflictError
+        self.csv.write_text("original,replacement\npin,cravada\n", encoding="utf-8")
+        analysis = glossario.analyze_glossary_csv_import(str(self.text), str(self.csv))
+        self.catalog.add(GlossaryEntryDraft("queen", "dama"), 1)
+        before = self.catalog.list_entries()
+        with self.assertRaises(GlossaryConflictError):
+            glossario.import_glossary_csv(str(self.text), str(self.csv), analysis=analysis)
+        self.assertEqual(self.catalog.list_entries(), before)
+
+    def test_v2_default_scope_comes_from_catalog_even_if_text_is_divergent(self):
+        self.text.write_text("escopo='it'\nsubstituicoes=[]\n", encoding="utf-8")
+        self.assertEqual(glossario.glossary_default_scope(), "pt")
+
+    def test_text_recovery_is_append_import_and_sqlite_recovery_replaces(self):
+        source = self.root / "legacy.txt"
+        source.write_text("escopo='it'\nsubstituicoes=[('pin','cravada')]\n", encoding="utf-8")
+        preview = self.catalog.preview_import(glossario.read_glossary_import(str(source)))
+        self.assertEqual(preview.rows[0].entry.scope, "it")
+        result = glossario.restore_glossary_from_backup(str(self.text), str(source))
+        self.assertEqual(result["operation"], "import")
+        self.assertEqual([e.original_text for e in self.catalog.list_entries().entries], ["rook", "pin"])
+        backup = Path(result["safety_backup_path"])
+        self.assertEqual(backup.suffix, ".db")
+        result = glossario.restore_glossary_from_backup(str(self.text), str(backup))
+        self.assertEqual(result["operation"], "restore")
+        self.assertEqual([e.original_text for e in self.catalog.list_entries().entries], ["rook"])
+        self.assertEqual(self.catalog.list_entries().default_scope, "pt")
+
+    def test_separate_legacy_file_import_also_uses_complete_identity_and_keeps_scope(self):
+        target = self.root / "separate.txt"
+        save_glossary_entries([("rook", "torre", "suggestion", 0, "pt")], str(target), create_backup=False)
+        self.csv.write_text("original,replacement,type,priority,lang\n"
+                            "rook,torre,suggestion,9,pt\nrook,torre,cleanup,0,pt\n"
+                            "rook,torre,suggestion,0,it\nrook,castelo,suggestion,0,pt\n", encoding="utf-8")
+        analysis = glossario.analyze_glossary_csv_import(str(target), str(self.csv))
+        self.assertEqual((analysis["inserted"], analysis["duplicates"], analysis["conflicts"]), (2, 1, 1))
+        glossario.import_glossary_csv(str(target), str(self.csv), analysis=analysis)
+        self.assertEqual(glossario.load_glossary_entry_details(str(target), prefer_db=False), [
+            ("rook", "torre", "suggestion", 0, "pt"),
+            ("rook", "torre", "cleanup", 0, "pt"),
+            ("rook", "torre", "suggestion", 0, "it"),
+        ])
+
+    def test_v2_backup_retention_keeps_selected_restore_source_and_new_safety_copy(self):
+        from tradutor_pgn.backup_retention import prune_backups
+        folder = self.root / "backups"
+        source = glossario.create_glossary_backup(backup_dir=str(folder), timestamp="20260101-000000", prune=False)
+        obsolete = glossario.create_glossary_backup(backup_dir=str(folder), timestamp="20260102-000000", prune=False)
+
+        def keep_one(*args, **kwargs):
+            return prune_backups(*args, keep_count=1, max_age_days=None, keep_minimum=0, **kwargs)
+
+        with unittest.mock.patch("tradutor_pgn.backup_retention.prune_backups", side_effect=keep_one):
+            result = glossario.restore_glossary_from_backup(str(self.text), source,
+                        safety_backup_dir=str(folder), timestamp="20260103-000000")
+        self.assertTrue(Path(source).exists())
+        self.assertTrue(Path(result["safety_backup_path"]).exists())
+        self.assertFalse(Path(obsolete).exists())
 
 
 class GlossaryEntryLocationTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 """Authoritative glossary records and SQLite catalog V2."""
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -9,13 +9,16 @@ from pathlib import Path
 import sqlite3
 import shutil
 import tempfile
-from typing import Callable, Sequence
-from uuid import uuid4
+import threading
+import time
+from typing import Callable, Literal, Sequence
+from uuid import UUID, uuid4
 
 from .app_config import LANGUAGE_NAMES
 
 from .glossary_types import (
     GLOSSARY_PRIORITY_DEFAULT,
+    GLOSSARY_RULE_CLEANUP,
     GLOSSARY_RULE_SUGGESTION,
     GLOSSARY_SCOPE_ALL,
     _rule_type_alias,
@@ -57,6 +60,7 @@ class CatalogSnapshot:
 
     entries: tuple[GlossaryEntry, ...]
     catalog_revision: int
+    default_scope: str = GLOSSARY_SCOPE_ALL
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "entries", tuple(self.entries))
@@ -76,6 +80,43 @@ class MutationResult:
 class ExportResult:
     path: str
     catalog_revision: int
+    mirror_pending: bool = False
+    warning: str | None = None
+
+
+@dataclass(frozen=True)
+class ImportRow:
+    line_number: int
+    status: Literal["new", "duplicate", "conflict", "invalid"]
+    source: tuple
+    entry: GlossaryEntry | None = None
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class ImportPreview:
+    rows: tuple[ImportRow, ...]
+    catalog_revision: int
+
+
+@dataclass(frozen=True)
+class ImportResult:
+    snapshot: CatalogSnapshot
+    preview: ImportPreview
+    inserted_count: int
+    mirror_pending: bool = False
+    warning: str | None = None
+
+
+@dataclass(frozen=True)
+class BackupResult:
+    path: str
+    catalog_revision: int
+
+
+@dataclass(frozen=True)
+class RestoreResult:
+    snapshot: CatalogSnapshot
     mirror_pending: bool = False
     warning: str | None = None
 
@@ -160,8 +201,125 @@ def canonical_identity(entry: GlossaryEntry | tuple) -> tuple[str, str, str, str
     )
 
 
+def _validated_scope(value) -> str:
+    scope = normalize_glossary_scope(value)
+    codes = scope.split(">") if scope else []
+    if len(codes) > 2 or any(code and code not in LANGUAGE_NAMES for code in codes):
+        raise ValueError(f"Unknown glossary scope: {scope!r}.")
+    return scope
+
+
 CATALOG_SCHEMA_VERSION = 1
 CATALOG_BUSY_TIMEOUT_MS = 5000
+_ENTRY_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS glossary_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        stable_id TEXT NOT NULL UNIQUE,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        original_text TEXT NOT NULL,
+        replacement_text TEXT NOT NULL,
+        rule_type TEXT NOT NULL DEFAULT 'suggestion'
+            CHECK (rule_type IN ('suggestion', 'cleanup', 'automatic')),
+        priority INTEGER NOT NULL DEFAULT 0,
+        scope TEXT NOT NULL DEFAULT '',
+        position INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+_METADATA_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS glossary_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+"""
+
+_access_locks: dict[str, threading.RLock] = {}
+_access_guard = threading.Lock()
+_access_depth = threading.local()
+
+
+@contextmanager
+def _catalog_access(db_path: str):
+    """Serialize catalog connections and replacement across threads/processes.
+
+    The sidecar is stable across os.replace. SQLite alone cannot protect the
+    interval after closing our connections and before replacing the database.
+    """
+    # db_path was resolved by the catalog constructor. Do not touch the
+    # database file before acquiring the lock: Windows path resolution may
+    # briefly open a handle which prevents another thread's os.replace.
+    key = os.path.normcase(os.path.abspath(db_path))
+    with _access_guard:
+        lock = _access_locks.setdefault(key, threading.RLock())
+    if not lock.acquire(timeout=CATALOG_BUSY_TIMEOUT_MS / 1000):
+        raise sqlite3.OperationalError("Glossary catalog is busy.")
+    depths = getattr(_access_depth, "paths", None)
+    if depths is None:
+        depths = _access_depth.paths = {}
+    depth = depths.get(key, 0)
+    handle = None
+    locked = False
+    try:
+        if not depth:
+            handle = open(key + ".lock", "a+b")
+            if os.fstat(handle.fileno()).st_size == 0:
+                handle.write(b"\0")
+                handle.flush()
+            deadline = time.monotonic() + CATALOG_BUSY_TIMEOUT_MS / 1000
+            while True:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except OSError as exc:
+                    if time.monotonic() >= deadline:
+                        raise sqlite3.OperationalError("Glossary catalog is busy.") from exc
+                    time.sleep(0.01)
+        depths[key] = depth + 1
+        yield
+    finally:
+        if depth:
+            depths[key] = depth
+        else:
+            depths.pop(key, None)
+        if handle is not None:
+            try:
+                if locked:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+        lock.release()
+
+
+class _CatalogConnection(sqlite3.Connection):
+    """Hold the replacement lock until this owned connection is closed."""
+
+    access = None
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            if self.access is not None:
+                access, self.access = self.access, None
+                access.__exit__(None, None, None)
 
 
 class GlossaryCatalog:
@@ -173,15 +331,24 @@ class GlossaryCatalog:
 
     def __init__(self, db_path: str, mirror_path: str | None = None):
         self.db_path = str(db_path)
+        self._access_key = str(Path(db_path).resolve())
         self.mirror_path = mirror_path
 
     def _connect(self, *, create: bool = False) -> sqlite3.Connection:
-        path = Path(self.db_path).resolve().as_uri()
-        conn = sqlite3.connect(
-            f"{path}?mode={'rwc' if create else 'rw'}",
-            uri=True,
-            timeout=CATALOG_BUSY_TIMEOUT_MS / 1000,
-        )
+        access = _catalog_access(self._access_key)
+        access.__enter__()
+        try:
+            path = Path(self.db_path).resolve().as_uri()
+            conn = sqlite3.connect(
+                f"{path}?mode={'rwc' if create else 'rw'}",
+                uri=True,
+                timeout=CATALOG_BUSY_TIMEOUT_MS / 1000,
+                factory=_CatalogConnection,
+            )
+            conn.access = access
+        except BaseException:
+            access.__exit__(None, None, None)
+            raise
         try:
             conn.row_factory = sqlite3.Row
             conn.execute(f"PRAGMA busy_timeout = {CATALOG_BUSY_TIMEOUT_MS}")
@@ -196,42 +363,19 @@ class GlossaryCatalog:
         with closing(self._connect(create=True)) as conn, conn:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS glossary_entries (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    stable_id TEXT NOT NULL UNIQUE,
-                    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
-                    original_text TEXT NOT NULL,
-                    replacement_text TEXT NOT NULL,
-                    rule_type TEXT NOT NULL DEFAULT 'suggestion'
-                        CHECK (rule_type IN ('suggestion', 'cleanup', 'automatic')),
-                    priority INTEGER NOT NULL DEFAULT 0,
-                    scope TEXT NOT NULL DEFAULT '',
-                    position INTEGER NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
+            conn.execute(_ENTRY_SCHEMA)
             conn.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_glossary_canonical_identity
                 ON glossary_entries(original_text, replacement_text, rule_type, scope)
                 """
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS glossary_metadata (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-                """
-            )
+            conn.execute(_METADATA_SCHEMA)
             conn.executemany(
                 "INSERT OR IGNORE INTO glossary_metadata (key, value) VALUES (?, ?)",
                 (("schema_version", str(CATALOG_SCHEMA_VERSION)), ("catalog_revision", "1")),
             )
+            self._ensure_default_scope(conn)
         if self.mirror_path is not None and self._migration_completed():
             return self.export_legacy()
         return self.retry_pending_mirror()
@@ -251,20 +395,40 @@ class GlossaryCatalog:
             (key, value),
         )
 
+    def _ensure_default_scope(self, conn: sqlite3.Connection) -> None:
+        """Upgrade old V2 metadata using only a verified canonical mirror."""
+        if self._metadata(conn, "default_scope") is not None:
+            return
+        scope = GLOSSARY_SCOPE_ALL
+        if self.mirror_path is not None:
+            try:
+                contents = Path(self.mirror_path).read_bytes()
+                if hashlib.sha256(contents).hexdigest() == self._metadata(conn, "legacy_mirror_hash"):
+                    from .glossario import _read_default_scope
+
+                    scope = _validated_scope(_read_default_scope(contents.decode("utf-8"), self.mirror_path))
+            except (OSError, UnicodeError, SyntaxError, ValueError):
+                pass
+        self._set_metadata(conn, "default_scope", scope)
+
     def export_legacy(self, path: str | None = None) -> ExportResult:
         """Publish the newest committed snapshot without replacing external edits."""
         target = Path(path or self.mirror_path or "")
         if not str(target) or target == Path("."):
             raise ValueError("Legacy mirror path is required.")
+        self._require_separate_file(str(target), allow_mirror=True)
+        canonical = self.mirror_path is not None and target.resolve() == Path(self.mirror_path).resolve()
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
+            if canonical:
+                self._ensure_default_scope(conn)
             snapshot = self._snapshot(conn)
             known_hash = self._metadata(conn, "legacy_mirror_hash")
             try:
                 actual_hash = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
-                if (known_hash is not None and actual_hash != known_hash) or (
+                if canonical and ((known_hash is not None and actual_hash != known_hash) or (
                     known_hash is None and actual_hash is not None
-                ):
+                )):
                     warning = "Espelho legado divergente; revisão externa preservada."
                     self._set_metadata(conn, "mirror_pending", "1")
                     self._set_metadata(conn, "mirror_error", warning)
@@ -277,7 +441,7 @@ class GlossaryCatalog:
                     (e.original_text, e.replacement_text, e.rule_type, e.priority, e.scope)
                     for e in snapshot.entries
                 ]
-                contents = _serialize_entries(entries).encode("utf-8")
+                contents = _serialize_entries(entries, default_scope=snapshot.default_scope).encode("utf-8")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 temporary = None
                 try:
@@ -293,21 +457,24 @@ class GlossaryCatalog:
                     latest_hash = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
                     if latest_hash != actual_hash:
                         warning = "Espelho legado divergente; revisão externa preservada."
-                        self._set_metadata(conn, "mirror_pending", "1")
-                        self._set_metadata(conn, "mirror_error", warning)
+                        if canonical:
+                            self._set_metadata(conn, "mirror_pending", "1")
+                            self._set_metadata(conn, "mirror_error", warning)
                         return ExportResult(str(target), snapshot.catalog_revision, True, warning)
                     os.replace(temporary, target)
                 finally:
                     if temporary is not None:
                         temporary.unlink(missing_ok=True)
-                self._set_metadata(conn, "legacy_mirror_hash", hashlib.sha256(contents).hexdigest())
-                self._set_metadata(conn, "mirror_pending", "0")
-                self._set_metadata(conn, "mirror_error", "")
+                if canonical:
+                    self._set_metadata(conn, "legacy_mirror_hash", hashlib.sha256(contents).hexdigest())
+                    self._set_metadata(conn, "mirror_pending", "0")
+                    self._set_metadata(conn, "mirror_error", "")
                 return ExportResult(str(target), snapshot.catalog_revision)
             except OSError as exc:
                 warning = f"Espelho legado pendente ({type(exc).__name__})."
-                self._set_metadata(conn, "mirror_pending", "1")
-                self._set_metadata(conn, "mirror_error", warning)
+                if canonical:
+                    self._set_metadata(conn, "mirror_pending", "1")
+                    self._set_metadata(conn, "mirror_error", warning)
                 return ExportResult(str(target), snapshot.catalog_revision, True, warning)
 
     def retry_pending_mirror(self) -> ExportResult | None:
@@ -361,7 +528,226 @@ class GlossaryCatalog:
         return CatalogSnapshot(
             entries=tuple(GlossaryEntry(**dict(entry)) for entry in rows),
             catalog_revision=int(row[0]),
+            default_scope=GlossaryCatalog._metadata(conn, "default_scope") or GLOSSARY_SCOPE_ALL,
         )
+
+    @staticmethod
+    def _preview_import(entries: Sequence[LegacyGlossaryEntry], snapshot: CatalogSnapshot) -> ImportPreview:
+        identities = {canonical_identity(entry) for entry in snapshot.entries}
+        replacements = {}
+        for original, replacement, phase, scope in identities:
+            replacements.setdefault((original, phase, scope), set()).add(replacement)
+        rows = []
+        for line_number, raw in enumerate(entries, 1):
+            source = tuple(raw) if isinstance(raw, (tuple, list)) else (raw,)
+            try:
+                prepared, _ = GlossaryCatalog._prepare_legacy([raw])
+                entry = prepared[0]
+                priority = raw[3] if len(raw) >= 4 else 0
+                if priority not in (None, "") and (
+                    isinstance(priority, bool) or str(int(priority)) != str(priority).strip()
+                ):
+                    raise ValueError("Prioridade precisa ser um número inteiro.")
+                if not all(isinstance(value, str) for value in raw[:2]):
+                    raise ValueError("Original e substituição precisam ser textos.")
+                if not entry.original_text or (not entry.replacement_text and entry.rule_type != GLOSSARY_RULE_CLEANUP):
+                    raise ValueError("Original ou substituição vazios.")
+            except (ValueError, TypeError, IndexError) as exc:
+                rows.append(ImportRow(line_number, "invalid", source, message=str(exc)))
+                continue
+            identity = canonical_identity(entry)
+            original, replacement, phase, scope = identity
+            group = (original, phase, scope)
+            if identity in identities:
+                status = "duplicate"
+            elif group in replacements and replacement not in replacements[group]:
+                status = "conflict"
+            else:
+                status = "new"
+                identities.add(identity)
+                replacements.setdefault(group, set()).add(replacement)
+            rows.append(ImportRow(line_number, status, source, entry))
+        return ImportPreview(tuple(rows), snapshot.catalog_revision)
+
+    def preview_import(self, entries: Sequence[LegacyGlossaryEntry]) -> ImportPreview:
+        """Classify every source row without changing the catalog."""
+        return self._preview_import(entries, self.list_entries())
+
+    def import_entries(
+        self, entries: Sequence[LegacyGlossaryEntry], mode: Literal["append"],
+        expected_catalog_revision: int,
+    ) -> ImportResult:
+        """Append only new identities in one transaction matching the preview."""
+        if mode != "append":
+            raise ValueError("Only append import is supported.")
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._require_catalog_revision(conn, expected_catalog_revision)
+            snapshot = self._snapshot(conn)
+            preview = self._preview_import(entries, snapshot)
+            accepted = [row.entry for row in preview.rows if row.status == "new"]
+            for offset, entry in enumerate(accepted, len(snapshot.entries)):
+                self._insert_legacy_entry(conn, GlossaryEntry(
+                    stable_id=entry.stable_id, original_text=entry.original_text,
+                    replacement_text=entry.replacement_text, rule_type=entry.rule_type,
+                    priority=entry.priority, scope=entry.scope, position=offset,
+                ))
+            if accepted:
+                self._increment_catalog_revision(conn)
+            snapshot = self._snapshot(conn)
+        result = self._committed_result(snapshot) if accepted else MutationResult(snapshot)
+        return ImportResult(snapshot, preview, len(accepted), result.mirror_pending, result.warning)
+
+    def _require_separate_file(self, path: str, *, allow_mirror: bool = False) -> Path:
+        target = Path(path).resolve()
+        protected = [Path(self.db_path + suffix).resolve() for suffix in ("", "-wal", "-shm", ".lock")]
+        if self.mirror_path is not None and not allow_mirror:
+            protected.append(Path(self.mirror_path).resolve())
+        for source in protected:
+            if target == source or (target.exists() and source.exists() and target.samefile(source)):
+                raise ValueError("Destination must be separate from the catalog and its mirror/sidecars.")
+        return target
+
+    @staticmethod
+    def _copy_database(source: str, target: Path) -> None:
+        with closing(sqlite3.connect(Path(source).resolve().as_uri() + "?mode=ro", uri=True)) as original:
+            with closing(sqlite3.connect(target)) as copied:
+                original.backup(copied)
+
+    @staticmethod
+    def _validate_backup(conn: sqlite3.Connection) -> CatalogSnapshot:
+        if [row[0] for row in conn.execute("PRAGMA integrity_check")] != ["ok"]:
+            raise ValueError("Glossary backup failed SQLite integrity check.")
+        objects = conn.execute("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
+        if {tuple(row) for row in objects} != {
+            ("table", "glossary_entries"), ("table", "glossary_metadata"),
+            ("index", "idx_glossary_canonical_identity"),
+        }:
+            raise ValueError("Incompatible glossary backup schema objects.")
+
+        def normalize_schema(sql):
+            return " ".join(sql.split()).replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE")
+
+        for name, expected in (("glossary_entries", _ENTRY_SCHEMA), ("glossary_metadata", _METADATA_SCHEMA)):
+            sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()[0]
+            if normalize_schema(sql) != normalize_schema(expected):
+                raise ValueError("Incompatible glossary backup table schema or constraints.")
+        indexes = {}
+        for index in conn.execute("PRAGMA index_list(glossary_entries)"):
+            # The name is database data; quote it as an SQL string literal.
+            quoted = index[1].replace("'", "''")
+            fields = tuple(row[2] for row in conn.execute(f"PRAGMA index_info('{quoted}')"))
+            if index[2] and not index[4]:
+                indexes[index[1]] = fields
+        if indexes.get("idx_glossary_canonical_identity") != (
+            "original_text", "replacement_text", "rule_type", "scope"
+        ) or ("stable_id",) not in indexes.values():
+            raise ValueError("Incompatible glossary backup identity indexes.")
+        if GlossaryCatalog._metadata(conn, "schema_version") != str(CATALOG_SCHEMA_VERSION):
+            raise ValueError("Incompatible glossary backup version.")
+        snapshot = GlossaryCatalog._snapshot(conn)
+        if snapshot.catalog_revision < 1:
+            raise ValueError("Invalid glossary backup catalog revision.")
+        GlossaryCatalog._validate_migration(conn, len(snapshot.entries))
+        raw_rows = conn.execute("SELECT * FROM glossary_entries ORDER BY position, id").fetchall()
+        for raw, entry in zip(raw_rows, snapshot.entries):
+            UUID(entry.stable_id)
+            if not entry.original_text or (not entry.replacement_text and entry.rule_type != GLOSSARY_RULE_CLEANUP):
+                raise ValueError("Invalid glossary backup text.")
+            if any(raw[field] != getattr(entry, field) for field in (
+                "original_text", "replacement_text", "rule_type", "scope", "priority",
+            )) or not isinstance(raw["revision"], int) or not isinstance(raw["priority"], int):
+                raise ValueError("Invalid glossary backup entry values.")
+        scope = snapshot.default_scope
+        if scope != _validated_scope(scope):
+            raise ValueError("Invalid glossary backup default scope.")
+        return snapshot
+
+    def backup(self, destination: str) -> BackupResult:
+        """Publish a consistent SQLite backup, including committed WAL data."""
+        target = self._require_separate_file(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.backup-", delete=False) as temp:
+            stage = Path(temp.name)
+        try:
+            with closing(self._connect()) as source:
+                with closing(sqlite3.connect(stage)) as copied:
+                    source.backup(copied)
+                    copied.row_factory = sqlite3.Row
+                    snapshot = self._validate_backup(copied)
+                    copied.execute("PRAGMA journal_mode = DELETE")
+            with stage.open("r+b") as contents:
+                os.fsync(contents.fileno())
+            os.replace(stage, target)
+            return BackupResult(str(target), snapshot.catalog_revision)
+        finally:
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                Path(str(stage) + suffix).unlink(missing_ok=True)
+
+    def restore(self, backup_path: str, expected_catalog_revision: int) -> RestoreResult:
+        """Validate a staged backup, then replace after CAS with no open owned handles."""
+        source = self._require_separate_file(backup_path)
+        target = Path(self.db_path).resolve()
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.restore-", delete=False) as temp:
+            stage = Path(temp.name)
+        try:
+            self._copy_database(str(source), stage)
+            with closing(sqlite3.connect(stage)) as restored:
+                restored.row_factory = sqlite3.Row
+                backup_snapshot = self._validate_backup(restored)
+                restored.execute("PRAGMA journal_mode = DELETE")
+            with _catalog_access(self._access_key):
+                with closing(self._connect()) as current, current:
+                    current.execute("BEGIN IMMEDIATE")
+                    self._require_catalog_revision(current, expected_catalog_revision)
+                    snapshot = self._snapshot(current)
+                    mirror_hash = self._metadata(current, "legacy_mirror_hash")
+                revision = max(
+                    snapshot.catalog_revision, backup_snapshot.catalog_revision,
+                    *(entry.revision for entry in snapshot.entries),
+                    *(entry.revision for entry in backup_snapshot.entries),
+                ) + 1
+                with closing(sqlite3.connect(stage)) as restored, restored:
+                    restored.execute("BEGIN IMMEDIATE")
+                    self._set_metadata(restored, "catalog_revision", str(revision))
+                    self._set_metadata(restored, "default_scope", backup_snapshot.default_scope)
+                    self._set_metadata(restored, "migration_completed", "1")
+                    # All old per-entry tokens must fail, including IDs which
+                    # disappeared after this backup and are now reintroduced.
+                    restored.execute("UPDATE glossary_entries SET revision = ?", (revision,))
+                    restored.execute("DELETE FROM glossary_metadata WHERE key='legacy_mirror_hash'")
+                    if mirror_hash is not None:
+                        self._set_metadata(restored, "legacy_mirror_hash", mirror_hash)
+                    self._set_metadata(restored, "mirror_pending", "1" if self.mirror_path else "0")
+                    self._set_metadata(restored, "mirror_error", "")
+                with closing(sqlite3.connect(stage)) as restored:
+                    restored.row_factory = sqlite3.Row
+                    staged_snapshot = self._snapshot(restored)
+                    restored.execute("PRAGMA journal_mode = WAL")
+                # Checkpoint and leave DELETE mode before closing the last
+                # owned connection: no WAL belonging to the old inode survives.
+                with closing(self._connect()) as current:
+                    checkpoint = current.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                    if checkpoint[0]:
+                        raise sqlite3.OperationalError("Glossary catalog has active readers.")
+                    current.execute("PRAGMA journal_mode = DELETE")
+                try:
+                    with stage.open("r+b") as contents:
+                        os.fsync(contents.fileno())
+                    os.replace(stage, target)
+                except BaseException:
+                    # Publication failed: keep the original catalog's WAL
+                    # behavior as well as its data and revisions.
+                    with closing(self._connect()) as current:
+                        current.execute("PRAGMA journal_mode = WAL")
+                    raise
+                # The staged image already carries WAL mode and the result.
+                # No post-publication read may turn this success into failure.
+                result = self._committed_result(staged_snapshot)
+                return RestoreResult(result.snapshot, result.mirror_pending, result.warning)
+        finally:
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                Path(str(stage) + suffix).unlink(missing_ok=True)
 
     @staticmethod
     def _entry(conn: sqlite3.Connection, stable_id: str) -> GlossaryEntry | None:
@@ -657,6 +1043,9 @@ class GlossaryCatalog:
             backup_paths.append(self._backup_file(Path(legacy_db_path), database=True))
 
         backed_up_text = Path(backup_paths[0]).read_bytes()
+        from .glossario import _read_default_scope
+
+        default_scope = _validated_scope(_read_default_scope(backed_up_text.decode("utf-8"), str(source)))
         entries, duplicates = self._prepare_legacy(load_entries())
         destination = Path(self.db_path)
         new_catalog = not destination.exists()
@@ -687,6 +1076,7 @@ class GlossaryCatalog:
                     "INSERT INTO glossary_metadata (key, value) VALUES ('migration_completed', '1')"
                 )
                 self._set_metadata(conn, "legacy_mirror_hash", hashlib.sha256(backed_up_text).hexdigest())
+                self._set_metadata(conn, "default_scope", default_scope)
                 self._set_metadata(conn, "mirror_pending", "1")
             if stage is not None:
                 with closing(catalog._connect()) as conn:
@@ -704,5 +1094,5 @@ class GlossaryCatalog:
             )
         finally:
             if stage is not None:
-                for suffix in ("", "-wal", "-shm"):
+                for suffix in ("", "-wal", "-shm", ".lock"):
                     Path(str(stage) + suffix).unlink(missing_ok=True)

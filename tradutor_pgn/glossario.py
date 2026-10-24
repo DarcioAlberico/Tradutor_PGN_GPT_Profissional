@@ -13,9 +13,10 @@ import sqlite3
 import sys
 
 from .app_config import LANGUAGE_NAMES
+from . import backup_retention
 from .app_paths import data_path, glossary_catalog_path
 from .backup_retention import prune_glossary_backups
-from .glossary_catalog import GlossaryCatalog, MigrationReport
+from .glossary_catalog import GlossaryCatalog, MigrationReport, canonical_identity
 from .glossary_types import (
     GLOSSARY_PRIORITY_DEFAULT as GLOSSARY_PRIORITY_DEFAULT,
     GLOSSARY_RULE_AUTOMATIC as GLOSSARY_RULE_AUTOMATIC,
@@ -529,15 +530,12 @@ def _load_glossary_entry_details_from_file(path, deduplicate=True):
 
 
 def glossary_default_scope(path=None):
-    """O escopo padrao declarado pelo arquivo de glossario.
-
-    Lido do texto, e nao do `glossario.db`: o indice guarda o escopo ja resolvido
-    em cada regra, entao o padrao ali seria apenas informativo. Quem precisa dele
-    e a gravacao, que tem de reescrever o arquivo com a mesma declaracao que
-    encontrou.
-    """
+    """Read the authoritative default scope, or a separate legacy file's declaration."""
     if path is None:
         path = _default_substitutions_path()
+    catalog = _catalog_for_path(path)
+    if catalog is not None:
+        return catalog.list_entries().default_scope
     if not os.path.exists(path):
         return GLOSSARY_SCOPE_ALL
     try:
@@ -941,6 +939,19 @@ def create_glossary_backup(path=None, backup_dir=None, timestamp=None, prune=Tru
     """Cria uma cópia de segurança do glossário e retorna o caminho criado."""
     if path is None:
         path = _default_substitutions_path()
+
+    catalog = _catalog_for_path(path)
+    if catalog is not None:
+        backup_dir = backup_dir or os.path.join(os.path.dirname(catalog.db_path), "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        timestamp = timestamp or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        target = _unique_path(os.path.join(backup_dir, f"glossario-v2-{timestamp}.db"))
+        result = catalog.backup(target)
+        if prune:
+            backup_retention.prune_backups(
+                backup_dir, "glossario-v2-", ".db", protected=(result.path,) + tuple(protect),
+            )
+        return result.path
 
     if not os.path.exists(path):
         return None
@@ -1691,7 +1702,7 @@ def export_glossary_csv(csv_path, entries=None, path=None):
     return {"exported": len(_normalize_detailed_entries(entries)), "csv_path": csv_path}
 
 
-def read_glossary_csv(csv_path):
+def read_glossary_csv(csv_path, *, strict=False):
     """Lê pares de glossário de um CSV exportado ou equivalente."""
     with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -1744,8 +1755,9 @@ def read_glossary_csv(csv_path):
                 (
                     (row.get(original_field) or "").strip(),
                     (row.get(replacement_field) or "").strip(),
+                    (row.get(type_field) if type_field else None) if strict else
                     _normalize_rule_type(row.get(type_field) if type_field else None),
-                    normalize_glossary_priority(
+                    (row.get(priority_field) if priority_field else None) if strict else normalize_glossary_priority(
                         row.get(priority_field) if priority_field else None
                     ),
                     normalize_glossary_scope(
@@ -1756,13 +1768,62 @@ def read_glossary_csv(csv_path):
         return rows
 
 
+def read_glossary_import(path):
+    """Read interchange rows without erasing invalid values before preview."""
+    if os.path.splitext(path)[1].lower() == ".csv":
+        return tuple(read_glossary_csv(path, strict=True))
+    with open(path, "r", encoding="utf-8") as source:
+        contents = source.read()
+    raw_items = _read_substitution_assignment(contents, path)
+    default_scope = _read_default_scope(contents, path)
+    entries = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            entries.append((item.get("original"), item.get("replacement"),
+                            _raw_rule_type(item), item.get("priority", 0),
+                            _entry_scope(item) if _entry_scope(item) is not None else default_scope))
+        elif isinstance(item, (tuple, list)) and 2 <= len(item) <= 5:
+            entries.append(tuple(item) + (None,) * (4 - len(item)) +
+                           ((default_scope,) if len(item) < 5 else ()))
+        else:
+            entries.append(item)
+    return tuple(entries)
+
+
+def _catalog_for_path(path):
+    if path is None:
+        path = _default_substitutions_path()
+    catalog_path = glossary_catalog_path()
+    if _is_default_substitutions_path(path) and os.path.exists(catalog_path):
+        return GlossaryCatalog(catalog_path, path)
+    return None
+
+
+def _catalog_import_analysis(catalog, source_entries):
+    preview = catalog.preview_import(source_entries)
+    counts = {status: sum(row.status == status for row in preview.rows)
+              for status in ("new", "duplicate", "conflict", "invalid")}
+    return {
+        "total_rows": len(preview.rows), "inserted": counts["new"],
+        "duplicates": counts["duplicate"], "conflicts": counts["conflict"],
+        "invalid": counts["invalid"], "skipped": len(preview.rows) - counts["new"],
+        "entries": [(row.entry.original_text, row.entry.replacement_text, row.entry.rule_type,
+                     row.entry.priority, row.entry.scope) for row in preview.rows if row.status == "new"],
+        "preview": preview, "catalog_revision": preview.catalog_revision,
+        "source_entries": tuple(source_entries),
+    }
+
+
 def analyze_glossary_csv_import(path, csv_path, allow_conflicts=False):
     """Analisa um CSV antes de importar para o glossário persistente."""
+    catalog = _catalog_for_path(path)
+    if catalog is not None:
+        return _catalog_import_analysis(catalog, read_glossary_import(csv_path))
     existing = load_glossary_entry_details(path, deduplicate=False)
-    existing_pairs = set(_normalize_entries(existing))
+    existing_pairs = {canonical_identity(entry) for entry in existing}
     replacements_by_original = {}
-    for orig, new in _normalize_entries(existing):
-        replacements_by_original.setdefault(orig, set()).add(new)
+    for orig, new, phase, scope in existing_pairs:
+        replacements_by_original.setdefault((orig, phase, scope), set()).add(new)
 
     stats = {
         "total_rows": 0,
@@ -1794,22 +1855,23 @@ def analyze_glossary_csv_import(path, csv_path, allow_conflicts=False):
             stats["skipped"] += 1
             continue
 
-        pair = (orig, new)
+        pair = canonical_identity(row_entry)
         if pair in existing_pairs or pair in inserted_pairs:
             stats["duplicates"] += 1
             stats["skipped"] += 1
             continue
 
-        has_conflict = orig in replacements_by_original and new not in replacements_by_original[orig]
+        group = (orig, rule_type, glossary_entry_scope(row_entry))
+        has_conflict = group in replacements_by_original and new not in replacements_by_original[group]
         if has_conflict:
             stats["conflicts"] += 1
             if not allow_conflicts:
                 stats["skipped"] += 1
                 continue
 
-        to_insert.append((orig, new, rule_type, glossary_entry_priority(row_entry)))
+        to_insert.append((orig, new, rule_type, glossary_entry_priority(row_entry), glossary_entry_scope(row_entry)))
         inserted_pairs.add(pair)
-        replacements_by_original.setdefault(orig, set()).add(new)
+        replacements_by_original.setdefault(group, set()).add(new)
         stats["inserted"] += 1
 
     stats["entries"] = to_insert
@@ -1836,6 +1898,15 @@ def import_glossary_csv(
         stats = analyze_glossary_csv_import(
             path, csv_path, allow_conflicts=allow_conflicts
         )
+    catalog = _catalog_for_path(path)
+    if catalog is not None:
+        # Reuse exactly the rows the user saw; CAS is still required for noops.
+        expected = stats["catalog_revision"]
+        backup_path = create_glossary_backup(path, backup_dir=backup_dir, timestamp=timestamp) if stats["entries"] else None
+        result = catalog.import_entries(stats["source_entries"], "append", expected)
+        return dict(stats, inserted=result.inserted_count, backup_path=backup_path,
+                    mirror_pending=result.mirror_pending, warning=result.warning,
+                    snapshot=result.snapshot)
     if not stats["entries"]:
         stats["backup_path"] = None
         return stats
@@ -1851,10 +1922,28 @@ def import_glossary_csv(
     return stats
 
 
-def restore_glossary_from_backup(path, backup_path, safety_backup_dir=None, timestamp=None):
+def restore_glossary_from_backup(
+    path, backup_path, safety_backup_dir=None, timestamp=None, *,
+    expected_catalog_revision=None, analysis=None,
+):
     """Restaura o glossário a partir de um backup validado."""
     if path is None:
         path = _default_substitutions_path()
+
+    catalog = _catalog_for_path(path)
+    if catalog is not None:
+        is_text = os.path.splitext(backup_path)[1].lower() in (".txt", ".csv")
+        if is_text:
+            stats = analysis if analysis is not None else _catalog_import_analysis(catalog, read_glossary_import(backup_path))
+            expected = stats["catalog_revision"]
+        else:
+            expected = expected_catalog_revision if expected_catalog_revision is not None else catalog.list_entries().catalog_revision
+        safety_path = create_glossary_backup(path, backup_dir=safety_backup_dir, timestamp=timestamp, protect=(backup_path,))
+        result = (catalog.import_entries(stats["source_entries"], "append", expected) if is_text
+                  else catalog.restore(backup_path, expected))
+        return {"safety_backup_path": safety_path, "operation": "import" if is_text else "restore",
+                "snapshot": result.snapshot, "mirror_pending": result.mirror_pending,
+                "warning": result.warning}
 
     load_glossary_entries(backup_path, deduplicate=False)
     safety_backup_path = create_glossary_backup(

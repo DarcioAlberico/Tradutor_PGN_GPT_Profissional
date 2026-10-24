@@ -1,5 +1,6 @@
 import os
 import tkinter as tk
+import weakref
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -36,6 +37,7 @@ from .glossario import (
     normalize_glossary_priority,
     promote_glossary_rule,
     load_interactive_substitutions,
+    read_glossary_import,
     validate_glossary_entry,
 )
 from .db_tools import preview_automatic_rule_impact
@@ -221,6 +223,63 @@ def row_label(entries, index, diagnostics=None):
     )
 
 
+class ImportPreviewDialog:
+    """Show the exact captured source rows before an append is authorized."""
+
+    def __init__(self, parent, preview, on_confirm, on_close):
+        self.win = ctk.CTkToplevel(parent)
+        self.win.title("Prévia da importação")
+        self.win.geometry("840x520")
+        self.win.minsize(600, 350)
+        self.win.transient(parent)
+        self.win.columnconfigure(0, weight=1)
+        self.win.rowconfigure(1, weight=1)
+        self.on_close = on_close
+        self.closed = False
+        labels = {"new": "nova", "duplicate": "duplicada", "conflict": "conflitante", "invalid": "inválida"}
+        new_count = sum(row.status == "new" for row in preview.rows)
+        summary = "; ".join(f"{sum(row.status == status for row in preview.rows)} {label}(s)"
+                            for status, label in labels.items())
+        ctk.CTkLabel(self.win, text=summary + "\nSomente as linhas novas serão acrescentadas.",
+                     wraplength=780).grid(row=0, column=0, sticky="ew", padx=12, pady=12)
+        self.rows_text = ctk.CTkTextbox(self.win, wrap="word")
+        self.rows_text.grid(row=1, column=0, sticky="nsew", padx=12)
+        contents = []
+        for row in preview.rows:
+            if row.entry is not None:
+                entry = row.entry
+                detail = (f"{entry.original_text!r} → {entry.replacement_text!r}; "
+                          f"fase={entry.rule_type}; escopo={entry.scope or 'global'}; prioridade={entry.priority}")
+            else:
+                detail = f"{row.source!r}: {row.message}"
+            contents.append(f"{row.line_number}. {labels[row.status]} — {detail}")
+        self.rows_text.insert("1.0", "\n\n".join(contents))
+        self.rows_text.configure(state="disabled")
+        buttons = ctk.CTkFrame(self.win, fg_color="transparent")
+        buttons.grid(row=2, column=0, sticky="e", padx=12, pady=12)
+
+        def confirm():
+            if self.closed:
+                return
+            self.close()
+            on_confirm()
+
+        self.cancel_button = ctk.CTkButton(buttons, text="Cancelar", command=self.close)
+        self.cancel_button.pack(side="left", padx=(0, 8))
+        self.confirm_button = ctk.CTkButton(buttons, text=f"Importar {new_count} nova(s)", command=confirm,
+                                           state="normal" if new_count else "disabled")
+        self.confirm_button.pack(side="left")
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+        self.win.bind("<Escape>", lambda _event: self.close())
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.win.destroy()
+        self.on_close()
+
+
 class GlossaryEditorState:
     """Estado mutavel da janela do glossario, em atributos.
 
@@ -313,6 +372,8 @@ class GlossaryEditor:
     mesmo corpo.
     """
 
+    _instances = weakref.WeakSet()
+
     def __init__(self, app, on_change=None, initial_original=None, initial_replacement=None):
         self.app = app
         self.on_change = on_change
@@ -322,6 +383,7 @@ class GlossaryEditor:
         self.build_footer()
         self.connect_events()
         self.load_first_entry(initial_original, initial_replacement)
+        self._instances.add(self)
 
     def build_state(self):
         """Janela, configuracoes salvas, estado e variaveis de controle."""
@@ -344,6 +406,7 @@ class GlossaryEditor:
         restore_or_maximize(self.win, self.app.root, saved_geometry)
 
         self.state = GlossaryEditorState()
+        self.import_preview_window = None
         self.catalog = GlossaryCatalog(glossary_catalog_path(), _default_substitutions_path())
         self.row_buttons = []
         self.form_baseline = {
@@ -699,8 +762,8 @@ class GlossaryEditor:
         self.buttons["Backup"].configure(command=self.create_backup_now)
         self.buttons["Recarregar"].configure(command=self.reload_all)
         self.buttons["Exportar CSV"].configure(command=self.export_csv)
-        self.buttons["Importar CSV"].configure(command=self.import_csv, state="disabled")
-        self.buttons["Restaurar backup"].configure(command=self.restore_backup, state="disabled")
+        self.buttons["Importar CSV"].configure(command=self.import_csv)
+        self.buttons["Restaurar backup"].configure(command=self.restore_backup)
         self.btn_page_prev.configure(command=lambda: self.change_page(-1))
         self.btn_page_next.configure(command=lambda: self.change_page(1))
         self.btn_search.configure(command=self.apply_search)
@@ -996,7 +1059,7 @@ class GlossaryEditor:
                     and self.form_baseline.get("revision") == self.state.selected_revision)
         self.buttons["Excluir"].configure(state="normal" if complete else "disabled")
         self.buttons["Salvar"].configure(state="normal" if complete or (self.state.selected_id is None and self.state.catalog_revision > 0) else "disabled")
-        for label in ("Salvar como nova", "Deduplicar"):
+        for label in ("Salvar como nova", "Deduplicar", "Importar CSV", "Restaurar backup", "Backup"):
             self.buttons[label].configure(state="normal" if self.state.catalog_revision > 0 else "disabled")
         self.btn_promote_conflict.configure(state="normal" if complete else "disabled")
         message = ""
@@ -1066,6 +1129,7 @@ class GlossaryEditor:
             if not os.path.exists(self.catalog.db_path):
                 initialize_catalog_glossary()
             self.state.snapshot = self.catalog.list_entries()
+            self.file_default_scope = self.state.snapshot.default_scope
             self.state.entries = [
                 (entry.original_text, entry.replacement_text, entry.rule_type, entry.priority, entry.scope)
                 for entry in self.state.snapshot.entries
@@ -1653,14 +1717,88 @@ class GlossaryEditor:
         self.show_message(f"CSV exportado: {stats['exported']} entradas")
 
     def import_csv(self):
-        """Bulk changes require a dedicated atomic catalog operation."""
-        self.show_message("Ação indisponível até a operação atômica do catálogo.", WARNING_COLOR)
-        return None
+        if self.state.dirty and not self.confirm_discard_changes():
+            return
+        path = filedialog.askopenfilename(
+            title="Importar glossário", parent=self.win,
+            filetypes=[("Glossário CSV ou texto", "*.csv *.txt"), ("Todos os arquivos", "*.*")],
+        )
+        if path:
+            self.preview_import_file(path)
+
+    def preview_import_file(self, path):
+        if self.import_preview_window is not None:
+            self.import_preview_window.win.lift()
+            return
+        try:
+            entries = read_glossary_import(path)
+            preview = self.catalog.preview_import(entries)
+        except Exception as exc:
+            messagebox.showerror("Erro", f"Erro ao ler importação:\n{exc}", parent=self.win)
+            return
+        shown_draft = (self.current_pair(), self.current_rule_type(), self.current_priority(), self.current_scope())
+
+        def confirmed():
+            current_draft = (self.current_pair(), self.current_rule_type(), self.current_priority(), self.current_scope())
+            if self.state.dirty and current_draft != shown_draft and not self.confirm_discard_changes():
+                return
+            try:
+                create_glossary_backup()
+                result = self.catalog.import_entries(entries, "append", preview.catalog_revision)
+            except GlossaryConflictError as exc:
+                self.report_revision_conflict(exc)
+                return
+            except Exception as exc:
+                messagebox.showerror("Erro", f"Erro ao importar glossário:\n{exc}", parent=self.win)
+                return
+            self.finish_mutation(result)
+            self.show_message(result.warning or f"Importadas {result.inserted_count} entrada(s) nova(s).",
+                              WARNING_COLOR if result.warning else OK_COLOR)
+
+        def closed():
+            self.import_preview_window = None
+
+        self.import_preview_window = ImportPreviewDialog(self.win, preview, confirmed, closed)
 
     def restore_backup(self):
-        """Bulk changes require a dedicated atomic catalog operation."""
-        self.show_message("Ação indisponível até a operação atômica do catálogo.", WARNING_COLOR)
-        return None
+        if self.state.dirty and not self.confirm_discard_changes():
+            return
+        path = filedialog.askopenfilename(
+            title="Restaurar backup SQLite V2 ou importar texto", parent=self.win,
+            filetypes=[("Backup SQLite V2", "*.db *.sqlite *.bak"), ("Glossário legado (importação)", "*.txt"),
+                       ("Todos os arquivos", "*.*")],
+        )
+        if not path:
+            return
+        if os.path.splitext(path)[1].lower() in (".txt", ".csv"):
+            self.preview_import_file(path)
+            return
+        expected = self.state.catalog_revision
+        if not messagebox.askyesno(
+            "Restaurar catálogo",
+            f"Substituir integralmente as {len(self.state.entries)} entradas pelo backup SQLite V2?\n"
+            "Será criado um backup de segurança. Todas as janelas do glossário serão recarregadas; "
+            "rascunhos abertos serão descartados.", parent=self.win,
+        ):
+            return
+        try:
+            create_glossary_backup(protect=(path,))
+            result = self.catalog.restore(path, expected)
+        except GlossaryConflictError as exc:
+            self.report_revision_conflict(exc)
+            return
+        except Exception as exc:
+            messagebox.showerror("Erro", f"Erro ao restaurar catálogo:\n{exc}", parent=self.win)
+            return
+        for editor in list(self._instances):
+            if editor.catalog._access_key == self.catalog._access_key and editor.win.winfo_exists():
+                if editor.import_preview_window is not None:
+                    editor.import_preview_window.close()
+                editor.set_dirty(False)
+                editor.reload_all()
+        self.update_app_glossary()
+        self.show_message(result.warning or "Catálogo restaurado; janelas recarregadas.",
+                          WARNING_COLOR if result.warning else OK_COLOR)
 
     def apply_search(self):
         self.state.page_index = 0

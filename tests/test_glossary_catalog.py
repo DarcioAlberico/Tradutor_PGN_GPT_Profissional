@@ -6,6 +6,8 @@ from contextlib import closing
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -514,6 +516,424 @@ class GlossaryCatalogConcurrencyTests(GlossaryCatalogMutationTests):
         self.assertEqual(stored, ("knight", "cavalo", "pt"))
         with self.assertRaises(glossary_catalog.GlossaryDuplicateError):
             self.catalog.add(self.draft(scope="pt"), 2)
+
+
+class GlossaryCatalogImportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.catalog = glossary_catalog.GlossaryCatalog(str(self.root / "catalog.db"))
+        self.catalog.initialize()
+        self.catalog.add(glossary_catalog.GlossaryEntryDraft("rook", "torre", scope="pt"), 1)
+
+    def test_preview_classifies_every_row_using_full_identity(self):
+        rows = [
+            (" rook ", "torre", "suggestion", 99, "pt"),
+            ("rook", "torre", "cleanup", 0, "pt"),
+            ("rook", "torre", "suggestion", 0, "it"),
+            ("rook", "torre dupla", "suggestion", 0, "pt"),
+            ("pin", "cravada", "suggestion", 0, "pt"),
+            ("pin", "cravada", "suggestion", 8, "pt"),
+            ("pin", "pregadura", "suggestion", 0, "pt"),
+            ("", "vazio"), ("rook", "", "automatic"),
+            ("x", "y", "unknown"), ("x", "y", "suggestion", 0, "xx"),
+            ("junk", "", "cleanup"), ("x", "y", "suggestion", "bad"),
+        ]
+        before = self.catalog.list_entries()
+        preview = self.catalog.preview_import(rows)
+        self.assertEqual([row.status for row in preview.rows], [
+            "duplicate", "new", "new", "conflict", "new", "duplicate", "conflict",
+            "invalid", "invalid", "invalid", "invalid", "new", "invalid",
+        ])
+        self.assertEqual([row.line_number for row in preview.rows], list(range(1, 14)))
+        self.assertEqual(preview.catalog_revision, 2)
+        self.assertEqual(self.catalog.list_entries(), before)
+        result = self.catalog.import_entries(rows, "append", preview.catalog_revision)
+        self.assertEqual(result.inserted_count, 4)
+        self.assertEqual(result.snapshot.catalog_revision, 3)
+        self.assertEqual([(e.original_text, e.rule_type, e.scope, e.position)
+                          for e in result.snapshot.entries], [
+            ("rook", "suggestion", "pt", 0), ("rook", "cleanup", "pt", 1),
+            ("rook", "suggestion", "it", 2), ("pin", "suggestion", "pt", 3),
+            ("junk", "cleanup", "", 4),
+        ])
+
+    def test_stale_preview_rejects_whole_import_even_when_it_would_insert_nothing(self):
+        rows = [("pin", "cravada"), ("bishop", "bispo")]
+        preview = self.catalog.preview_import(rows)
+        other = glossary_catalog.GlossaryCatalog(self.catalog.db_path)
+        other.add(glossary_catalog.GlossaryEntryDraft("queen", "dama"), 2)
+        before = other.list_entries()
+        for candidates in (rows, []):
+            with self.assertRaises(glossary_catalog.GlossaryConflictError):
+                self.catalog.import_entries(candidates, "append", preview.catalog_revision)
+        self.assertEqual(self.catalog.list_entries(), before)
+
+    def test_import_failure_rolls_back_all_rows_and_revision(self):
+        before = self.catalog.list_entries()
+        with closing(self.catalog._connect()) as conn, conn:
+            conn.execute("""CREATE TRIGGER fail_import BEFORE INSERT ON glossary_entries
+                            WHEN NEW.original_text = 'fail' BEGIN
+                            SELECT RAISE(ABORT, 'injected failure'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.catalog.import_entries([("pin", "cravada"), ("fail", "erro")], "append", 2)
+        self.assertEqual(self.catalog.list_entries(), before)
+
+    def test_append_only_and_noop_do_not_change_revision(self):
+        before = self.catalog.list_entries()
+        with self.assertRaises(ValueError):
+            self.catalog.import_entries([], "replace", 2)
+        result = self.catalog.import_entries([("rook", "torre", "suggestion", 0, "pt")], "append", 2)
+        self.assertEqual(result.inserted_count, 0)
+        self.assertEqual(result.snapshot, before)
+
+
+class GlossaryCatalogRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.catalog = glossary_catalog.GlossaryCatalog(str(self.root / "catalog.db"))
+        self.catalog.initialize()
+        self.entry = self.catalog.add(glossary_catalog.GlossaryEntryDraft("rook", "torre"), 1).entry
+        self.backup_path = self.root / "backup.db"
+
+    def backup(self):
+        return self.catalog.backup(str(self.backup_path))
+
+    def test_backup_captures_committed_wal_with_active_reader_and_preserves_source(self):
+        with closing(sqlite3.connect(self.catalog.db_path)) as active:
+            active.execute("BEGIN")
+            active.execute("SELECT * FROM glossary_entries").fetchall()
+            self.catalog.add(glossary_catalog.GlossaryEntryDraft("pin", "cravada"), 2)
+            before = self.catalog.list_entries()
+            result = self.backup()
+            self.assertEqual(result.catalog_revision, 3)
+            copied = glossary_catalog.GlossaryCatalog(str(self.backup_path)).list_entries()
+            self.assertEqual(copied, before)
+            self.assertEqual(self.catalog.list_entries(), before)
+            with closing(sqlite3.connect(self.backup_path)) as conn:
+                self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_backup_replace_failure_preserves_existing_destination(self):
+        self.backup_path.write_bytes(b"existing backup")
+        with patch.object(glossary_catalog.os, "replace", side_effect=OSError("injected publish failure")):
+            with self.assertRaises(OSError):
+                self.backup()
+        self.assertEqual(self.backup_path.read_bytes(), b"existing backup")
+        self.assertEqual(list(self.root.glob(".*backup*")), [])
+
+    def test_backup_rejects_catalog_and_sidecar_targets(self):
+        for suffix in ("", "-wal", "-shm", ".lock"):
+            with self.subTest(suffix=suffix), self.assertRaises(ValueError):
+                self.catalog.backup(self.catalog.db_path + suffix)
+        self.assertEqual(self.catalog.list_entries().entries, (self.entry,))
+
+    def test_restore_replaces_whole_catalog_and_invalidates_global_and_entry_snapshots(self):
+        self.backup()
+        self.catalog.update(self.entry.stable_id, 1, glossary_catalog.GlossaryEntryChanges(priority=9))
+        self.catalog.add(glossary_catalog.GlossaryEntryDraft("pin", "cravada"), 3)
+        before = self.catalog.list_entries()
+        result = self.catalog.restore(str(self.backup_path), before.catalog_revision)
+        restored = result.snapshot
+        self.assertEqual(restored.catalog_revision, 5)
+        self.assertEqual(len(restored.entries), 1)
+        self.assertEqual(restored.entries[0].stable_id, self.entry.stable_id)
+        self.assertEqual(restored.entries[0].priority, 0)
+        self.assertGreater(restored.entries[0].revision, before.entries[0].revision)
+        for stale in (self.entry, before.entries[0]):
+            with self.assertRaises(glossary_catalog.GlossaryConflictError):
+                self.catalog.delete(stale.stable_id, stale.revision)
+        with self.assertRaises(glossary_catalog.GlossaryConflictError):
+            self.catalog.import_entries([("queen", "dama")], "append", before.catalog_revision)
+        self.assertEqual(self.catalog.list_entries(), restored)
+        # Source backup remains immutable and reusable.
+        self.assertEqual(glossary_catalog.GlossaryCatalog(str(self.backup_path)).list_entries().catalog_revision, 2)
+
+    def test_restore_uses_revision_higher_than_backup_even_when_it_is_from_future(self):
+        self.backup()
+        with closing(sqlite3.connect(self.backup_path)) as conn, conn:
+            conn.execute("UPDATE glossary_metadata SET value='100' WHERE key='catalog_revision'")
+            conn.execute("UPDATE glossary_entries SET revision=70")
+        result = self.catalog.restore(str(self.backup_path), 2)
+        self.assertEqual(result.snapshot.catalog_revision, 101)
+        self.assertGreater(result.snapshot.entries[0].revision, 70)
+
+    def test_restore_rejects_corruption_old_cache_and_wrong_schema_without_touching_current(self):
+        before = self.catalog.list_entries()
+        for kind in ("corrupt", "legacy", "version", "column", "index", "trigger", "row", "scope", "constraint", "extra_index"):
+            with self.subTest(kind=kind):
+                self.backup()
+                if kind == "corrupt":
+                    self.backup_path.write_bytes(b"not sqlite")
+                else:
+                    with closing(sqlite3.connect(self.backup_path)) as conn, conn:
+                        statements = {
+                            "legacy": "DROP TABLE glossary_metadata",
+                            "version": "UPDATE glossary_metadata SET value='999' WHERE key='schema_version'",
+                            "column": "ALTER TABLE glossary_entries RENAME COLUMN stable_id TO alien_id",
+                            "index": "DROP INDEX idx_glossary_canonical_identity",
+                            "trigger": "CREATE TRIGGER unexpected AFTER DELETE ON glossary_entries BEGIN SELECT 1; END",
+                            "row": "UPDATE glossary_entries SET position=10",
+                            "scope": "UPDATE glossary_metadata SET value='xx' WHERE key='default_scope'",
+                            "extra_index": "CREATE UNIQUE INDEX sabotage_priority ON glossary_entries(priority)",
+                        }
+                        if kind == "constraint":
+                            conn.execute("PRAGMA writable_schema=ON")
+                            conn.execute("UPDATE sqlite_master SET sql=replace(sql, 'CHECK (revision >= 1)', '') "
+                                         "WHERE name='glossary_entries'")
+                            conn.execute("PRAGMA schema_version=100")
+                        else:
+                            conn.execute(statements[kind])
+                with self.assertRaises((ValueError, sqlite3.DatabaseError)):
+                    self.catalog.restore(str(self.backup_path), 2)
+                self.assertEqual(self.catalog.list_entries(), before)
+
+    def test_restore_stale_cas_and_failed_replace_leave_catalog_unchanged(self):
+        self.backup()
+        self.catalog.add(glossary_catalog.GlossaryEntryDraft("pin", "cravada"), 2)
+        before = self.catalog.list_entries()
+        with self.assertRaises(glossary_catalog.GlossaryConflictError):
+            self.catalog.restore(str(self.backup_path), 2)
+        with patch.object(glossary_catalog.os, "replace", side_effect=OSError("injected publish failure")):
+            with self.assertRaises(OSError):
+                self.catalog.restore(str(self.backup_path), 3)
+        self.assertEqual(self.catalog.list_entries(), before)
+        self.assertEqual(list(self.root.glob(".*restore*")), [])
+        with closing(sqlite3.connect(self.catalog.db_path)) as conn:
+            self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+
+    def test_restore_serializes_mutation_while_connections_are_closed_for_replace(self):
+        self.backup()
+        other = glossary_catalog.GlossaryCatalog(self.catalog.db_path)
+        entered = threading.Event()
+        started = threading.Event()
+        release = threading.Event()
+        original_replace = glossary_catalog.os.replace
+
+        def pause_replace(source, destination):
+            if Path(destination).resolve() == Path(self.catalog.db_path).resolve():
+                entered.set()
+                self.assertTrue(release.wait(5))
+            return original_replace(source, destination)
+
+        def stale_add():
+            started.set()
+            return other.add(glossary_catalog.GlossaryEntryDraft("pin", "cravada"), 2)
+
+        with patch.object(glossary_catalog.os, "replace", side_effect=pause_replace):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                restoring = executor.submit(self.catalog.restore, str(self.backup_path), 2)
+                self.assertTrue(entered.wait(5))
+                mutation = executor.submit(stale_add)
+                self.assertTrue(started.wait(5))
+                try:
+                    self.assertFalse(mutation.done())
+                finally:
+                    release.set()
+                result = restoring.result(timeout=10)
+                with self.assertRaises(glossary_catalog.GlossaryConflictError):
+                    mutation.result(timeout=10)
+        self.assertEqual(self.catalog.list_entries(), result.snapshot)
+
+    def test_restore_preserves_default_scope_and_current_mirror_guard(self):
+        text = self.root / "mirror.txt"
+        text.write_text("escopo='pt'\nsubstituicoes=[('rook','torre')]\n", encoding="utf-8")
+        catalog = glossary_catalog.GlossaryCatalog(str(self.root / "scoped.db"), str(text))
+        catalog.migrate_legacy(lambda: glossario._load_glossary_entry_details_from_file(str(text)))
+        catalog.backup(str(self.backup_path))
+        catalog.add(glossary_catalog.GlossaryEntryDraft("pin", "cravada"), 1)
+        result = catalog.restore(str(self.backup_path), 2)
+        self.assertFalse(result.mirror_pending)
+        self.assertEqual(result.snapshot.default_scope, "pt")
+        self.assertEqual(glossario.glossary_default_scope(str(text)), "pt")
+        self.assertNotIn("pin", text.read_text(encoding="utf-8"))
+        text.write_text("external edit", encoding="utf-8")
+        result = catalog.restore(str(self.backup_path), 3)
+        self.assertTrue(result.mirror_pending)
+        self.assertEqual(text.read_text(encoding="utf-8"), "external edit")
+
+    def test_restore_accepts_old_v2_without_scope_metadata(self):
+        self.backup()
+        with closing(sqlite3.connect(self.backup_path)) as conn, conn:
+            conn.execute("DELETE FROM glossary_metadata WHERE key='default_scope'")
+        result = self.catalog.restore(str(self.backup_path), 2)
+        self.assertEqual(result.snapshot.default_scope, "")
+        self.assertEqual(result.snapshot.entries[0].original_text, "rook")
+
+    def test_restore_deleted_and_reintroduced_id_rejects_historical_revision(self):
+        self.backup()
+        self.catalog.update(self.entry.stable_id, 1, glossary_catalog.GlossaryEntryChanges(priority=1))
+        historical = self.catalog.list_entries().entries[0]
+        self.catalog.delete(historical.stable_id, historical.revision)
+        result = self.catalog.restore(str(self.backup_path), 4)
+        with self.assertRaises(glossary_catalog.GlossaryConflictError):
+            self.catalog.update(historical.stable_id, historical.revision,
+                                glossary_catalog.GlossaryEntryChanges(priority=100))
+        self.assertEqual(self.catalog.list_entries(), result.snapshot)
+
+    def test_restore_post_replace_mirror_failure_returns_committed_state(self):
+        self.backup()
+        self.catalog.mirror_path = str(self.root / "mirror.txt")
+        with patch.object(self.catalog, "export_legacy", side_effect=OSError("injected mirror failure")):
+            result = self.catalog.restore(str(self.backup_path), 2)
+        self.assertTrue(result.mirror_pending)
+        self.assertEqual(self.catalog.list_entries(), result.snapshot)
+        self.assertEqual(result.snapshot.catalog_revision, 3)
+
+    def test_restore_refuses_active_sqlite_writer_without_losing_uncommitted_work(self):
+        self.backup()
+        with closing(sqlite3.connect(self.catalog.db_path)) as writer:
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute("UPDATE glossary_entries SET priority=9")
+            original_connect = self.catalog._connect
+
+            def fast_connection(*args, **kwargs):
+                conn = original_connect(*args, **kwargs)
+                conn.execute("PRAGMA busy_timeout=1")
+                return conn
+
+            with patch.object(self.catalog, "_connect", side_effect=fast_connection):
+                with self.assertRaises(sqlite3.OperationalError):
+                    self.catalog.restore(str(self.backup_path), 2)
+            writer.commit()
+        self.assertEqual(self.catalog.list_entries().entries[0].priority, 9)
+
+    def test_another_process_waits_for_restore_and_then_rejects_stale_cas(self):
+        self.backup()
+        code = """
+import sys
+from tradutor_pgn.glossary_catalog import GlossaryCatalog, GlossaryEntryDraft, GlossaryConflictError
+catalog = GlossaryCatalog(sys.argv[1])
+print('ready', flush=True)
+try:
+    catalog.add(GlossaryEntryDraft('pin', 'cravada'), 2)
+except GlossaryConflictError:
+    print('conflict', flush=True)
+else:
+    print('unexpected success', flush=True)
+"""
+        with glossary_catalog._catalog_access(self.catalog._access_key):
+            child = subprocess.Popen([sys.executable, "-c", code, self.catalog.db_path],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "ready")
+                self.assertIsNone(child.poll())
+                result = self.catalog.restore(str(self.backup_path), 2)
+            except BaseException:
+                child.kill()
+                child.communicate()
+                raise
+        try:
+            stdout, stderr = child.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate()
+            raise
+        self.assertEqual((child.returncode, stdout.strip(), stderr), (0, "conflict", ""))
+        self.assertEqual(self.catalog.list_entries(), result.snapshot)
+
+    def test_restore_does_not_need_a_new_database_connection_after_publish(self):
+        self.backup()
+        published = False
+        original_replace = glossary_catalog.os.replace
+        original_connect = self.catalog._connect
+
+        def publish(source, target):
+            nonlocal published
+            original_replace(source, target)
+            published = True
+
+        def connect(*args, **kwargs):
+            if published:
+                raise sqlite3.OperationalError("injected failure after publish")
+            return original_connect(*args, **kwargs)
+
+        with patch.object(glossary_catalog.os, "replace", side_effect=publish), patch.object(
+            self.catalog, "_connect", side_effect=connect,
+        ):
+            result = self.catalog.restore(str(self.backup_path), 2)
+        self.assertEqual(result.snapshot, self.catalog.list_entries())
+        with closing(sqlite3.connect(self.catalog.db_path)) as conn:
+            self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+
+
+class GlossaryCatalogScopeMetadataTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.text = self.root / "Substituicoes.txt"
+        self.text.write_text("escopo = 'pt'\nsubstituicoes = [('rook', 'torre')]\n", encoding="utf-8")
+        self.catalog = glossary_catalog.GlossaryCatalog(str(self.root / "catalog.db"), str(self.text))
+
+    def migrate(self):
+        self.catalog.migrate_legacy(lambda: glossario._load_glossary_entry_details_from_file(str(self.text)))
+
+    def test_migration_startup_import_and_explicit_export_preserve_default_scope(self):
+        self.migrate()
+        self.assertEqual(self.catalog.list_entries().default_scope, "pt")
+        self.catalog.initialize()
+        self.catalog.import_entries([("pin", "cravada", "suggestion", 0, "it")], "append", 1)
+        target = self.root / "export.txt"
+        result = self.catalog.export_legacy(str(target))
+        self.assertFalse(result.mirror_pending)
+        self.assertEqual(glossario.glossary_default_scope(str(target)), "pt")
+        self.assertEqual(glossario.glossary_default_scope(str(self.text)), "pt")
+
+    def test_old_v2_recovers_missing_scope_metadata_only_from_verified_mirror(self):
+        self.migrate()
+        # Emulate V2 written before the metadata was introduced, with a trusted
+        # legacy declaration which must survive the next startup/export.
+        self.text.write_text("escopo = 'it'\nsubstituicoes = [('rook', 'torre', 'suggestion', 0, 'pt')]\n",
+                             encoding="utf-8")
+        import hashlib
+        with closing(self.catalog._connect()) as conn, conn:
+            conn.execute("DELETE FROM glossary_metadata WHERE key='default_scope'")
+            conn.execute("UPDATE glossary_metadata SET value=? WHERE key='legacy_mirror_hash'",
+                         (hashlib.sha256(self.text.read_bytes()).hexdigest(),))
+        self.catalog.initialize()
+        self.assertEqual(self.catalog.list_entries().default_scope, "it")
+        self.assertEqual(glossario.glossary_default_scope(str(self.text)), "it")
+
+    def test_missing_metadata_never_adopts_a_divergent_mirror(self):
+        self.migrate()
+        with closing(self.catalog._connect()) as conn, conn:
+            conn.execute("DELETE FROM glossary_metadata WHERE key='default_scope'")
+        self.text.write_text("escopo='it'\nsubstituicoes=[]\n", encoding="utf-8")
+        self.catalog.initialize()
+        self.assertEqual(self.catalog.list_entries().default_scope, "")
+        self.assertIn("it", self.text.read_text(encoding="utf-8"))
+        self.assertEqual(len(self.catalog.list_entries().entries), 1)
+
+    def test_explicit_export_does_not_touch_canonical_mirror_state(self):
+        self.migrate()
+        self.text.write_text("substituicoes = [('external', 'externo')]\n", encoding="utf-8")
+        self.assertTrue(self.catalog.export_legacy().mirror_pending)
+        with closing(self.catalog._connect()) as conn:
+            before = dict(conn.execute("SELECT key, value FROM glossary_metadata"))
+        target = self.root / "export.txt"
+        target.write_text("previous explicit export", encoding="utf-8")
+        self.assertFalse(self.catalog.export_legacy(str(target)).mirror_pending)
+        self.assertIn("rook", target.read_text(encoding="utf-8"))
+        with closing(self.catalog._connect()) as conn:
+            self.assertEqual(dict(conn.execute("SELECT key, value FROM glossary_metadata")), before)
+        self.assertIn("external", self.text.read_text(encoding="utf-8"))
+
+    def test_export_refuses_catalog_and_sidecars_as_destinations(self):
+        self.migrate()
+        before = self.catalog.list_entries()
+        for suffix in ("", "-wal", "-shm", ".lock"):
+            with self.subTest(suffix=suffix), self.assertRaises(ValueError):
+                self.catalog.export_legacy(self.catalog.db_path + suffix)
+        self.assertEqual(self.catalog.list_entries(), before)
+
+    def test_migration_rejects_unknown_declared_scope_even_when_rows_override_it(self):
+        self.text.write_text("escopo='xx'\nsubstituicoes=[('rook','torre','suggestion',0,'pt')]\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.migrate()
+        self.assertFalse(Path(self.catalog.db_path).exists())
 
 
 class GlossaryCatalogMigrationTests(unittest.TestCase):

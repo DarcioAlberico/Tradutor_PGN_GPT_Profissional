@@ -7783,12 +7783,120 @@ class DeleteShownDuplicatesTests(EditorWindowTestCase):
         self.assertIsNone(self.editor.delete_shown_duplicates())
         self.assertEqual(self.entries_on_disk(), before)
 
-    def test_import_and_restore_wait_for_atomic_catalog_operations(self):
+    def test_import_and_restore_are_available_with_atomic_catalog_operations(self):
         before = self.entries_on_disk()
         for label in ("Importar CSV", "Restaurar backup"):
-            self.assertEqual(self.editor.buttons[label].cget("state"), "disabled")
+            self.assertEqual(self.editor.buttons[label].cget("state"), "normal")
             self.editor.buttons[label].invoke()
         self.assertEqual(self.entries_on_disk(), before)
+
+
+class GlossaryFileRecoveryWindowTests(EditorWindowTestCase):
+    module = glossary_editor
+
+    def setUp(self):
+        super().setUp()
+        self.glossary_path = glossario._default_substitutions_path()
+        save_glossary_entries([("rook", "torre", "suggestion", 0, "pt")],
+                              self.glossary_path, create_backup=False)
+        self.editor = glossary_editor.open_glossary_editor(self.app)
+        self.win = self.editor.win
+        self.csv = Path(self.base) / "incoming.csv"
+        self.csv.write_text("original,replacement,type,priority,lang\n"
+                            "rook,torre,suggestion,9,pt\nrook,castelo,suggestion,0,pt\n"
+                            "pin,cravada,suggestion,0,it\nx,y,unknown,0,pt\n", encoding="utf-8")
+        self.pump()
+
+    def open_preview(self, path=None, restore=False):
+        self.file_dialogs.answer = str(path or self.csv)
+        (self.editor.restore_backup if restore else self.editor.import_csv)()
+        self.pump()
+        self.assertIsNotNone(self.editor.import_preview_window)
+        return self.editor.import_preview_window
+
+    def test_csv_requires_line_preview_and_applies_only_confirmed_new_rows(self):
+        before = self.editor.catalog.list_entries()
+        dialog = self.open_preview()
+        contents = dialog.rows_text.get("1.0", "end")
+        for label in ("duplicada", "conflitante", "nova", "inválida", "pin", "it"):
+            self.assertIn(label, contents)
+        self.assertEqual(self.editor.catalog.list_entries(), before)
+        self.csv.write_text("original,replacement\nevil,changed\n", encoding="utf-8")
+        dialog.confirm_button.invoke()
+        self.pump()
+        self.assertEqual([(e.original_text, e.scope) for e in self.editor.catalog.list_entries().entries],
+                         [("rook", "pt"), ("pin", "it")])
+        self.assertIsNone(self.editor.import_preview_window)
+
+    def test_cancel_preview_and_invalid_only_rows_never_mutate(self):
+        before = self.editor.catalog.list_entries()
+        self.open_preview().cancel_button.invoke()
+        self.pump()
+        self.assertEqual(self.editor.catalog.list_entries(), before)
+        self.csv.write_text("original,replacement,type\nx,y,unknown\n", encoding="utf-8")
+        dialog = self.open_preview()
+        self.assertEqual(dialog.confirm_button.cget("state"), "disabled")
+        self.assertIn("inválida", dialog.rows_text.get("1.0", "end"))
+
+    def test_catalog_change_during_preview_refuses_import_and_reloads(self):
+        from tradutor_pgn.glossary_catalog import GlossaryEntryDraft
+        dialog = self.open_preview()
+        self.editor.catalog.add(GlossaryEntryDraft("queen", "dama"), 1)
+        dialog.confirm_button.invoke()
+        self.pump()
+        self.assertEqual([e.original_text for e in self.editor.state.snapshot.entries], ["rook", "queen"])
+        self.assertIn("Conflito de revisão", self.dialogs.titles("warning"))
+
+    def test_declining_discard_of_draft_typed_during_preview_prevents_import(self):
+        dialog = self.open_preview()
+        before = self.editor.catalog.list_entries()
+        self.editor.set_text(self.editor.new_text, "rascunho posterior à prévia")
+        self.editor.mark_dirty()
+        self.dialogs.askyesno_result = False
+        dialog.confirm_button.invoke()
+        self.pump()
+        self.assertEqual(self.editor.catalog.list_entries(), before)
+        self.assertEqual(self.editor.current_pair()[1], "rascunho posterior à prévia")
+        self.assertTrue(self.editor.state.dirty)
+
+    def test_restore_text_routes_through_append_preview(self):
+        source = Path(self.base) / "legacy.txt"
+        source.write_text("escopo='it'\nsubstituicoes=[('pin','cravada')]\n", encoding="utf-8")
+        self.open_preview(source, restore=True).confirm_button.invoke()
+        self.pump()
+        self.assertEqual([e.original_text for e in self.editor.catalog.list_entries().entries], ["rook", "pin"])
+
+    def test_sqlite_restore_reloads_all_open_glossary_windows(self):
+        from tradutor_pgn.glossary_catalog import GlossaryEntryDraft
+        backup = Path(self.base) / "snapshot.db"
+        self.editor.catalog.backup(str(backup))
+        self.editor.catalog.add(GlossaryEntryDraft("pin", "cravada"), 1)
+        self.editor.reload_all()
+        other = glossary_editor.open_glossary_editor(self.app)
+        other.set_text(other.new_text, "rascunho antigo")
+        other.mark_dirty()
+        self.file_dialogs.answer = str(backup)
+        self.editor.restore_backup()
+        self.pump()
+        for window in (self.editor, other):
+            self.assertEqual([e.original_text for e in window.state.snapshot.entries], ["rook"])
+            self.assertEqual(window.state.catalog_revision, 3)
+            self.assertFalse(window.state.dirty)
+        self.assertEqual(self.editor.catalog.list_entries().catalog_revision, 3)
+
+    def test_restore_confirmation_uses_displayed_revision_and_reports_invalid_backup(self):
+        from tradutor_pgn.glossary_catalog import GlossaryEntryDraft
+        backup = Path(self.base) / "snapshot.db"
+        self.editor.catalog.backup(str(backup))
+        self.editor.catalog.add(GlossaryEntryDraft("pin", "cravada"), 1)
+        self.file_dialogs.answer = str(backup)
+        self.editor.restore_backup()
+        self.assertIn("Conflito de revisão", self.dialogs.titles("warning"))
+        self.assertEqual(len(self.editor.catalog.list_entries().entries), 2)
+        backup.write_bytes(b"corrupt")
+        self.editor.restore_backup()
+        self.assertTrue(self.dialogs.messages("error"))
+        self.assertEqual(len(self.editor.catalog.list_entries().entries), 2)
 
 
 class GlossaryEditorZoomTests(EditorWindowTestCase):
