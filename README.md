@@ -260,8 +260,8 @@ mora na pasta do programa.) Dali em diante o
 botao abre o indice em milissegundos, em vez de reler os 30 MB do arquivo a cada
 uso. Trocar o `spelling.ssp` por uma versao nova reconstroi o indice sozinho (ele
 guarda o hash do arquivo de onde veio); apagar o `spelling.db` tambem e seguro, e
-ele volta na normalizacao seguinte. E o mesmo desenho do `glossario.db`, e por
-isso ele nao vai para o repositorio: e derivado.
+ele volta na normalizacao seguinte. Esse indice e derivado; o catalogo
+autoritativo do glossario, `glossario-v2.db`, precisa de backup proprio.
 
 O `spelling.ssp` **vem com o projeto** (29 MB, ~513 mil nomes de jogadores, mais
 sedes, eventos e rodadas), e por isso o botao funciona sem preparo — inclusive no
@@ -271,8 +271,10 @@ nova e substituir o arquivo; carrega-lo custa ~1,1 s, uma vez por uso do botao.
 
 ## Glossario
 
-`Substituicoes.txt` e a fonte de verdade; `glossario.db` e apenas um indice
-derivado, reconstruido a partir dele. Cada regra tem um tipo:
+`glossario-v2.db` e a fonte autoritativa do glossario. `Substituicoes.txt` e
+um espelho legivel, exportado apos cada transacao confirmada, e um formato de
+importacao explicita. O antigo `glossario.db` pertence ao fluxo legado; nunca
+substitui o catalogo V2. Cada regra tem um tipo:
 
 - `cleanup`: aplicada ao comentario **antes** de enviar para a API.
 - `automatic`: aplicada a resposta da API, sem revisao humana.
@@ -289,7 +291,7 @@ decidir (garantia S10). Ela existe porque a especificidade e derivada do texto �
 sem prioridade, adiantar uma regra exige alongar o padrao, isto e, mudar o que
 ela casa para mudar quando ela roda.
 
-No arquivo cada regra e uma tupla de dois a quatro campos, e cada campo so
+No espelho cada regra e uma tupla de dois a cinco campos, e cada campo so
 aparece quando tem algo a dizer:
 
 ```python
@@ -304,10 +306,68 @@ substituicoes = [
 ]
 ```
 
-Um `Substituicoes.txt` de uma versao anterior continua valendo: o que faltar
-assume o padrao. O mesmo vale para o CSV, cuja coluna `priority` e opcional na
-leitura. Um tipo que o programa nao reconheca continua virando `suggestion`, mas
-agora avisa qual valor nao foi entendido.
+Um `Substituicoes.txt` de uma versao anterior pode ser migrado ou importado:
+campos ausentes assumem os padroes legados. O CSV tambem aceita `priority`
+opcional. Na migracao V2, fase ou escopo desconhecidos interrompem a operacao
+com erro; na previa de importacao, a linha e marcada como invalida.
+
+### Identidade, migracao e concorrencia V2
+
+A identidade canonica e `(original, substituicao, fase, escopo)`, com textos
+normalizados nas pontas e comparacao sensivel a caixa. Prioridade e posicao
+nao fazem parte dela. Regras iguais em fases ou escopos diferentes continuam
+distintas. Cada entrada guarda `stable_id` (UUID imutavel) e `revision`;
+`catalog_revision` identifica a versao global usada por operacoes em lote.
+Salvar/excluir exige a revisao da entrada exibida; se outra janela a alterou,
+a interface mostra conflito e permite recarregar ou cancelar. Nao ha
+sobrescrita forcada. Entradas diferentes podem ser editadas independentemente.
+
+Na primeira inicializacao, a migracao cria backups timestampados do texto e,
+se existir, do banco legado, antes de publicar o V2. O texto legado valido
+vence um cache divergente; fonte ausente/invalida ou falha de backup aborta a
+migracao. Ordem, fase, prioridade e escopo sao preservados; duplicatas da
+identidade completa conservam a primeira e aparecem no relatorio. Reabrir nao
+troca IDs nem importa o texto novamente. `default_scope` fica nos metadados
+do catalogo: preserva o `escopo` do arquivo migrado e orienta novas entradas
+e exportacoes, mesmo se o espelho estiver indisponivel.
+
+### Importacao e recuperacao do glossario
+
+No editor, **Importar** aceita CSV e texto e abre previa por linha: nova,
+duplicada, conflitante ou invalida. A unica modalidade e `append`: apos
+confirmacao, acrescenta somente novas identidades; as demais sao informadas
+e nao gravadas. Conflito significa mesmo original/fase/escopo com substituicao
+diferente. Se `catalog_revision` mudou desde a previa, nada e importado e a
+previa precisa ser refeita. CSV nao substitui integralmente o catalogo.
+
+**Backup agora** cria uma copia consistente SQLite V2 pela API de backup do
+SQLite, incluindo IDs, revisoes e `default_scope`. **Restaurar backup** aceita
+somente SQLite V2 com schema e integridade validados para substituicao integral;
+exige a revisao global atual e cria backup de seguranca antes da troca.
+Restaurar invalida snapshots anteriores, recarrega as janelas do glossario e
+descarta seus rascunhos apos confirmacao. Escolher `.txt`/CSV nesse fluxo abre
+importacao com previa. Backups pre-migracao servem para retorno manual a uma
+versao antiga; nao sao backups SQLite V2 restauraveis por esse comando.
+
+Se a transacao SQLite confirmou mas a exportacao falhou, a alteracao esta
+salva: `mirror_pending=1` e um aviso registram o espelho pendente. Corrija a
+permissao, bloqueio ou indisponibilidade do caminho e reabra o aplicativo;
+a inicializacao e mutacoes posteriores tentam exportar o snapshot mais recente.
+A API `GlossaryCatalog.retry_pending_mirror()` tambem permite nova tentativa.
+
+Se o motivo for edicao externa de `Substituicoes.txt`, inclusive por versao
+antiga, essa edicao e preservada e nao e importada automaticamente. Guarde uma
+copia dela fora do caminho do espelho e, se quiser incorporar suas regras,
+importe a copia com previa. Para retomar a exportacao no caminho original,
+reponha ali a ultima copia do espelho sincronizado cujo hash o V2 reconhece;
+depois reabra ou tente novamente. Se nao tiver essa copia, exporte o catalogo
+para outro arquivo pela API `export_legacy(path=...)` e mantenha o aviso ate
+reconciliar o espelho. Apagar o espelho divergente nao resolve o hash pendente.
+Nunca apague o V2 para forcar uma reconstrucao a partir do texto.
+
+**Deduplicar** usa identidade completa e revisao global em uma transacao.
+As acoes em massa **Excluir duplicadas exibidas** e **Manter esta regra**
+continuam desabilitadas enquanto nao houver operacao atomica correspondente.
 
 O `@casa@` no padrao vale pelas **64 casas do tabuleiro**: a linha acima e uma
 no arquivo e 64 regras na aplicacao (`a1-torre`, ... `h8-torre`). As regras que
@@ -688,9 +748,10 @@ preenchida e diz a taxa de "aceito sem editar" de cada motor. A barra e 80 %.
 - `tests/`: suite automatizada, por dominio (`test_banco.py`, `test_worker.py`, `test_glossario.py`, ...); `tests/helpers.py` traz os dubles e o sandbox por modulo dos testes sem janela, e `tests/gui_harness.py` o sandbox de caminhos e o silenciamento de dialogos dos testes de janela.
 - `.claude/skills/run-tradutor-pgn/`: ferramenta para abrir e dirigir o app sem interacao manual (inclusive o worker de traducao, sem abrir janela) e capturar telas.
 - `dicionarios/`: dicionarios hunspell do idioma de destino, para o corretor de prosa. So `pt_BR` por enquanto, e a janela diz isso nos outros idiomas.
-- `Substituicoes.txt`: as regras do glossario do usuario (original, substituicao e, quando ha, tipo, prioridade e escopo de idioma).
+- `glossario-v2.db`: catalogo autoritativo do glossario, com IDs estaveis, revisoes e metadados; dado de usuario, nao versionado.
+- `Substituicoes.txt`: espelho legivel do catalogo e formato explicito de importacao (original, substituicao, tipo, prioridade e escopo).
 - `tradutor_pgn/Substituicoes-semente.txt`: a terminologia que vem com o programa, escopada por idioma de destino. Nunca sobrepoe o `Substituicoes.txt`.
 - `tradutor_pgn/Termos-suspeitos.txt`: os pares "termo no original / forma errada na traducao" que geram aviso de qualidade. Vem com o programa, medido no banco de desenvolvimento, e nao corrige nada — leva o revisor ate a linha.
-- `glossario.db`: indice SQLite do glossario, derivado do `Substituicoes.txt`. E versionado para que um clone ja abra com o indice pronto, e ele proprio guarda de qual arquivo veio (caminho relativo e hash do conteudo), de modo que reconstroi sozinho assim que as regras mudam.
+- `glossario.db`: indice SQLite legado, conservado para compatibilidade e backup pre-migracao; o V2 nao o usa como autoridade.
 - `traducoes.db`: cache local de traducoes, uma linha por (comentario, idioma de origem, idioma de destino). Ao lado dela, a tabela `occurrences` guarda onde cada comentario foi lido — arquivo, partida, indice e numero do lance —, que e o que da ordem de leitura da obra ao editor e progresso por livro as estatisticas. As traducoes gravadas antes desta versao nao tem essa procedencia e a ganham ao reprocessar o PGN.
 - `backups/`, `logs/`: gerados em tempo de execucao, nao versionados.

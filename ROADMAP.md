@@ -9571,3 +9571,78 @@ banco, `dados\` e marcador sao todos nomeados; o `main()` do empacotador com uma
 `chaves-api.json` na pasta devolve 1 sem criar nem a pasta de saida; o zip roda
 antes do instalador; a migracao nao traz chave. Tres mutacoes — sem a
 conferencia, a chave permitida na lista, o instalador antes do zip —, mortas.
+
+## 30. Catalogo de glossario V2 — validacao integrada (2026-10-24)
+
+O recorte de **RG-000, GL-001 e GL-002** foi implementado nos commits
+`6cbc5c7` a `e296589`: a identidade canonica completa distingue fase e escopo,
+`stable_id`/`revision` protegem a entrada e `catalog_revision` protege
+deduplicacao, importacao e restauracao contra snapshots antigos. A interface
+mostra conflito sem sobrescrita forcada; alteracoes em entradas diferentes
+continuam independentes. As acoes bulk "Excluir duplicadas exibidas" e
+"Manter esta regra" seguem desabilitadas ate terem operacao atomica propria.
+
+`glossario-v2.db` e agora a autoridade. A migracao usa o texto legado valido,
+cria backups timestampados antes da publicacao e preserva ordem, fase,
+prioridade e escopo, conservando a primeira duplicata da identidade completa
+com relatorio. Repetir a inicializacao preserva IDs. `default_scope` mora
+nos metadados e acompanha exportacao, backup e restauracao. O antigo
+`glossario.db` fica isolado para compatibilidade com versoes anteriores.
+
+`Substituicoes.txt` e espelho sincronizado/importacao explicita; alteracao
+externa e avisada sem importacao automatica. Falha pos-commit deixa
+`mirror_pending=1`, preserva o catalogo e e tentada novamente ao inicializar
+ou mutar. Divergencia externa exige preservar a copia alterada, importa-la
+com previa se desejado e reconciliar o hash do espelho; o README detalha a
+recuperacao, inclusive exportacao para outro caminho sem limpar o aviso.
+
+Importacao CSV/texto aceita somente append com previa por linha; grava
+apenas novas identidades depois da confirmacao e recusa integralmente se a
+revisao global mudou. Backup usa a API SQLite; restauracao integral exige
+backup V2 validado, cria copia de seguranca e invalida revisoes anteriores.
+Texto nao substitui o catalogo. Snapshots/janelas sao recarregados apos restore.
+
+Limite conhecido da previa: prioridade inteira fora do intervalo do SQLite
+pode aparecer como nova e falhar somente ao confirmar, sem gravacao parcial.
+Permanece Minor diferido da Tarefa 6; nao foi ampliado o escopo desta validacao.
+
+Esta entrega nao conclui GL-003/GL-004/GL-005, o `GlossaryEngine`, o corretor
+pt-BR com sugestoes/concordancia, o redesign, os demais marcos da Revisao
+Geral nem um novo build do executavel. Os registros anteriores permanecem
+como historico; instrucoes operacionais atuais do catalogo estao no README.
+
+### 30.1 Evidencias da Tarefa 7 e pendencia de integracao
+
+Gates executados nesta ordem, em 24/10/2026:
+
+1. `uv run python -m pytest tests/test_glossary_catalog.py tests/test_glossario.py tests/test_editor_windows.py tests/test_editor.py tests/test_worker.py -q`
+   — exit 0: **938 passed, 1 skipped, 6467 subtests passed in 855.25s**.
+2. `uv run ruff check .` — exit 0: `All checks passed!`.
+3. `uv run mypy` — exit 0: `Success: no issues found in 8 source files`.
+4. `uv run python -m pytest -q` — exit 1:
+   **2 failed, 1935 passed, 1 skipped, 6742 subtests passed in 984.12s**.
+5. `git diff --check` — exit 0, sem erros de whitespace.
+
+A suite completa **nao esta verde**. Falharam
+`tests/test_main_window.py::LogDoesNotYankTheReaderBackTests::test_following_the_end_keeps_following`
+(fim do log nao reconhecido apos `see(END)`) e
+`tests/test_main_window.py::SettingsWindowTests::test_the_glossary_pane_follows_the_theme_and_lets_go_on_close`
+(`TclError: No more menus can be allocated`, ao criar um menu CTk).
+O erro de menus ja havia sido observado antes desta tarefa. Reexecutar as
+duas classes juntas em processo novo, com
+`uv run python -m pytest tests/test_main_window.py::LogDoesNotYankTheReaderBackTests tests/test_main_window.py::SettingsWindowTests -q`,
+deu **17 passed, 4 subtests passed in 19.51s** (exit 0).
+Isso indica dependencia do contexto da suite; nao prova a causa nem exclui
+uma regressao. Nao houve correcao de producao por hipotese nesta tarefa.
+RG-000/GL-001/GL-002 estao implementados e cobertos pelo gate focado, mas a
+aceitacao integrada permanece pendente da investigacao dessas falhas GUI.
+
+O unico skip e o teste de symlink introduzido na Tarefa 6: Windows recusou
+a criacao com `WinError 1314` (privilegio insuficiente). Confirmado com
+`uv run python -m pytest tests/test_glossary_catalog.py -k through_symlink -q -rs`
+— **1 skipped, 72 deselected in 0.11s**. Nenhum skip foi acrescentado na Tarefa 7.
+Nao houve warnings nas execucoes pytest desta tarefa.
+
+`Substituicoes.txt` real permaneceu igual ao HEAD:
+`d54cf12ba5d51ad51afc7eba234908a53b6eaac6`. Dados, bancos, locks e backups
+ficaram fora do commit. Mudancas preexistentes do usuario foram preservadas.
