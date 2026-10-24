@@ -304,6 +304,68 @@ class GlossaryCatalogMirrorTests(unittest.TestCase):
         self.assertEqual([entry.original_text for entry in self.catalog.list_entries().entries],
                          ["old", "new"])
 
+    def test_connection_failure_after_commit_returns_warning_and_recovers_on_startup(self):
+        for persistent_failure in (False, True):
+            with self.subTest(persistent_failure=persistent_failure):
+                real_connect = self.catalog._connect
+                connection_count = 0
+                revision = self.catalog.list_entries().catalog_revision
+
+                def connect_after_commit(**kwargs):
+                    nonlocal connection_count
+                    connection_count += 1
+                    if connection_count == 2 or (persistent_failure and connection_count > 2):
+                        raise sqlite3.OperationalError("secret-path: unable to open database")
+                    return real_connect(**kwargs)
+
+                with patch.object(self.catalog, "_connect", side_effect=connect_after_commit):
+                    result = self.catalog.add(
+                        glossary_catalog.GlossaryEntryDraft(f"rook-{revision}", "torre"), revision
+                    )
+
+                self.assertEqual(result.snapshot, self.catalog.list_entries())
+                self.assertTrue(result.mirror_pending)
+                self.assertTrue(result.warning)
+                self.assertNotIn("secret-path", result.warning)
+                self.assertEqual(self.metadata()["mirror_pending"], "1")
+                if not persistent_failure:
+                    self.assertEqual(self.metadata()["mirror_error"], result.warning)
+                reopening = glossary_catalog.GlossaryCatalog(self.catalog.db_path, str(self.path))
+                reopening.initialize()
+                self.assertEqual(self.metadata()["mirror_pending"], "0")
+                exported = glossario._load_glossary_entries_from_file(str(self.path))
+                self.assertIn((f"rook-{revision}", "torre"), exported)
+
+    def test_real_write_lock_after_commit_returns_warning_and_recovers_on_startup(self):
+        self.catalog.add(glossary_catalog.GlossaryEntryDraft("rook", "torre"), 1)
+        original_contents = self.path.read_bytes()
+        real_export = self.catalog.export_legacy
+        with closing(sqlite3.connect(self.catalog.db_path)) as blocker:
+            def export_with_write_lock():
+                blocker.execute("BEGIN IMMEDIATE")
+                return real_export()
+
+            try:
+                with patch.object(glossary_catalog, "CATALOG_BUSY_TIMEOUT_MS", 0), patch.object(
+                    self.catalog, "export_legacy", side_effect=export_with_write_lock
+                ):
+                    result = self.catalog.add(
+                        glossary_catalog.GlossaryEntryDraft("queen", "dama"), 2
+                    )
+                self.assertTrue(result.mirror_pending)
+                self.assertTrue(result.warning)
+                self.assertEqual(result.snapshot, self.catalog.list_entries())
+                self.assertEqual(self.path.read_bytes(), original_contents)
+                self.assertEqual(self.metadata()["mirror_pending"], "1")
+            finally:
+                blocker.rollback()
+
+        reopening = glossary_catalog.GlossaryCatalog(self.catalog.db_path, str(self.path))
+        reopening.initialize()
+        self.assertEqual(self.metadata()["mirror_pending"], "0")
+        self.assertEqual(glossario._load_glossary_entries_from_file(str(self.path)),
+                         [("rook", "torre"), ("queen", "dama")])
+
     def test_edit_between_migration_commit_and_export_is_not_overwritten(self):
         self.path.write_text("substituicoes = [('old', 'antigo')]\n", encoding="utf-8")
         original_export = glossary_catalog.GlossaryCatalog.export_legacy

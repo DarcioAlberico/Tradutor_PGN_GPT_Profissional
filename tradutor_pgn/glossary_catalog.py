@@ -322,7 +322,20 @@ class GlossaryCatalog:
     ) -> MutationResult:
         if self.mirror_path is None:
             return MutationResult(snapshot, entry)
-        mirror = self.export_legacy()
+        try:
+            mirror = self.export_legacy()
+        except (sqlite3.Error, OSError) as exc:
+            warning = f"Espelho legado pendente ({type(exc).__name__})."
+            try:
+                with closing(self._connect()) as conn, conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    self._set_metadata(conn, "mirror_pending", "1")
+                    self._set_metadata(conn, "mirror_error", warning)
+            except (sqlite3.Error, OSError):
+                # The mutation already committed mirror_pending with its data.
+                # A lock must not turn that success into an apparent failure.
+                pass
+            return MutationResult(snapshot, entry, True, warning)
         return MutationResult(snapshot, entry, mirror.mirror_pending, mirror.warning)
 
     def list_entries(self) -> CatalogSnapshot:
@@ -379,12 +392,14 @@ class GlossaryCatalog:
             )
         return current
 
-    @staticmethod
-    def _increment_catalog_revision(conn: sqlite3.Connection) -> None:
+    def _increment_catalog_revision(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             "UPDATE glossary_metadata SET value = CAST(value AS INTEGER) + 1 "
             "WHERE key = 'catalog_revision'"
         )
+        if self.mirror_path is not None:
+            # Persist recovery before committing, even if export cannot connect.
+            self._set_metadata(conn, "mirror_pending", "1")
 
     @staticmethod
     def _compact_positions(conn: sqlite3.Connection) -> None:

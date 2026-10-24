@@ -3662,6 +3662,50 @@ class LegacyMigrationAdapterTests(unittest.TestCase):
 
 
 class CatalogPipelineProjectionTests(unittest.TestCase):
+    def test_startup_migrates_schema_only_catalog_once(self):
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {app_paths.DATA_DIR_ENV: tmp}
+        ):
+            source = Path(tmp) / "Substituicoes.txt"
+            source.write_text("substituicoes = [('rook', 'torre', 'automatic', 3, 'pt')]\n",
+                              encoding="utf-8")
+            catalog = glossario.GlossaryCatalog(app_paths.glossary_catalog_path(), str(source))
+            catalog.initialize()
+
+            first = glossario.initialize_catalog_glossary()
+
+            self.assertTrue(first.migrated)
+            self.assertEqual(first.imported_count, 1)
+            self.assertEqual(load_glossary_entries(), [("rook", "torre")])
+            self.assertEqual(load_glossary_entry_details(),
+                             [("rook", "torre", "automatic", 3, "pt")])
+            snapshot = catalog.list_entries()
+            source.write_text("substituicoes = [('external', 'externo')]\n", encoding="utf-8")
+            self.assertFalse(glossario.initialize_catalog_glossary().migrated)
+            self.assertEqual(catalog.list_entries(), snapshot)
+            self.assertEqual(load_glossary_entries(), [("rook", "torre")])
+
+    def test_startup_retries_catalog_after_interrupted_migration(self):
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
+            os.environ, {app_paths.DATA_DIR_ENV: tmp}
+        ):
+            source = Path(tmp) / "Substituicoes.txt"
+            source.write_text("substituicoes = [('rook', 'torre')]\n", encoding="utf-8")
+            catalog = glossario.GlossaryCatalog(app_paths.glossary_catalog_path(), str(source))
+            catalog.initialize()
+            with unittest.mock.patch.object(
+                glossario.GlossaryCatalog, "_validate_migration",
+                side_effect=RuntimeError("migration interrupted"),
+            ), self.assertRaisesRegex(RuntimeError, "migration interrupted"):
+                glossario.migrate_legacy_glossary()
+
+            report = glossario.initialize_catalog_glossary()
+
+            self.assertTrue(report.migrated)
+            self.assertEqual(report.imported_count, 1)
+            self.assertEqual(load_glossary_entries(), [("rook", "torre")])
+            self.assertFalse(glossario.initialize_catalog_glossary().migrated)
+
     def test_explicit_startup_migrates_once_and_repairs_pending_mirror(self):
         with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.dict(
             os.environ, {app_paths.DATA_DIR_ENV: tmp}

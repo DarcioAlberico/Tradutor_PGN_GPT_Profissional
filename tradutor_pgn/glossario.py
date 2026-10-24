@@ -846,10 +846,9 @@ def migrate_legacy_glossary(path=None, catalog_path=None, legacy_db_path=None) -
 def initialize_catalog_glossary() -> MigrationReport:
     """Run the one-time legacy migration, then repair any pending mirror."""
     catalog_path = glossary_catalog_path()
-    if os.path.exists(catalog_path):
-        mirror = GlossaryCatalog(
-            catalog_path, _default_substitutions_path()
-        ).initialize()
+    catalog = GlossaryCatalog(catalog_path, _default_substitutions_path())
+    if catalog._migration_completed():
+        mirror = catalog.initialize()
         return MigrationReport(
             migrated=False, imported_count=0,
             mirror_pending=mirror.mirror_pending if mirror else False,
