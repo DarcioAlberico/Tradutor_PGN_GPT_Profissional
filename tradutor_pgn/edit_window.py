@@ -51,15 +51,20 @@ from .db_tools import (
 )
 from .editor_text import diff_spans, find_text_ranges, replace_all_text
 from .glossario import (
-    add_to_glossary,
+    initialize_catalog_glossary,
+    _default_substitutions_path,
     apply_automatic_substitutions,
     case_adjusted_replacement,
-    delete_glossary_entry_by_pair,
     find_glossary_matches,
     find_glossary_suggestions,
+    glossary_default_scope,
     load_automatic_substitutions,
     load_interactive_substitutions,
     versioned_rules,
+)
+from .app_paths import glossary_catalog_path
+from .glossary_catalog import (
+    GlossaryCatalog, GlossaryConflictError, GlossaryDuplicateError, GlossaryEntryDraft,
 )
 from .editor_common import (
     DESTRUCTIVE_COLOR,
@@ -4870,22 +4875,40 @@ class TranslationEditor:
                 self.text_index_for_offset(end),
             )
 
-    def delete_suggestion_from_glossary(self, orig, new):
-        # Exclui pelo par, nunca por indice: a lista exibida aqui e deduplicada
-        # e a exclusao opera sobre a lista completa do arquivo, entao os indices
-        # nao correspondem (garantia S6 da SPEC.md).
-        if delete_glossary_entry_by_pair(orig, new) is None:
-            self.show_message("Entrada não encontrada no glossário")
+    def delete_suggestion_from_glossary(self, orig, new, record=None):
+        record = self.suggestion_record(orig, new) if record is None else record
+        if record is None:
+            self.reload_glossary(show_feedback=False)
+            self.show_message("Registro completo indisponível ou ambíguo; abra o editor de glossário.")
             return
-
+        try:
+            result = GlossaryCatalog(glossary_catalog_path(), _default_substitutions_path()).delete(record.stable_id, record.revision)
+        except GlossaryConflictError:
+            self.reload_glossary(show_feedback=False)
+            messagebox.showwarning("Conflito de revisão", "A regra mudou em outra janela. Nada foi excluído; sugestões recarregadas.", parent=self.win)
+            return
+        except Exception as exc:
+            messagebox.showerror("Glossário", f"Erro ao excluir a regra:\n{exc}", parent=self.win)
+            return
         self.reload_glossary(show_feedback=False)
-        self.show_message(f'Removido do glossário: "{preview(orig, 30)}"')
+        self.show_message(result.warning or f'Removido do glossário: "{preview(orig, 30)}"')
+
+    def suggestion_record(self, orig, new):
+        snapshot = getattr(self, "suggestion_catalog_snapshot", None)
+        if snapshot is None:
+            return None
+        matches = [entry for entry in snapshot.entries
+                   if entry.original_text == orig and entry.replacement_text == new
+                   and entry.rule_type in {"suggestion", "automatic"}]
+        return matches[0] if len(matches) == 1 else None
 
     def show_suggestion_context_menu(self, event, orig, new):
+        record = self.suggestion_record(orig, new)
         menu = tk.Menu(self.win, tearoff=0)
         menu.add_command(
             label="Excluir do glossário",
-            command=lambda: self.delete_suggestion_from_glossary(orig, new),
+            command=lambda: self.delete_suggestion_from_glossary(orig, new, record),
+            state="normal" if record else "disabled",
         )
         try:
             menu.tk_popup(event.x_root, event.y_root)
@@ -5125,6 +5148,13 @@ class TranslationEditor:
         )
 
     def load_scoped_interactive_glossary(self):
+        try:
+            self.suggestion_catalog_snapshot = (
+                GlossaryCatalog(glossary_catalog_path()).list_entries()
+                if os.path.exists(glossary_catalog_path()) else None
+            )
+        except (OSError, sqlite3.Error):
+            self.suggestion_catalog_snapshot = None
         origem, destino = self.scoped_languages()
         return load_interactive_substitutions(
             source_language=origem, target_language=destino
@@ -5181,6 +5211,15 @@ class TranslationEditor:
 
     def add_gloss_popup(self):
         sel_text = self.selected_translation_text()
+        default_scope = glossary_default_scope()
+        catalog = GlossaryCatalog(glossary_catalog_path(), _default_substitutions_path())
+        try:
+            if not os.path.exists(catalog.db_path):
+                initialize_catalog_glossary()
+            snapshot = catalog.list_entries()
+        except Exception as exc:
+            messagebox.showerror("Adicionar ao glossário", f"Erro ao carregar catálogo:\n{exc}", parent=self.win)
+            return
 
         pop = ctk.CTkToplevel(self.win)
         pop.title("Adicionar ao glossário")
@@ -5217,6 +5256,7 @@ class TranslationEditor:
             glossario e sem uma palavra na tela, o usuario tinha todo motivo para
             achar que gravou.
             """
+            nonlocal snapshot
             orig = original_entry.get().strip()
             new = replacement_entry.get().strip()
             rule_type = _type_map.get(type_var.get(), "suggestion")
@@ -5238,7 +5278,20 @@ class TranslationEditor:
                 )
                 return
 
-            if not add_to_glossary(orig, new, rule_type=rule_type):
+            try:
+                result = catalog.add(
+                    GlossaryEntryDraft(orig, new, rule_type, scope=default_scope),
+                    snapshot.catalog_revision,
+                )
+            except GlossaryConflictError:
+                snapshot = catalog.list_entries()
+                self.reload_glossary(show_feedback=False)
+                messagebox.showwarning("Conflito de revisão", "O catálogo mudou. Nada foi adicionado. Revise a regra e salve novamente.", parent=pop)
+                return
+            except GlossaryDuplicateError:
+                messagebox.showinfo("Adicionar ao glossário", "Esta regra já existe neste tipo e escopo.", parent=pop)
+                return
+            except Exception:
                 messagebox.showerror(
                     "Adicionar ao glossário",
                     "Não foi possível gravar a regra no glossário.\n\n"
@@ -5248,7 +5301,7 @@ class TranslationEditor:
                 return
 
             self.reload_glossary(show_feedback=False)
-            self.show_message("Entrada adicionada ao glossário")
+            self.show_message(result.warning or "Entrada adicionada ao glossário")
             pop.destroy()
 
         ctk.CTkButton(pop, text="Adicionar", command=confirm).pack(pady=14)

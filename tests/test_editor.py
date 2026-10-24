@@ -72,6 +72,27 @@ def tearDownModule():
     teardown_module_sandbox()
 
 
+class CatalogDuplicatePresentationTests(unittest.TestCase):
+    def test_diagnostics_do_not_mark_distinct_scopes_or_phases_as_duplicates(self):
+        from tradutor_pgn.glossary_editor import build_glossary_diagnostics
+        entries = [
+            ("rook", "torre", "suggestion", 0, "en>pt"),
+            ("rook", "torre", "suggestion", 0, "fr>pt"),
+            ("rook", "torre", "automatic", 0, "en>pt"),
+        ]
+        self.assertTrue(all("Entrada duplicada." not in warnings for warnings in build_glossary_diagnostics(entries)))
+
+    def test_same_text_in_other_scope_or_phase_is_not_a_duplicate_extra(self):
+        from tradutor_pgn.glossary_editor import duplicate_extras_indices
+        entries = [
+            ("rook", "torre", "suggestion", 0, "en>pt"),
+            ("rook", "torre", "suggestion", 0, "fr>pt"),
+            ("rook", "torre", "automatic", 0, "en>pt"),
+            ("rook", "torre", "suggestion", 9, "en>pt"),
+        ]
+        self.assertEqual(duplicate_extras_indices(entries, range(4)), [3])
+
+
 class HistoryChangeSummaryTests(unittest.TestCase):
     """O resumo por linha do historico (ROADMAP 22.12), sem Tk.
 

@@ -28,6 +28,7 @@ import tkinter as tk
 import customtkinter as ctk
 import types
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr
 from pathlib import Path
 
@@ -47,7 +48,6 @@ from tradutor_pgn import (
     window_utils,
 )
 from tradutor_pgn.app_config import language_label
-from tradutor_pgn.editor_common import DESTRUCTIVE_COLOR
 from tradutor_pgn.database import (
     REVIEW_STATUS_PENDING,
     REVIEW_STATUS_DOUBT,
@@ -103,6 +103,8 @@ class EditorWindowTestCase(GuiTestCase):
     def setUp(self):
         super().setUp()
         self.app = FakeApp(self.root, self.db_path)
+        # A normal installation supplies this source before catalog migration.
+        save_glossary_entries([], glossario._default_substitutions_path(), create_backup=False)
 
     # ---------------- helpers de widget ----------------
 
@@ -419,7 +421,18 @@ class GlossaryEditorTests(EditorWindowTestCase):
 
     def external_change(self, entries):
         """Outra janela grava no glossario enquanto esta esta aberta."""
-        save_glossary_entries(entries, self.glossary_path, create_backup=False)
+        from tradutor_pgn.app_paths import glossary_catalog_path
+        from tradutor_pgn.glossary_catalog import GlossaryCatalog, GlossaryEntryDraft, canonical_identity
+        catalog = GlossaryCatalog(glossary_catalog_path(), self.glossary_path)
+        wanted = {canonical_identity(entry) for entry in entries}
+        snapshot = catalog.list_entries()
+        for entry in snapshot.entries:
+            if canonical_identity(entry) not in wanted:
+                catalog.delete(entry.stable_id, entry.revision)
+        existing = {canonical_identity(entry) for entry in catalog.list_entries().entries}
+        for entry in entries:
+            if canonical_identity(entry) not in existing:
+                catalog.add(GlossaryEntryDraft(*entry), catalog.list_entries().catalog_revision)
 
     def test_every_button_survives_a_click(self):
         clicados = self.click_every_button()
@@ -469,7 +482,7 @@ class GlossaryEditorTests(EditorWindowTestCase):
         self.set_text(self.texts()[1], "torre nova")
         self.click(self.button("Salvar"))
 
-        self.assertEqual(self.entries_on_disk(), com_prioridade(sobraram), "gravou uma entrada que sumiu")
+        self.assertCountEqual(self.entries_on_disk(), com_prioridade(sobraram), "gravou uma entrada que sumiu")
         self.assertIn("Entrada não encontrada", self.dialogs.titles("warning"))
 
     def test_deleting_an_entry_removed_elsewhere_writes_nothing(self):
@@ -479,8 +492,207 @@ class GlossaryEditorTests(EditorWindowTestCase):
 
         self.click(self.button("Excluir"))
 
-        self.assertEqual(self.entries_on_disk(), com_prioridade(sobraram))
+        self.assertCountEqual(self.entries_on_disk(), com_prioridade(sobraram))
         self.assertIn("Entrada não encontrada", self.dialogs.titles("warning"))
+
+
+class GlossaryRevisionEditorTests(EditorWindowTestCase):
+    """Catalog identity survives presentation changes and concurrent editors."""
+
+    module = glossary_editor
+
+    def setUp(self):
+        super().setUp()
+        from tradutor_pgn.app_paths import glossary_catalog_path
+        from tradutor_pgn.glossary_catalog import GlossaryCatalog
+
+        path = glossario._default_substitutions_path()
+        save_glossary_entries([
+            ("rook", "torre", "suggestion", 2, "en>pt"),
+            ("rook", "torre", "suggestion", 8, "fr>pt"),
+            ("queen", "dama", "suggestion", 0, ""),
+        ], path, create_backup=False)
+        glossario.initialize_catalog_glossary()
+        self.catalog = GlossaryCatalog(glossary_catalog_path(), path)
+        self.editor = glossary_editor.open_glossary_editor(self.app)
+        self.pump()
+
+    def second_editor(self):
+        other = glossary_editor.open_glossary_editor(self.app)
+        self.pump()
+        return other
+
+    def test_selection_and_baseline_keep_full_revision_identity(self):
+        self.editor.select_entry(1)
+        record = self.catalog.list_entries().entries[1]
+        self.assertEqual(self.editor.state.selected_id, record.stable_id)
+        self.assertEqual(self.editor.state.selected_revision, record.revision)
+        self.assertEqual(self.editor.form_baseline["stable_id"], record.stable_id)
+        self.assertEqual(self.editor.form_baseline["revision"], record.revision)
+        self.assertEqual(self.editor.form_baseline["catalog_revision"], 1)
+
+    def test_filter_and_sort_save_the_selected_scope_by_id(self):
+        self.editor.select_entry(1)
+        selected = self.catalog.list_entries().entries[1]
+        self.editor.sort_text.set("Original A-Z")
+        self.editor.search_text.set("queen")
+        self.editor.apply_search()
+        self.editor.set_text(self.editor.new_text, "tour")
+        self.editor.save_current()
+        records = self.catalog.list_entries().entries
+        self.assertEqual(records[0].replacement_text, "torre")
+        self.assertEqual(records[1].stable_id, selected.stable_id)
+        self.assertEqual(records[1].replacement_text, "tour")
+        self.assertEqual(records[1].scope, "fr>pt")
+        self.assertEqual(records[1].priority, 8)
+
+    def test_delete_targets_the_selected_scope_by_id(self):
+        selected = self.catalog.list_entries().entries[1]
+        self.editor.select_entry(1)
+        self.editor.delete_current()
+        records = self.catalog.list_entries().entries
+        self.assertNotIn(selected.stable_id, [entry.stable_id for entry in records])
+        self.assertEqual([entry.scope for entry in records], ["en>pt", ""])
+
+    def test_different_entries_can_be_saved_from_simultaneous_snapshots(self):
+        other = self.second_editor()
+        self.editor.select_entry(0)
+        other.select_entry(1)
+        self.editor.set_text(self.editor.new_text, "torre A")
+        other.set_text(other.new_text, "torre B")
+        self.editor.save_current()
+        other.save_current()
+        self.assertEqual(
+            [entry.replacement_text for entry in self.catalog.list_entries().entries],
+            ["torre A", "torre B", "dama"],
+        )
+        self.assertEqual(self.dialogs.messages("error"), [])
+
+    def test_same_entry_conflict_compares_and_reloads_without_force_prompt(self):
+        other = self.second_editor()
+        self.editor.set_text(self.editor.new_text, "primeira janela")
+        other.set_text(other.new_text, "segunda janela")
+        self.editor.save_current()
+        before = len(self.dialogs.messages("askyesno"))
+        other.save_current()
+        self.assertEqual(self.catalog.list_entries().entries[0].replacement_text, "primeira janela")
+        warning = self.dialogs.messages("warning")[-1]
+        self.assertIn("segunda janela", warning)
+        self.assertIn("primeira janela", warning)
+        self.assertIn("torre", warning)
+        self.assertEqual(other.current_pair(), ("rook", "primeira janela"))
+        self.assertFalse(other.state.dirty)
+        self.assertEqual(len(self.dialogs.messages("askyesno")), before)
+
+    def test_stale_delete_reloads_instead_of_deleting_new_revision(self):
+        other = self.second_editor()
+        self.editor.set_text(self.editor.new_text, "atual")
+        self.editor.save_current()
+        other.delete_current()
+        self.assertEqual(len(self.catalog.list_entries().entries), 3)
+        self.assertEqual(other.current_pair(), ("rook", "atual"))
+        self.assertTrue(self.dialogs.messages("warning"))
+
+    def test_stale_catalog_dedup_reloads_without_losing_concurrent_add(self):
+        from tradutor_pgn.glossary_catalog import GlossaryEntryDraft
+        self.catalog.add(GlossaryEntryDraft("bishop", "bispo"), 1)
+        self.editor.deduplicate_entries()
+        self.assertEqual(len(self.catalog.list_entries().entries), 4)
+        self.assertEqual(len(self.editor.state.entries), 4)
+        self.assertTrue(self.dialogs.messages("warning"))
+
+    def test_suggestion_pair_without_unique_record_cannot_delete(self):
+        conn = initialize_database(self.db_path)
+        save_translation(conn.cursor(), "a rook", "rook", "pt", "en")
+        conn.commit()
+        conn.close()
+        editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        editor.delete_suggestion_from_glossary("rook", "torre")
+        self.assertEqual(len(self.catalog.list_entries().entries), 3)
+        self.assertIn("complet", editor.msg_label.cget("text").lower())
+
+    def test_typing_does_not_refresh_suggestion_revision_before_delete(self):
+        from tradutor_pgn.glossary_catalog import GlossaryEntryChanges
+        conn = initialize_database(self.db_path)
+        save_translation(conn.cursor(), "queen", "queen", "pt", "en")
+        conn.commit()
+        conn.close()
+        editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        record = self.catalog.list_entries().entries[2]
+        self.catalog.update(record.stable_id, record.revision, GlossaryEntryChanges(priority=7))
+        editor.refresh_suggestions()
+        editor.delete_suggestion_from_glossary("queen", "dama")
+        self.assertEqual(len(self.catalog.list_entries().entries), 3)
+        self.assertTrue(self.dialogs.messages("warning"))
+
+    def test_open_context_menu_keeps_its_record_revision_during_reload(self):
+        from tradutor_pgn.glossary_catalog import GlossaryEntryChanges
+        conn = initialize_database(self.db_path)
+        save_translation(conn.cursor(), "queen", "queen", "pt", "en")
+        conn.commit()
+        conn.close()
+        editor = edit_window.open_translation_editor(self.app)
+        self.pump()
+        menus = []
+        with unittest.mock.patch.object(tk.Menu, "tk_popup", lambda menu, *args: menus.append(menu)):
+            editor.show_suggestion_context_menu(types.SimpleNamespace(x_root=0, y_root=0), "queen", "dama")
+        record = self.catalog.list_entries().entries[2]
+        self.catalog.update(record.stable_id, record.revision, GlossaryEntryChanges(priority=7))
+        editor.reload_glossary(show_feedback=False)
+        menus[0].invoke(0)
+        self.assertEqual(len(self.catalog.list_entries().entries), 3)
+        self.assertTrue(self.dialogs.messages("warning"))
+
+    def test_preview_callback_keeps_original_id_when_selection_changes(self):
+        pending = []
+        original = glossary_editor.preview_automatic_rule_impact
+        glossary_editor.preview_automatic_rule_impact = lambda *args, **kwargs: pending.append(kwargs["on_decision"])
+        self.addCleanup(setattr, glossary_editor, "preview_automatic_rule_impact", original)
+        self.editor.set_rule_type("automatic")
+        self.editor.save_current()
+        self.editor.select_entry(2)
+        pending[0](True)
+        entries = self.catalog.list_entries().entries
+        self.assertEqual(entries[0].rule_type, "automatic")
+        self.assertEqual(entries[2].original_text, "queen")
+        self.assertEqual(entries[2].replacement_text, "dama")
+
+    def test_actions_without_complete_selection_reload_without_writing(self):
+        self.editor.select_entry(1)
+        before = self.catalog.list_entries()
+        self.editor.form_baseline["revision"] = None
+        self.editor.refresh_conflict()
+        self.assertEqual(self.editor.buttons["Excluir"].cget("state"), "disabled")
+        self.assertEqual(self.editor.buttons["Salvar"].cget("state"), "disabled")
+        self.editor.set_text(self.editor.new_text, "incompleto")
+        self.editor.save_current()
+        self.assertEqual(self.catalog.list_entries(), before)
+        self.assertIsNotNone(self.editor.form_baseline["revision"])
+
+    def test_catalog_read_failure_disables_actions_requiring_a_snapshot(self):
+        with unittest.mock.patch.object(self.editor.catalog, "list_entries", side_effect=OSError("catálogo indisponível")):
+            self.editor.reload_all()
+        for label in ("Salvar", "Salvar como nova", "Excluir", "Deduplicar"):
+            self.assertEqual(self.editor.buttons[label].cget("state"), "disabled", label)
+
+    def test_preview_conflict_compares_original_draft_after_selection_moves(self):
+        from tradutor_pgn.glossary_catalog import GlossaryEntryChanges
+        pending = []
+        original = glossary_editor.preview_automatic_rule_impact
+        glossary_editor.preview_automatic_rule_impact = lambda *args, **kwargs: pending.append(kwargs["on_decision"])
+        self.addCleanup(setattr, glossary_editor, "preview_automatic_rule_impact", original)
+        record = self.catalog.list_entries().entries[0]
+        self.editor.set_text(self.editor.new_text, "rascunho original")
+        self.editor.set_rule_type("automatic")
+        self.editor.save_current()
+        self.catalog.update(record.stable_id, record.revision, GlossaryEntryChanges(replacement_text="atual externo"))
+        self.editor.select_entry(2)
+        pending[0](True)
+        warning = self.dialogs.messages("warning")[-1]
+        self.assertIn("rascunho original", warning)
+        self.assertIn("atual externo", warning)
 
 
 class GlossaryConflictEditorTests(EditorWindowTestCase):
@@ -547,17 +759,12 @@ class GlossaryConflictEditorTests(EditorWindowTestCase):
         self.click(self.row_for("queen"))
         self.assertEqual(self.conflict_text(), "")
 
-    def test_keeping_a_rule_removes_only_the_one_it_disputed(self):
+    def test_bulk_resolution_waits_for_an_atomic_catalog_operation(self):
         self.click(self.row_for("castle"))
+        before = self.entries_on_disk()
+        self.assertEqual(self.button("Manter esta").cget("state"), "disabled")
         self.click(self.button("Manter esta"))
-
-        entradas = self.entries_on_disk()
-        self.assertIn(("torre", "castle", "suggestion", 0, ""), entradas)
-        self.assertNotIn(("torre", "rook", "suggestion", 0, ""), entradas)
-        self.assertIn(("dama", "queen", "suggestion", 0, ""), entradas, "levou junto quem nao disputava")
-
-        # Resolvido tambem na tela: nao sobra aviso de conflito nenhum.
-        self.assertEqual(self.conflict_text(), "")
+        self.assertEqual(self.entries_on_disk(), before)
 
 
 class GlossaryPriorityEditorTests(EditorWindowTestCase):
@@ -2065,6 +2272,31 @@ class AddToGlossaryPopupTests(EditorWindowTestCase):
             glossario._default_substitutions_path(), prefer_db=False
         )
 
+    def test_catalog_change_while_popup_is_open_requires_review_and_retry(self):
+        from tradutor_pgn.glossary_catalog import GlossaryCatalog, GlossaryEntryDraft
+        self.abrir_popup()
+        self.entradas()[0].insert(0, "rook")
+        self.entradas()[1].insert(0, "torre")
+        catalog = GlossaryCatalog(edit_window.glossary_catalog_path(), glossario._default_substitutions_path())
+        catalog.add(GlossaryEntryDraft("queen", "dama"), catalog.list_entries().catalog_revision)
+        self.botao_adicionar().invoke()
+        self.assertTrue(self.pop.winfo_exists())
+        self.assertEqual([entry.original_text for entry in catalog.list_entries().entries], ["queen"])
+        self.assertTrue(self.dialogs.messages("warning"))
+        self.botao_adicionar().invoke()
+        self.assertEqual([entry.original_text for entry in catalog.list_entries().entries], ["queen", "rook"])
+        self.assertFalse(self.pop.winfo_exists())
+
+    def test_popup_inherits_default_scope_captured_before_migration(self):
+        Path(glossario._default_substitutions_path()).write_text(
+            "escopo = 'pt'\nsubstituicoes = []\n", encoding="utf-8"
+        )
+        self.abrir_popup()
+        self.entradas()[0].insert(0, "rook")
+        self.entradas()[1].insert(0, "torre")
+        self.botao_adicionar().invoke()
+        self.assertEqual(self.regras(), [("rook", "torre", "suggestion", 0, "pt")])
+
     def test_an_empty_original_warns_and_keeps_the_window_open(self):
         self.abrir_popup()
         self.dialogs.calls.clear()
@@ -2157,9 +2389,8 @@ class AddToGlossaryPopupTests(EditorWindowTestCase):
         self.abrir_popup()
         self.entradas()[0].insert(0, "rook")
         self.entradas()[1].insert(0, "torre")
-        original = edit_window.add_to_glossary
-        edit_window.add_to_glossary = lambda *a, **k: False
-        self.addCleanup(setattr, edit_window, "add_to_glossary", original)
+        catalog_path = Path(edit_window.glossary_catalog_path())
+        catalog_path.unlink()
         self.dialogs.calls.clear()
 
         self.botao_adicionar().invoke()
@@ -6885,6 +7116,29 @@ class RepeatedEditsWindowTests(EditorWindowTestCase):
     def rotulos(self, janela):
         return [b.cget("text") for b in janela.buttons]
 
+    def test_catalog_change_during_preview_does_not_add_or_apply_candidate(self):
+        from tradutor_pgn import repeated_edits_window
+        from tradutor_pgn.glossary_catalog import GlossaryEntryDraft
+        janela = self.abrir()
+        pending = []
+        applied = []
+        with unittest.mock.patch.object(repeated_edits_window, "preview_automatic_rule_impact", side_effect=lambda *args, **kwargs: pending.append(kwargs["on_decision"])), unittest.mock.patch.object(repeated_edits_window, "apply_automatic_rules_to_database", side_effect=lambda *args, **kwargs: applied.append(kwargs)):
+            janela.create_automatic_rule()
+            janela.catalog.add(GlossaryEntryDraft("queen", "dama"), janela.snapshot.catalog_revision)
+            pending[0](True)
+        self.assertEqual([entry.original_text for entry in janela.catalog.list_entries().entries], ["rook", "queen"])
+        self.assertEqual(applied, [])
+        self.assertEqual(len(janela.snapshot.entries), 2)
+        self.assertTrue(self.dialogs.messages("warning"))
+
+    def test_unreadable_catalog_disables_candidate_creation(self):
+        janela = self.abrir()
+        with unittest.mock.patch.object(janela.catalog, "list_entries", side_effect=OSError("catálogo indisponível")):
+            janela.refresh()
+        self.assertIsNone(janela.snapshot)
+        self.assertEqual(janela.btn_create.cget("state"), "disabled")
+        self.assertTrue(self.dialogs.messages("error"))
+
     # ------------------------------------------------------------- o botao
 
     def test_the_button_is_disabled_until_a_file_is_chosen(self):
@@ -6950,6 +7204,15 @@ class RepeatedEditsWindowTests(EditorWindowTestCase):
         self.assertEqual(
             janela.btn_create.cget("state"), "disabled", "nao ha o que criar"
         )
+
+    def test_an_automatic_in_another_scope_does_not_block_this_candidate(self):
+        save_glossary_entries(
+            [("troca", "qualidade", "automatic", 0, "fr>it")],
+            self.glossary_path, create_backup=False,
+        )
+        janela = self.abrir()
+        self.assertIn("sem regra", self.rotulos(janela)[0])
+        self.assertEqual(janela.btn_create.cget("state"), "normal")
 
     def test_a_file_without_edits_says_why_the_list_is_empty(self):
         outro = str(Path(self.base) / "novo.pgn")
@@ -7480,52 +7743,19 @@ class DeleteShownDuplicatesTests(EditorWindowTestCase):
         self.assertEqual(glossary_editor.duplicate_extras_indices(entradas, [2, 3]), [3])
         self.assertEqual(glossary_editor.duplicate_extras_indices(entradas, [5]), [])
 
-    def test_the_button_exists_only_with_the_duplicates_filter_and_says_how_many(self):
-        self.assertFalse(self.botao().winfo_manager(), "sem filtro nao ha botao")
+    def test_no_bulk_deletion_is_available_after_catalog_migration(self):
         self.filtrar("Duplicadas")
-        self.assertTrue(self.botao().winfo_manager())
-        self.assertEqual(self.botao().cget("text"), "Excluir as 3 cópias repetidas exibidas")
-        self.assertEqual(self.botao().cget("fg_color"), DESTRUCTIVE_COLOR)
-        self.filtrar("Todas")
         self.assertFalse(self.botao().winfo_manager())
-
-    def test_it_deletes_only_the_extras_after_a_backup_and_a_yes(self):
-        self.filtrar("Duplicadas")
-        self.dialogs.askyesno_result = True
-        antes = self.backups()
-        apagadas = self.editor.delete_shown_duplicates()
-        self.pump()
-        self.assertEqual(apagadas, 3)
-        self.assertEqual(
-            self.entries_on_disk(), [("rook", "torre"), ("queen", "dama"), ("pawn", "peao")]
-        )
-        # Pelo menos um novo (o de antes da pergunta; a gravacao faz o dela
-        # tambem), e o nomeado na pergunta existe de verdade.
-        self.assertGreaterEqual(len(self.backups()), len(antes) + 1, "um backup novo")
-        pergunta = self.dialogs.messages("askyesno")[-1]
-        self.assertIn("3 cópia(s)", pergunta)
-        nomeado = next((nome for nome in self.backups() if nome in pergunta), None)
-        self.assertIsNotNone(nomeado, "o caminho do backup esta na pergunta e o arquivo existe")
-        self.assertFalse(self.botao().winfo_manager(), "sem excesso, o botao some")
-
-    def test_saying_no_keeps_everything_but_the_backup_exists(self):
-        self.filtrar("Duplicadas")
-        self.dialogs.askyesno_result = False
-        antes = self.backups()
+        before = self.entries_on_disk()
         self.assertIsNone(self.editor.delete_shown_duplicates())
-        self.assertEqual(len(self.entries_on_disk()), 6)
-        self.assertGreaterEqual(len(self.backups()), len(antes) + 1, "o backup vem antes da pergunta")
+        self.assertEqual(self.entries_on_disk(), before)
 
-    def test_the_search_narrows_what_is_deleted(self):
-        self.filtrar("Duplicadas")
-        self.editor.search_text.set("rook")
-        self.editor.apply_search()
-        self.pump()
-        self.assertEqual(self.botao().cget("text"), "Excluir as 2 cópias repetidas exibidas")
-        self.dialogs.askyesno_result = True
-        self.assertEqual(self.editor.delete_shown_duplicates(), 2)
-        self.assertEqual(self.entries_on_disk().count(("pawn", "peao")), 2, "fora da busca, intocada")
-        self.assertEqual(self.entries_on_disk().count(("rook", "torre")), 1)
+    def test_import_and_restore_wait_for_atomic_catalog_operations(self):
+        before = self.entries_on_disk()
+        for label in ("Importar CSV", "Restaurar backup"):
+            self.assertEqual(self.editor.buttons[label].cget("state"), "disabled")
+            self.editor.buttons[label].invoke()
+        self.assertEqual(self.entries_on_disk(), before)
 
 
 class GlossaryEditorZoomTests(EditorWindowTestCase):

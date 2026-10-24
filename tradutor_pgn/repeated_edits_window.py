@@ -34,11 +34,14 @@ from .editor_widgets import render_row_buttons
 from .glossario import (
     GLOSSARY_RULE_AUTOMATIC,
     GLOSSARY_SCOPE_SEPARATOR,
-    add_glossary_entry,
+    initialize_catalog_glossary,
+    _default_substitutions_path,
     filter_glossary_entries_by_type,
-    load_glossary_entry_details,
     load_interactive_substitutions,
+    scope_matches,
 )
+from .app_paths import glossary_catalog_path
+from .glossary_catalog import GlossaryCatalog, GlossaryConflictError, GlossaryDuplicateError, GlossaryEntryDraft
 from .repeated_edits import repeated_edits_report
 from .window_utils import bring_window_to_front
 
@@ -109,6 +112,8 @@ class RepeatedEditsWindow:
         self.items = []
         self.buttons = []
         self.selected = None
+        self.catalog = GlossaryCatalog(glossary_catalog_path(), _default_substitutions_path())
+        self.snapshot = None
 
         self.build()
         self.refresh()
@@ -176,7 +181,21 @@ class RepeatedEditsWindow:
                 self.target_language,
                 self.source_language,
             )
-        self.items = repeated_edits_report(self.events, load_glossary_entry_details())
+        try:
+            if not os.path.exists(self.catalog.db_path):
+                initialize_catalog_glossary()
+            self.snapshot = self.catalog.list_entries()
+        except Exception as exc:
+            self.snapshot = None
+            self.items = repeated_edits_report(self.events, [])
+            messagebox.showerror("Trocas repetidas", f"Erro ao carregar catálogo:\n{exc}", parent=self.win)
+            return
+        entries = [
+            (entry.original_text, entry.replacement_text, entry.rule_type, entry.priority, entry.scope)
+            for entry in self.snapshot.entries
+            if scope_matches(entry.scope, self.source_language, self.target_language)
+        ]
+        self.items = repeated_edits_report(self.events, entries)
 
     def refresh(self, keep=None):
         """Rele o banco e o glossario e refaz a lista.
@@ -240,7 +259,10 @@ class RepeatedEditsWindow:
                 f"Regra no glossário: {item['rule_label']}"
             )
         )
-        if already_automatic(item):
+        if self.snapshot is None:
+            self.btn_create.configure(state="disabled")
+            self.hint_label.configure(text="Recarregue o catálogo antes de criar uma regra.")
+        elif already_automatic(item):
             self.btn_create.configure(state="disabled")
             self.hint_label.configure(text="Já há regra automática para esta troca.")
         else:
@@ -290,11 +312,12 @@ class RepeatedEditsWindow:
         regra criada, valendo para as traducoes novas.
         """
         item = self.current_item()
-        if item is None or already_automatic(item):
+        if item is None or already_automatic(item) or self.snapshot is None:
             return
         escopo = rule_scope_for_pair(self.source_language, self.target_language)
         entrada = (item["old"], item["new"], GLOSSARY_RULE_AUTOMATIC, 0, escopo)
         par = (item["old"], item["new"])
+        expected_catalog_revision = self.snapshot.catalog_revision
 
         def aplicado(_stats):
             if self.win.winfo_exists():
@@ -304,12 +327,18 @@ class RepeatedEditsWindow:
             if not promover or not self.win.winfo_exists():
                 return
             try:
-                resultado = add_glossary_entry(
-                    item["old"],
-                    item["new"],
-                    rule_type=GLOSSARY_RULE_AUTOMATIC,
-                    scope=escopo,
+                resultado = self.catalog.add(
+                    GlossaryEntryDraft(item["old"], item["new"], GLOSSARY_RULE_AUTOMATIC, escopo),
+                    expected_catalog_revision,
                 )
+            except GlossaryConflictError:
+                self.refresh(keep=par)
+                messagebox.showwarning("Conflito de revisão", "O catálogo mudou. Nada foi adicionado ou aplicado. Revise a lista recarregada.", parent=self.win)
+                return
+            except GlossaryDuplicateError:
+                self.refresh(keep=par)
+                messagebox.showinfo("Trocas repetidas", "Esta regra já existe neste tipo e escopo.", parent=self.win)
+                return
             except Exception as exc:
                 messagebox.showerror(
                     "Trocas repetidas",
@@ -318,12 +347,8 @@ class RepeatedEditsWindow:
                 )
                 return
             self.notify_glossary_change()
-            if resultado["status"] != "inserted":
-                messagebox.showinfo(
-                    "Trocas repetidas",
-                    "Esta regra já existia no glossário.",
-                    parent=self.win,
-                )
+            if resultado.warning:
+                messagebox.showwarning("Trocas repetidas", resultado.warning, parent=self.win)
             self.refresh(keep=par)
             apply_automatic_rules_to_database(
                 self.app,

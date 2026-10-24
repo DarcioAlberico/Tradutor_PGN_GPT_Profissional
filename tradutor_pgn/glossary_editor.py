@@ -4,6 +4,12 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from .app_paths import glossary_catalog_path
+from .glossary_catalog import (
+    CatalogSnapshot, GlossaryCatalog, GlossaryConflictError, GlossaryDuplicateError,
+    GlossaryEntryChanges, GlossaryEntryDraft, canonical_identity,
+)
+
 from .glossario import (
     build_glossary_lookup,
     GLOSSARY_PRIORITY_DEFAULT,
@@ -13,33 +19,23 @@ from .glossario import (
     GLOSSARY_RULE_TYPES,
     GLOSSARY_SCOPE_ALL,
     GLOSSARY_SCOPE_ANY,
-    add_glossary_entry,
     glossary_default_scope,
+    initialize_catalog_glossary,
+    _default_substitutions_path,
     glossary_entry_scope,
     normalize_glossary_scope,
-    analyze_glossary_csv_import,
     create_glossary_backup,
-    deduplicate_glossary_entries,
-    delete_glossary_entry_by_pair,
     describe_glossary_conflict,
     export_glossary_csv,
     glossary_conflicts,
-    resolve_glossary_conflict,
-    find_glossary_entry_index,
     apply_all_substitutions,
-    import_glossary_csv,
     interactive_rules_from_entries,
     glossary_entry_pair,
     glossary_entry_priority,
     glossary_entry_type,
     normalize_glossary_priority,
     promote_glossary_rule,
-    load_glossary_entry_details,
-    load_glossary_entries,
     load_interactive_substitutions,
-    restore_glossary_from_backup,
-    save_glossary_entries,
-    update_glossary_entry_by_entry,
     validate_glossary_entry,
 )
 from .db_tools import preview_automatic_rule_impact
@@ -120,8 +116,9 @@ def build_glossary_diagnostics(entries, conflicts=None):
     nunca carrega juntos.
     """
     pair_counts = {}
-    for orig, new in entry_pairs(entries):
-        pair_counts[(orig, new)] = pair_counts.get((orig, new), 0) + 1
+    for entry in entries:
+        identity = canonical_identity(entry)
+        pair_counts[identity] = pair_counts.get(identity, 0) + 1
 
     if conflicts is None:
         conflicts = glossary_conflicts(entries)
@@ -135,7 +132,7 @@ def build_glossary_diagnostics(entries, conflicts=None):
             rule_type=glossary_entry_type(entry),
             scope=glossary_entry_scope(entry),
         )
-        if pair_counts.get((orig, new), 0) > 1:
+        if pair_counts.get(canonical_identity(entry), 0) > 1:
             warnings.append("Entrada duplicada.")
         if index in conflicts:
             warnings.append("Mesmo original com substituição diferente.")
@@ -244,6 +241,9 @@ class GlossaryEditorState:
     def __init__(self):
         # O glossario como foi carregado do arquivo.
         self.entries = []
+        self.snapshot = CatalogSnapshot((), 0)
+        self.selected_id = None
+        self.selected_revision = None
         self.diagnostics = []
         self.conflicts = {}
 
@@ -251,8 +251,7 @@ class GlossaryEditorState:
         self.filtered_indices = []
         self.page_index = 0
 
-        # Posicao em `entries` — nao na lista filtrada, que muda com o filtro e
-        # com a ordenacao (garantia S6).
+        # Selection owns identity/revision. Its index is derived for display.
         self.selected_index = None
 
         # `loading` suprime o marcador de "nao salvo" enquanto o proprio
@@ -264,11 +263,26 @@ class GlossaryEditorState:
         # `entries`: invalidado junto com ela.
         self.validation_lookup = None
 
+    @property
+    def catalog_revision(self):
+        return self.snapshot.catalog_revision
+
+    @property
+    def selected_index(self):
+        return next((i for i, entry in enumerate(self.snapshot.entries)
+                     if entry.stable_id == self.selected_id), None)
+
+    @selected_index.setter
+    def selected_index(self, index):
+        record = self.snapshot.entries[index] if index is not None and 0 <= index < len(self.snapshot.entries) else None
+        self.selected_id = record.stable_id if record else None
+        self.selected_revision = record.revision if record else None
+
 
 def duplicate_extras_indices(entries, shown_indices):
-    """As copias A MAIS dos pares repetidos entre os indices exibidos (S22).
+    """Excess copies of a complete canonical identity among displayed rows.
 
-    Para cada par `(original, substituicao)` que aparece mais de uma vez na
+    Para cada identidade `(original, substituicao, tipo, escopo)` repetida na
     lista exibida, ficam de fora a PRIMEIRA copia em ordem de arquivo e entram
     as outras. Apagar todas as copias — que e o que "excluir as exibidas" diria
     ao pe da letra com o filtro "Duplicadas", ja que ele mostra cada copia —
@@ -278,7 +292,7 @@ def duplicate_extras_indices(entries, shown_indices):
     vistos = set()
     extras = []
     for index in sorted(shown_indices):
-        pair = glossary_entry_pair(entries[index])
+        pair = canonical_identity(entries[index])
         if pair in vistos:
             extras.append(index)
         else:
@@ -330,6 +344,7 @@ class GlossaryEditor:
         restore_or_maximize(self.win, self.app.root, saved_geometry)
 
         self.state = GlossaryEditorState()
+        self.catalog = GlossaryCatalog(glossary_catalog_path(), _default_substitutions_path())
         self.row_buttons = []
         self.form_baseline = {
             "orig": "",
@@ -684,13 +699,13 @@ class GlossaryEditor:
         self.buttons["Backup"].configure(command=self.create_backup_now)
         self.buttons["Recarregar"].configure(command=self.reload_all)
         self.buttons["Exportar CSV"].configure(command=self.export_csv)
-        self.buttons["Importar CSV"].configure(command=self.import_csv)
-        self.buttons["Restaurar backup"].configure(command=self.restore_backup)
+        self.buttons["Importar CSV"].configure(command=self.import_csv, state="disabled")
+        self.buttons["Restaurar backup"].configure(command=self.restore_backup, state="disabled")
         self.btn_page_prev.configure(command=lambda: self.change_page(-1))
         self.btn_page_next.configure(command=lambda: self.change_page(1))
         self.btn_search.configure(command=self.apply_search)
         self.btn_clear_search.configure(command=self.clear_search)
-        self.btn_keep_conflict.configure(command=self.keep_this_rule)
+        self.btn_keep_conflict.configure(command=self.keep_this_rule, state="disabled")
         self.btn_promote_conflict.configure(command=self.promote_this_rule)
         self.priority_text.trace_add("write", lambda *_a: self.mark_dirty())
         self.btn_apply_preview.configure(command=self.refresh_preview)
@@ -851,6 +866,9 @@ class GlossaryEditor:
         self.form_baseline["type"] = rule_type or GLOSSARY_RULE_SUGGESTION
         self.form_baseline["priority"] = normalize_glossary_priority(priority)
         self.form_baseline["scope"] = normalize_glossary_scope(scope)
+        self.form_baseline["stable_id"] = self.state.selected_id
+        self.form_baseline["revision"] = self.state.selected_revision
+        self.form_baseline["catalog_revision"] = self.state.catalog_revision
 
     def form_changed(self):
         orig, new = self.current_pair()
@@ -974,6 +992,13 @@ class GlossaryEditor:
         gravados, e o texto sendo digitado ainda nao e nenhum dos dois.
         """
         index = self.state.selected_index
+        complete = (index is not None and self.form_baseline.get("stable_id") == self.state.selected_id
+                    and self.form_baseline.get("revision") == self.state.selected_revision)
+        self.buttons["Excluir"].configure(state="normal" if complete else "disabled")
+        self.buttons["Salvar"].configure(state="normal" if complete or (self.state.selected_id is None and self.state.catalog_revision > 0) else "disabled")
+        for label in ("Salvar como nova", "Deduplicar"):
+            self.buttons[label].configure(state="normal" if self.state.catalog_revision > 0 else "disabled")
+        self.btn_promote_conflict.configure(state="normal" if complete else "disabled")
         message = ""
         if index is not None and 0 <= index < len(self.state.entries):
             message = describe_glossary_conflict(self.state.entries, index, self.state.conflicts)
@@ -986,53 +1011,9 @@ class GlossaryEditor:
             self.conflict_bar.grid_remove()
 
     def keep_this_rule(self):
-        index = self.state.selected_index
-        if index is None or index not in self.state.conflicts:
-            self.show_message("Selecione uma regra em conflito", WARNING_COLOR)
-            return
-        if self.state.dirty and not self.confirm_discard_changes():
-            return
-
-        info = self.state.conflicts[index]
-        descartadas = [position for position in info["group"] if position != index]
-        detalhes = "\n".join(
-            f"#{position + 1}  {rule_type_label(glossary_entry_type(self.state.entries[position]))}"
-            f"  ->  {preview(glossary_entry_pair(self.state.entries[position])[1], 48)}"
-            for position in descartadas
-        )
-        if not messagebox.askyesno(
-            "Manter esta regra",
-            f"Manter a regra #{index + 1} para {info['pattern']!r} e remover "
-            f"{len(descartadas)} regra(s) que disputam o mesmo texto?\n\n{detalhes}",
-            parent=self.win,
-        ):
-            return
-
-        restantes = resolve_glossary_conflict(self.state.entries, index, self.state.conflicts)
-        if restantes is None:
-            self.show_message("Nada a resolver", WARNING_COLOR)
-            return
-
-        # A entrada mantida e reencontrada pelo conteudo: remover as anteriores
-        # desloca a posicao dela, e o arquivo pode ter mudado por fora (S6).
-        entrada = self.state.entries[index]
-        mantida = (*glossary_entry_pair(entrada), glossary_entry_type(entrada))
-        try:
-            save_glossary_entries(restantes)
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Erro ao gravar glossário:\n{exc}", parent=self.win)
-            return
-
-        self.load_rows_from_file()
-        self.state.selected_index = find_glossary_entry_index(self.state.entries, mantida)
-        self.set_dirty(False)
-        self.update_app_glossary()
-        self.apply_filter()
-        if self.state.selected_index is not None:
-            self.select_entry(self.state.selected_index)
-        else:
-            self.clear_form()
-        self.show_message(f"{len(descartadas)} regra(s) em conflito removida(s)")
+        """Bulk changes require a dedicated atomic catalog operation."""
+        self.show_message("Ação indisponível até a operação atômica do catálogo.", WARNING_COLOR)
+        return None
 
     def promote_this_rule(self):
         """Resolve o conflito pela prioridade, sem apagar nada (ROADMAP 1.5).
@@ -1047,6 +1028,9 @@ class GlossaryEditor:
             self.show_message("Selecione uma regra em conflito", WARNING_COLOR)
             return
         if self.state.dirty and not self.confirm_discard_changes():
+            return
+        identity = self.require_selected_record()
+        if identity is None:
             return
 
         promovidas = promote_glossary_rule(self.state.entries, index, self.state.conflicts)
@@ -1065,36 +1049,35 @@ class GlossaryEditor:
         ):
             return
 
-        # Reencontrada pelo conteudo, como em "Manter esta": nada foi removido
-        # aqui, mas o arquivo pode ter mudado por fora (S6).
-        entrada = self.state.entries[index]
-        promovida = (*glossary_entry_pair(entrada), glossary_entry_type(entrada))
         try:
-            save_glossary_entries(promovidas)
+            result = self.catalog.update(*identity, GlossaryEntryChanges(priority=nova))
+        except GlossaryConflictError as exc:
+            self.report_revision_conflict(exc)
+            return
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao gravar glossário:\n{exc}", parent=self.win)
             return
 
-        self.load_rows_from_file()
-        self.state.selected_index = find_glossary_entry_index(self.state.entries, promovida)
-        self.set_dirty(False)
-        self.update_app_glossary()
-        self.apply_filter()
-        if self.state.selected_index is not None:
-            self.select_entry(self.state.selected_index)
-        else:
-            self.clear_form()
         self.show_message(f"Regra priorizada (prioridade {nova})")
+        self.finish_mutation(result, identity[0])
 
     def load_rows_from_file(self):
         try:
-            self.state.entries = load_glossary_entry_details(deduplicate=False)
+            if not os.path.exists(self.catalog.db_path):
+                initialize_catalog_glossary()
+            self.state.snapshot = self.catalog.list_entries()
+            self.state.entries = [
+                (entry.original_text, entry.replacement_text, entry.rule_type, entry.priority, entry.scope)
+                for entry in self.state.snapshot.entries
+            ]
             self.state.conflicts = glossary_conflicts(self.state.entries)
             self.state.diagnostics = build_glossary_diagnostics(
                 self.state.entries, self.state.conflicts
             )
         except Exception as exc:
             self.state.entries = []
+            self.state.snapshot = CatalogSnapshot((), 0)
+            self.state.selected_index = None
             self.state.diagnostics = []
             self.state.conflicts = {}
             # Com `parent`, como os outros treze dialogos deste arquivo. Era o
@@ -1106,7 +1089,7 @@ class GlossaryEditor:
             )
         # O indice de validacao e derivado de `entries`; invalida junto.
         self.state.validation_lookup = None
-        self.file_label.configure(text="Arquivo: Substituicoes.txt")
+        self.file_label.configure(text="Catálogo: glossario-v2.db")
 
     def current_validation_lookup(self):
         if self.state.validation_lookup is None:
@@ -1217,57 +1200,13 @@ class GlossaryEditor:
             return
         plural = "cópia repetida exibida" if len(extras) == 1 else "cópias repetidas exibidas"
         self.btn_delete_shown_duplicates.configure(text=f"Excluir as {len(extras)} {plural}")
+        self.btn_delete_shown_duplicates.configure(state="disabled")
         self.btn_delete_shown_duplicates.grid()
 
     def delete_shown_duplicates(self):
-        """Apaga as copias a mais dos pares exibidos, com backup e confirmacao
-        proprios (garantia S22). Uma exclusao em massa e acao destrutiva nova
-        (22.12): nao herda o `askyesno` curto da exclusao de uma regra, e o
-        backup vem ANTES da pergunta, com o caminho nela (a regra de Z1)."""
-        extras = self.shown_duplicate_extras()
-        if not extras:
-            self.show_message("Nenhuma cópia repetida na lista exibida")
-            return None
-        try:
-            backup_path = create_glossary_backup()
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Erro ao criar backup:\n{exc}", parent=self.win)
-            return None
-        if not messagebox.askyesno(
-            "Excluir cópias repetidas",
-            (
-                f"Excluir {len(extras)} cópia(s) repetida(s) das entradas exibidas?\n\n"
-                "A primeira cópia de cada par fica; só o excesso sai. "
-                "Um backup acabou de ser criado em:\n"
-                f"{backup_path}"
-            ),
-            parent=self.win,
-        ):
-            self.show_message(f"Exclusão cancelada. Backup em {os.path.basename(backup_path)}")
-            return None
-        apagar = set(extras)
-        restantes = [
-            entry for index, entry in enumerate(self.state.entries) if index not in apagar
-        ]
-        try:
-            save_glossary_entries(restantes)
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Erro ao excluir as cópias:\n{exc}", parent=self.win)
-            return None
-        self.load_rows_from_file()
-        self.state.selected_index = None
-        self.set_dirty(False)
-        self.update_app_glossary()
-        self.apply_filter()
-        if self.state.filtered_indices:
-            self.select_entry(self.state.filtered_indices[0])
-        else:
-            self.clear_form()
-        self.show_message(
-            f"{len(extras)} cópia(s) repetida(s) excluída(s). "
-            f"Backup em {os.path.basename(backup_path)}"
-        )
-        return len(extras)
+        """Bulk changes require a dedicated atomic catalog operation."""
+        self.show_message("Ação indisponível até a operação atômica do catálogo.", WARNING_COLOR)
+        return None
 
     def build_row_button(self, parent, _visible_index, entry_index):
         button = ctk.CTkButton(
@@ -1402,26 +1341,54 @@ class GlossaryEditor:
         else:
             self.clear_form()
 
-    def current_baseline_entry(self):
-        """A entrada como estava quando foi carregada no formulario.
+    def finish_mutation(self, result, stable_id=None):
+        self.set_dirty(False)
+        self.load_rows_from_file()
+        self.state.selected_id = stable_id
+        self.apply_filter()
+        if self.state.selected_index is not None:
+            self.select_entry(self.state.selected_index)
+        else:
+            self.clear_form()
+        self.update_app_glossary()
+        if result.warning:
+            self.show_message(result.warning, WARNING_COLOR)
 
-        E o que identifica a linha no arquivo — a posicao nao serve, porque a
-        janela nao e notificada de alteracoes externas ao glossario.
-        """
-        return (
-            self.form_baseline["orig"],
-            self.form_baseline["new"],
-            self.form_baseline["type"],
-        )
+    def report_revision_conflict(self, conflict, baseline=None, attempted=None):
+        """Compare the user's draft with the baseline and reload, without force."""
+        baseline = dict(self.form_baseline) if baseline is None else baseline
+        attempted = (*self.current_pair(), self.current_rule_type(), self.current_priority(), self.current_scope()) if attempted is None else attempted
+        current = conflict.current_entry
+        def describe(values):
+            orig, new, phase, priority, scope = values
+            return f"{orig!r} → {new!r}; tipo={phase}; prioridade={priority}; escopo={scope!r}"
+        previous = (baseline["orig"], baseline["new"], baseline["type"], baseline["priority"], baseline["scope"])
+        actual = describe((current.original_text, current.replacement_text, current.rule_type, current.priority, current.scope)) if current else "Entrada removida ou catálogo alterado."
+        message = (f"A revisão mudou em outra janela.\n\nBase: {describe(previous)}"
+                   f"\nSua edição: {describe(attempted)}\nAtual: {actual}"
+                   "\n\nNada foi gravado. A lista foi recarregada; revise antes de salvar novamente.")
+        self.set_dirty(False)
+        self.load_rows_from_file()
+        self.state.selected_id = conflict.stable_id
+        self.apply_filter()
+        if self.state.selected_index is not None:
+            self.select_entry(self.state.selected_index)
+        else:
+            self.clear_form()
+        messagebox.showwarning("Conflito de revisão" if current or conflict.stable_id is None else "Entrada não encontrada", message, parent=self.win)
 
-    def locate_saved_entry(self, orig, new, rule_type):
-        """Posicao, no `entries` recem recarregado, da entrada acabada de gravar.
-
-        A gravacao normaliza os espacos das pontas (garantia S7), entao procurar
-        pelo texto digitado pode nao achar nada. `find_glossary_entry_index`
-        normaliza os dois lados antes de comparar.
-        """
-        return find_glossary_entry_index(self.state.entries, (orig, new, rule_type))
+    def require_selected_record(self):
+        """A projection without its complete record never authorizes a mutation."""
+        stable_id = self.form_baseline.get("stable_id")
+        revision = self.form_baseline.get("revision")
+        if (stable_id and revision and self.state.selected_id == stable_id
+                and self.state.selected_revision == revision
+                and self.state.selected_index is not None):
+            return stable_id, revision
+        self.set_dirty(False)
+        self.reload_all()
+        self.show_message("Seleção incompleta; catálogo recarregado. Selecione novamente.", WARNING_COLOR)
+        return None
 
     def report_entry_vanished(self):
         """A entrada editada nao existe mais como estava no arquivo."""
@@ -1441,6 +1408,12 @@ class GlossaryEditor:
         rule_type = self.current_rule_type()
         priority = self.current_priority()
         scope = self.current_scope()
+        baseline = dict(self.form_baseline)
+        identity = None
+        if self.state.selected_id is not None or baseline.get("stable_id") is not None:
+            identity = self.require_selected_record()
+            if identity is None:
+                return
         warnings = validate_glossary_entry(
             orig,
             new,
@@ -1466,50 +1439,27 @@ class GlossaryEditor:
 
         def gravar():
             try:
-                if self.state.selected_index is None:
-                    result = add_glossary_entry(
-                        orig, new, rule_type=rule_type, priority=priority, scope=scope
-                    )
-                    self.load_rows_from_file()
-                    self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
-                    self.show_message(
-                        "Entrada adicionada"
-                        if result["status"] == "inserted"
-                        else "Entrada já existia",
-                        OK_COLOR if result["status"] == "inserted" else WARNING_COLOR,
+                if identity is None:
+                    result = self.catalog.add(
+                        GlossaryEntryDraft(orig, new, rule_type, scope, priority),
+                        baseline["catalog_revision"],
                     )
                 else:
-                    # Pelo estado exibido, nao pela posicao guardada: o arquivo pode
-                    # ter mudado por fora desde que esta entrada foi selecionada, e
-                    # ai o indice aponta para a vizinha (garantia S6).
-                    result = update_glossary_entry_by_entry(
-                        self.current_baseline_entry(),
-                        orig,
-                        new,
-                        rule_type=rule_type,
-                        index_hint=self.state.selected_index,
-                        priority=priority,
-                        scope=scope,
+                    result = self.catalog.update(
+                        *identity, GlossaryEntryChanges(orig, new, rule_type, scope, priority)
                     )
-                    self.load_rows_from_file()
-                    if result is None:
-                        self.report_entry_vanished()
-                        return
-                    self.state.selected_index = result["index"]
-                    self.show_message("Entrada salva")
+            except GlossaryConflictError as exc:
+                self.report_revision_conflict(exc, baseline, (orig, new, rule_type, priority, scope))
+                return
+            except GlossaryDuplicateError:
+                self.show_message("Entrada já existia neste tipo e escopo", WARNING_COLOR)
+                return
             except Exception as exc:
                 messagebox.showerror("Erro", f"Erro ao salvar glossário:\n{exc}", parent=self.win)
                 return
 
-            self.set_form_baseline(orig, new, rule_type, priority, scope)
-            self.set_dirty(False)
-            self.update_app_glossary()
-            self.apply_filter()
-            if (
-                self.state.selected_index is not None
-                and self.state.selected_index < len(self.state.entries)
-            ):
-                self.select_entry(self.state.selected_index)
+            self.show_message("Entrada salva")
+            self.finish_mutation(result, result.entry.stable_id)
 
         self.confirm_promotion_then(orig, new, rule_type, priority, scope, gravar)
 
@@ -1566,6 +1516,8 @@ class GlossaryEditor:
         rule_type = self.current_rule_type()
         priority = self.current_priority()
         scope = self.current_scope()
+        expected_catalog_revision = self.state.catalog_revision
+        baseline = dict(self.form_baseline)
         warnings = validate_glossary_entry(
             orig, new, self.state.entries, rule_type=rule_type, scope=scope
         )
@@ -1579,30 +1531,24 @@ class GlossaryEditor:
 
         def gravar():
             try:
-                result = add_glossary_entry(
-                    orig, new, rule_type=rule_type, priority=priority, scope=scope
+                result = self.catalog.add(
+                    GlossaryEntryDraft(orig, new, rule_type, scope, priority),
+                    expected_catalog_revision,
                 )
+            except GlossaryConflictError as exc:
+                self.report_revision_conflict(exc, baseline, (orig, new, rule_type, priority, scope))
+                return
+            except GlossaryDuplicateError:
+                self.show_message("Entrada já existia neste tipo e escopo", WARNING_COLOR)
+                return
             except Exception as exc:
                 messagebox.showerror(
                     "Erro", f"Erro ao salvar nova entrada:\n{exc}", parent=self.win
                 )
                 return
 
-            self.load_rows_from_file()
-            if result["status"] == "unchanged":
-                self.show_message("Entrada já existia", WARNING_COLOR)
-            else:
-                self.show_message("Nova entrada salva")
-            # Vale para os dois casos: a entrada existente e a recem inserida sao
-            # localizadas do mesmo jeito. `len(entries) - 1` so acertava porque a
-            # insercao acrescenta no fim, e errava quando ela nao acontecia.
-            self.state.selected_index = self.locate_saved_entry(orig, new, rule_type)
-            self.set_form_baseline(orig, new, rule_type, priority, scope)
-            self.set_dirty(False)
-            self.update_app_glossary()
-            self.apply_filter()
-            if self.state.selected_index is not None:
-                self.select_entry(self.state.selected_index)
+            self.show_message("Nova entrada salva")
+            self.finish_mutation(result, result.entry.stable_id)
 
         # "Salvar como nova" sempre cria uma entrada, entao uma automatica aqui e
         # sempre uma regra automatica nova — a linha de base nao conta.
@@ -1617,6 +1563,9 @@ class GlossaryEditor:
             self.show_message("Selecione uma entrada", WARNING_COLOR)
             return
 
+        identity = self.require_selected_record()
+        if identity is None:
+            return
         if not messagebox.askyesno(
             "Excluir entrada",
             "Excluir a entrada selecionada do glossário?",
@@ -1624,47 +1573,28 @@ class GlossaryEditor:
         ):
             return
 
-        orig, new = glossary_entry_pair(self.state.entries[index])
-        rule_type = glossary_entry_type(self.state.entries[index])
         try:
-            # Pelo conteudo, nao pela posicao: mesma razao do "Salvar" (S6).
-            removed = delete_glossary_entry_by_pair(
-                orig, new, rule_type=rule_type, index_hint=index
-            )
+            result = self.catalog.delete(*identity)
+        except GlossaryConflictError as exc:
+            self.report_revision_conflict(exc)
+            return
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao excluir entrada:\n{exc}", parent=self.win)
             return
 
-        if removed is None:
-            self.load_rows_from_file()
-            self.report_entry_vanished()
-            return
-
-        self.load_rows_from_file()
-        self.state.selected_index = None
-        self.set_dirty(False)
-        self.update_app_glossary()
-        self.apply_filter()
+        self.show_message("Entrada excluída")
+        self.finish_mutation(result)
         if self.state.filtered_indices:
-            # `removed["index"]` e a posicao real da entrada no arquivo, que
-            # pode diferir da que estava selecionada. `filtered_indices` guarda
-            # posicoes de `entries`, entao a vizinha e a primeira que sobrou a
-            # partir dela — nao `filtered_indices[index]`, que com filtro ou
-            # ordenacao ativos apontaria para uma entrada arbitraria.
-            seguintes = [i for i in self.state.filtered_indices if i >= removed["index"]]
+            # The previous index chooses a neighbour only after deletion by ID.
+            seguintes = [i for i in self.state.filtered_indices if i >= index]
             self.select_entry(seguintes[0] if seguintes else self.state.filtered_indices[-1])
         else:
             self.clear_form()
-        self.show_message("Entrada excluída")
 
     def deduplicate_entries(self):
-        deduplicated = deduplicate_glossary_entries(self.state.entries)
-        removed = len(self.state.entries) - len(deduplicated)
-        if removed <= 0:
-            self.show_message("Nenhuma duplicata exata encontrada")
-            return
-
-        if not messagebox.askyesno(
+        identities = [canonical_identity(entry) for entry in self.state.snapshot.entries]
+        removed = len(identities) - len(set(identities))
+        if removed and not messagebox.askyesno(
             "Deduplicar glossário",
             f"Remover {removed} duplicata(s) exata(s)?",
             parent=self.win,
@@ -1672,19 +1602,16 @@ class GlossaryEditor:
             return
 
         try:
-            save_glossary_entries(deduplicated)
+            result = self.catalog.deduplicate(self.state.catalog_revision)
+        except GlossaryConflictError as exc:
+            self.report_revision_conflict(exc)
+            return
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao deduplicar glossário:\n{exc}", parent=self.win)
             return
 
-        self.load_rows_from_file()
-        self.state.selected_index = None
-        self.set_dirty(False)
-        self.update_app_glossary()
-        self.apply_filter()
-        if self.state.filtered_indices:
-            self.select_entry(self.state.filtered_indices[0])
         self.show_message(f"{removed} duplicata(s) removida(s)")
+        self.finish_mutation(result, self.state.selected_id)
 
     def create_backup_now(self):
         try:
@@ -1717,117 +1644,26 @@ class GlossaryEditor:
         self.show_message(f"CSV exportado: {stats['exported']} entradas")
 
     def import_csv(self):
-        csv_path = filedialog.askopenfilename(
-            title="Importar glossário CSV",
-            filetypes=[("Arquivos CSV", "*.csv"), ("Todos os arquivos", "*.*")],
-            parent=self.win,
-        )
-        if not csv_path:
-            return
-
-        try:
-            preview = analyze_glossary_csv_import(None, csv_path)
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Erro ao analisar CSV:\n{exc}", parent=self.win)
-            return
-
-        if preview["inserted"] == 0:
-            messagebox.showinfo(
-                "Importar CSV",
-                (
-                    "Nenhuma entrada nova para importar.\n\n"
-                    f"Duplicadas: {preview['duplicates']}\n"
-                    f"Conflitos ignorados: {preview['conflicts']}\n"
-                    f"Inválidas: {preview['invalid']}"
-                ),
-                parent=self.win,
-            )
-            return
-
-        confirmed = messagebox.askyesno(
-            "Importar CSV",
-            (
-                f"Importar {preview['inserted']} entrada(s) nova(s)?\n\n"
-                f"Linhas: {preview['total_rows']}\n"
-                f"Duplicadas ignoradas: {preview['duplicates']}\n"
-                f"Conflitos ignorados: {preview['conflicts']}\n"
-                f"Inválidas: {preview['invalid']}"
-            ),
-            parent=self.win,
-        )
-        if not confirmed:
-            return
-
-        try:
-            # A previa acima ja tem as entradas escolhidas; importar recalculando
-            # releria o CSV e poderia gravar algo diferente do confirmado.
-            stats = import_glossary_csv(None, csv_path, analysis=preview)
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Erro ao importar CSV:\n{exc}", parent=self.win)
-            return
-
-        self.load_rows_from_file()
-        self.state.selected_index = None
-        self.set_dirty(False)
-        self.update_app_glossary()
-        self.state.page_index = 0
-        self.apply_filter()
-        if self.state.filtered_indices:
-            self.select_entry(self.state.filtered_indices[0])
-        self.show_message(f"Importadas {stats['inserted']} entrada(s)")
+        """Bulk changes require a dedicated atomic catalog operation."""
+        self.show_message("Ação indisponível até a operação atômica do catálogo.", WARNING_COLOR)
+        return None
 
     def restore_backup(self):
-        backup_path = filedialog.askopenfilename(
-            title="Restaurar backup do glossário",
-            filetypes=[("Arquivos TXT", "*.txt"), ("Todos os arquivos", "*.*")],
-            parent=self.win,
-        )
-        if not backup_path:
-            return
-
-        try:
-            backup_entries = load_glossary_entries(backup_path, deduplicate=False)
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Backup inválido:\n{exc}", parent=self.win)
-            return
-
-        if not messagebox.askyesno(
-            "Restaurar backup",
-            (
-                f"Restaurar este backup com {len(backup_entries)} entrada(s)?\n\n"
-                "O glossário atual será salvo em um backup de segurança antes da restauração."
-            ),
-            parent=self.win,
-        ):
-            return
-
-        try:
-            restore_glossary_from_backup(None, backup_path)
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Erro ao restaurar backup:\n{exc}", parent=self.win)
-            return
-
-        self.load_rows_from_file()
-        self.state.selected_index = None
-        self.set_dirty(False)
-        self.update_app_glossary()
-        self.state.page_index = 0
-        self.apply_filter()
-        if self.state.filtered_indices:
-            self.select_entry(self.state.filtered_indices[0])
-        self.show_message("Backup restaurado")
+        """Bulk changes require a dedicated atomic catalog operation."""
+        self.show_message("Ação indisponível até a operação atômica do catálogo.", WARNING_COLOR)
+        return None
 
     def apply_search(self):
         self.state.page_index = 0
         self.apply_filter()
-        if self.state.filtered_indices:
+        if self.state.selected_id is None and self.state.filtered_indices:
             self.select_entry(self.state.filtered_indices[0])
 
     def clear_search(self):
         self.search_text.set("")
         self.state.page_index = 0
         self.apply_filter()
-        if self.state.filtered_indices:
+        if self.state.selected_id is None and self.state.filtered_indices:
             self.select_entry(self.state.filtered_indices[0])
 
     def close_editor(self):
