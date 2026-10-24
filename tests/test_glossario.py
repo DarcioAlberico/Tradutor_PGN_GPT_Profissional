@@ -3620,5 +3620,33 @@ class FileEditEventsTests(unittest.TestCase):
             self.assertEqual([e[2] for e in it], ["la qualità"])
 
 
+class LegacyMigrationAdapterTests(unittest.TestCase):
+    def test_migration_rejects_unknown_raw_phase_before_legacy_normalization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "Substituicoes.txt"
+            source.write_text("substituicoes = [('a', 'b', 'typo'), ('c', 'd')]\n", encoding="utf-8")
+            catalog = root / "glossario-v2.db"
+            with self.assertRaisesRegex(ValueError, "Unknown legacy rule types"):
+                glossario.migrate_legacy_glossary(
+                    path=str(source), catalog_path=str(catalog),
+                    legacy_db_path=str(root / "absent.db"),
+                )
+            self.assertFalse(catalog.exists())
+
+    def test_migration_rejects_malformed_rule_instead_of_dropping_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "Substituicoes.txt"
+            source.write_text("substituicoes = [('a', 'b'), 'broken']\n", encoding="utf-8")
+            catalog = root / "glossario-v2.db"
+            with self.assertRaisesRegex(ValueError, "Invalid legacy entry"):
+                glossario.migrate_legacy_glossary(
+                    path=str(source), catalog_path=str(catalog),
+                    legacy_db_path=str(root / "absent.db"),
+                )
+            self.assertFalse(catalog.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

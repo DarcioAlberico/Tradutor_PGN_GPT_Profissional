@@ -13,8 +13,9 @@ import sqlite3
 import sys
 
 from .app_config import LANGUAGE_NAMES
-from .app_paths import data_path
+from .app_paths import data_path, glossary_catalog_path
 from .backup_retention import prune_glossary_backups
+from .glossary_catalog import GlossaryCatalog, MigrationReport
 from .glossary_types import (
     GLOSSARY_PRIORITY_DEFAULT as GLOSSARY_PRIORITY_DEFAULT,
     GLOSSARY_RULE_AUTOMATIC as GLOSSARY_RULE_AUTOMATIC,
@@ -801,6 +802,36 @@ def rebuild_glossary_database(path=None, db_path=None):
 
     entries = _load_glossary_entry_details_from_file(path, deduplicate=False)
     return sync_glossary_database(entries, db_path=db_path, source_path=path)
+
+
+def migrate_legacy_glossary(path=None, catalog_path=None, legacy_db_path=None) -> MigrationReport:
+    """Migrate the legacy text to V2 once, keeping the old cache only as backup."""
+    if path is None:
+        path = _default_substitutions_path()
+    if catalog_path is None:
+        catalog_path = glossary_catalog_path()
+    if legacy_db_path is None:
+        legacy_db_path = _default_glossary_db_path()
+
+    def load_entries():
+        # The permissive legacy parser normalizes unknown phases to suggestion.
+        # Reject their original spelling before it erases that distinction.
+        with open(path, "r", encoding="utf-8") as source:
+            raw_items = _read_substitution_assignment(source.read(), path)
+        for position, item in enumerate(raw_items, 1):
+            valid_pair = (
+                isinstance(item, (list, tuple)) and 2 <= len(item) <= 5
+            ) or (
+                isinstance(item, dict) and "original" in item and "replacement" in item
+            )
+            if not valid_pair:
+                raise ValueError(f"Invalid legacy entry at position {position}.")
+        unknown = unknown_rule_types(raw_items)
+        if unknown:
+            raise ValueError(f"Unknown legacy rule types: {', '.join(map(repr, unknown))}")
+        return _load_glossary_entry_details_from_file(path, deduplicate=False)
+
+    return GlossaryCatalog(catalog_path, path).migrate_legacy(load_entries, legacy_db_path)
 
 
 def load_glossary_entries(path=None, deduplicate=True, prefer_db=True, db_path=None):

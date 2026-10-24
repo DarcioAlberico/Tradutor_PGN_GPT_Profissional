@@ -2,13 +2,20 @@
 
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import sqlite3
+import shutil
+from typing import Callable, Sequence
+from uuid import uuid4
+
+from .app_config import LANGUAGE_NAMES
 
 from .glossary_types import (
     GLOSSARY_PRIORITY_DEFAULT,
     GLOSSARY_RULE_SUGGESTION,
     GLOSSARY_SCOPE_ALL,
+    _rule_type_alias,
     _normalize_rule_type,
     normalize_glossary_priority,
     normalize_glossary_scope,
@@ -60,6 +67,24 @@ class MutationResult:
     entry: GlossaryEntry | None = None
     mirror_pending: bool = False
     warning: str | None = None
+
+
+LegacyGlossaryEntry = tuple[str, str, str, int, str]
+
+
+@dataclass(frozen=True)
+class MigrationDuplicate:
+    first_position: int
+    duplicate_position: int
+    identity: tuple[str, str, str, str]
+
+
+@dataclass(frozen=True)
+class MigrationReport:
+    migrated: bool
+    imported_count: int
+    duplicates: tuple[MigrationDuplicate, ...] = ()
+    backup_paths: tuple[str, ...] = ()
 
 
 class GlossaryConflictError(Exception):
@@ -197,3 +222,169 @@ class GlossaryCatalog:
                 entries=tuple(GlossaryEntry(**dict(entry)) for entry in rows),
                 catalog_revision=int(row[0]),
             )
+
+    @staticmethod
+    def _backup_file(source: Path, *, database: bool = False) -> str:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        base = source.with_name(f"{source.name}.{stamp}.bak")
+        attempt = 0
+        while True:
+            target = base if attempt == 0 else base.with_name(f"{base.name}.{attempt}")
+            try:
+                with target.open("xb"):
+                    pass
+                break
+            except FileExistsError:
+                attempt += 1
+        try:
+            if database:
+                with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as original:
+                    with closing(sqlite3.connect(target)) as backup:
+                        original.backup(backup)
+            else:
+                with source.open("rb") as original, target.open("wb") as backup:
+                    shutil.copyfileobj(original, backup)
+            return str(target)
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _prepare_legacy(entries: Sequence[LegacyGlossaryEntry]) -> tuple[list[GlossaryEntry], tuple[MigrationDuplicate, ...]]:
+        prepared = []
+        duplicates = []
+        seen = {}
+        known = set(LANGUAGE_NAMES)
+        for source_position, raw in enumerate(entries, 1):
+            if not isinstance(raw, (tuple, list)) or not 2 <= len(raw) <= 5:
+                raise ValueError(f"Invalid legacy glossary entry at position {source_position}.")
+            phase = raw[2] if len(raw) >= 3 else None
+            if phase is not None and str(phase).strip() and _rule_type_alias(phase) is None:
+                raise ValueError(f"Unknown legacy rule type at position {source_position}: {phase!r}.")
+            scope = normalize_glossary_scope(raw[4] if len(raw) >= 5 else None)
+            codes = scope.split(">") if scope else []
+            if any(code and code not in known for code in codes) or len(codes) > 2:
+                raise ValueError(f"Unknown legacy scope at position {source_position}: {scope!r}.")
+            entry = GlossaryEntry(
+                stable_id=str(uuid4()), original_text=raw[0], replacement_text=raw[1],
+                rule_type=phase, scope=scope,
+                priority=raw[3] if len(raw) >= 4 else GLOSSARY_PRIORITY_DEFAULT,
+                position=len(prepared),
+            )
+            identity = canonical_identity(entry)
+            if identity in seen:
+                duplicates.append(MigrationDuplicate(seen[identity], source_position, identity))
+            else:
+                seen[identity] = source_position
+                prepared.append(entry)
+        return prepared, tuple(duplicates)
+
+    @staticmethod
+    def _insert_legacy_entry(conn: sqlite3.Connection, entry: GlossaryEntry) -> None:
+        conn.execute(
+            """INSERT INTO glossary_entries
+               (stable_id, original_text, replacement_text, rule_type, priority,
+                scope, position, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (entry.stable_id, entry.original_text, entry.replacement_text,
+             entry.rule_type, entry.priority, entry.scope, entry.position, entry.revision),
+        )
+
+    @staticmethod
+    def _validate_migration(conn: sqlite3.Connection, expected: int) -> None:
+        if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise ValueError("Migrated glossary failed SQLite integrity check.")
+        rows = conn.execute(
+            "SELECT original_text, replacement_text, rule_type, scope, position "
+            "FROM glossary_entries ORDER BY position, id"
+        ).fetchall()
+        if len(rows) != expected or [row[4] for row in rows] != list(range(expected)):
+            raise ValueError("Migrated glossary count or positions are invalid.")
+        if len({tuple(row[:4]) for row in rows}) != expected:
+            raise ValueError("Migrated glossary contains duplicate identities.")
+        known = set(LANGUAGE_NAMES)
+        for row in rows:
+            if _rule_type_alias(row[2]) != row[2]:
+                raise ValueError("Migrated glossary contains an invalid rule type.")
+            scope = row[3]
+            codes = scope.split(">") if scope else []
+            if scope != normalize_glossary_scope(scope) or len(codes) > 2 or any(
+                code and code not in known for code in codes
+            ):
+                raise ValueError("Migrated glossary contains an invalid scope.")
+
+    def migrate_legacy(
+        self,
+        load_entries: Callable[[], Sequence[LegacyGlossaryEntry]],
+        legacy_db_path: str | None = None,
+    ) -> MigrationReport:
+        """Import the legacy text once, after recoverable backups and before commit."""
+        if self.mirror_path is None:
+            raise ValueError("Legacy text path is required for migration backups.")
+        source = Path(self.mirror_path)
+        if self.db_path and Path(self.db_path).exists():
+            with closing(self._connect()) as conn:
+                tables = {
+                    row[0] for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                if not {"glossary_entries", "glossary_metadata"} <= tables:
+                    raise ValueError("Incompatible glossary catalog schema.")
+                version = conn.execute(
+                    "SELECT value FROM glossary_metadata WHERE key = 'schema_version'"
+                ).fetchone()
+                if version is None or version[0] != str(CATALOG_SCHEMA_VERSION):
+                    raise ValueError("Incompatible glossary catalog version.")
+                marker = conn.execute(
+                    "SELECT value FROM glossary_metadata WHERE key = 'migration_completed'"
+                ).fetchone()
+                if marker is not None and marker[0] == "1":
+                    return MigrationReport(migrated=False, imported_count=0)
+        if not source.is_file():
+            raise FileNotFoundError(f"Legacy glossary text is missing: {source}")
+
+        backup_paths = [self._backup_file(source)]
+        if legacy_db_path is not None and Path(legacy_db_path).exists():
+            backup_paths.append(self._backup_file(Path(legacy_db_path), database=True))
+
+        backed_up_text = Path(backup_paths[0]).read_bytes()
+        entries, duplicates = self._prepare_legacy(load_entries())
+        destination = Path(self.db_path)
+        new_catalog = not destination.exists()
+        if new_catalog:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            stage = destination.with_name(f".{destination.name}.migration-{uuid4().hex}.db")
+            catalog = GlossaryCatalog(str(stage), self.mirror_path)
+        else:
+            stage = None
+            catalog = self
+        try:
+            catalog.initialize()
+            with closing(catalog._connect()) as conn, conn:
+                conn.execute("BEGIN IMMEDIATE")
+                marker = conn.execute(
+                    "SELECT value FROM glossary_metadata WHERE key = 'migration_completed'"
+                ).fetchone()
+                if marker is not None and marker[0] == "1":
+                    return MigrationReport(migrated=False, imported_count=0)
+                if conn.execute("SELECT COUNT(*) FROM glossary_entries").fetchone()[0]:
+                    raise ValueError("Unmarked catalog already contains glossary entries.")
+                for entry in entries:
+                    self._insert_legacy_entry(conn, entry)
+                self._validate_migration(conn, len(entries))
+                if source.read_bytes() != backed_up_text:
+                    raise ValueError("Legacy glossary text changed during migration.")
+                conn.execute(
+                    "INSERT INTO glossary_metadata (key, value) VALUES ('migration_completed', '1')"
+                )
+            if stage is not None:
+                with closing(catalog._connect()) as conn:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                if destination.exists():
+                    raise FileExistsError(f"Catalog appeared during migration: {destination}")
+                stage.replace(destination)
+            return MigrationReport(True, len(entries), duplicates, tuple(backup_paths))
+        finally:
+            if stage is not None:
+                for suffix in ("", "-wal", "-shm"):
+                    Path(str(stage) + suffix).unlink(missing_ok=True)

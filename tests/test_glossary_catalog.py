@@ -219,3 +219,181 @@ class GlossaryCatalogSchemaTests(unittest.TestCase):
         with self.assertRaises((sqlite3.OperationalError, FileNotFoundError)):
             self.catalog().list_entries()
         self.assertFalse(Path(self.db_path).exists())
+
+
+class GlossaryCatalogMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.text_path = self.root / "Substituicoes.txt"
+        self.db_path = self.root / "glossario-v2.db"
+        self.cache_path = self.root / "glossario.db"
+
+    def catalog(self):
+        return glossary_catalog.GlossaryCatalog(str(self.db_path), str(self.text_path))
+
+    def write_text(self, body):
+        self.text_path.write_text(body, encoding="utf-8")
+
+    def migrate(self):
+        return glossario.migrate_legacy_glossary(
+            path=str(self.text_path), catalog_path=str(self.db_path),
+            legacy_db_path=str(self.cache_path),
+        )
+
+    def test_migration_keeps_order_details_and_first_of_complete_duplicates(self):
+        self.write_text("""escopo = 'pt'\nsubstituicoes = [
+    ('Knight', 'Cavalo', 'suggestion', 7),
+    ('Knight', 'Cavalo', 'suggestion', 2, 'it'),
+    ('Knight', 'Cavalo', 'cleanup', 3),
+    ('Knight', 'Cavalo', 'suggestion', 99),
+    ('Rook', 'Torre', 'automatic', 4, '*'),
+]\n""")
+        with closing(sqlite3.connect(self.cache_path)) as cache, cache:
+            cache.execute("CREATE TABLE old_rules (original TEXT)")
+            cache.execute("INSERT INTO old_rules VALUES ('Cache only')")
+
+        report = self.migrate()
+
+        entries = self.catalog().list_entries().entries
+        self.assertTrue(report.migrated)
+        self.assertEqual(report.imported_count, 4)
+        self.assertEqual(
+            [(e.original_text, e.replacement_text, e.rule_type, e.priority, e.scope, e.position)
+             for e in entries],
+            [
+                ("Knight", "Cavalo", "suggestion", 7, "pt", 0),
+                ("Knight", "Cavalo", "suggestion", 2, "it", 1),
+                ("Knight", "Cavalo", "cleanup", 3, "pt", 2),
+                ("Rook", "Torre", "automatic", 4, "", 3),
+            ],
+        )
+        self.assertEqual([e.revision for e in entries], [1] * 4)
+        self.assertEqual(len({e.stable_id for e in entries}), 4)
+        self.assertEqual(
+            [(d.first_position, d.duplicate_position, d.identity) for d in report.duplicates],
+            [(1, 4, ("Knight", "Cavalo", "suggestion", "pt"))],
+        )
+        self.assertEqual(len(report.backup_paths), 2)
+        self.assertEqual(Path(report.backup_paths[0]).read_bytes(), self.text_path.read_bytes())
+        with closing(sqlite3.connect(report.backup_paths[1])) as backup:
+            self.assertEqual(backup.execute("SELECT original FROM old_rules").fetchone()[0], "Cache only")
+
+    def test_missing_text_does_not_create_catalog_or_consult_cache(self):
+        with closing(sqlite3.connect(self.cache_path)) as cache, cache:
+            cache.execute("CREATE TABLE old_rules (original TEXT)")
+            cache.execute("INSERT INTO old_rules VALUES ('Cache only')")
+        with self.assertRaises(FileNotFoundError):
+            self.migrate()
+        self.assertFalse(self.db_path.exists())
+        self.assertEqual(list(self.root.glob("*.bak*")), [])
+
+    def test_invalid_text_leaves_only_backup_and_no_catalog(self):
+        self.write_text("substituicoes = {'not': 'a list'}\n")
+        with self.assertRaises(ValueError):
+            self.migrate()
+        self.assertFalse(self.db_path.exists())
+        self.assertEqual(len(list(self.root.glob("Substituicoes.txt.*.bak*"))), 1)
+
+    def test_second_backup_failure_aborts_before_writing_v2(self):
+        self.write_text("substituicoes = [('a', 'b')]\n")
+        with closing(sqlite3.connect(self.cache_path)) as cache, cache:
+            cache.execute("CREATE TABLE old_rules (original TEXT)")
+        original = glossary_catalog.GlossaryCatalog._backup_file
+
+        def fail_cache(source, *, database=False):
+            if database:
+                raise OSError("backup unavailable")
+            return original(source, database=database)
+
+        with patch.object(glossary_catalog.GlossaryCatalog, "_backup_file", side_effect=fail_cache):
+            with self.assertRaisesRegex(OSError, "backup unavailable"):
+                self.migrate()
+        self.assertFalse(self.db_path.exists())
+        self.assertEqual(len(list(self.root.glob("Substituicoes.txt.*.bak*"))), 1)
+
+    def test_insertion_error_rolls_back_and_removes_new_partial_catalog(self):
+        self.write_text("substituicoes = [('a', 'b'), ('c', 'd')]\n")
+        original = glossary_catalog.GlossaryCatalog._insert_legacy_entry
+        calls = 0
+
+        def interrupted(conn, entry):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected insertion failure")
+            original(conn, entry)
+
+        with patch.object(glossary_catalog.GlossaryCatalog, "_insert_legacy_entry", side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, "injected insertion failure"):
+                self.migrate()
+        self.assertFalse(self.db_path.exists())
+        self.assertEqual(list(self.root.glob(".*migration*")), [])
+
+    def test_repeat_preserves_ids_and_does_not_read_changed_legacy_text(self):
+        self.write_text("substituicoes = [('a', 'b')]\n")
+        first = self.migrate()
+        ids = [entry.stable_id for entry in self.catalog().list_entries().entries]
+        self.write_text("substituicoes = [('else', 'changed')]\n")
+
+        repeated = self.migrate()
+
+        self.assertFalse(repeated.migrated)
+        self.assertEqual(repeated.backup_paths, ())
+        self.assertEqual([entry.stable_id for entry in self.catalog().list_entries().entries], ids)
+        self.assertEqual(len(list(self.root.glob("Substituicoes.txt.*.bak*"))), 1)
+        self.assertTrue(first.migrated)
+
+    def test_existing_empty_catalog_rolls_back_all_rows_and_marker(self):
+        self.write_text("substituicoes = [('a', 'b'), ('c', 'd')]\n")
+        catalog = self.catalog()
+        catalog.initialize()
+        original = glossary_catalog.GlossaryCatalog._insert_legacy_entry
+        calls = 0
+
+        def interrupted(conn, entry):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected insertion failure")
+            original(conn, entry)
+
+        with patch.object(glossary_catalog.GlossaryCatalog, "_insert_legacy_entry", side_effect=interrupted):
+            with self.assertRaisesRegex(OSError, "injected insertion failure"):
+                self.migrate()
+        self.assertEqual(catalog.list_entries().entries, ())
+        with closing(catalog._connect()) as conn:
+            marker = conn.execute(
+                "SELECT value FROM glossary_metadata WHERE key = 'migration_completed'"
+            ).fetchone()
+        self.assertIsNone(marker)
+
+    def test_incompatible_existing_v2_file_is_preserved(self):
+        self.write_text("substituicoes = [('a', 'b')]\n")
+        with closing(sqlite3.connect(self.db_path)) as alien, alien:
+            alien.execute("CREATE TABLE unrelated (value TEXT)")
+            alien.execute("INSERT INTO unrelated VALUES ('keep me')")
+
+        with self.assertRaisesRegex(ValueError, "Incompatible glossary catalog"):
+            self.migrate()
+
+        with closing(sqlite3.connect(self.db_path)) as alien:
+            self.assertEqual(alien.execute("SELECT value FROM unrelated").fetchone()[0], "keep me")
+            tables = [row[0] for row in alien.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        self.assertNotIn("glossary_entries", tables)
+
+    def test_text_change_after_backup_aborts_instead_of_importing_unbacked_data(self):
+        self.write_text("substituicoes = [('original', 'first')]\n")
+        original = glossary_catalog.GlossaryCatalog._backup_file
+
+        def change_after_backup(source, *, database=False):
+            backup = original(source, database=database)
+            if not database:
+                self.write_text("substituicoes = [('changed', 'second')]\n")
+            return backup
+
+        with patch.object(glossary_catalog.GlossaryCatalog, "_backup_file", side_effect=change_after_backup):
+            with self.assertRaisesRegex(ValueError, "changed during migration"):
+                self.migrate()
+        self.assertFalse(self.db_path.exists())
