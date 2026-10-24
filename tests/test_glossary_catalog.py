@@ -3,6 +3,7 @@
 from dataclasses import FrozenInstanceError, replace
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -690,6 +691,45 @@ class GlossaryCatalogRecoveryTests(unittest.TestCase):
                     self.catalog.restore(str(self.backup_path), 2)
                 self.assertEqual(self.catalog.list_entries(), before)
 
+    def test_restore_rejects_trigger_with_sqlite_lookalike_name_before_it_can_mutate_stage(self):
+        self.backup()
+        with closing(sqlite3.connect(self.backup_path)) as conn, conn:
+            conn.execute("""CREATE TRIGGER sqliteErase AFTER UPDATE OF revision ON glossary_entries
+                            BEGIN DELETE FROM glossary_entries; END""")
+        before = self.catalog.list_entries()
+        with self.assertRaises(ValueError):
+            self.catalog.restore(str(self.backup_path), before.catalog_revision)
+        self.assertEqual(self.catalog.list_entries(), before)
+
+    def test_restore_rejects_case_insensitive_canonical_identity_index(self):
+        self.backup()
+        with closing(sqlite3.connect(self.backup_path)) as conn, conn:
+            conn.execute("DROP INDEX idx_glossary_canonical_identity")
+            conn.execute("""CREATE UNIQUE INDEX idx_glossary_canonical_identity
+                            ON glossary_entries(
+                                original_text COLLATE NOCASE,
+                                replacement_text,
+                                rule_type,
+                                scope
+                            )""")
+        before = self.catalog.list_entries()
+        with self.assertRaises(ValueError):
+            self.catalog.restore(str(self.backup_path), before.catalog_revision)
+        self.assertEqual(self.catalog.list_entries(), before)
+
+    def test_restore_refuses_catalog_with_hardlink_alias(self):
+        self.backup()
+        alias = self.root / "catalog-alias.db"
+        try:
+            os.link(self.catalog.db_path, alias)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"hard links unavailable: {exc}")
+        before = self.catalog.list_entries()
+        with self.assertRaises(ValueError):
+            self.catalog.restore(str(self.backup_path), before.catalog_revision)
+        self.assertEqual(self.catalog.list_entries(), before)
+        self.assertTrue(os.path.samefile(self.catalog.db_path, alias))
+
     def test_restore_stale_cas_and_failed_replace_leave_catalog_unchanged(self):
         self.backup()
         self.catalog.add(glossary_catalog.GlossaryEntryDraft("pin", "cravada"), 2)
@@ -920,6 +960,26 @@ class GlossaryCatalogScopeMetadataTests(unittest.TestCase):
         with closing(self.catalog._connect()) as conn:
             self.assertEqual(dict(conn.execute("SELECT key, value FROM glossary_metadata")), before)
         self.assertIn("external", self.text.read_text(encoding="utf-8"))
+
+    def test_export_through_symlink_updates_target_without_replacing_link(self):
+        self.migrate()
+        real_mirror = self.root / "real-mirror.txt"
+        real_mirror.write_bytes(self.text.read_bytes())
+        link = self.root / "mirror-link.txt"
+        try:
+            link.symlink_to(real_mirror)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symbolic links unavailable: {exc}")
+        catalog = glossary_catalog.GlossaryCatalog(self.catalog.db_path, str(link))
+        with closing(catalog._connect()) as conn, conn:
+            conn.execute("UPDATE glossary_metadata SET value=? WHERE key='legacy_mirror_hash'",
+                         (hashlib.sha256(real_mirror.read_bytes()).hexdigest(),))
+        catalog.add(glossary_catalog.GlossaryEntryDraft("pin", "cravada"), 1)
+        self.assertTrue(link.is_symlink())
+        self.assertIn("pin", real_mirror.read_text(encoding="utf-8"))
+        with closing(catalog._connect()) as conn:
+            self.assertEqual(catalog._metadata(conn, "legacy_mirror_hash"),
+                             hashlib.sha256(real_mirror.read_bytes()).hexdigest())
 
     def test_export_refuses_catalog_and_sidecars_as_destinations(self):
         self.migrate()

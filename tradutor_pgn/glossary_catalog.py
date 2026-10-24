@@ -416,7 +416,10 @@ class GlossaryCatalog:
         target = Path(path or self.mirror_path or "")
         if not str(target) or target == Path("."):
             raise ValueError("Legacy mirror path is required.")
-        self._require_separate_file(str(target), allow_mirror=True)
+        # Read, compare and replace the same file.  In particular, following a
+        # symlink only for comparison and then replacing the link itself would
+        # leave the mirror stale while recording the new contents' hash.
+        target = self._require_separate_file(str(target), allow_mirror=True)
         canonical = self.mirror_path is not None and target.resolve() == Path(self.mirror_path).resolve()
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -618,7 +621,12 @@ class GlossaryCatalog:
     def _validate_backup(conn: sqlite3.Connection) -> CatalogSnapshot:
         if [row[0] for row in conn.execute("PRAGMA integrity_check")] != ["ok"]:
             raise ValueError("Glossary backup failed SQLite integrity check.")
-        objects = conn.execute("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
+        # `_` is a wildcard in LIKE.  A predicate such as `NOT LIKE
+        # 'sqlite_%'` therefore hides attacker-controlled names like
+        # `sqliteErase`; only SQLite's literal reserved prefix is exempt.
+        objects = conn.execute(
+            "SELECT type, name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'"
+        ).fetchall()
         if {tuple(row) for row in objects} != {
             ("table", "glossary_entries"), ("table", "glossary_metadata"),
             ("index", "idx_glossary_canonical_identity"),
@@ -633,14 +641,25 @@ class GlossaryCatalog:
             if normalize_schema(sql) != normalize_schema(expected):
                 raise ValueError("Incompatible glossary backup table schema or constraints.")
         indexes = {}
+        index_semantics = {}
         for index in conn.execute("PRAGMA index_list(glossary_entries)"):
             # The name is database data; quote it as an SQL string literal.
             quoted = index[1].replace("'", "''")
             fields = tuple(row[2] for row in conn.execute(f"PRAGMA index_info('{quoted}')"))
             if index[2] and not index[4]:
                 indexes[index[1]] = fields
+                index_semantics[index[1]] = tuple(
+                    (row[2], row[4], row[3])
+                    for row in conn.execute(f"PRAGMA index_xinfo('{quoted}')")
+                    if row[5]
+                )
         if indexes.get("idx_glossary_canonical_identity") != (
             "original_text", "replacement_text", "rule_type", "scope"
+        ) or index_semantics.get("idx_glossary_canonical_identity") != (
+            ("original_text", "BINARY", 0),
+            ("replacement_text", "BINARY", 0),
+            ("rule_type", "BINARY", 0),
+            ("scope", "BINARY", 0),
         ) or ("stable_id",) not in indexes.values():
             raise ValueError("Incompatible glossary backup identity indexes.")
         if GlossaryCatalog._metadata(conn, "schema_version") != str(CATALOG_SCHEMA_VERSION):
@@ -697,6 +716,8 @@ class GlossaryCatalog:
                 backup_snapshot = self._validate_backup(restored)
                 restored.execute("PRAGMA journal_mode = DELETE")
             with _catalog_access(self._access_key):
+                if target.stat().st_nlink > 1:
+                    raise ValueError("Cannot restore a glossary catalog with hard-link aliases.")
                 with closing(self._connect()) as current, current:
                     current.execute("BEGIN IMMEDIATE")
                     self._require_catalog_revision(current, expected_catalog_revision)
@@ -722,7 +743,10 @@ class GlossaryCatalog:
                     self._set_metadata(restored, "mirror_error", "")
                 with closing(sqlite3.connect(stage)) as restored:
                     restored.row_factory = sqlite3.Row
-                    staged_snapshot = self._snapshot(restored)
+                    # Revalidate after our revision/metadata mutations so a
+                    # hostile trigger or schema side effect can never reach
+                    # publication merely because the source validated once.
+                    staged_snapshot = self._validate_backup(restored)
                     restored.execute("PRAGMA journal_mode = WAL")
                 # Checkpoint and leave DELETE mode before closing the last
                 # owned connection: no WAL belonging to the old inode survives.
@@ -732,6 +756,8 @@ class GlossaryCatalog:
                         raise sqlite3.OperationalError("Glossary catalog has active readers.")
                     current.execute("PRAGMA journal_mode = DELETE")
                 try:
+                    if target.stat().st_nlink > 1:
+                        raise ValueError("Cannot restore a glossary catalog with hard-link aliases.")
                     with stage.open("r+b") as contents:
                         os.fsync(contents.fileno())
                     os.replace(stage, target)
