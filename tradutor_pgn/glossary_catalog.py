@@ -205,8 +205,42 @@ def _validated_scope(value) -> str:
     scope = normalize_glossary_scope(value)
     codes = scope.split(">") if scope else []
     if len(codes) > 2 or any(code and code not in LANGUAGE_NAMES for code in codes):
-        raise ValueError(f"Unknown glossary scope: {scope!r}.")
+        raise ValueError(f"Idioma de escopo desconhecido: {scope!r}.")
     return scope
+
+
+def validate_entry_draft(draft: GlossaryEntryDraft) -> GlossaryEntryDraft:
+    """Validate raw ingress before permissive legacy normalization loses data.
+
+    All writes and backup validation share this persistible domain. Empty
+    cleanup replacements, phase aliases and omitted legacy defaults remain valid.
+    """
+    if not isinstance(draft.original_text, str) or not isinstance(draft.replacement_text, str):
+        raise ValueError("Original e substituição precisam ser textos.")
+    original = normalize_glossary_text(draft.original_text)
+    replacement = normalize_glossary_text(draft.replacement_text)
+    phase = draft.rule_type
+    if phase is not None and (not isinstance(phase, str) or
+                              (phase.strip() and _rule_type_alias(phase) is None)):
+        raise ValueError(f"Fase de regra desconhecida: {phase!r}.")
+    phase = _normalize_rule_type(phase)
+    if not original:
+        raise ValueError("Texto original vazio.")
+    if not replacement and phase != GLOSSARY_RULE_CLEANUP:
+        raise ValueError("Texto de substituição vazio.")
+    scope = _validated_scope(draft.scope)
+    priority = draft.priority
+    if priority is None or priority == "":
+        priority = GLOSSARY_PRIORITY_DEFAULT
+    if isinstance(priority, bool) or not isinstance(priority, (int, str)):
+        raise ValueError("Prioridade precisa ser um número inteiro.")
+    try:
+        priority = int(priority)
+    except (ValueError, OverflowError) as exc:
+        raise ValueError("Prioridade precisa ser um número inteiro.") from exc
+    if not -(2**63) <= priority < 2**63:
+        raise ValueError("Prioridade fora do intervalo inteiro de 64 bits.")
+    return GlossaryEntryDraft(original, replacement, phase, scope, priority)
 
 
 CATALOG_SCHEMA_VERSION = 1
@@ -427,11 +461,12 @@ class GlossaryCatalog:
                 self._ensure_default_scope(conn)
             snapshot = self._snapshot(conn)
             known_hash = self._metadata(conn, "legacy_mirror_hash")
+            intended_hash = self._metadata(conn, "mirror_publish_hash")
             try:
                 actual_hash = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
-                if canonical and ((known_hash is not None and actual_hash != known_hash) or (
-                    known_hash is None and actual_hash is not None
-                )):
+                # A durable intent is evidence of our own interrupted publication,
+                # never a license to accept arbitrary external changes.
+                if canonical and actual_hash != known_hash and actual_hash != intended_hash:
                     warning = "Espelho legado divergente; revisão externa preservada."
                     self._set_metadata(conn, "mirror_pending", "1")
                     self._set_metadata(conn, "mirror_error", warning)
@@ -445,6 +480,7 @@ class GlossaryCatalog:
                     for e in snapshot.entries
                 ]
                 contents = _serialize_entries(entries, default_scope=snapshot.default_scope).encode("utf-8")
+                publication_hash = hashlib.sha256(contents).hexdigest()
                 target.parent.mkdir(parents=True, exist_ok=True)
                 temporary = None
                 try:
@@ -464,12 +500,21 @@ class GlossaryCatalog:
                             self._set_metadata(conn, "mirror_pending", "1")
                             self._set_metadata(conn, "mirror_error", warning)
                         return ExportResult(str(target), snapshot.catalog_revision, True, warning)
+                    if canonical:
+                        self._set_metadata(conn, "mirror_publish_hash", publication_hash)
+                        self._set_metadata(conn, "mirror_pending", "1")
+                        # Keep the stable catalog lock across this commit and
+                        # replacement. A crash after replace can then recognize
+                        # the exact bytes we intended to publish.
+                        conn.commit()
+                        conn.execute("BEGIN IMMEDIATE")
                     os.replace(temporary, target)
                 finally:
                     if temporary is not None:
                         temporary.unlink(missing_ok=True)
                 if canonical:
-                    self._set_metadata(conn, "legacy_mirror_hash", hashlib.sha256(contents).hexdigest())
+                    self._set_metadata(conn, "legacy_mirror_hash", publication_hash)
+                    conn.execute("DELETE FROM glossary_metadata WHERE key = 'mirror_publish_hash'")
                     self._set_metadata(conn, "mirror_pending", "0")
                     self._set_metadata(conn, "mirror_error", "")
                 return ExportResult(str(target), snapshot.catalog_revision)
@@ -546,15 +591,6 @@ class GlossaryCatalog:
             try:
                 prepared, _ = GlossaryCatalog._prepare_legacy([raw])
                 entry = prepared[0]
-                priority = raw[3] if len(raw) >= 4 else 0
-                if priority not in (None, "") and (
-                    isinstance(priority, bool) or str(int(priority)) != str(priority).strip()
-                ):
-                    raise ValueError("Prioridade precisa ser um número inteiro.")
-                if not all(isinstance(value, str) for value in raw[:2]):
-                    raise ValueError("Original e substituição precisam ser textos.")
-                if not entry.original_text or (not entry.replacement_text and entry.rule_type != GLOSSARY_RULE_CLEANUP):
-                    raise ValueError("Original ou substituição vazios.")
             except (ValueError, TypeError, IndexError) as exc:
                 rows.append(ImportRow(line_number, "invalid", source, message=str(exc)))
                 continue
@@ -671,8 +707,9 @@ class GlossaryCatalog:
         raw_rows = conn.execute("SELECT * FROM glossary_entries ORDER BY position, id").fetchall()
         for raw, entry in zip(raw_rows, snapshot.entries):
             UUID(entry.stable_id)
-            if not entry.original_text or (not entry.replacement_text and entry.rule_type != GLOSSARY_RULE_CLEANUP):
-                raise ValueError("Invalid glossary backup text.")
+            validate_entry_draft(GlossaryEntryDraft(
+                raw["original_text"], raw["replacement_text"], raw["rule_type"], raw["scope"], raw["priority"],
+            ))
             if any(raw[field] != getattr(entry, field) for field in (
                 "original_text", "replacement_text", "rule_type", "scope", "priority",
             )) or not isinstance(raw["revision"], int) or not isinstance(raw["priority"], int):
@@ -823,6 +860,7 @@ class GlossaryCatalog:
 
     def add(self, draft: GlossaryEntryDraft, expected_catalog_revision: int) -> MutationResult:
         """Append a new entry only when the caller's catalog snapshot is current."""
+        draft = validate_entry_draft(draft)
         candidate = GlossaryEntry(
             stable_id=str(uuid4()), original_text=draft.original_text,
             replacement_text=draft.replacement_text, rule_type=draft.rule_type,
@@ -858,9 +896,12 @@ class GlossaryCatalog:
                 name: getattr(changes, name) if getattr(changes, name) is not None else getattr(old, name)
                 for name in ("original_text", "replacement_text", "rule_type", "scope", "priority")
             }
+            draft = validate_entry_draft(GlossaryEntryDraft(**values))
             candidate = GlossaryEntry(
                 stable_id=stable_id, position=old.position, revision=old.revision,
-                created_at=old.created_at, updated_at=old.updated_at, **values,
+                created_at=old.created_at, updated_at=old.updated_at,
+                original_text=draft.original_text, replacement_text=draft.replacement_text,
+                rule_type=draft.rule_type, scope=draft.scope, priority=draft.priority,
             )
             try:
                 cursor = conn.execute(
@@ -896,6 +937,16 @@ class GlossaryCatalog:
             self._increment_catalog_revision(conn)
             result = MutationResult(self._snapshot(conn), old)
         return self._committed_result(result.snapshot, result.entry)
+
+    def clear(self, expected_catalog_revision: int) -> MutationResult:
+        """Clear exactly the catalog revision the user reviewed, atomically."""
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._require_catalog_revision(conn, expected_catalog_revision)
+            conn.execute("DELETE FROM glossary_entries")
+            self._increment_catalog_revision(conn)
+            snapshot = self._snapshot(conn)
+        return self._committed_result(snapshot)
 
     def deduplicate(self, expected_catalog_revision: int) -> MutationResult:
         """Keep the first full identity of a current snapshot and compact order."""
@@ -971,21 +1022,17 @@ class GlossaryCatalog:
         prepared = []
         duplicates = []
         seen = {}
-        known = set(LANGUAGE_NAMES)
         for source_position, raw in enumerate(entries, 1):
             if not isinstance(raw, (tuple, list)) or not 2 <= len(raw) <= 5:
                 raise ValueError(f"Invalid legacy glossary entry at position {source_position}.")
-            phase = raw[2] if len(raw) >= 3 else None
-            if phase is not None and str(phase).strip() and _rule_type_alias(phase) is None:
-                raise ValueError(f"Unknown legacy rule type at position {source_position}: {phase!r}.")
-            scope = normalize_glossary_scope(raw[4] if len(raw) >= 5 else None)
-            codes = scope.split(">") if scope else []
-            if any(code and code not in known for code in codes) or len(codes) > 2:
-                raise ValueError(f"Unknown legacy scope at position {source_position}: {scope!r}.")
+            draft = validate_entry_draft(GlossaryEntryDraft(
+                raw[0], raw[1], raw[2] if len(raw) >= 3 else None,
+                raw[4] if len(raw) >= 5 else None,
+                raw[3] if len(raw) >= 4 else GLOSSARY_PRIORITY_DEFAULT,
+            ))
             entry = GlossaryEntry(
-                stable_id=str(uuid4()), original_text=raw[0], replacement_text=raw[1],
-                rule_type=phase, scope=scope,
-                priority=raw[3] if len(raw) >= 4 else GLOSSARY_PRIORITY_DEFAULT,
+                stable_id=str(uuid4()), original_text=draft.original_text, replacement_text=draft.replacement_text,
+                rule_type=draft.rule_type, scope=draft.scope, priority=draft.priority,
                 position=len(prepared),
             )
             identity = canonical_identity(entry)
@@ -1107,12 +1154,16 @@ class GlossaryCatalog:
             if stage is not None:
                 with closing(catalog._connect()) as conn:
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                try:
-                    os.link(stage, destination)
-                except FileExistsError:
-                    if self._migration_completed():
-                        return MigrationReport(migrated=False, imported_count=0)
-                    raise FileExistsError(f"Catalog appeared during migration: {destination}")
+                with _catalog_access(self._access_key):
+                    if destination.exists():
+                        if self._migration_completed():
+                            return MigrationReport(migrated=False, imported_count=0)
+                        raise FileExistsError(f"Catalog appeared during migration: {destination}")
+                    # The stage is complete and lives beside the destination.
+                    # Atomic replace under the stable sidecar lock works even
+                    # when the filesystem has no hard-link support. The check
+                    # above preserves a concurrent winner.
+                    os.replace(stage, destination)
             mirror = self.export_legacy()
             return MigrationReport(
                 True, len(entries), duplicates, tuple(backup_paths),

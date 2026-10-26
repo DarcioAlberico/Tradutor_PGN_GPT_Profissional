@@ -2,6 +2,7 @@ import os
 import sqlite3
 from tkinter import filedialog, messagebox
 
+from . import glossario as glossary_module
 from .app_config import language_label
 from .chess_notation import fix_move_notation, supports_notation
 from .prose_fixes import normalize_prose
@@ -29,6 +30,7 @@ from .database import (
 from .background_task import TaskCanceled, run_with_progress
 from .confirm_dialog import ask_typed_confirmation
 from .database import AutomaticRulesCanceled
+from .glossary_catalog import GlossaryConflictError
 from .glossario import (
     GLOSSARY_RULE_AUTOMATIC,
     GLOSSARY_RULE_CLEANUP,
@@ -1400,7 +1402,17 @@ def reset_glossary(app, on_finish=None):
     # semente — que zerar NAO apaga, porque a semente vem com o programa — e
     # exclui as de limpeza, que zerar apaga. Medido no glossario real: o arquivo
     # tinha 5.910 entradas e o dialogo anunciava 7.325.
-    total, por_tipo = count_glossary_entries_by_type()
+    catalog = glossary_module._catalog_for_path(None)
+    catalog_revision = None
+    if catalog is not None:
+        snapshot = catalog.list_entries()
+        total = len(snapshot.entries)
+        por_tipo = {}
+        for entry in snapshot.entries:
+            por_tipo[entry.rule_type] = por_tipo.get(entry.rule_type, 0) + 1
+        catalog_revision = snapshot.catalog_revision
+    else:
+        total, por_tipo = count_glossary_entries_by_type()
 
     backup_path = None
     try:
@@ -1441,7 +1453,23 @@ def reset_glossary(app, on_finish=None):
         # `create_backup=False`: a copia acima ja foi feita, antes de perguntar.
         # Fazer outra aqui deixaria duas copias identicas na pasta e faria a
         # retencao descartar uma versao mais antiga de verdade para caber.
-        save_glossary_entries([], create_backup=False)
+        if catalog is not None:
+            assert catalog_revision is not None
+            catalog.clear(catalog_revision)
+        else:
+            # Compatibility for an explicit legacy-only installation. Once a
+            # V2 catalog exists, only its revision-safe mutation API may write
+            # the authoritative glossary.
+            save_glossary_entries([], create_backup=False)
+    except GlossaryConflictError:
+        messagebox.showerror(
+            "Conflito de revisão",
+            "O glossário mudou enquanto a confirmação estava aberta. "
+            "Nada foi apagado; revise as regras e tente novamente.",
+        )
+        if on_finish is not None:
+            on_finish(None)
+        return
     except Exception as exc:
         messagebox.showerror("Erro", f"Erro ao zerar o glossario:\n{exc}")
         if on_finish is not None:

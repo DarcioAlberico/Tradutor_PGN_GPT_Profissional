@@ -836,7 +836,7 @@ def migrate_legacy_glossary(path=None, catalog_path=None, legacy_db_path=None) -
                 unknown.append(text)
         if unknown:
             raise ValueError(f"Unknown legacy rule types: {', '.join(map(repr, unknown))}")
-        return _load_glossary_entry_details_from_file(path, deduplicate=False)
+        return read_glossary_import(path)
 
     return GlossaryCatalog(catalog_path, path).migrate_legacy(load_entries, legacy_db_path)
 
@@ -994,6 +994,11 @@ def save_glossary_entries(
     if path is None:
         path = _default_substitutions_path()
 
+    if _catalog_for_path(path) is not None:
+        raise RuntimeError(
+            "O catálogo SQLite V2 é autoritativo; use uma operação revision-safe do catálogo."
+        )
+
     _ensure_parent_dir(path)
     backup_path = None
     if create_backup:
@@ -1025,7 +1030,7 @@ def save_glossary_entries(
 
 
 def build_glossary_lookup(entries):
-    """Indice `orig -> [(new, posicao)]` para validar sem varrer o glossario.
+    """Indice `(original, fase, escopo) -> [(substituição, posição)]`.
 
     A validacao roda a cada tecla digitada no editor. Percorrer as ~7 mil
     entradas (e reconstruir a lista normalizada) a cada caractere trava a
@@ -1033,8 +1038,9 @@ def build_glossary_lookup(entries):
     igual, indexar por `orig` da o mesmo resultado em tempo constante.
     """
     lookup = {}
-    for index, (orig, new) in enumerate(_normalize_entries(entries)):
-        lookup.setdefault(orig, []).append((new, index))
+    for index, entry in enumerate(_normalize_detailed_entries(entries)):
+        orig, new, phase, scope = canonical_identity(entry)
+        lookup.setdefault((orig, phase, scope), []).append((new, index))
     return lookup
 
 
@@ -1080,10 +1086,11 @@ def validate_glossary_entry(
     if existing_lookup is not None:
         # Mesma ordem do laço original: vence a primeira entrada de mesmo
         # `orig`, seja ela duplicata exata ou conflito.
-        for existing_new, index in existing_lookup.get(orig, ()):
+        original, replacement, phase, canonical_scope = canonical_identity((orig, new, rule_type, 0, scope))
+        for existing_new, index in existing_lookup.get((original, phase, canonical_scope), ()):
             if current_index is not None and index == current_index:
                 continue
-            if new == existing_new:
+            if replacement == existing_new:
                 warnings.append("Entrada duplicada.")
             elif orig:
                 warnings.append("Mesmo original com substituição diferente.")

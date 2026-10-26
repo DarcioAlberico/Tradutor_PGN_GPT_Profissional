@@ -8,7 +8,7 @@ import customtkinter as ctk
 from .app_paths import glossary_catalog_path
 from .glossary_catalog import (
     CatalogSnapshot, GlossaryCatalog, GlossaryConflictError, GlossaryDuplicateError,
-    GlossaryEntryChanges, GlossaryEntryDraft, canonical_identity,
+    GlossaryEntryChanges, GlossaryEntryDraft, canonical_identity, validate_entry_draft,
 )
 
 from .glossario import (
@@ -152,6 +152,7 @@ def glossary_entry_warnings(entries, index, diagnostics=None):
         entries,
         current_index=index,
         rule_type=glossary_entry_type(entries[index]),
+        scope=glossary_entry_scope(entries[index]),
     )
 
 
@@ -909,6 +910,19 @@ class GlossaryEditor:
         """
         return normalize_glossary_scope(self.scope_text.get())
 
+    def persistible_draft(self, orig, new, rule_type, priority, scope):
+        """Return the normalized draft or explain why it cannot be stored."""
+        if priority is None:
+            self.show_message(INVALID_PRIORITY_WARNING, ERROR_COLOR)
+            return None
+        try:
+            return validate_entry_draft(
+                GlossaryEntryDraft(orig, new, rule_type, scope, priority)
+            )
+        except ValueError as exc:
+            self.show_message(str(exc), ERROR_COLOR)
+            return None
+
     def set_scope(self, scope):
         """Mostra o escopo, escrevendo `'*'` quando ele contraria o padrao.
 
@@ -1032,6 +1046,7 @@ class GlossaryEditor:
             new,
             current_index=current_index,
             rule_type=self.current_rule_type(),
+            scope=self.current_scope(),
             existing_lookup=self.current_validation_lookup(),
         )
         if self.current_priority() is None:
@@ -1419,7 +1434,7 @@ class GlossaryEditor:
             self.show_message(result.warning, WARNING_COLOR)
 
     def report_revision_conflict(self, conflict, baseline=None, attempted=None):
-        """Compare the user's draft with the baseline and reload, without force."""
+        """Compare revisions and reload only with explicit user consent."""
         baseline = dict(self.form_baseline) if baseline is None else baseline
         attempted = (*self.current_pair(), self.current_rule_type(), self.current_priority(), self.current_scope()) if attempted is None else attempted
         current = conflict.current_entry
@@ -1430,7 +1445,13 @@ class GlossaryEditor:
         actual = describe((current.original_text, current.replacement_text, current.rule_type, current.priority, current.scope)) if current else "Entrada removida ou catálogo alterado."
         message = (f"A revisão mudou em outra janela.\n\nBase: {describe(previous)}"
                    f"\nSua edição: {describe(attempted)}\nAtual: {actual}"
-                   "\n\nNada foi gravado. A lista foi recarregada; revise antes de salvar novamente.")
+                   "\n\nNada foi gravado.")
+        if not messagebox.askyesno(
+            "Conflito de revisão" if current or conflict.stable_id is None else "Entrada não encontrada",
+            message + "\n\nRecarregar agora descarta o rascunho. Escolha Não para cancelar e mantê-lo.",
+            parent=self.win,
+        ):
+            return False
         self.set_dirty(False)
         self.load_rows_from_file()
         self.state.selected_id = conflict.stable_id
@@ -1439,7 +1460,7 @@ class GlossaryEditor:
             self.select_entry(self.state.selected_index)
         else:
             self.clear_form()
-        messagebox.showwarning("Conflito de revisão" if current or conflict.stable_id is None else "Entrada não encontrada", message, parent=self.win)
+        return True
 
     def require_selected_record(self):
         """A projection without its complete record never authorizes a mutation."""
@@ -1472,6 +1493,13 @@ class GlossaryEditor:
         rule_type = self.current_rule_type()
         priority = self.current_priority()
         scope = self.current_scope()
+        draft = self.persistible_draft(orig, new, rule_type, priority, scope)
+        if draft is None:
+            return
+        orig, new, rule_type, scope, priority = (
+            draft.original_text, draft.replacement_text, draft.rule_type,
+            draft.scope, draft.priority,
+        )
         baseline = dict(self.form_baseline)
         identity = None
         if self.state.selected_id is not None or baseline.get("stable_id") is not None:
@@ -1580,6 +1608,13 @@ class GlossaryEditor:
         rule_type = self.current_rule_type()
         priority = self.current_priority()
         scope = self.current_scope()
+        draft = self.persistible_draft(orig, new, rule_type, priority, scope)
+        if draft is None:
+            return
+        orig, new, rule_type, scope, priority = (
+            draft.original_text, draft.replacement_text, draft.rule_type,
+            draft.scope, draft.priority,
+        )
         expected_catalog_revision = self.state.catalog_revision
         baseline = dict(self.form_baseline)
         warnings = validate_glossary_entry(

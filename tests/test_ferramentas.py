@@ -2410,6 +2410,9 @@ class ResetGlossaryTests(ResetToolsTestCase):
         self.addCleanup(
             setattr, glossario, "_default_substitutions_path", original
         )
+        original_catalog = glossario.glossary_catalog_path
+        glossario.glossary_catalog_path = lambda: str(self.base / "glossario-v2.db")
+        self.addCleanup(setattr, glossario, "glossary_catalog_path", original_catalog)
         return path
 
     def test_saying_no_leaves_every_rule_in_place(self):

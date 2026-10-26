@@ -447,7 +447,7 @@ class GlossaryCatalogMutationTests(GlossaryCatalogMutationFixture):
                          [(first.stable_id, 0), (third.stable_id, 1)])
 
 
-class GlossaryCatalogConcurrencyTests(GlossaryCatalogMutationTests):
+class GlossaryCatalogConcurrencyTests(GlossaryCatalogMutationFixture):
     def test_separate_instances_can_edit_different_entries_from_old_snapshot(self):
         first = self.catalog.add(self.draft(), 1).entry
         second = self.catalog.add(self.draft("rook", "torre"), 2).entry
@@ -478,13 +478,14 @@ class GlossaryCatalogConcurrencyTests(GlossaryCatalogMutationTests):
         self.catalog.add(self.draft(scope="pt"), 1)
         self.catalog.add(self.draft(scope="it"), 2)
         self.catalog.add(self.draft(scope="pt", rule_type="cleanup"), 3)
-        with closing(sqlite3.connect(self.catalog.db_path)) as conn:
+        with closing(sqlite3.connect(self.catalog.db_path)) as conn, conn:
             conn.execute("DROP INDEX idx_glossary_canonical_identity")
             conn.execute("""INSERT INTO glossary_entries
                 (stable_id, original_text, replacement_text, rule_type, scope, priority, position)
                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 ("duplicate", "knight", "cavalo", "suggestion", "pt", 9, 7))
         before = self.catalog.list_entries()
+        self.assertEqual(len(before.entries), 4)
         with self.assertRaises(glossary_catalog.GlossaryConflictError):
             self.catalog.deduplicate(3)
         self.assertEqual(self.catalog.list_entries(), before)

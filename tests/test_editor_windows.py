@@ -483,7 +483,7 @@ class GlossaryEditorTests(EditorWindowTestCase):
         self.click(self.button("Salvar"))
 
         self.assertCountEqual(self.entries_on_disk(), com_prioridade(sobraram), "gravou uma entrada que sumiu")
-        self.assertIn("Entrada não encontrada", self.dialogs.titles("warning"))
+        self.assertIn("Entrada não encontrada", self.dialogs.titles("askyesno"))
 
     def test_deleting_an_entry_removed_elsewhere_writes_nothing(self):
         self.click(self.row_for("rook"))
@@ -493,7 +493,7 @@ class GlossaryEditorTests(EditorWindowTestCase):
         self.click(self.button("Excluir"))
 
         self.assertCountEqual(self.entries_on_disk(), com_prioridade(sobraram))
-        self.assertIn("Entrada não encontrada", self.dialogs.titles("warning"))
+        self.assertIn("Entrada não encontrada", self.dialogs.titles("askyesno"))
 
 
 class GlossaryRevisionEditorTests(EditorWindowTestCase):
@@ -568,21 +568,34 @@ class GlossaryRevisionEditorTests(EditorWindowTestCase):
         )
         self.assertEqual(self.dialogs.messages("error"), [])
 
-    def test_same_entry_conflict_compares_and_reloads_without_force_prompt(self):
+    def test_same_entry_conflict_compares_and_reloads_after_confirmation(self):
         other = self.second_editor()
         self.editor.set_text(self.editor.new_text, "primeira janela")
         other.set_text(other.new_text, "segunda janela")
         self.editor.save_current()
-        before = len(self.dialogs.messages("askyesno"))
         other.save_current()
         self.assertEqual(self.catalog.list_entries().entries[0].replacement_text, "primeira janela")
-        warning = self.dialogs.messages("warning")[-1]
-        self.assertIn("segunda janela", warning)
-        self.assertIn("primeira janela", warning)
-        self.assertIn("torre", warning)
+        prompt = self.dialogs.messages("askyesno")[-1]
+        self.assertIn("segunda janela", prompt)
+        self.assertIn("primeira janela", prompt)
+        self.assertIn("torre", prompt)
         self.assertEqual(other.current_pair(), ("rook", "primeira janela"))
         self.assertFalse(other.state.dirty)
-        self.assertEqual(len(self.dialogs.messages("askyesno")), before)
+
+    def test_canceling_same_entry_conflict_preserves_draft_and_baseline(self):
+        other = self.second_editor()
+        baseline = dict(other.form_baseline)
+        self.editor.set_text(self.editor.new_text, "primeira janela")
+        other.set_text(other.new_text, "rascunho preservado")
+        other.mark_dirty()
+        self.editor.save_current()
+        self.dialogs.askyesno_result = False
+
+        other.save_current()
+
+        self.assertEqual(other.current_pair(), ("rook", "rascunho preservado"))
+        self.assertEqual(other.form_baseline, baseline)
+        self.assertTrue(other.state.dirty)
 
     def test_stale_delete_reloads_instead_of_deleting_new_revision(self):
         other = self.second_editor()
@@ -591,7 +604,7 @@ class GlossaryRevisionEditorTests(EditorWindowTestCase):
         other.delete_current()
         self.assertEqual(len(self.catalog.list_entries().entries), 3)
         self.assertEqual(other.current_pair(), ("rook", "atual"))
-        self.assertTrue(self.dialogs.messages("warning"))
+        self.assertIn("Conflito de revisão", self.dialogs.titles("askyesno"))
 
     def test_stale_catalog_dedup_reloads_without_losing_concurrent_add(self):
         from tradutor_pgn.glossary_catalog import GlossaryEntryDraft
@@ -599,7 +612,7 @@ class GlossaryRevisionEditorTests(EditorWindowTestCase):
         self.editor.deduplicate_entries()
         self.assertEqual(len(self.catalog.list_entries().entries), 4)
         self.assertEqual(len(self.editor.state.entries), 4)
-        self.assertTrue(self.dialogs.messages("warning"))
+        self.assertIn("Conflito de revisão", self.dialogs.titles("askyesno"))
 
     def test_dedup_without_duplicates_preserves_every_dirty_form_field(self):
         self.editor.select_entry(1)
@@ -633,6 +646,21 @@ class GlossaryRevisionEditorTests(EditorWindowTestCase):
         self.editor.save_current()
         self.assertEqual([entry.original_text for entry in self.catalog.list_entries().entries], ["rook", "rook", "queen", "bishop"])
         self.assertEqual(self.dialogs.messages("warning"), [])
+
+    def test_invalid_scope_and_sqlite_overflow_are_blocked_before_catalog_write(self):
+        before = self.catalog.list_entries()
+        self.editor.scope_text.set("ptt")
+        self.editor.mark_dirty()
+        self.editor.save_current()
+        self.assertEqual(self.catalog.list_entries(), before)
+        self.assertIn("desconhecido", self.editor.msg_label.cget("text").lower())
+
+        self.editor.scope_text.set("pt")
+        self.editor.priority_text.set(str(2**63))
+        self.editor.mark_dirty()
+        self.editor.save_current()
+        self.assertEqual(self.catalog.list_entries(), before)
+        self.assertIn("64 bits", self.editor.msg_label.cget("text"))
 
     def test_suggestion_pair_without_unique_record_cannot_delete(self):
         conn = initialize_database(self.db_path)
@@ -723,9 +751,9 @@ class GlossaryRevisionEditorTests(EditorWindowTestCase):
         self.catalog.update(record.stable_id, record.revision, GlossaryEntryChanges(replacement_text="atual externo"))
         self.editor.select_entry(2)
         pending[0](True)
-        warning = self.dialogs.messages("warning")[-1]
-        self.assertIn("rascunho original", warning)
-        self.assertIn("atual externo", warning)
+        prompt = self.dialogs.messages("askyesno")[-1]
+        self.assertIn("rascunho original", prompt)
+        self.assertIn("atual externo", prompt)
 
 
 class GlossaryConflictEditorTests(EditorWindowTestCase):
@@ -7821,7 +7849,23 @@ class GlossaryFileRecoveryWindowTests(EditorWindowTestCase):
         dialog.confirm_button.invoke()
         self.pump()
         self.assertEqual([e.original_text for e in self.editor.state.snapshot.entries], ["rook", "queen"])
-        self.assertIn("Conflito de revisão", self.dialogs.titles("warning"))
+        self.assertIn("Conflito de revisão", self.dialogs.titles("askyesno"))
+
+    def test_canceling_import_conflict_preserves_the_open_draft(self):
+        from tradutor_pgn.glossary_catalog import GlossaryEntryDraft
+        self.editor.set_text(self.editor.new_text, "rascunho preservado")
+        self.editor.mark_dirty()
+        dialog = self.open_preview()
+        self.editor.catalog.add(GlossaryEntryDraft("queen", "dama"), 1)
+        self.dialogs.askyesno_result = False
+
+        dialog.confirm_button.invoke()
+        self.pump()
+
+        self.assertEqual(self.editor.current_pair()[1], "rascunho preservado")
+        self.assertTrue(self.editor.state.dirty)
+        self.assertEqual(self.editor.state.catalog_revision, 1)
+        self.assertIn("Conflito de revisão", self.dialogs.titles("askyesno"))
 
     def test_declining_discard_of_draft_typed_during_preview_prevents_import(self):
         dialog = self.open_preview()
@@ -7871,7 +7915,7 @@ class GlossaryFileRecoveryWindowTests(EditorWindowTestCase):
         self.editor.catalog.add(GlossaryEntryDraft("pin", "cravada"), 1)
         self.file_dialogs.answer = str(backup)
         self.editor.restore_backup()
-        self.assertIn("Conflito de revisão", self.dialogs.titles("warning"))
+        self.assertIn("Conflito de revisão", self.dialogs.titles("askyesno"))
         self.assertEqual(len(self.editor.catalog.list_entries().entries), 2)
         backup.write_bytes(b"corrupt")
         self.editor.restore_backup()
