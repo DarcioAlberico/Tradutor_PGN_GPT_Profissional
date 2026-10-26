@@ -9602,16 +9602,15 @@ revisao global mudou. Backup usa a API SQLite; restauracao integral exige
 backup V2 validado, cria copia de seguranca e invalida revisoes anteriores.
 Texto nao substitui o catalogo. Snapshots/janelas sao recarregados apos restore.
 
-Limite conhecido da previa: prioridade inteira fora do intervalo do SQLite
-pode aparecer como nova e falhar somente ao confirmar, sem gravacao parcial.
-Permanece Minor diferido da Tarefa 6; nao foi ampliado o escopo desta validacao.
+A prévia agora classifica como inválida qualquer prioridade fora do intervalo
+inteiro do SQLite; linhas válidas do mesmo lote continuam importáveis.
 
 Esta entrega nao conclui GL-003/GL-004/GL-005, o `GlossaryEngine`, o corretor
 pt-BR com sugestoes/concordancia, o redesign, os demais marcos da Revisao
 Geral nem um novo build do executavel. Os registros anteriores permanecem
 como historico; instrucoes operacionais atuais do catalogo estao no README.
 
-### 30.1 Evidencias da Tarefa 7 e pendencia de integracao
+### 30.1 Evidencias da Tarefa 7 e integração concluída
 
 Gates executados nesta ordem, em 24/10/2026:
 
@@ -9623,7 +9622,7 @@ Gates executados nesta ordem, em 24/10/2026:
    **2 failed, 1935 passed, 1 skipped, 6742 subtests passed in 984.12s**.
 5. `git diff --check` — exit 0, sem erros de whitespace.
 
-A suite completa **nao esta verde**. Falharam
+A primeira execução da suite completa **não ficou verde**. Falharam
 `tests/test_main_window.py::LogDoesNotYankTheReaderBackTests::test_following_the_end_keeps_following`
 (fim do log nao reconhecido apos `see(END)`) e
 `tests/test_main_window.py::SettingsWindowTests::test_the_glossary_pane_follows_the_theme_and_lets_go_on_close`
@@ -9634,8 +9633,11 @@ duas classes juntas em processo novo, com
 deu **17 passed, 4 subtests passed in 19.51s** (exit 0).
 Isso indica dependencia do contexto da suite; nao prova a causa nem exclui
 uma regressao. Nao houve correcao de producao por hipotese nesta tarefa.
-RG-000/GL-001/GL-002 estao implementados e cobertos pelo gate focado, mas a
-aceitacao integrada permanece pendente da investigacao dessas falhas GUI.
+Essas falhas levaram à correção do teardown Tk do harness; o histórico acima
+foi preservado por mostrar a causa da investigação. O gate integral final,
+executado depois das correções, ficou verde: **1991 passed, 1 skipped e 6742
+subtests passed em 587.34s**. RG-000/GL-001/GL-002 estão implementados e com
+aceitação integrada concluída.
 
 O unico skip e o teste de symlink introduzido na Tarefa 6: Windows recusou
 a criacao com `WinError 1314` (privilegio insuficiente). Confirmado com

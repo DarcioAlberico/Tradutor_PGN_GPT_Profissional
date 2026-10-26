@@ -333,14 +333,14 @@ e exportacoes, mesmo se o espelho estiver indisponivel.
 
 ### Importacao e recuperacao do glossario
 
-No editor, **Importar** aceita CSV e texto e abre previa por linha: nova,
+No editor, **Importar CSV** aceita CSV e texto e abre previa por linha: nova,
 duplicada, conflitante ou invalida. A unica modalidade e `append`: apos
 confirmacao, acrescenta somente novas identidades; as demais sao informadas
 e nao gravadas. Conflito significa mesmo original/fase/escopo com substituicao
 diferente. Se `catalog_revision` mudou desde a previa, nada e importado e a
 previa precisa ser refeita. CSV nao substitui integralmente o catalogo.
 
-**Backup agora** cria uma copia consistente SQLite V2 pela API de backup do
+**Backup** cria uma copia consistente SQLite V2 pela API de backup do
 SQLite, incluindo IDs, revisoes e `default_scope`. **Restaurar backup** aceita
 somente SQLite V2 com schema e integridade validados para substituicao integral;
 exige a revisao global atual e cria backup de seguranca antes da troca.
