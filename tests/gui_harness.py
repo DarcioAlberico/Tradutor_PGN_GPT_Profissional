@@ -81,16 +81,14 @@ def cancel_pending_after(root):
     esses callbacks dispararem no vazio e o Tk imprime "invalid command name" no
     meio da saida da suite — barulho que esconderia uma falha de verdade.
 
-    **O `after_cancel` do tkinter nao serve sozinho.** Antes de cancelar ele
-    tenta apagar o comando registrado, e le o script com
-    `splitlist(...)[0]`: quando o script e uma LISTA Tcl de varias palavras — o
-    que acontece quando alguem agenda com argumentos —, esse `[0]` e uma tupla e
-    o `deletecommand` levanta `TypeError`, **antes** de o timer ser cancelado.
-    Um `except tk.TclError` nao pega isso, e a suite ganhava um erro de
-    desmontagem numa classe que nao tinha nada a ver com o assunto.
+    Cancelar pelo `root.after_cancel` tambem apaga o comando Tcl de callbacks
+    registrados em widgets filhos, mas deixa o nome na lista de comandos do
+    filho. Sua destruicao tenta apaga-lo de novo, falha e pode deixar a raiz
+    inteira viva. Alem disso, scripts Tcl de varias palavras nao sao nomes
+    de comandos Python que possam ser apagados assim.
 
-    O `after cancel` em Tcl puro nao passa por nada disso, e e o que de fato
-    para o callback; o comando orfao morre com a interpretacao.
+    `after cancel` em Tcl puro para o timer e preserva o comando: o widget
+    que o registrou o remove durante sua propria destruicao.
     """
     try:
         pendentes = root.tk.eval("after info").split()
@@ -98,12 +96,21 @@ def cancel_pending_after(root):
         return
     for after_id in pendentes:
         try:
-            root.after_cancel(after_id)
-        except (tk.TclError, TypeError):
-            try:
-                root.tk.call("after", "cancel", after_id)
-            except tk.TclError:
-                pass
+            root.tk.call("after", "cancel", after_id)
+        except tk.TclError:
+            pass
+
+
+def destroy_test_root(root):
+    """Destroy a fixture root, reporting errors that leave its native window alive."""
+    cancel_pending_after(root)
+    try:
+        root.destroy()
+    except tk.TclError:
+        # A test may already have closed its root. An error while destroying
+        # a child is different: the root command still exists and must fail CI.
+        if root.tk.call("info", "commands", root._w):
+            raise
 
 
 class SilentDialogs:
@@ -289,12 +296,7 @@ class GuiTestCase(unittest.TestCase):
             os.environ[app_paths.DATA_DIR_ENV] = dados
 
     def _destroy_root(self):
-        cancel_pending_after(self.root)
-
-        try:
-            self.root.destroy()
-        except tk.TclError:
-            pass
+        destroy_test_root(self.root)
 
     def pump(self):
         self.root.update()

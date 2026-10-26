@@ -1803,7 +1803,7 @@ class ClosingTheMainWindowTests(MainWindowTestCase):
         # `tearDown` cairia. O que interessa aqui e a DECISAO — fechar, cancelar
         # ou nao fazer nada —, e ela e observavel sem executar o `destroy`.
         self.destruida = []
-        self.app.root.destroy = lambda: self.destruida.append(True)
+        self.patch(self.app.root, "destroy", lambda: self.destruida.append(True))
 
     def test_the_x_is_wired(self):
         self.assertTrue(self.app.root.protocol("WM_DELETE_WINDOW"))

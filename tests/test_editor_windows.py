@@ -32,7 +32,7 @@ import unittest.mock
 from contextlib import redirect_stderr
 from pathlib import Path
 
-from gui_harness import DISPLAY, GuiTestCase, needs_room
+from gui_harness import DISPLAY, GuiTestCase, cancel_pending_after, destroy_test_root, needs_room
 from tradutor_pgn import (
     board_widget,
     database,
@@ -1678,19 +1678,7 @@ class CallbackErrorHookTests(unittest.TestCase):
         # `update_log` e o CTk agenda `check_dpi_scaling`. Destruir sem cancelar
         # faz o Tk imprimir "invalid command name" no meio da saida da suite —
         # barulho que esconderia uma falha de verdade.
-        try:
-            for after_id in self.root.tk.eval("after info").split():
-                try:
-                    self.root.after_cancel(after_id)
-                except tk.TclError:
-                    pass
-        except tk.TclError:
-            pass
-
-        try:
-            self.root.destroy()
-        except tk.TclError:
-            pass
+        destroy_test_root(self.root)
 
     def dispara_em(self, widget, exc):
         """Agenda um callback que explode e deixa o Tk despacha-lo."""
@@ -5088,11 +5076,7 @@ class LabelsAndWidthsFitTests(EditorWindowTestCase):
         A janela vai para +3000+3000 para nao aparecer na frente de quem esta
         trabalhando noutro programa enquanto a suite roda.
         """
-        for after_id in self.win.tk.eval("after info").split():
-            try:
-                self.win.after_cancel(after_id)
-            except tk.TclError:
-                pass
+        cancel_pending_after(self.win)
 
         largura = edit_window.MIN_WIDTH if largura is None else largura
         self.win.geometry(f"{largura}x{edit_window.MIN_HEIGHT}+3000+3000")
@@ -7071,11 +7055,7 @@ class DiscardUnreviewedInTheEditorTests(EditorWindowTestCase):
 
     def test_the_button_is_whole_inside_the_bar_at_the_minimum_width(self):
         """A mesma medicao de "Trocas repetidas": a faixa da lista tem 320 px."""
-        for after_id in self.win.tk.eval("after info").split():
-            try:
-                self.win.after_cancel(after_id)
-            except tk.TclError:
-                pass
+        cancel_pending_after(self.win)
         self.win.geometry(f"{edit_window.MIN_WIDTH}x{edit_window.MIN_HEIGHT}+3000+3000")
         self.win.deiconify()
         self.pump()
@@ -7193,11 +7173,7 @@ class RepeatedEditsWindowTests(EditorWindowTestCase):
 
     def test_the_button_is_whole_inside_the_bar_at_the_minimum_width(self):
         """A familia "correto e nao cabe na tela": a faixa da lista tem 320 px."""
-        for after_id in self.win.tk.eval("after info").split():
-            try:
-                self.win.after_cancel(after_id)
-            except tk.TclError:
-                pass
+        cancel_pending_after(self.win)
         self.win.geometry(f"{edit_window.MIN_WIDTH}x{edit_window.MIN_HEIGHT}+3000+3000")
         self.win.deiconify()
         self.pump()
@@ -7881,7 +7857,11 @@ class GlossaryFileRecoveryWindowTests(EditorWindowTestCase):
         for window in (self.editor, other):
             self.assertEqual([e.original_text for e in window.state.snapshot.entries], ["rook"])
             self.assertEqual(window.state.catalog_revision, 3)
-            self.assertFalse(window.state.dirty)
+            self.assertFalse(window.state.dirty, {
+                "window": str(window.win), "pair": window.current_pair(),
+                "type": window.current_rule_type(), "priority": window.current_priority(),
+                "scope": window.current_scope(), "baseline": window.form_baseline,
+            })
         self.assertEqual(self.editor.catalog.list_entries().catalog_revision, 3)
 
     def test_restore_confirmation_uses_displayed_revision_and_reports_invalid_backup(self):
