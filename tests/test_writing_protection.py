@@ -69,6 +69,18 @@ def test_names_from_source_and_multiword_glossary_use_whole_word_boundaries():
     }
 
 
+@pytest.mark.parametrize("token", ["d'Alembert", "kasparov", "bispo"])
+def test_all_source_vocabulary_is_protected_without_capitalization_heuristics(token):
+    text = f"🙂 {token} permanece."
+    protected = protect_text(WritingRequest(text, 1, "pt", source_text=f"Sobre {token}."))
+    end = 2 + len(token)
+    assert protected.projected_text == "🙂 " + " " * len(token) + " permanece."
+    assert any(r.kind == "source_name" and (r.start, r.end) == (2, end)
+               for r in protected.ranges)
+    assert restore_issue_offsets(projected_issue(protected, 2, end), protected) is None
+    assert protected.index_map[end] == end
+
+
 def test_normalization_maps_back_to_real_decomposed_unicode_and_casefold_expansions():
     text = "🙂 ac\u0327a\u0303o STRASSE São"
     protected = protect_text(WritingRequest(text, 2, "pt", source_text="São agrees.",

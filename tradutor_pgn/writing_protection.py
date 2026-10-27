@@ -14,7 +14,7 @@ import unicodedata
 from .annotation_mask import COMMAND_TAG_RE, PLAYER_PAIR_RE
 from .chess_notation import _all_known_letters, _move_pattern
 from .glossary_types import normalize_glossary_text
-from .prose_spellcheck import NOTATION_RE, TOKEN_RE
+from .prose_spellcheck import NOTATION_RE, TOKEN_RE, source_vocabulary
 from .writing_types import WritingIssue, WritingRequest
 
 
@@ -103,12 +103,11 @@ def _term_ranges(
 
 
 def protect_text(request: WritingRequest) -> ProtectedText:
-    """Mask notation, technical fragments, source names and glossary phrases.
+    """Mask notation, technical fragments, source vocabulary and glossary phrases.
 
-    Source names use the existing lexical tokenizer: capitalized source tokens
-    of at least two letters, plus the product's recognized player citations.
-    This is deliberately conservative; it does not infer names from prose in
-    the target alone or protect every source-language word as grammar text.
+    Source vocabulary uses the existing spelling filter without capitalization
+    heuristics, preserving names and shared tokens accepted by that filter.
+    Its intervals retain the ``source_name`` kind for compatibility.
     Overlapping typed ranges are retained so glossary diagnostics cannot bypass
     simultaneous technical protection.
     """
@@ -135,10 +134,8 @@ def protect_text(request: WritingRequest) -> ProtectedText:
         if NOTATION_RE.fullmatch(match.group()):
             ranges.append(ProtectedRange(*match.span(), "notation"))
     source = unicodedata.normalize("NFC", request.source_text)
-    names = frozenset(match.group() for match in TOKEN_RE.finditer(source)
-                      if match.group()[0].isupper()
-                      and sum(char.isalpha() for char in match.group()) >= 2)
-    ranges.extend(_term_ranges(text, names, "source_name"))
+    vocabulary = frozenset(source_vocabulary(source))
+    ranges.extend(_term_ranges(text, vocabulary, "source_name"))
     ranges.extend(_term_ranges(text, request.glossary_terms, "glossary"))
     ordered = tuple(sorted(set(ranges)))
     projected = list(text)
