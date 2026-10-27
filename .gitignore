@@ -42,3 +42,6 @@ piloto/
 
 # Configuracao do PyCharm: e de quem usa, nao do projeto.
 .idea/
+
+# Worktrees isolados usados por planos de implementação agentic.
+.worktrees/
