@@ -3,6 +3,7 @@
 from dataclasses import replace
 import json
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -10,7 +11,7 @@ from tradutor_pgn import prose_spellcheck
 from tradutor_pgn.personal_dictionary import PersonalDictionary
 from tradutor_pgn.writing_assistant import PortugueseWritingAssistant, SpyllsAdapter
 from tradutor_pgn.writing_protection import protect_text
-from tradutor_pgn.writing_types import WritingIssue, WritingRequest
+from tradutor_pgn.writing_types import AssistantStatus, WritingIssue, WritingRequest
 
 
 class Dictionary:
@@ -366,3 +367,76 @@ def test_assistant_shutdown_closes_grammar_resource_once(tmp_path):
     assistant.shutdown()
     assert closed == [True]
     assert assistant.status().state == "stopped"
+
+
+@pytest.mark.parametrize("vocabulary", ["personal", "session"])
+def test_grammar_preserves_accepted_spelling_vocabulary_and_valid_grammar(tmp_path, vocabulary):
+    personal = PersonalDictionary(tmp_path / "personal.json")
+    if vocabulary == "personal":
+        personal.add("POSICAO")
+
+    class Grammar:
+        def analyze(self, request, protected):
+            return (
+                WritingIssue("", "MORFOLOGIK_RULE_PT_BR", "SPELLING", 0, 7, "posicao",
+                             "Grafia", "Grafia", ("posição",), "warning", "languagetool", request.text_version),
+                WritingIssue("", "GENERAL_GENDER_AGREEMENT_ERRORS", "NOMINAL_AGREEMENT", 8, 11, "boa",
+                             "Concordância", "Concordância", ("boas",), "warning", "languagetool", request.text_version),
+            )
+
+    request = WritingRequest("posicao boa", 2, "pt-BR",
+                             session_ignored_words=frozenset({"POSICAO"}) if vocabulary == "session" else frozenset())
+    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path), grammar_adapter=Grammar())
+    assert assistant.analyze(request).issues == ()
+    result = assistant.analyze(replace(request, grammar_enabled=True))
+    assert result.mode == "full"
+    assert [(issue.original, issue.category) for issue in result.issues] == [("boa", "NOMINAL_AGREEMENT")]
+
+
+@pytest.mark.parametrize("transient", ["starting", "restarting"])
+@pytest.mark.parametrize("previous", ["fresh", "spelling_only"])
+def test_assistant_publishes_active_grammar_transitions_before_first_full_result(tmp_path, transient, previous):
+    entered = threading.Event()
+    release = threading.Event()
+    results = []
+    errors = []
+
+    class Grammar:
+        current = AssistantStatus("stopped", "spelling_only")
+
+        def analyze(self, request, protected):
+            self.current = AssistantStatus(transient, "spelling_only", restart_attempted=transient == "restarting")
+            entered.set()
+            if not release.wait(timeout=3):
+                raise RuntimeError("test did not release grammar provider")
+            self.current = AssistantStatus("ready", "full", restart_attempted=transient == "restarting")
+            return ()
+
+        def status(self):
+            return self.current
+
+    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path), grammar_adapter=Grammar())
+    request = WritingRequest("boa", 3, "pt-BR", grammar_enabled=True)
+    if previous == "spelling_only":
+        assert assistant.analyze(replace(request, grammar_enabled=False)).mode == "spelling_only"
+
+    def analyze():
+        try:
+            results.append(assistant.analyze(request))
+        except Exception as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=analyze)
+    worker.start()
+    try:
+        assert entered.wait(timeout=3)
+        status = assistant.status()
+        assert (status.state, status.mode, status.restart_attempted) == (
+            transient, "spelling_only", transient == "restarting",
+        )
+    finally:
+        release.set()
+        worker.join(timeout=3)
+    assert not worker.is_alive() and not errors
+    assert len(results) == 1 and results[0].mode == "full"
+    assert assistant.status().state == "ready" and assistant.status().mode == "full"

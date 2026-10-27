@@ -6,6 +6,7 @@ asynchronous warm-up. No failure is presented as a successful empty analysis.
 """
 
 from collections.abc import Callable, Iterable, Iterator
+import threading
 from typing import Protocol
 import unicodedata
 
@@ -153,6 +154,8 @@ class PortugueseWritingAssistant:
         self._protect = protector
         self._status = AssistantStatus("stopped", "unavailable")
         self._closed = False
+        self._grammar_activity_lock = threading.Lock()
+        self._active_grammar_checks = 0
 
     def analyze(self, request: WritingRequest) -> WritingResult:
         if self._closed:
@@ -167,13 +170,22 @@ class PortugueseWritingAssistant:
         mode: AssistantMode = "spelling_only"
         diagnostic = ""
         if request.grammar_enabled:
+            with self._grammar_activity_lock:
+                self._active_grammar_checks += 1
             try:
-                candidates += self._grammar.analyze(request, protected)
+                # The spelling adapter alone applies the complete personal,
+                # session and dictionary acceptance policy. Grammar must not
+                # reintroduce typos that that policy already accepted.
+                candidates += tuple(issue for issue in self._grammar.analyze(request, protected)
+                                    if issue.category != "SPELLING")
                 mode = "full"
             except Exception:
                 # Provider exceptions can contain the complete request/response.
                 # Preserve spelling and use only this fixed local diagnostic.
                 diagnostic = "Concordância indisponível; somente ortografia."
+            finally:
+                with self._grammar_activity_lock:
+                    self._active_grammar_checks -= 1
         issues: dict[tuple[object, ...], WritingIssue] = {}
         for candidate in candidates:
             if candidate.rule_id in request.disabled_rule_ids:
@@ -182,8 +194,7 @@ class PortugueseWritingAssistant:
             if issue is None:
                 continue
             issue.validate_for(request)
-            # Spylls runs first and remains the authoritative spelling provider.
-            # LT may report the same typo under a different rule ID.
+            # Collapse repeated spelling spans; keep distinct grammar reasons.
             key = ((issue.start, issue.end, issue.category, issue.state) if issue.category == "SPELLING"
                    else (issue.start, issue.end, issue.category, issue.rule_id, issue.provider, issue.state))
             issues.setdefault(key, issue)
@@ -200,12 +211,18 @@ class PortugueseWritingAssistant:
         return WritingResult(request.text_version, (), "unavailable", diagnostic)
 
     def status(self) -> AssistantStatus:
-        if self._status.mode == "full":
+        with self._grammar_activity_lock:
+            grammar_active = self._active_grammar_checks > 0
+        if grammar_active or self._status.mode == "full":
             grammar_status = self._grammar_status()
-            if grammar_status is not None and grammar_status.mode != "full":
-                self._status = AssistantStatus(grammar_status.state, "spelling_only",
-                                               "Concordância indisponível; somente ortografia.",
-                                               grammar_status.restart_attempted)
+            if grammar_status is not None:
+                if grammar_active and grammar_status.state in {"starting", "restarting"}:
+                    return AssistantStatus(grammar_status.state, "spelling_only", grammar_status.diagnostic,
+                                           grammar_status.restart_attempted)
+                if self._status.mode == "full" and grammar_status.mode != "full":
+                    self._status = AssistantStatus(grammar_status.state, "spelling_only",
+                                                   "Concordância indisponível; somente ortografia.",
+                                                   grammar_status.restart_attempted)
         return self._status
 
     def _grammar_status(self) -> AssistantStatus | None:
