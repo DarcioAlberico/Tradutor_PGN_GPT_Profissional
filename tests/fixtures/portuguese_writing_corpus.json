@@ -1,0 +1,411 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "TA-004",
+      "text": "As pretas tem uma posiçao ativa depois de 13.Cd4 [%eval +0.35].",
+      "source_text": "Black has an active position after 13.Nd4 [%eval +0.35].",
+      "glossary_terms": [],
+      "expected_issues": [
+        {
+          "start": 10,
+          "end": 13,
+          "original": "tem",
+          "category": "VERBAL_AGREEMENT",
+          "suggestions": [
+            "têm"
+          ]
+        },
+        {
+          "start": 18,
+          "end": 25,
+          "original": "posiçao",
+          "category": "SPELLING",
+          "suggestions": [
+            "posição"
+          ]
+        }
+      ],
+      "forbidden_ranges": [
+        {
+          "start": 42,
+          "end": 48,
+          "original": "13.Cd4",
+          "kind": "notation"
+        },
+        {
+          "start": 49,
+          "end": 62,
+          "original": "[%eval +0.35]",
+          "kind": "annotation"
+        }
+      ],
+      "notes": "Regressão de aceite: concordância verbal e acento, preservando lance e avaliação."
+    },
+    {
+      "id": "correct-chess",
+      "text": "As pretas têm uma posição ativa depois de 13.Cd4.",
+      "source_text": "Black has an active position after 13.Nd4.",
+      "glossary_terms": [],
+      "expected_issues": [],
+      "forbidden_ranges": [
+        {
+          "start": 42,
+          "end": 48,
+          "original": "13.Cd4",
+          "kind": "notation"
+        }
+      ],
+      "notes": "Frase correta; nenhum alerta esperado."
+    },
+    {
+      "id": "nominal-plural",
+      "text": "As peça brancas estão ativas.",
+      "source_text": "The white pieces are active.",
+      "glossary_terms": [],
+      "expected_issues": [
+        {
+          "start": 3,
+          "end": 7,
+          "original": "peça",
+          "category": "NOMINAL_AGREEMENT",
+          "suggestions": [
+            "peças"
+          ]
+        }
+      ],
+      "forbidden_ranges": [],
+      "notes": "Concordância nominal de alta confiança entre artigo e substantivo."
+    },
+    {
+      "id": "nominal-gender",
+      "text": "A posição está ativo.",
+      "source_text": "The position is active.",
+      "glossary_terms": [],
+      "expected_issues": [
+        {
+          "start": 15,
+          "end": 20,
+          "original": "ativo",
+          "category": "NOMINAL_AGREEMENT",
+          "suggestions": [
+            "ativa"
+          ]
+        }
+      ],
+      "forbidden_ranges": [],
+      "notes": "Predicativo feminino singular."
+    },
+    {
+      "id": "verbal-plural",
+      "text": "Os bispos domina o centro.",
+      "source_text": "The bishops dominate the center.",
+      "glossary_terms": [],
+      "expected_issues": [
+        {
+          "start": 10,
+          "end": 16,
+          "original": "domina",
+          "category": "VERBAL_AGREEMENT",
+          "suggestions": [
+            "dominam"
+          ]
+        }
+      ],
+      "forbidden_ranges": [],
+      "notes": "Sujeito plural explícito."
+    },
+    {
+      "id": "verbal-singular",
+      "text": "O cavalo ocupam o centro.",
+      "source_text": "The knight occupies the center.",
+      "glossary_terms": [],
+      "expected_issues": [
+        {
+          "start": 9,
+          "end": 15,
+          "original": "ocupam",
+          "category": "VERBAL_AGREEMENT",
+          "suggestions": [
+            "ocupa"
+          ]
+        }
+      ],
+      "forbidden_ranges": [],
+      "notes": "Sujeito singular explícito."
+    },
+    {
+      "id": "spelling-accent",
+      "text": "O peao avança.",
+      "source_text": "The pawn advances.",
+      "glossary_terms": [],
+      "expected_issues": [
+        {
+          "start": 2,
+          "end": 6,
+          "original": "peao",
+          "category": "SPELLING",
+          "suggestions": [
+            "peão"
+          ]
+        }
+      ],
+      "forbidden_ranges": [],
+      "notes": "Ausência do til no termo comum de xadrez."
+    },
+    {
+      "id": "spelling-hyphen",
+      "text": "O contra-jogo é forte.",
+      "source_text": "The counterplay is strong.",
+      "glossary_terms": [],
+      "expected_issues": [
+        {
+          "start": 2,
+          "end": 13,
+          "original": "contra-jogo",
+          "category": "SPELLING",
+          "suggestions": [
+            "contrajogo"
+          ]
+        }
+      ],
+      "forbidden_ranges": [],
+      "notes": "Forma de referência do corpus; o glossário pode preservar a grafia editorial."
+    },
+    {
+      "id": "repeated-word",
+      "text": "O bispo está está ativo.",
+      "source_text": "The bishop is active.",
+      "glossary_terms": [],
+      "expected_issues": [
+        {
+          "start": 8,
+          "end": 17,
+          "original": "está está",
+          "category": "REPEATED_WORD",
+          "suggestions": [
+            "está"
+          ]
+        }
+      ],
+      "forbidden_ranges": [],
+      "notes": "Repetição imediata acidental."
+    },
+    {
+      "id": "punctuation-double-comma",
+      "text": "O bispo,, porém, está ativo.",
+      "source_text": "The bishop, however, is active.",
+      "glossary_terms": [],
+      "expected_issues": [
+        {
+          "start": 7,
+          "end": 9,
+          "original": ",,",
+          "category": "PUNCTUATION",
+          "suggestions": [
+            ","
+          ]
+        }
+      ],
+      "forbidden_ranges": [],
+      "notes": "Pontuação duplicada de alta confiança."
+    },
+    {
+      "id": "notation-and-tags",
+      "text": "Após 13.Cd4 $5 O-O, a posição é ativa [%clk 0:05:30] [%cal Ra1h8] [%csl Gd4].",
+      "source_text": "After 13.Nd4 $5 O-O, the position is active.",
+      "glossary_terms": [],
+      "expected_issues": [],
+      "forbidden_ranges": [
+        {
+          "start": 5,
+          "end": 11,
+          "original": "13.Cd4",
+          "kind": "notation"
+        },
+        {
+          "start": 12,
+          "end": 14,
+          "original": "$5",
+          "kind": "nag"
+        },
+        {
+          "start": 15,
+          "end": 18,
+          "original": "O-O",
+          "kind": "notation"
+        },
+        {
+          "start": 38,
+          "end": 52,
+          "original": "[%clk 0:05:30]",
+          "kind": "annotation"
+        },
+        {
+          "start": 53,
+          "end": 65,
+          "original": "[%cal Ra1h8]",
+          "kind": "annotation"
+        },
+        {
+          "start": 66,
+          "end": 76,
+          "original": "[%csl Gd4]",
+          "kind": "annotation"
+        }
+      ],
+      "notes": "Anotações PGN, roque e NAG nunca recebem sugestões."
+    },
+    {
+      "id": "source-names",
+      "text": "Kasparov analisou a posição com Kramnik.",
+      "source_text": "Kasparov analyzed the position with Kramnik.",
+      "glossary_terms": [],
+      "expected_issues": [],
+      "forbidden_ranges": [
+        {
+          "start": 0,
+          "end": 8,
+          "original": "Kasparov",
+          "kind": "source_name"
+        },
+        {
+          "start": 32,
+          "end": 39,
+          "original": "Kramnik",
+          "kind": "source_name"
+        }
+      ],
+      "notes": "Nomes próprios preservados a partir da origem."
+    },
+    {
+      "id": "glossary-multiword",
+      "text": "A Defesa Índia do Rei permite contra-jogo.",
+      "source_text": "The King's Indian Defense allows counterplay.",
+      "glossary_terms": [
+        "defesa índia do rei",
+        "contra-jogo"
+      ],
+      "expected_issues": [],
+      "forbidden_ranges": [
+        {
+          "start": 2,
+          "end": 21,
+          "original": "Defesa Índia do Rei",
+          "kind": "glossary"
+        },
+        {
+          "start": 30,
+          "end": 41,
+          "original": "contra-jogo",
+          "kind": "glossary"
+        }
+      ],
+      "notes": "Termos editoriais aplicáveis e comparação sem distinção de caixa."
+    },
+    {
+      "id": "unicode-emoji",
+      "text": "🙂 A posiçao está ativa após Cd4.",
+      "source_text": "The position is active after Nd4.",
+      "glossary_terms": [],
+      "expected_issues": [
+        {
+          "start": 4,
+          "end": 11,
+          "original": "posiçao",
+          "category": "SPELLING",
+          "suggestions": [
+            "posição"
+          ]
+        }
+      ],
+      "forbidden_ranges": [
+        {
+          "start": 28,
+          "end": 31,
+          "original": "Cd4",
+          "kind": "notation"
+        }
+      ],
+      "notes": "Emoji astral antes da ocorrência; índices contam codepoints Python."
+    },
+    {
+      "id": "unicode-decomposed",
+      "text": "A ação começa na Defesa Índia do Rei.",
+      "source_text": "The action starts in the King's Indian Defense.",
+      "glossary_terms": [
+        "ação",
+        "Defesa Índia do Rei"
+      ],
+      "expected_issues": [],
+      "forbidden_ranges": [
+        {
+          "start": 2,
+          "end": 8,
+          "original": "ação",
+          "kind": "glossary"
+        },
+        {
+          "start": 19,
+          "end": 38,
+          "original": "Defesa Índia do Rei",
+          "kind": "glossary"
+        }
+      ],
+      "notes": "Comparação NFC sem alterar acentos decompostos nem offsets reais."
+    },
+    {
+      "id": "technical-addresses",
+      "text": "Consulte https://example.org/x e autor@example.org no motor_v2.",
+      "source_text": "See the technical references.",
+      "glossary_terms": [],
+      "expected_issues": [],
+      "forbidden_ranges": [
+        {
+          "start": 9,
+          "end": 30,
+          "original": "https://example.org/x",
+          "kind": "url"
+        },
+        {
+          "start": 33,
+          "end": 50,
+          "original": "autor@example.org",
+          "kind": "email"
+        },
+        {
+          "start": 54,
+          "end": 62,
+          "original": "motor_v2",
+          "kind": "identifier"
+        }
+      ],
+      "notes": "Endereços sintéticos, e-mail e identificador técnico."
+    },
+    {
+      "id": "ambiguous-fragment",
+      "text": "Peças no centro; talvez melhor.",
+      "source_text": "Pieces in the center; perhaps better.",
+      "glossary_terms": [],
+      "expected_issues": [],
+      "forbidden_ranges": [],
+      "notes": "Fragmento editorial deliberado: não inferir concordância sem oração completa."
+    },
+    {
+      "id": "ambiguous-ellipsis",
+      "text": "Se 13.Cd4, então ...",
+      "source_text": "If 13.Nd4, then ...",
+      "glossary_terms": [],
+      "expected_issues": [],
+      "forbidden_ranges": [
+        {
+          "start": 3,
+          "end": 9,
+          "original": "13.Cd4",
+          "kind": "notation"
+        }
+      ],
+      "notes": "Elipse deliberada de comentário; não completar nem reescrever."
+    }
+  ]
+}

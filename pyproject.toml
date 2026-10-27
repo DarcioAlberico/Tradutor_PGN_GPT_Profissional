@@ -30,7 +30,13 @@ llm = ["anthropic>=1.0"]
 # `unittest`, mas o CI quer o `-q` e o resumo dele) e o lint com `ruff`. O `uv
 # sync` instala o grupo `dev` por padrao; o `.exe` nao os leva.
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10", "types-requests"]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-requests",
+    "hypothesis>=6.168.5",
+]
 
 # Tipos (ROADMAP 28.11): comecando por `translation_api` e `database`, nao
 # bloqueante. So os modulos listados sao conferidos; os outros entram quando
