@@ -2,9 +2,12 @@ import json
 import os
 import sys
 import threading
+from collections.abc import Mapping
 from datetime import datetime
+from typing import TypedDict, get_args
 
 from .app_paths import data_path
+from .writing_types import IssueCategory
 
 
 SETTINGS_FILENAME = "pgn_tradutor_pro_settings.json"
@@ -462,6 +465,71 @@ def write_main_window_settings(values, path=None):
     """As escolhas da janela principal, pela mesma porta (R4)."""
     gravadas = write_settings_sections({MAIN_WINDOW_KEY: values}, path)
     return gravadas[MAIN_WINDOW_KEY] if gravadas else gravadas
+
+
+class WritingSettings(TypedDict):
+    spelling_enabled: bool
+    grammar_enabled: bool
+    visible_categories: list[IssueCategory]
+    disabled_rule_ids: list[str]
+
+
+WRITING_KEY = "writing_assistant"
+WRITING_CATEGORIES: tuple[IssueCategory, ...] = get_args(IssueCategory)
+WRITING_DEFAULTS: WritingSettings = {
+    "spelling_enabled": True,
+    "grammar_enabled": False,
+    "visible_categories": list(WRITING_CATEGORIES),
+    "disabled_rule_ids": [],
+}
+
+
+def read_writing_settings(settings: object) -> WritingSettings:
+    """Return validated independent preferences, including for older files.
+
+    Categories follow the public category order; disabled IDs are sorted and
+    case-sensitive. An explicit empty list is a valid user choice.
+    """
+    values: WritingSettings = {
+        "spelling_enabled": WRITING_DEFAULTS["spelling_enabled"],
+        "grammar_enabled": WRITING_DEFAULTS["grammar_enabled"],
+        "visible_categories": list(WRITING_DEFAULTS["visible_categories"]),
+        "disabled_rule_ids": list(WRITING_DEFAULTS["disabled_rule_ids"]),
+    }
+    stored = settings.get(WRITING_KEY) if isinstance(settings, Mapping) else None
+    if not isinstance(stored, Mapping):
+        return values
+    spelling = stored.get("spelling_enabled")
+    if isinstance(spelling, bool):
+        values["spelling_enabled"] = spelling
+    grammar = stored.get("grammar_enabled")
+    if isinstance(grammar, bool):
+        values["grammar_enabled"] = grammar
+    categories = stored.get("visible_categories")
+    if isinstance(categories, list):
+        values["visible_categories"] = [
+            category for category in WRITING_CATEGORIES if category in categories
+        ]
+    rules = stored.get("disabled_rule_ids")
+    if isinstance(rules, list):
+        values["disabled_rule_ids"] = sorted({
+            rule.strip() for rule in rules if isinstance(rule, str) and rule.strip()
+        })
+    return values
+
+
+def write_writing_settings(
+    values: Mapping[str, object], path: str | os.PathLike[str] | None = None,
+) -> WritingSettings:
+    """Persist supplied preferences, retaining other keys and disk sections.
+
+    Only known supplied keys are updated, so a partial update cannot reset a
+    preference written by another window. Personal vocabulary has its own file.
+    """
+    validated = read_writing_settings({WRITING_KEY: values})
+    changes = {key: value for key, value in validated.items() if key in values}
+    saved = write_settings_sections({WRITING_KEY: changes}, path)
+    return read_writing_settings(saved)
 
 
 APPEARANCE_KEY = "appearance"

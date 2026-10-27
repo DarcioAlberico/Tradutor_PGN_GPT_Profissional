@@ -71,6 +71,119 @@ class DefaultPathSafetyTests(unittest.TestCase):
         self.assertIn("glossario-sandbox-", str(caminho))
 
 
+class WritingSettingsTests(unittest.TestCase):
+    CATEGORIES = [
+        "SPELLING", "NOMINAL_AGREEMENT", "VERBAL_AGREEMENT", "GRAMMAR",
+        "PUNCTUATION", "REPEATED_WORD",
+    ]
+
+    def test_old_or_malformed_settings_use_safe_defaults(self):
+        expected = {
+            "spelling_enabled": True,
+            "grammar_enabled": False,
+            "visible_categories": self.CATEGORIES,
+            "disabled_rule_ids": [],
+        }
+        for stored in ({}, None, [], {"writing_assistant": None},
+                       {"writing_assistant": ["SPELLING"]},
+                       {"writing_assistant": {
+                           "spelling_enabled": 0, "grammar_enabled": "true",
+                           "visible_categories": "SPELLING", "disabled_rule_ids": {},
+                       }}):
+            with self.subTest(stored=stored):
+                self.assertEqual(settings.read_writing_settings(stored), expected)
+
+    def test_preferences_are_validated_and_canonical_without_mutating_source(self):
+        stored = {"writing_assistant": {
+            "spelling_enabled": False,
+            "grammar_enabled": True,
+            "visible_categories": ["REPEATED_WORD", "SPELLING", "UNKNOWN", "SPELLING", {}, 3],
+            "disabled_rule_ids": [" Z_RULE ", "A_RULE", "Z_RULE", "a_rule", "", " ", None, 3],
+            "unknown_future_option": True,
+        }}
+        before = json.loads(json.dumps(stored))
+        self.assertEqual(settings.read_writing_settings(stored), {
+            "spelling_enabled": False,
+            "grammar_enabled": True,
+            "visible_categories": ["SPELLING", "REPEATED_WORD"],
+            "disabled_rule_ids": ["A_RULE", "Z_RULE", "a_rule"],
+        })
+        self.assertEqual(stored, before)
+
+    def test_empty_lists_are_preserved_and_read_results_are_independent(self):
+        source = {"writing_assistant": {"visible_categories": [], "disabled_rule_ids": ["RULE"]}}
+        result = settings.read_writing_settings(source)
+        self.assertEqual(result["visible_categories"], [])
+        result["visible_categories"].append("SPELLING")
+        result["disabled_rule_ids"].clear()
+        self.assertEqual(settings.read_writing_settings(source)["disabled_rule_ids"], ["RULE"])
+        self.assertEqual(source["writing_assistant"]["visible_categories"], [])
+        defaults = settings.read_writing_settings({})
+        defaults["visible_categories"].clear()
+        defaults["disabled_rule_ids"].append("RULE")
+        self.assertEqual(settings.read_writing_settings({})["visible_categories"], self.CATEGORIES)
+        self.assertEqual(settings.read_writing_settings({})["disabled_rule_ids"], [])
+
+    def test_writes_validate_values_and_preserve_other_sections_and_omitted_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings({
+                "editor_drafts": {"draft": {"text": "rascunho"}},
+                "output": {"utf8_bom": True},
+                "writing_assistant": {"spelling_enabled": False, "future_option": 42},
+            }, path)
+            result = settings.write_writing_settings({
+                "grammar_enabled": True,
+                "visible_categories": ["GRAMMAR", "SPELLING", "GRAMMAR"],
+                "disabled_rule_ids": [" B ", "A", "A"],
+                "words": ["NEVER_STORE_PERSONAL_WORDS_HERE"],
+            }, path)
+            self.assertEqual(result, {
+                "spelling_enabled": False, "grammar_enabled": True,
+                "visible_categories": ["SPELLING", "GRAMMAR"],
+                "disabled_rule_ids": ["A", "B"],
+            })
+            disk = load_settings(path)
+            self.assertEqual(disk["editor_drafts"], {"draft": {"text": "rascunho"}})
+            self.assertEqual(disk["output"], {"utf8_bom": True})
+            self.assertEqual(disk["writing_assistant"], {**result, "future_option": 42})
+            self.assertNotIn("words", disk["writing_assistant"])
+            settings.write_writing_settings({"grammar_enabled": "false"}, path)
+            self.assertFalse(settings.read_writing_settings(load_settings(path))["grammar_enabled"])
+
+    def test_concurrent_writing_and_other_section_updates_do_not_erase_each_other(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            start = threading.Barrier(3)
+            failures = []
+
+            def change(values):
+                try:
+                    start.wait(timeout=5)
+                    settings.write_writing_settings(values, path)
+                except Exception as exc:
+                    failures.append(exc)
+
+            workers = [
+                threading.Thread(target=change, args=({"grammar_enabled": True},)),
+                threading.Thread(target=change, args=({"disabled_rule_ids": ["RULE"]},)),
+            ]
+            for worker in workers:
+                worker.start()
+            start.wait(timeout=5)
+            settings.write_settings_sections({"output": {"utf8_bom": True}}, path)
+            for worker in workers:
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
+            disk = load_settings(path)
+            self.assertTrue(disk["output"]["utf8_bom"])
+            self.assertEqual(settings.read_writing_settings(disk), {
+                "spelling_enabled": True, "grammar_enabled": True,
+                "visible_categories": self.CATEGORIES, "disabled_rule_ids": ["RULE"],
+            })
+
+
 class SettingsTests(unittest.TestCase):
     def test_safe_geometry_clamps_negative_saved_position(self):
         self.assertEqual(
