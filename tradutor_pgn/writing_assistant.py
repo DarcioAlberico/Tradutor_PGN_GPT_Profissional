@@ -10,9 +10,10 @@ from typing import Protocol
 import unicodedata
 
 from . import prose_spellcheck
+from .languagetool_client import LanguageToolLocalAdapter
 from .personal_dictionary import PersonalDictionary
 from .writing_protection import ProtectedText, protect_text, restore_issue_offsets
-from .writing_types import AssistantStatus, WritingIssue, WritingRequest, WritingResult
+from .writing_types import AssistantMode, AssistantStatus, WritingIssue, WritingRequest, WritingResult
 
 
 class SpellingUnavailable(RuntimeError):
@@ -144,13 +145,18 @@ class PortugueseWritingAssistant:
 
     def __init__(
         self, *, spelling_adapter: WritingAdapter | None = None,
+        grammar_adapter: WritingAdapter | None = None,
         protector: Callable[[WritingRequest], ProtectedText] = protect_text,
     ) -> None:
         self._spelling = spelling_adapter if spelling_adapter is not None else SpyllsAdapter()
+        self._grammar = grammar_adapter if grammar_adapter is not None else LanguageToolLocalAdapter()
         self._protect = protector
         self._status = AssistantStatus("stopped", "unavailable")
+        self._closed = False
 
     def analyze(self, request: WritingRequest) -> WritingResult:
+        if self._closed:
+            return self._unavailable(request, "Assistente de escrita encerrado.")
         try:
             protected = self._protect(request)
             candidates = self._spelling.analyze(request, protected)
@@ -158,6 +164,16 @@ class PortugueseWritingAssistant:
             return self._unavailable(request, str(error))
         except Exception:
             return self._unavailable(request, "Ortografia indisponível: falha no motor local.")
+        mode: AssistantMode = "spelling_only"
+        diagnostic = ""
+        if request.grammar_enabled:
+            try:
+                candidates += self._grammar.analyze(request, protected)
+                mode = "full"
+            except Exception:
+                # Provider exceptions can contain the complete request/response.
+                # Preserve spelling and use only this fixed local diagnostic.
+                diagnostic = "Concordância indisponível; somente ortografia."
         issues: dict[tuple[object, ...], WritingIssue] = {}
         for candidate in candidates:
             if candidate.rule_id in request.disabled_rule_ids:
@@ -166,21 +182,41 @@ class PortugueseWritingAssistant:
             if issue is None:
                 continue
             issue.validate_for(request)
-            key = (issue.start, issue.end, issue.category, issue.rule_id, issue.provider, issue.state)
+            # Spylls runs first and remains the authoritative spelling provider.
+            # LT may report the same typo under a different rule ID.
+            key = ((issue.start, issue.end, issue.category, issue.state) if issue.category == "SPELLING"
+                   else (issue.start, issue.end, issue.category, issue.rule_id, issue.provider, issue.state))
             issues.setdefault(key, issue)
         ordered = tuple(sorted(issues.values(), key=lambda issue: (
             issue.start, issue.end, issue.category, issue.rule_id, issue.provider,
         )))
-        diagnostic = "Concordância indisponível; somente ortografia." if request.grammar_enabled else ""
-        self._status = AssistantStatus("ready", "spelling_only", diagnostic)
-        return WritingResult(request.text_version, ordered, "spelling_only", diagnostic)
+        grammar_status = self._grammar_status() if request.grammar_enabled else None
+        self._status = AssistantStatus("ready", mode, diagnostic,
+                                       grammar_status.restart_attempted if grammar_status else False)
+        return WritingResult(request.text_version, ordered, mode, diagnostic)
 
     def _unavailable(self, request: WritingRequest, diagnostic: str) -> WritingResult:
         self._status = AssistantStatus("failed", "unavailable", diagnostic)
         return WritingResult(request.text_version, (), "unavailable", diagnostic)
 
     def status(self) -> AssistantStatus:
+        if self._status.mode == "full":
+            grammar_status = self._grammar_status()
+            if grammar_status is not None and grammar_status.mode != "full":
+                self._status = AssistantStatus(grammar_status.state, "spelling_only",
+                                               "Concordância indisponível; somente ortografia.",
+                                               grammar_status.restart_attempted)
         return self._status
 
+    def _grammar_status(self) -> AssistantStatus | None:
+        status = getattr(self._grammar, "status", None)
+        return status() if callable(status) else None
+
     def shutdown(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        shutdown = getattr(self._grammar, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
         self._status = AssistantStatus("stopped", "unavailable")

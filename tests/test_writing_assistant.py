@@ -279,3 +279,90 @@ def test_existing_hyphen_suggestion_is_preserved_without_inventing_correction(tm
     assert [issue.original for issue in issues] == ["contra-jogo"]
     assert issues[0].suggestions == ("contra jogo",)
     assert prose_spellcheck.suggestions("contra-jogo", dictionary) == ["contra jogo"]
+
+
+def test_grammar_disabled_never_calls_or_starts_provider(tmp_path):
+    class ForbiddenGrammar:
+        def analyze(self, request, protected):
+            pytest.fail("disabled grammar must not call its provider")
+
+    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path), grammar_adapter=ForbiddenGrammar())
+    result = assistant.analyze(WritingRequest("posiçao", 1, "pt", grammar_enabled=False))
+    assert result.mode == "spelling_only" and result.diagnostic == ""
+    assert [issue.original for issue in result.issues] == ["posiçao"]
+
+
+def test_full_mode_restores_grammar_offsets_deduplicates_spelling_and_filters_rules(tmp_path):
+    class Grammar:
+        def analyze(self, request, protected):
+            def issue(start, end, rule, category):
+                return WritingIssue("", rule, category, start, end, protected.projected_text[start:end],
+                                    "Mensagem", "Explicação", ("correção",), "warning", "languagetool", request.text_version)
+            grammar = issue(14, 18, "AGREEMENT", "NOMINAL_AGREEMENT")
+            return (grammar, grammar, issue(2, 9, "MORFOLOGIK_RULE_PT_BR", "SPELLING"),
+                    issue(10, 13, "DISABLED", "GRAMMAR"), issue(2, 9, "SECOND_REASON", "GRAMMAR"))
+
+    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path), grammar_adapter=Grammar())
+    request = WritingRequest("🙂 posiçao boa erro", 8, "pt-BR", grammar_enabled=True,
+                             disabled_rule_ids=frozenset({"DISABLED"}))
+    result = assistant.analyze(request)
+    assert result.mode == "full" and result.diagnostic == ""
+    assert [(issue.start, issue.rule_id, issue.provider) for issue in result.issues] == [
+        (2, "SECOND_REASON", "languagetool"), (2, "SPELLING_UNKNOWN_WORD", "spylls"),
+        (14, "AGREEMENT", "languagetool"),
+    ]
+    result.validate_for(request)
+    assert assistant.status().mode == "full"
+
+
+def test_grammar_projection_hides_domain_text_and_suppresses_exact_glossary_conflict(tmp_path):
+    seen = []
+
+    class Grammar:
+        def analyze(self, request, protected):
+            seen.append(protected.projected_text)
+            def issue(start, end):
+                return WritingIssue("", "GRAMMAR_RULE", "GRAMMAR", start, end, protected.projected_text[start:end],
+                                    "Mensagem", "Explicação", ("correção",), "warning", "languagetool", request.text_version)
+            return (issue(0, 4), issue(5, 10), issue(11, 16), issue(17, 24))
+
+    request = WritingRequest("Bxf7 termo NomeX posiçao", 1, "pt", source_text="NomeX",
+                             glossary_terms=frozenset({"termo"}), grammar_enabled=True)
+    result = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path), grammar_adapter=Grammar()).analyze(request)
+    assert seen == ["                 posiçao"]
+    assert [(issue.original, issue.state) for issue in result.issues] == [
+        ("termo", "suppressed_by_glossary"), ("posiçao", "active"), ("posiçao", "active"),
+    ]
+    assert result.mode == "full"
+    result.validate_for(request)
+
+
+def test_grammar_failure_preserves_spelling_without_leaking_provider_payload(tmp_path):
+    class BrokenGrammar:
+        def analyze(self, request, protected):
+            raise RuntimeError(request.text)
+
+    request = WritingRequest("posiçao", 4, "pt", grammar_enabled=True)
+    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path), grammar_adapter=BrokenGrammar())
+    result = assistant.analyze(request)
+    assert result.mode == "spelling_only" and len(result.issues) == 1
+    assert result.diagnostic and request.text not in result.diagnostic
+    assert assistant.status().mode == "spelling_only"
+
+
+def test_assistant_shutdown_closes_grammar_resource_once(tmp_path):
+    closed = []
+
+    class Grammar:
+        def analyze(self, request, protected):
+            return ()
+
+        def shutdown(self):
+            closed.append(True)
+
+    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path), grammar_adapter=Grammar())
+    assert assistant.analyze(WritingRequest("boa", 1, "pt", grammar_enabled=True)).mode == "full"
+    assistant.shutdown()
+    assistant.shutdown()
+    assert closed == [True]
+    assert assistant.status().state == "stopped"
