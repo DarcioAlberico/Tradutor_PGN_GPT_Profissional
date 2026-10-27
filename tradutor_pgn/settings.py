@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import threading
 from datetime import datetime
 
@@ -44,6 +45,103 @@ def load_settings(path=None):
     if not isinstance(data, dict):
         return {}
     return data
+
+
+# ============================================================================
+# Canal de aviso das configuracoes (garantia M3)
+#
+# `load_settings` acima e tolerante de proposito: quem LE degrada para `{}`,
+# porque uma janela que nao abre e pior do que uma janela sem preferencias. A
+# GRAVACAO nao pode ter a mesma tolerancia — e o que este canal e a funcao
+# `_read_settings_for_update` separam. Como o canal do glossario (S5), este
+# modulo nao importa Tk: quem registra o handler decide como mostrar.
+# ============================================================================
+
+_settings_warning_handler = None
+
+
+def set_settings_warning_handler(handler):
+    """Registra quem exibe os avisos de gravacao. Devolve o handler anterior."""
+    global _settings_warning_handler
+    previous = _settings_warning_handler
+    _settings_warning_handler = handler
+    return previous
+
+
+def _warn(message):
+    """Publica um aviso. Nunca levanta: o chamador ja esta num caminho de erro."""
+    if _settings_warning_handler is None:
+        if sys.stdout is not None:
+            try:
+                print(f"[CONFIGURACOES] {message}")
+            except Exception:  # pragma: no cover - stdout fechado
+                pass
+        return
+    try:
+        _settings_warning_handler(message)
+    except Exception:  # pragma: no cover - defensivo
+        pass
+
+
+def _read_settings_for_update(path):
+    """A leitura ESTRITA que antecede uma gravacao (garantia M3).
+
+    `update_settings` lia com `load_settings`, que devolve `{}` para qualquer
+    erro — inclusive um `PermissionError` de um antivirus tocando o arquivo por
+    uma fracao de segundo. A gravacao seguinte escrevia por cima um arquivo so
+    com a chave que estava mudando: rascunhos (R4), lista de falhas (T4) e
+    preferencias (M1) sumiam de vez, sem aviso. Reproduzido com a funcao real
+    (ROADMAP 28.1).
+
+    Tres desfechos, e nenhum deles e "fingir que o arquivo nao existe":
+
+    - nao existe: `{}`, e a gravacao cria o arquivo;
+    - existe e nao da para ler (`OSError`): o aviso sai e o `OSError` sobe —
+      todos os chamadores ja o tratam, e desistir de UMA gravacao e barato;
+    - existe e nao e JSON (ou nao e um objeto): e renomeado para
+      `.corrompido-<data>` ao lado, o aviso diz onde ficou, e a gravacao segue
+      com `{}`. Renomear preserva o que der para recuperar a mao; seguir e o
+      que impede o programa de ficar sem gravar preferencia nenhuma ate alguem
+      consertar o arquivo.
+    """
+    # Em bytes, e nao em texto: um byte invalido no meio do arquivo e
+    # "corrompido" (o ramo de baixo), e nao "ilegivel" — decodificar aqui o
+    # confundiria com o `OSError`.
+    try:
+        with open(path, "rb") as file:
+            raw = file.read()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        _warn(
+            f"Nao foi possivel ler {path} ({exc}); esta gravacao foi "
+            f"descartada para nao apagar o que o arquivo ja tem."
+        )
+        raise
+
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        data = None
+
+    if isinstance(data, dict):
+        return data
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    aside = f"{path}.corrompido-{stamp}"
+    try:
+        os.replace(path, aside)
+    except OSError as exc:
+        _warn(
+            f"{path} esta corrompido e nao pode ser renomeado ({exc}); esta "
+            f"gravacao foi descartada."
+        )
+        raise
+    _warn(
+        f"{path} estava corrompido e foi renomeado para {aside}; as "
+        f"configuracoes recomecam vazias. O que der para recuperar esta la."
+    )
+    return {}
 
 
 def save_settings(settings, path=None):
@@ -97,8 +195,13 @@ def update_settings(mutator, path=None):
     a gravacao sao uma coisa so, e desde que o rascunho passou a ser gravado em
     segundo plano ha duas threads chamando isto.
     """
+    if path is None:
+        path = default_settings_path()
+
     with _UPDATE_LOCK:
-        settings = load_settings(path)
+        # A leitura estrita, e nao `load_settings`: aqui `{}` por engano vira
+        # um arquivo novo por cima do velho (garantia M3).
+        settings = _read_settings_for_update(path)
         result = mutator(settings)
         save_settings(settings, path)
     return result
@@ -254,11 +357,21 @@ def read_output_settings(settings):
 
 MAIN_WINDOW_KEY = "main_window"
 
+# Os motores que o dialogo do "Iniciar tradução" oferece (ROADMAP 28.7).
+# "google" e o de sempre; os outros sao os ids de `llm_providers.PROVIDERS`,
+# escritos aqui tambem para o arquivo validar sem importar a camada de rede.
+TRANSLATION_PROVIDER_GOOGLE = "google"
+TRANSLATION_PROVIDER_IDS = (TRANSLATION_PROVIDER_GOOGLE, "anthropic", "openai", "deepseek")
+
 MAIN_WINDOW_DEFAULTS = {
     "source_language": "",
     "target_language": "pt",
     "process_subdirs": True,
     "source_path": "",
+    # O motor escolhido no ultimo "Iniciar tradução" — o que o dialogo oferece
+    # pre-selecionado na proxima vez. Nunca decide sozinho: sem chave para ele,
+    # o dialogo cai no Google e diz por que (garantia M1, ROADMAP 28.7).
+    "translation_provider": TRANSLATION_PROVIDER_GOOGLE,
     # Tamanho e posicao (ROADMAP 22.12). Vazio quer dizer "nunca foi gravado", e
     # ai a janela maximiza — que e o que ela sempre fez, e o certo para a
     # primeira abertura. Os dois editores ja lembravam a geometria deles; a
@@ -315,22 +428,151 @@ def read_main_window_settings(settings, known_languages):
     if isinstance(geometria, str):
         valores["geometry"] = geometria
 
+    motor = guardado.get("translation_provider")
+    if isinstance(motor, str) and motor in TRANSLATION_PROVIDER_IDS:
+        valores["translation_provider"] = motor
+
     return valores
 
 
-def write_main_window_settings(values, path=None):
-    """Grava as escolhas relendo o disco antes (garantia R4).
+def write_settings_sections(sections, path=None):
+    """Grava `{secao: {chave: valor}}` relendo o disco antes (garantia R4).
 
     As janelas de edicao guardam rascunhos no MESMO arquivo. Gravar o snapshot
     inteiro daqui apagaria o que elas escreveram desde que este processo abriu —
-    que e exatamente o defeito que R4 existe para impedir.
+    que e exatamente o defeito que R4 existe para impedir. Varias secoes numa
+    chamada so porque a tela de Configuracoes grava duas de uma vez, e duas
+    releituras seriam duas escritas para um clique.
     """
     def mutator(settings):
-        guardado = settings.get(MAIN_WINDOW_KEY)
-        if not isinstance(guardado, dict):
-            guardado = {}
-            settings[MAIN_WINDOW_KEY] = guardado
-        guardado.update(values)
-        return guardado
+        gravadas = {}
+        for key, values in sections.items():
+            guardado = settings.get(key)
+            if not isinstance(guardado, dict):
+                guardado = {}
+                settings[key] = guardado
+            guardado.update(values)
+            gravadas[key] = guardado
+        return gravadas
 
     return update_settings(mutator, path)
+
+
+def write_main_window_settings(values, path=None):
+    """As escolhas da janela principal, pela mesma porta (R4)."""
+    gravadas = write_settings_sections({MAIN_WINDOW_KEY: values}, path)
+    return gravadas[MAIN_WINDOW_KEY] if gravadas else gravadas
+
+
+APPEARANCE_KEY = "appearance"
+
+# Os tres valores que a tela oferece, e os nomes que o CustomTkinter entende.
+# "system" e o comportamento de sempre: o programa nasceu em
+# `set_appearance_mode("System")` e segue o Windows.
+APPEARANCE_THEMES = ("system", "light", "dark")
+CTK_APPEARANCE_MODES = {"system": "System", "light": "Light", "dark": "Dark"}
+
+APPEARANCE_DEFAULTS = {
+    "theme": "system",
+}
+
+
+def read_appearance_settings(settings):
+    """O tema escolhido, validado: qualquer coisa fora dos tres cai em "system"."""
+    guardado = settings.get(APPEARANCE_KEY)
+    valores = dict(APPEARANCE_DEFAULTS)
+    if not isinstance(guardado, dict):
+        return valores
+    tema = guardado.get("theme")
+    if isinstance(tema, str) and tema in APPEARANCE_THEMES:
+        valores["theme"] = tema
+    return valores
+
+
+def appearance_mode_from_settings(settings):
+    """O argumento de `ctk.set_appearance_mode` para o que esta gravado."""
+    return CTK_APPEARANCE_MODES[read_appearance_settings(settings)["theme"]]
+
+
+BOARD_KEY = "board"
+
+BOARD_DEFAULTS = {
+    # Calcular a posicao (FEN) de cada comentario na vez do arquivo (ROADMAP
+    # 28.8). Ligado por padrao: custa ~2 s por 800 KB de PGN e so acontece
+    # quando o `python-chess` esta instalado; sem ele o worker avisa uma vez
+    # por execucao e segue, e desligar aqui cala o aviso.
+    "fen": True,
+}
+
+
+def read_board_settings(settings):
+    guardado = settings.get(BOARD_KEY)
+    valores = dict(BOARD_DEFAULTS)
+    if isinstance(guardado, dict) and isinstance(guardado.get("fen"), bool):
+        valores["fen"] = guardado["fen"]
+    return valores
+
+
+LLM_KEY = "llm"
+
+# O modelo de cada provedor de linguagem (ROADMAP 28.7). Os nomes sao os que
+# cada API aceita; o campo e livre porque os provedores trocam de modelo mais
+# depressa do que este programa lanca versao — quem acompanha o nome e o
+# usuario, e a tela diz onde conferir. As chaves NAO ficam aqui: vivem em
+# `api_keys` (arquivo proprio, cifrado), e a tela as trata como campo a parte.
+LLM_DEFAULTS = {
+    "anthropic_model": "claude-opus-5",
+    "openai_model": "gpt-5",
+    "deepseek_model": "deepseek-flash",
+}
+
+
+def read_llm_settings(settings):
+    """Os modelos gravados; um campo vazio ou de outro tipo volta ao padrao."""
+    guardado = settings.get(LLM_KEY)
+    valores = dict(LLM_DEFAULTS)
+    if not isinstance(guardado, dict):
+        return valores
+    for chave in LLM_DEFAULTS:
+        modelo = guardado.get(chave)
+        if isinstance(modelo, str) and modelo.strip():
+            valores[chave] = modelo.strip()
+    return valores
+
+
+# As opcoes que o USUARIO escolhe, por secao — e so elas. `main_window` e
+# `editor_drafts` tambem vivem no arquivo, mas sao estado que a janela grava
+# sozinha (o ultimo idioma, a geometria, um rascunho), nao uma escolha que se
+# faz numa tela. A tela de Configuracoes e conferida contra isto (garantia M4):
+# toda chave daqui tem um controle la, e um teste enumera.
+USER_OPTION_SECTIONS = {
+    OUTPUT_KEY: OUTPUT_DEFAULTS,
+    APPEARANCE_KEY: APPEARANCE_DEFAULTS,
+    BOARD_KEY: BOARD_DEFAULTS,
+    LLM_KEY: LLM_DEFAULTS,
+}
+
+
+def parse_wrap_columns(text):
+    """O que o usuario digitou no campo da requebra -> `(valor, erro)`.
+
+    Vazio e `0` desligam. Um inteiro de `MIN_WRAP_COLUMNS` para cima e a
+    largura. O resto volta com a razao, para o campo dizer e nao gravar: a
+    regra e a mesma que `read_output_settings` aplica ao JSON editado a mao,
+    escrita uma vez so — o piso mora em `MIN_WRAP_COLUMNS` para as duas.
+    """
+    digitado = (text or "").strip()
+    if not digitado:
+        return 0, None
+    try:
+        valor = int(digitado)
+    except ValueError:
+        return None, "Digite um número inteiro de colunas, ou 0 para desligar."
+    if valor < 0:
+        return None, "A largura não pode ser negativa; 0 desliga a requebra."
+    if 0 < valor < MIN_WRAP_COLUMNS:
+        return None, (
+            f"O mínimo é {MIN_WRAP_COLUMNS} colunas; abaixo disso o PGN vira "
+            f"uma palavra por linha. Use 0 para desligar."
+        )
+    return valor, None

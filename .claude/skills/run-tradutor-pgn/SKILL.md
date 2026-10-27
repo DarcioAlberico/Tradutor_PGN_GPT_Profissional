@@ -218,10 +218,17 @@ bloqueia o terminal e não dá handle nenhum sobre o app.
 python -m unittest discover -s tests
 ```
 
-627 testes, ~112 s. Os de `test_editor_windows.py` e `test_main_window.py` abrem
-janelas de verdade — os editores e a janela principal — e são pulados onde não
-houver display. O harness comum deles (gate de display, silenciamento de
-diálogos, sandbox de caminhos) está em `tests/gui_harness.py`.
+~1.650 testes: ~1 min sem janela + ~9 min de janelas. Os de
+`test_editor_windows.py` e `test_main_window.py` abrem janelas de verdade — os
+editores e a janela principal — e são pulados onde não houver display. O harness
+comum deles (gate de display, silenciamento de diálogos, sandbox de caminhos)
+está em `tests/gui_harness.py`. Os sem janela estão divididos por domínio
+(`test_banco.py`, `test_worker.py`, `test_glossario.py`, …; os dublês em
+`tests/helpers.py`), então o módulo de uma função roda em segundos:
+
+```bash
+python -m pytest tests/test_worker.py -q
+```
 
 ## Gotchas
 

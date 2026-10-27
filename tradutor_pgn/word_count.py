@@ -8,8 +8,18 @@ o orcamento discordar do relatorio.
 Sem Tk e sem banco, como `chess_terms` e `annotation_mask`.
 """
 
+from __future__ import annotations
 
-def count_words(text):
+from collections.abc import Hashable
+from typing import TypeVar
+
+# As cinco contagens de um par (ou do total): `rows`, `original`, `translated`,
+# `verified`, `pending`.
+WordCounts = dict[str, int]
+Chave = TypeVar("Chave", bound=Hashable)
+
+
+def count_words(text: str | None) -> int:
     """Palavras separadas por espaco em branco.
 
     E a mesma definicao que as ferramentas de traducao usam para orcar (`wc -w`,
@@ -31,7 +41,13 @@ def count_words(text):
     return len(text.split())
 
 
-def add_word_counts(acumulador, chave, original, translated, verified):
+def add_word_counts(
+    acumulador: dict[Chave, WordCounts],
+    chave: Chave,
+    original: str | None,
+    translated: str | None,
+    verified: int | None,
+) -> WordCounts:
     """Soma um par de textos no acumulador `{chave: contagens}`.
 
     A escrita fica aqui, e nao no laco de quem agrega, porque as cinco somas tem de
@@ -64,7 +80,7 @@ def add_word_counts(acumulador, chave, original, translated, verified):
     return contagens
 
 
-def total_word_counts(acumulador):
+def total_word_counts(acumulador: dict[Chave, WordCounts]) -> WordCounts:
     """Soma de todas as chaves, na mesma forma de cada uma."""
     total = {"rows": 0, "original": 0, "translated": 0, "verified": 0, "pending": 0}
     for contagens in acumulador.values():

@@ -13,50 +13,33 @@ import sqlite3
 import sys
 
 from .app_config import LANGUAGE_NAMES
-from .app_paths import data_path
+from . import backup_retention
+from .app_paths import data_path, glossary_catalog_path
 from .backup_retention import prune_glossary_backups
+from .glossary_catalog import GlossaryCatalog, MigrationReport, canonical_identity
+from .glossary_types import (
+    GLOSSARY_PRIORITY_DEFAULT as GLOSSARY_PRIORITY_DEFAULT,
+    GLOSSARY_RULE_AUTOMATIC as GLOSSARY_RULE_AUTOMATIC,
+    GLOSSARY_RULE_CLEANUP as GLOSSARY_RULE_CLEANUP,
+    GLOSSARY_RULE_SUGGESTION as GLOSSARY_RULE_SUGGESTION,
+    GLOSSARY_RULE_TYPES as GLOSSARY_RULE_TYPES,
+    GLOSSARY_RULE_TYPE_ALIASES as GLOSSARY_RULE_TYPE_ALIASES,
+    GLOSSARY_SCOPE_ALL as GLOSSARY_SCOPE_ALL,
+    GLOSSARY_SCOPE_ANY as GLOSSARY_SCOPE_ANY,
+    GLOSSARY_SCOPE_SEPARATOR as GLOSSARY_SCOPE_SEPARATOR,
+    GLOSSARY_SCOPE_VARIABLES as GLOSSARY_SCOPE_VARIABLES,
+    _normalize_rule_type as _normalize_rule_type,
+    _rule_type_alias as _rule_type_alias,
+    normalize_glossary_priority as normalize_glossary_priority,
+    normalize_glossary_scope as normalize_glossary_scope,
+    normalize_glossary_text as normalize_glossary_text,
+)
 
 
 SUBSTITUTION_VARIABLES = {"substituições", "substituicoes"}
-GLOSSARY_RULE_SUGGESTION = "suggestion"
-GLOSSARY_RULE_CLEANUP = "cleanup"
-GLOSSARY_RULE_AUTOMATIC = "automatic"
-GLOSSARY_RULE_TYPES = (
-    GLOSSARY_RULE_SUGGESTION,
-    GLOSSARY_RULE_CLEANUP,
-    GLOSSARY_RULE_AUTOMATIC,
-)
 GLOSSARY_CSV_HEADERS = ["original", "replacement", "type", "priority", "lang"]
 GLOSSARY_DB_FILENAME = "glossario.db"
 GLOSSARY_SEED_FILENAME = "Substituicoes-semente.txt"
-
-# Prioridade explicita (ROADMAP 1.5, parte 2). Zero e "sem opiniao", e e o valor
-# de toda regra que nao foi tocada — por isso o formato do arquivo so escreve o
-# campo quando ele nao e zero: um glossario de 7 mil regras nao muda de tamanho
-# por causa de uma decisao tomada em quatro delas.
-GLOSSARY_PRIORITY_DEFAULT = 0
-
-# ============================================================================
-# Escopo de idioma (garantia S11, ROADMAP 15)
-#
-# O escopo nomeia **o idioma de DESTINO** para o qual a regra vale — `'pt'` —, ou
-# o par inteiro quando o erro e daquela traducao especifica — `'en>pt'`. Vazio
-# vale para todo par, que e o comportamento que o programa sempre teve.
-#
-# **Destino, e nao "o idioma do texto que a regra le".** A segunda leitura e mais
-# bonita (uma regra de limpeza le o comentario original, que esta no idioma de
-# ORIGEM) e e uma armadilha: um arquivo que declara `escopo = 'pt'` para as
-# milhares de regras que corrigem portugues desligaria, em silencio, todas as
-# regras de limpeza numa execucao en -> pt. Uniforme e sem excecao por tipo e o
-# que se pode explicar em uma frase.
-GLOSSARY_SCOPE_ALL = ""
-# Como se ESCREVE "vale para todo par" numa regra, quando o arquivo declara um
-# padrao. Sem isto nao haveria como dizer "esta e a excecao global" — a ausencia
-# do campo passou a significar "herda o padrao".
-GLOSSARY_SCOPE_ANY = "*"
-GLOSSARY_SCOPE_SEPARATOR = ">"
-# Nomes aceitos para o padrao do arquivo.
-GLOSSARY_SCOPE_VARIABLES = {"escopo", "escopo_padrao", "scope", "default_scope"}
 
 # Sobe quando o `glossario.db` ganha coluna, e tambem quando muda o significado
 # das marcas que dizem de onde ele veio. Um banco gravado por uma versao anterior
@@ -211,46 +194,6 @@ def _read_default_scope(code, path):
     return GLOSSARY_SCOPE_ALL
 
 
-# Como o tipo pode estar escrito no arquivo, que e editado a mao. O masculino
-# (`automatico`) faltava e e o erro mais facil de cometer — a regra virava
-# sugestao, deixava de rodar depois da API, e nada avisava (ROADMAP 14.6).
-GLOSSARY_RULE_TYPE_ALIASES = {
-    "sugestao": GLOSSARY_RULE_SUGGESTION,
-    "sugestão": GLOSSARY_RULE_SUGGESTION,
-    "sugestões": GLOSSARY_RULE_SUGGESTION,
-    "suggestion": GLOSSARY_RULE_SUGGESTION,
-    "limpeza": GLOSSARY_RULE_CLEANUP,
-    "limpar": GLOSSARY_RULE_CLEANUP,
-    "cleanup": GLOSSARY_RULE_CLEANUP,
-    "clean": GLOSSARY_RULE_CLEANUP,
-    "auto": GLOSSARY_RULE_AUTOMATIC,
-    "automatica": GLOSSARY_RULE_AUTOMATIC,
-    "automática": GLOSSARY_RULE_AUTOMATIC,
-    "automatico": GLOSSARY_RULE_AUTOMATIC,
-    "automático": GLOSSARY_RULE_AUTOMATIC,
-    "automatic": GLOSSARY_RULE_AUTOMATIC,
-}
-
-
-def _rule_type_alias(value):
-    """O tipo canonico de `value`, ou `None` quando ele nao e reconhecido.
-
-    Separado de `_normalize_rule_type` porque as duas perguntas sao diferentes:
-    aquela responde "com que tipo eu seguo em frente" (e o padrao serve), esta
-    responde "isto e um tipo que eu conheco" — que e o que permite avisar em vez
-    de degradar em silencio (garantia S13).
-    """
-    texto = "" if value is None else str(value).strip()
-    if not texto:
-        return None
-    canonico = GLOSSARY_RULE_TYPE_ALIASES.get(texto.casefold(), texto)
-    return canonico if canonico in GLOSSARY_RULE_TYPES else None
-
-
-def _normalize_rule_type(rule_type):
-    return _rule_type_alias(rule_type) or GLOSSARY_RULE_SUGGESTION
-
-
 def _raw_rule_type(item):
     """O tipo COMO ESTA ESCRITO na entrada, sem normalizar."""
     if isinstance(item, dict):
@@ -301,57 +244,12 @@ def _entry_rule_type(item):
     return GLOSSARY_RULE_SUGGESTION
 
 
-def normalize_glossary_priority(value):
-    """Prioridade como inteiro, ou o padrao quando o valor nao serve.
-
-    O `Substituicoes.txt` e o CSV sao editaveis a mao e sobrevivem a versoes do
-    programa: uma prioridade escrita como `"alta"` nao pode virar excecao no
-    meio da carga do glossario. Vale a mesma regra do `rule_type` — o que nao da
-    para entender vira o padrao.
-    """
-    if isinstance(value, bool) or value is None:
-        return GLOSSARY_PRIORITY_DEFAULT
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return GLOSSARY_PRIORITY_DEFAULT
-
-
 def _entry_priority(item):
     if isinstance(item, dict):
         return normalize_glossary_priority(item.get("priority"))
     if isinstance(item, (list, tuple)) and len(item) >= 4:
         return normalize_glossary_priority(item[3])
     return GLOSSARY_PRIORITY_DEFAULT
-
-
-def normalize_glossary_scope(value):
-    """O escopo como texto canonico: `''`, `'pt'` ou `'en>pt'`.
-
-    `'*'` vira `''` — as duas grafias dizem "todo par", e uma delas existe so
-    porque a ausencia do campo passou a significar "herda o padrao do arquivo".
-
-    Um codigo que o programa nao conhece **e preservado como esta**, e nao
-    degradado para "todo par". Degradar aqui seria o oposto do que a intencao
-    diz: quem escreveu `'ptt'` quis restringir, e transformar isso em "vale para
-    todos" espalharia a regra em vez de limita-la. A regra simplesmente nao casa
-    par nenhum, e a carga avisa (mesma escolha da garantia S13).
-    """
-    texto = "" if value is None else str(value).strip()
-    if not texto or texto == GLOSSARY_SCOPE_ANY:
-        return GLOSSARY_SCOPE_ALL
-    if GLOSSARY_SCOPE_SEPARATOR in texto:
-        origem, destino = texto.split(GLOSSARY_SCOPE_SEPARATOR, 1)
-        origem = origem.strip()
-        destino = destino.strip()
-        if origem == GLOSSARY_SCOPE_ANY:
-            origem = ""
-        if destino == GLOSSARY_SCOPE_ANY:
-            destino = ""
-        if not origem and not destino:
-            return GLOSSARY_SCOPE_ALL
-        return f"{origem}{GLOSSARY_SCOPE_SEPARATOR}{destino}"
-    return texto
 
 
 def scope_languages(scope):
@@ -632,15 +530,12 @@ def _load_glossary_entry_details_from_file(path, deduplicate=True):
 
 
 def glossary_default_scope(path=None):
-    """O escopo padrao declarado pelo arquivo de glossario.
-
-    Lido do texto, e nao do `glossario.db`: o indice guarda o escopo ja resolvido
-    em cada regra, entao o padrao ali seria apenas informativo. Quem precisa dele
-    e a gravacao, que tem de reescrever o arquivo com a mesma declaracao que
-    encontrou.
-    """
+    """Read the authoritative default scope, or a separate legacy file's declaration."""
     if path is None:
         path = _default_substitutions_path()
+    catalog = _catalog_for_path(path)
+    if catalog is not None:
+        return catalog.list_entries().default_scope
     if not os.path.exists(path):
         return GLOSSARY_SCOPE_ALL
     try:
@@ -907,6 +802,59 @@ def rebuild_glossary_database(path=None, db_path=None):
     return sync_glossary_database(entries, db_path=db_path, source_path=path)
 
 
+def migrate_legacy_glossary(path=None, catalog_path=None, legacy_db_path=None) -> MigrationReport:
+    """Migrate the legacy text to V2 once, keeping the old cache only as backup."""
+    if path is None:
+        path = _default_substitutions_path()
+    if catalog_path is None:
+        catalog_path = glossary_catalog_path()
+    if legacy_db_path is None:
+        legacy_db_path = _default_glossary_db_path()
+
+    def load_entries():
+        # The permissive legacy parser normalizes unknown phases to suggestion.
+        # Reject their original spelling before it erases that distinction.
+        with open(path, "r", encoding="utf-8") as source:
+            raw_items = _read_substitution_assignment(source.read(), path)
+        for position, item in enumerate(raw_items, 1):
+            valid_pair = (
+                isinstance(item, (list, tuple)) and 2 <= len(item) <= 5
+            ) or (
+                isinstance(item, dict) and "original" in item and "replacement" in item
+            )
+            if not valid_pair:
+                raise ValueError(f"Invalid legacy entry at position {position}.")
+        unknown = []
+        for item in raw_items:
+            raw_type = _raw_rule_type(item)
+            if isinstance(item, dict) and not raw_type and item.get("type") not in (None, ""):
+                # A legacy parser prefers rule_type when type is falsy; reject
+                # an invalid falsy type only when no usable fallback was chosen.
+                raw_type = item["type"]
+            text = "" if raw_type is None else str(raw_type).strip()
+            if text and _rule_type_alias(raw_type) is None and text not in unknown:
+                unknown.append(text)
+        if unknown:
+            raise ValueError(f"Unknown legacy rule types: {', '.join(map(repr, unknown))}")
+        return read_glossary_import(path)
+
+    return GlossaryCatalog(catalog_path, path).migrate_legacy(load_entries, legacy_db_path)
+
+
+def initialize_catalog_glossary() -> MigrationReport:
+    """Run the one-time legacy migration, then repair any pending mirror."""
+    catalog_path = glossary_catalog_path()
+    catalog = GlossaryCatalog(catalog_path, _default_substitutions_path())
+    if catalog._migration_completed():
+        mirror = catalog.initialize()
+        return MigrationReport(
+            migrated=False, imported_count=0,
+            mirror_pending=mirror.mirror_pending if mirror else False,
+            warning=mirror.warning if mirror else None,
+        )
+    return migrate_legacy_glossary(catalog_path=catalog_path)
+
+
 def load_glossary_entries(path=None, deduplicate=True, prefer_db=True, db_path=None):
     """Carrega entradas persistentes do glossário sem depender de traducoes.db.
 
@@ -917,6 +865,15 @@ def load_glossary_entries(path=None, deduplicate=True, prefer_db=True, db_path=N
     """
     if path is None:
         path = _default_substitutions_path()
+
+    catalog_path = glossary_catalog_path()
+    if prefer_db and (
+        (_is_default_substitutions_path(path) and os.path.exists(catalog_path))
+        or (db_path is not None and os.path.abspath(db_path) == os.path.abspath(catalog_path))
+    ):
+        snapshot = GlossaryCatalog(catalog_path).list_entries()
+        entries = [(entry.original_text, entry.replacement_text) for entry in snapshot.entries]
+        return _deduplicate_entries(entries) if deduplicate else entries
 
     use_db = prefer_db and (
         db_path is not None or _is_default_substitutions_path(path)
@@ -946,6 +903,19 @@ def load_glossary_entry_details(path=None, deduplicate=True, prefer_db=True, db_
     if path is None:
         path = _default_substitutions_path()
 
+    catalog_path = glossary_catalog_path()
+    if prefer_db and (
+        (_is_default_substitutions_path(path) and os.path.exists(catalog_path))
+        or (db_path is not None and os.path.abspath(db_path) == os.path.abspath(catalog_path))
+    ):
+        snapshot = GlossaryCatalog(catalog_path).list_entries()
+        entries = [
+            (entry.original_text, entry.replacement_text, entry.rule_type,
+             entry.priority, entry.scope)
+            for entry in snapshot.entries
+        ]
+        return _deduplicate_entries(entries) if deduplicate else entries
+
     use_db = prefer_db and (
         db_path is not None or _is_default_substitutions_path(path)
     )
@@ -969,6 +939,19 @@ def create_glossary_backup(path=None, backup_dir=None, timestamp=None, prune=Tru
     """Cria uma cópia de segurança do glossário e retorna o caminho criado."""
     if path is None:
         path = _default_substitutions_path()
+
+    catalog = _catalog_for_path(path)
+    if catalog is not None:
+        backup_dir = backup_dir or os.path.join(os.path.dirname(catalog.db_path), "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        timestamp = timestamp or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        target = _unique_path(os.path.join(backup_dir, f"glossario-v2-{timestamp}.db"))
+        result = catalog.backup(target)
+        if prune:
+            backup_retention.prune_backups(
+                backup_dir, "glossario-v2-", ".db", protected=(result.path,) + tuple(protect),
+            )
+        return result.path
 
     if not os.path.exists(path):
         return None
@@ -1011,6 +994,11 @@ def save_glossary_entries(
     if path is None:
         path = _default_substitutions_path()
 
+    if _catalog_for_path(path) is not None:
+        raise RuntimeError(
+            "O catálogo SQLite V2 é autoritativo; use uma operação revision-safe do catálogo."
+        )
+
     _ensure_parent_dir(path)
     backup_path = None
     if create_backup:
@@ -1042,7 +1030,7 @@ def save_glossary_entries(
 
 
 def build_glossary_lookup(entries):
-    """Indice `orig -> [(new, posicao)]` para validar sem varrer o glossario.
+    """Indice `(original, fase, escopo) -> [(substituição, posição)]`.
 
     A validacao roda a cada tecla digitada no editor. Percorrer as ~7 mil
     entradas (e reconstruir a lista normalizada) a cada caractere trava a
@@ -1050,8 +1038,9 @@ def build_glossary_lookup(entries):
     igual, indexar por `orig` da o mesmo resultado em tempo constante.
     """
     lookup = {}
-    for index, (orig, new) in enumerate(_normalize_entries(entries)):
-        lookup.setdefault(orig, []).append((new, index))
+    for index, entry in enumerate(_normalize_detailed_entries(entries)):
+        orig, new, phase, scope = canonical_identity(entry)
+        lookup.setdefault((orig, phase, scope), []).append((new, index))
     return lookup
 
 
@@ -1097,10 +1086,11 @@ def validate_glossary_entry(
     if existing_lookup is not None:
         # Mesma ordem do laço original: vence a primeira entrada de mesmo
         # `orig`, seja ela duplicata exata ou conflito.
-        for existing_new, index in existing_lookup.get(orig, ()):
+        original, replacement, phase, canonical_scope = canonical_identity((orig, new, rule_type, 0, scope))
+        for existing_new, index in existing_lookup.get((original, phase, canonical_scope), ()):
             if current_index is not None and index == current_index:
                 continue
-            if new == existing_new:
+            if replacement == existing_new:
                 warnings.append("Entrada duplicada.")
             elif orig:
                 warnings.append("Mesmo original com substituição diferente.")
@@ -1467,19 +1457,6 @@ def deduplicate_glossary_entries(entries):
     return result
 
 
-def normalize_glossary_text(value):
-    """Remove espacos nas pontas de um lado da regra.
-
-    Um espaco no fim do padrao e consumido pelo casamento, mas a substituicao
-    normalmente nao o devolve — o resultado cola duas palavras
-    (`' a-coluna '` -> `' coluna a'` transforma "na a-coluna aberta" em
-    "na coluna aaberta"). Um espaco no inicio tambem desliga a checagem de
-    fronteira de palavra daquele lado. Nenhum dos dois efeitos e intencional,
-    entao as pontas sao normalizadas na gravacao.
-    """
-    return "" if value is None else str(value).strip()
-
-
 def add_glossary_entry(
     orig, new, path=None, backup_dir=None, timestamp=None, rule_type=None, priority=None,
     scope=None,
@@ -1732,7 +1709,7 @@ def export_glossary_csv(csv_path, entries=None, path=None):
     return {"exported": len(_normalize_detailed_entries(entries)), "csv_path": csv_path}
 
 
-def read_glossary_csv(csv_path):
+def read_glossary_csv(csv_path, *, strict=False):
     """Lê pares de glossário de um CSV exportado ou equivalente."""
     with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -1785,8 +1762,9 @@ def read_glossary_csv(csv_path):
                 (
                     (row.get(original_field) or "").strip(),
                     (row.get(replacement_field) or "").strip(),
+                    (row.get(type_field) if type_field else None) if strict else
                     _normalize_rule_type(row.get(type_field) if type_field else None),
-                    normalize_glossary_priority(
+                    (row.get(priority_field) if priority_field else None) if strict else normalize_glossary_priority(
                         row.get(priority_field) if priority_field else None
                     ),
                     normalize_glossary_scope(
@@ -1797,13 +1775,62 @@ def read_glossary_csv(csv_path):
         return rows
 
 
+def read_glossary_import(path):
+    """Read interchange rows without erasing invalid values before preview."""
+    if os.path.splitext(path)[1].lower() == ".csv":
+        return tuple(read_glossary_csv(path, strict=True))
+    with open(path, "r", encoding="utf-8") as source:
+        contents = source.read()
+    raw_items = _read_substitution_assignment(contents, path)
+    default_scope = _read_default_scope(contents, path)
+    entries = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            entries.append((item.get("original"), item.get("replacement"),
+                            _raw_rule_type(item), item.get("priority", 0),
+                            _entry_scope(item) if _entry_scope(item) is not None else default_scope))
+        elif isinstance(item, (tuple, list)) and 2 <= len(item) <= 5:
+            entries.append(tuple(item) + (None,) * (4 - len(item)) +
+                           ((default_scope,) if len(item) < 5 else ()))
+        else:
+            entries.append(item)
+    return tuple(entries)
+
+
+def _catalog_for_path(path):
+    if path is None:
+        path = _default_substitutions_path()
+    catalog_path = glossary_catalog_path()
+    if _is_default_substitutions_path(path) and os.path.exists(catalog_path):
+        return GlossaryCatalog(catalog_path, path)
+    return None
+
+
+def _catalog_import_analysis(catalog, source_entries):
+    preview = catalog.preview_import(source_entries)
+    counts = {status: sum(row.status == status for row in preview.rows)
+              for status in ("new", "duplicate", "conflict", "invalid")}
+    return {
+        "total_rows": len(preview.rows), "inserted": counts["new"],
+        "duplicates": counts["duplicate"], "conflicts": counts["conflict"],
+        "invalid": counts["invalid"], "skipped": len(preview.rows) - counts["new"],
+        "entries": [(row.entry.original_text, row.entry.replacement_text, row.entry.rule_type,
+                     row.entry.priority, row.entry.scope) for row in preview.rows if row.status == "new"],
+        "preview": preview, "catalog_revision": preview.catalog_revision,
+        "source_entries": tuple(source_entries),
+    }
+
+
 def analyze_glossary_csv_import(path, csv_path, allow_conflicts=False):
     """Analisa um CSV antes de importar para o glossário persistente."""
+    catalog = _catalog_for_path(path)
+    if catalog is not None:
+        return _catalog_import_analysis(catalog, read_glossary_import(csv_path))
     existing = load_glossary_entry_details(path, deduplicate=False)
-    existing_pairs = set(_normalize_entries(existing))
+    existing_pairs = {canonical_identity(entry) for entry in existing}
     replacements_by_original = {}
-    for orig, new in _normalize_entries(existing):
-        replacements_by_original.setdefault(orig, set()).add(new)
+    for orig, new, phase, scope in existing_pairs:
+        replacements_by_original.setdefault((orig, phase, scope), set()).add(new)
 
     stats = {
         "total_rows": 0,
@@ -1835,22 +1862,23 @@ def analyze_glossary_csv_import(path, csv_path, allow_conflicts=False):
             stats["skipped"] += 1
             continue
 
-        pair = (orig, new)
+        pair = canonical_identity(row_entry)
         if pair in existing_pairs or pair in inserted_pairs:
             stats["duplicates"] += 1
             stats["skipped"] += 1
             continue
 
-        has_conflict = orig in replacements_by_original and new not in replacements_by_original[orig]
+        group = (orig, rule_type, glossary_entry_scope(row_entry))
+        has_conflict = group in replacements_by_original and new not in replacements_by_original[group]
         if has_conflict:
             stats["conflicts"] += 1
             if not allow_conflicts:
                 stats["skipped"] += 1
                 continue
 
-        to_insert.append((orig, new, rule_type, glossary_entry_priority(row_entry)))
+        to_insert.append((orig, new, rule_type, glossary_entry_priority(row_entry), glossary_entry_scope(row_entry)))
         inserted_pairs.add(pair)
-        replacements_by_original.setdefault(orig, set()).add(new)
+        replacements_by_original.setdefault(group, set()).add(new)
         stats["inserted"] += 1
 
     stats["entries"] = to_insert
@@ -1877,6 +1905,15 @@ def import_glossary_csv(
         stats = analyze_glossary_csv_import(
             path, csv_path, allow_conflicts=allow_conflicts
         )
+    catalog = _catalog_for_path(path)
+    if catalog is not None:
+        # Reuse exactly the rows the user saw; CAS is still required for noops.
+        expected = stats["catalog_revision"]
+        backup_path = create_glossary_backup(path, backup_dir=backup_dir, timestamp=timestamp) if stats["entries"] else None
+        result = catalog.import_entries(stats["source_entries"], "append", expected)
+        return dict(stats, inserted=result.inserted_count, backup_path=backup_path,
+                    mirror_pending=result.mirror_pending, warning=result.warning,
+                    snapshot=result.snapshot)
     if not stats["entries"]:
         stats["backup_path"] = None
         return stats
@@ -1892,10 +1929,28 @@ def import_glossary_csv(
     return stats
 
 
-def restore_glossary_from_backup(path, backup_path, safety_backup_dir=None, timestamp=None):
+def restore_glossary_from_backup(
+    path, backup_path, safety_backup_dir=None, timestamp=None, *,
+    expected_catalog_revision=None, analysis=None,
+):
     """Restaura o glossário a partir de um backup validado."""
     if path is None:
         path = _default_substitutions_path()
+
+    catalog = _catalog_for_path(path)
+    if catalog is not None:
+        is_text = os.path.splitext(backup_path)[1].lower() in (".txt", ".csv")
+        if is_text:
+            stats = analysis if analysis is not None else _catalog_import_analysis(catalog, read_glossary_import(backup_path))
+            expected = stats["catalog_revision"]
+        else:
+            expected = expected_catalog_revision if expected_catalog_revision is not None else catalog.list_entries().catalog_revision
+        safety_path = create_glossary_backup(path, backup_dir=safety_backup_dir, timestamp=timestamp, protect=(backup_path,))
+        result = (catalog.import_entries(stats["source_entries"], "append", expected) if is_text
+                  else catalog.restore(backup_path, expected))
+        return {"safety_backup_path": safety_path, "operation": "import" if is_text else "restore",
+                "snapshot": result.snapshot, "mirror_pending": result.mirror_pending,
+                "warning": result.warning}
 
     load_glossary_entries(backup_path, deduplicate=False)
     safety_backup_path = create_glossary_backup(
@@ -2521,7 +2576,8 @@ def _ordered_rules_cache_key(rules):
         return None
 
 
-_ordered_rules_cache = {}
+# Chave de `_ordered_rules_cache_key` -> as regras ja ordenadas.
+_ordered_rules_cache: dict = {}
 _ORDERED_RULES_CACHE_MAX = 8
 
 

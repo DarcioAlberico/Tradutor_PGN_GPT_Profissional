@@ -5906,10 +5906,6 @@ substituicoes = [
     ('assemelha a um Dragão Acelerado', 'assemelha a uma Dragão Acelerada', 'automatic'),
     ('a marca duvidosa', 'a marca de duvidoso'),
     ('Accelerated Dragon', 'Dragão Acelerada', 'automatic'),
-    # As sete familias abaixo estavam escritas as 64 casas na mao, cinco
-    # delas com escopo '*' — regra portuguesa alcancando os outros seis
-    # idiomas de destino. Uma linha com @casa@ e a mesma coisa sem os dois
-    # defeitos (ROADMAP 14.7 e 25).
     ('bispo-@casa@', 'bispo de @casa@', 'automatic'),
     ('torre-@casa@', 'torre de @casa@', 'automatic'),
     ('cavalo-@casa@', 'cavalo de @casa@', 'automatic'),
@@ -6074,4 +6070,8 @@ substituicoes = [
     ('podem ser melhores', 'podem estar melhores'),
     ('como pretas', 'de pretas'),
     ('O fato de as pretas', 'O fato das pretas', 'automatic'),
+    ('As pretas trocam rumo a', 'As pretas simplificam para', 'automatic'),
+    ('de bom cavalo', 'de cavalo bom', 'automatic'),
+    ('contra mau bispo', 'contra bispo mau', 'automatic'),
+    ('Pretas para jogar e vencer', 'Pretas jogam e ganham', 'automatic'),
 ]

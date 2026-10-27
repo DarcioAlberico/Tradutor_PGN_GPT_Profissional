@@ -20,6 +20,11 @@ Instale as dependencias e crie o ambiente virtual:
 uv sync
 ```
 
+O `pyproject.toml` e a fonte das dependencias (o `uv.lock` deriva dele); o
+`requirements.txt` existe para quem usa `pip` e tem de dizer o mesmo. Ate
+2026-09-14 ele dizia mais — o `spylls` do corretor de prosa so estava la —, e
+`uv sync` abria o programa sem corretor, em silencio (ROADMAP 28.1).
+
 Execute a aplicacao:
 
 ```powershell
@@ -42,21 +47,54 @@ Parte da suite abre as janelas de verdade e clica nos widgets (o editor de
 traducoes, o de glossario e a janela principal). Onde nao houver display, essas
 classes sao puladas e o restante roda normalmente.
 
+Sete testes que medem pixels pulam em telas menores que 1100 x 740 (a maior
+janela nao cabe) — e o caso do runner do GitHub, de 1024 x 768; a mensagem do
+skip diz a tela.
+
+Os testes sem janela estao divididos por dominio — `tests/test_banco.py`,
+`test_ocorrencias.py`, `test_glossario.py`, `test_worker.py`, `test_api.py`,
+`test_ferramentas.py`, `test_pgn.py`, `test_notacao.py`, `test_editor.py`,
+`test_settings.py`, `test_qa.py`, `test_corretor.py`, `test_llm.py`,
+`test_piloto_llm.py` —, entao "mudei uma funcao,
+rodo os testes dela" e um modulo de poucos segundos:
+
+```powershell
+uv run python -m pytest tests\test_glossario.py -q
+```
+
+O que os modulos dividem entre si (os `Fake*`, o harness do worker, os PGN de
+amostra, o sandbox por modulo) esta em `tests/helpers.py`. Ha um CI em
+`.github/workflows/testes.yml` (Windows, porque os testes de janela precisam de
+uma sessao de desktop) que roda tudo e publica o `dist/` do PyInstaller como
+artefato. O lint e o `ruff` com as regras escritas no `pyproject.toml` (o
+conjunto padrao dele muda entre versoes); `uv run mypy` confere os modulos ja
+anotados inteiros (`translation_api.py`, `database.py`, `word_count.py`) e
+exige tipos em toda funcao nova deles.
+
 > Se `uv run` reclamar de um Python inexistente (`No Python at ...`), o `.venv`
 > ficou apontando para uma instalacao removida. Apague a pasta `.venv` e rode
 > `uv sync` de novo.
 
 ## Executavel (rodar sem Python instalado)
 
-Gera um `.exe` para Windows que roda em maquinas sem Python. A receita esta em
-[PGN_Tradutor_Pro.spec](PGN_Tradutor_Pro.spec), com o motivo de cada decisao:
+Gera o `.exe` para Windows que roda em maquinas sem Python — e, com ele, o
+instalador e o zip portatil — num comando so:
 
 ```powershell
-python -m pip install pyinstaller
-python -m PyInstaller --noconfirm .\PGN_Tradutor_Pro.spec
+python .\instalador\gerar-entregas.py
 ```
 
-Sai em `dist\PGN_Tradutor_Pro\` (~77 MB), e **a pasta esta completa** — nao copie
+O roteiro ([instalador/gerar-entregas.py](instalador/gerar-entregas.py)) roda o
+PyInstaller num ambiente **so de execucao**, `build\venv-exe`, montado do
+`uv.lock` com `--no-dev --extra llm`: o executavel leva o SDK do Claude e nada
+das ferramentas de desenvolvimento. Nao rode o PyInstaller direto de um Python
+qualquer — ele leva tudo o que o interpretador tiver e a analise alcancar, e o
+`.venv` de desenvolvimento punha o mypy e o pytest dentro do pacote (ROADMAP
+29.2). Precisa do `uv` no PATH e, para o instalador, do Inno Setup 6; com
+`--so-exe` ele para depois do executavel. A receita do PyInstaller esta em
+[PGN_Tradutor_Pro.spec](PGN_Tradutor_Pro.spec), com o motivo de cada decisao.
+
+Sai em `dist\PGN_Tradutor_Pro\` (~79 MB), e **a pasta esta completa** — nao copie
 nada para dentro dela. O glossario, o dicionario de grafias, a semente e a lista
 de termos suspeitos ja vao embutidos em `_internal\`.
 
@@ -86,7 +124,8 @@ padrao do PyInstaller.
 ### As duas entregas
 
 O mesmo executavel vira duas coisas. **A diferenca entre elas e um arquivo
-vazio** — o `portatil.txt` ao lado do `.exe`:
+vazio** — o `portatil.txt` ao lado do `.exe`. O `gerar-entregas.py` gera as
+duas; os passos, separados, sao:
 
 ```powershell
 & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" .\instalador\PGN_Tradutor_Pro.iss
@@ -104,7 +143,9 @@ explica onde os dados ficam e como atualizar sem perder o acervo.
 > **Nunca ponha um `portatil.txt` dentro de `dist\`.** O instalador empacota
 > aquela pasta inteira, e o marcador faria a versao instalada gravar dentro de
 > `Program Files`. O `empacotar-portatil.py` escreve o marcador direto no zip e
-> se recusa a rodar se achar um solto ali.
+> se recusa a rodar se achar na pasta do programa qualquer coisa alem do `.exe`
+> e do `_internal` — marcador, chave de API, banco, pasta `dados\` (I11). Como o
+> `gerar-entregas.py` faz o zip antes do instalador, a recusa barra os dois.
 
 ### Onde ficam os seus dados
 
@@ -137,7 +178,7 @@ A receita esta em [instalador\PGN_Tradutor_Pro.iss](instalador/PGN_Tradutor_Pro.
 ISCC.exe .\instalador\PGN_Tradutor_Pro.iss
 ```
 
-Sai em `instalador\saida\` (~23 MB). Ele instala por usuario (sem pedir
+Sai em `instalador\saida\` (~26 MB). Ele instala por usuario (sem pedir
 administrador), cria os atalhos, **nao distribui nenhum arquivo de dados** e, ao
 desinstalar, pergunta antes de apagar a pasta de dados — com "Nao" como resposta
 padrao. Numa desinstalacao silenciosa nao ha pergunta, e os dados ficam.
@@ -162,7 +203,7 @@ seu acervo como cobaia.
 Ela vive num lugar so, `tradutor_pgn/__init__.py`:
 
 ```python
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 ```
 
 Dela saem o titulo da janela, o cabecalho do TMX exportado, o recurso de versao
@@ -179,8 +220,23 @@ silencio: o instalador pergunta, e numa instalacao silenciosa recusa.
   primeira execucao ("Windows protegeu o computador" -> "Mais informacoes" ->
   "Executar assim mesmo"), e alguns antivirus marcam executaveis do PyInstaller
   por heuristica. Assinar exige um certificado de codigo pago.
-- **E especifico de Windows x64**, porque o PyInstaller empacota para a
-  plataforma em que roda. Para outra plataforma, o build tem de acontecer nela.
+- **Roda em Windows 10 ou 11 de 64 bits sem instalar mais nada**: o Python, o
+  runtime do Visual C++ e o Tcl/Tk vao dentro da pasta (conferido binario a
+  binario, ROADMAP 29.3). Nao roda no Windows 7 nem em Windows de 32 bits; em
+  processador ARM, so no Windows 11, que emula x64. O PyInstaller empacota para
+  a plataforma em que roda: para outra, o build tem de acontecer nela.
+- **Prefira um caminho curto para a pasta do programa.** Com mais de 188
+  caracteres o Windows recusa as fontes do customtkinter, e o programa abre com
+  os cantos dos botoes um pouco serrilhados (ROADMAP 29.1). O instalador poe o
+  programa em `%LOCALAPPDATA%\Programs` (ou em `Program Files`), longe disso; o
+  zip portatil depende de onde for descompactado.
+- **O tabuleiro do editor nao vem no executavel**: o python-chess e GPL e fica de
+  fora de proposito (ver "O tabuleiro do editor (opcional)").
+- **Nenhuma chave de API vai junto.** Sem chave o programa traduz pelo Google;
+  para usar Claude, ChatGPT ou DeepSeek, cada usuario grava a propria chave em
+  Configuracoes, e ela fica cifrada para a conta do Windows dele. As entregas
+  0.4.0 foram varridas por formato de chave e pelo valor das chaves da maquina
+  que as construiu (ROADMAP 29.5).
 
 ## Normalizacao de metadados PGN
 
@@ -204,8 +260,8 @@ mora na pasta do programa.) Dali em diante o
 botao abre o indice em milissegundos, em vez de reler os 30 MB do arquivo a cada
 uso. Trocar o `spelling.ssp` por uma versao nova reconstroi o indice sozinho (ele
 guarda o hash do arquivo de onde veio); apagar o `spelling.db` tambem e seguro, e
-ele volta na normalizacao seguinte. E o mesmo desenho do `glossario.db`, e por
-isso ele nao vai para o repositorio: e derivado.
+ele volta na normalizacao seguinte. Esse indice e derivado; o catalogo
+autoritativo do glossario, `glossario-v2.db`, precisa de backup proprio.
 
 O `spelling.ssp` **vem com o projeto** (29 MB, ~513 mil nomes de jogadores, mais
 sedes, eventos e rodadas), e por isso o botao funciona sem preparo — inclusive no
@@ -215,8 +271,10 @@ nova e substituir o arquivo; carrega-lo custa ~1,1 s, uma vez por uso do botao.
 
 ## Glossario
 
-`Substituicoes.txt` e a fonte de verdade; `glossario.db` e apenas um indice
-derivado, reconstruido a partir dele. Cada regra tem um tipo:
+`glossario-v2.db` e a fonte autoritativa do glossario. `Substituicoes.txt` e
+um espelho legivel, exportado apos cada transacao confirmada, e um formato de
+importacao explicita. O antigo `glossario.db` pertence ao fluxo legado; nunca
+substitui o catalogo V2. Cada regra tem um tipo:
 
 - `cleanup`: aplicada ao comentario **antes** de enviar para a API.
 - `automatic`: aplicada a resposta da API, sem revisao humana.
@@ -233,7 +291,7 @@ decidir (garantia S10). Ela existe porque a especificidade e derivada do texto �
 sem prioridade, adiantar uma regra exige alongar o padrao, isto e, mudar o que
 ela casa para mudar quando ela roda.
 
-No arquivo cada regra e uma tupla de dois a quatro campos, e cada campo so
+No espelho cada regra e uma tupla de dois a cinco campos, e cada campo so
 aparece quando tem algo a dizer:
 
 ```python
@@ -248,10 +306,68 @@ substituicoes = [
 ]
 ```
 
-Um `Substituicoes.txt` de uma versao anterior continua valendo: o que faltar
-assume o padrao. O mesmo vale para o CSV, cuja coluna `priority` e opcional na
-leitura. Um tipo que o programa nao reconheca continua virando `suggestion`, mas
-agora avisa qual valor nao foi entendido.
+Um `Substituicoes.txt` de uma versao anterior pode ser migrado ou importado:
+campos ausentes assumem os padroes legados. O CSV tambem aceita `priority`
+opcional. Na migracao V2, fase ou escopo desconhecidos interrompem a operacao
+com erro; na previa de importacao, a linha e marcada como invalida.
+
+### Identidade, migracao e concorrencia V2
+
+A identidade canonica e `(original, substituicao, fase, escopo)`, com textos
+normalizados nas pontas e comparacao sensivel a caixa. Prioridade e posicao
+nao fazem parte dela. Regras iguais em fases ou escopos diferentes continuam
+distintas. Cada entrada guarda `stable_id` (UUID imutavel) e `revision`;
+`catalog_revision` identifica a versao global usada por operacoes em lote.
+Salvar/excluir exige a revisao da entrada exibida; se outra janela a alterou,
+a interface mostra conflito e permite recarregar ou cancelar. Nao ha
+sobrescrita forcada. Entradas diferentes podem ser editadas independentemente.
+
+Na primeira inicializacao, a migracao cria backups timestampados do texto e,
+se existir, do banco legado, antes de publicar o V2. O texto legado valido
+vence um cache divergente; fonte ausente/invalida ou falha de backup aborta a
+migracao. Ordem, fase, prioridade e escopo sao preservados; duplicatas da
+identidade completa conservam a primeira e aparecem no relatorio. Reabrir nao
+troca IDs nem importa o texto novamente. `default_scope` fica nos metadados
+do catalogo: preserva o `escopo` do arquivo migrado e orienta novas entradas
+e exportacoes, mesmo se o espelho estiver indisponivel.
+
+### Importacao e recuperacao do glossario
+
+No editor, **Importar CSV** aceita CSV e texto e abre previa por linha: nova,
+duplicada, conflitante ou invalida. A unica modalidade e `append`: apos
+confirmacao, acrescenta somente novas identidades; as demais sao informadas
+e nao gravadas. Conflito significa mesmo original/fase/escopo com substituicao
+diferente. Se `catalog_revision` mudou desde a previa, nada e importado e a
+previa precisa ser refeita. CSV nao substitui integralmente o catalogo.
+
+**Backup** cria uma copia consistente SQLite V2 pela API de backup do
+SQLite, incluindo IDs, revisoes e `default_scope`. **Restaurar backup** aceita
+somente SQLite V2 com schema e integridade validados para substituicao integral;
+exige a revisao global atual e cria backup de seguranca antes da troca.
+Restaurar invalida snapshots anteriores, recarrega as janelas do glossario e
+descarta seus rascunhos apos confirmacao. Escolher `.txt`/CSV nesse fluxo abre
+importacao com previa. Backups pre-migracao servem para retorno manual a uma
+versao antiga; nao sao backups SQLite V2 restauraveis por esse comando.
+
+Se a transacao SQLite confirmou mas a exportacao falhou, a alteracao esta
+salva: `mirror_pending=1` e um aviso registram o espelho pendente. Corrija a
+permissao, bloqueio ou indisponibilidade do caminho e reabra o aplicativo;
+a inicializacao e mutacoes posteriores tentam exportar o snapshot mais recente.
+A API `GlossaryCatalog.retry_pending_mirror()` tambem permite nova tentativa.
+
+Se o motivo for edicao externa de `Substituicoes.txt`, inclusive por versao
+antiga, essa edicao e preservada e nao e importada automaticamente. Guarde uma
+copia dela fora do caminho do espelho e, se quiser incorporar suas regras,
+importe a copia com previa. Para retomar a exportacao no caminho original,
+reponha ali a ultima copia do espelho sincronizado cujo hash o V2 reconhece;
+depois reabra ou tente novamente. Se nao tiver essa copia, exporte o catalogo
+para outro arquivo pela API `export_legacy(path=...)` e mantenha o aviso ate
+reconciliar o espelho. Apagar o espelho divergente nao resolve o hash pendente.
+Nunca apague o V2 para forcar uma reconstrucao a partir do texto.
+
+**Deduplicar** usa identidade completa e revisao global em uma transacao.
+As acoes em massa **Excluir duplicadas exibidas** e **Manter esta regra**
+continuam desabilitadas enquanto nao houver operacao atomica correspondente.
 
 O `@casa@` no padrao vale pelas **64 casas do tabuleiro**: a linha acima e uma
 no arquivo e 64 regras na aplicacao (`a1-torre`, ... `h8-torre`). As regras que
@@ -322,12 +438,30 @@ O que o revisor ganhou para aguentar um livro inteiro:
 - **previa com diff pintado** em "Aplicar todas": as faixas trocadas aparecem
   destacadas nos dois lados, com a contagem de trechos alterados. O historico da
   linha usa a mesma pintura, e diz em quantos trechos cada versao mexeu;
-- **`F1` (ou o "?" do rodape) lista os atalhos e os gestos de mouse.** Sao vinte
-  atalhos e tres gestos, e nenhum deles aparece no rotulo de um botao:
-  `Ctrl+Shift+Enter` verifica e ja vai para a proxima, `Ctrl+PageUp/PageDown`
-  viram pagina, `Ctrl+roda` e `Ctrl+±` mudam o tamanho da fonte, duplo clique
-  numa sugestao a aplica, e o rodape "Lido em:" abre a lista de todas as
-  posicoes em que aquele comentario aparece.
+- **`Alt+1` a `Alt+9` aplicam a sugestao daquele numero** — o numero esta no
+  proprio botao da sugestao, ate a nona. Clicar numa sugestao agora tambem
+  **realca no texto o trecho que ela vai trocar**, que ate aqui so o "Aplicar
+  todas" mostrava;
+- **`Ctrl+M` marca a linha aberta para o lote**, sem tirar a mao do teclado; a
+  caixa da lista acompanha;
+- **`F1` (ou o "?" do rodape) lista os atalhos e os gestos de mouse.** Sao 22
+  atalhos (30 teclas) e tres gestos, e nenhum deles aparece no rotulo de um
+  botao: `Ctrl+Shift+Enter` verifica e ja vai para a proxima,
+  `Ctrl+PageUp/PageDown` viram pagina, `Ctrl+roda` e `Ctrl+±` mudam o tamanho
+  da fonte, duplo clique numa sugestao a aplica, e o rodape "Lido em:" abre a
+  lista de todas as posicoes em que aquele comentario aparece.
+
+## Da traducao para a revisao, sem procurar nada
+
+Durante a execucao, o texto sob a barra de progresso diz onde ela esta:
+`Arquivo 2/5 · Lote 37/125 · 2.410/6.500 · ~3 min`. A estimativa e uma regra de
+tres sobre o que ja passou — o `~` esta la por isso.
+
+Terminada, dois botoes na fileira dos controles: **"Revisar pendentes"** abre o editor
+ja no arquivo que acabou de ser traduzido, no filtro "Pendentes" e no idioma
+daquela execucao (e nao no que o radio marca agora); **"Abrir pasta"** abre a
+pasta do PGN gerado. Com varios arquivos, o editor abre no primeiro — os outros
+estao no seletor "Arquivo".
 
 ## Contagem de palavras, estatisticas e TMX
 
@@ -346,11 +480,51 @@ e a nota.
 ## Requebra em 80 colunas (opcional)
 
 O padrao PGN tem um *export format* de 80 colunas, que e o que editora espera
-receber. Ligue com `"output": {"wrap_columns": 80}` no
-`pgn_tradutor_pro_settings.json`; zero, o padrao, mantem cada comentario em linha
-unica como sempre. A requebra muda **so o espaco em branco** — as palavras saem
+receber. Ligue em **Configurações** (botao na grade de Ferramentas), campo
+"Requebra dos comentarios"; zero, o padrao, mantem cada comentario em linha
+unica como sempre. A mesma tela tem o UTF-8 com BOM, o tema (Sistema, Claro,
+Escuro) e mostra a pasta de dados. Tudo continua gravado no
+`pgn_tradutor_pro_settings.json`, mas nao e mais preciso edita-lo a mao. A requebra muda **so o espaco em branco** — as palavras saem
 identicas, as anotacoes `[%...]` nunca sao partidas e o fim de linha do arquivo e
 respeitado.
+
+## Atalhos que andam
+
+`Ctrl+Shift+R` rejeita a linha aberta e vai para a proxima; `Ctrl+Shift+D` a
+poe em duvida e vai para a proxima. Os botoes "Rejeitar"/"Em dúvida" continuam
+parados na linha. Os controles curtos da barra (`▤/▥`, `A-`, `A+`, `B`, `Aa`,
+`?`) mostram uma dica ao passar o mouse. No editor de glossario, com o filtro
+"Duplicadas", um botao vermelho exclui as copias a mais das entradas exibidas
+(a primeira de cada par fica), com backup antes de perguntar; `Ctrl+roda` e
+`Ctrl+±` mudam a letra dos dois textos, como no editor de traducoes.
+
+## Traducoes semelhantes
+
+Sob o quadro do tabuleiro, "Semelhantes · N" lista ate cinco linhas do mesmo
+par cujo original mais se parece com o aberto, com a traducao delas: um clique
+mostra de onde veio, o duplo clique a poe na linha aberta (Ctrl+Z desfaz). E o
+que substitui a "memoria de traducao" que a medicao derrubou — a maioria das
+frases parecidas de um livro difere so por nome, casa ou pontuacao, e o
+vizinho ja revisado e o melhor ponto de partida. Precisa do FTS5 do SQLite
+(o do Python tem).
+
+## O tabuleiro do editor (opcional)
+
+O editor mostra a posicao em que o comentario aberto aparece: uma linha
+"Posicao · Brancas jogam" sob os botoes de sugestoes, que abre num quadro de
+8 x 8 ao clicar (a escolha fica lembrada). A posicao e calculada ao traduzir,
+na vez de cada arquivo, e gravada com as ocorrencias — entao so as linhas
+traduzidas a partir desta versao a tem.
+
+Precisa do pacote `python-chess`, que e **opcional e nao vem no executavel**:
+ele e GPL, e o programa nao muda de licenca por um quadro. Rodando do fonte:
+
+```bash
+python -m pip install chess
+```
+
+(ou `uv sync --extra tabuleiro`). Sem o pacote nada quebra: o log avisa uma
+vez por execucao e a opcao "Tabuleiro" em Configuracoes cala o aviso.
 
 ## Revisar um livro na ordem em que ele se le
 
@@ -369,10 +543,55 @@ traducao serve a varias posicoes, quantas sao: editar ali muda todas.
 comentarios distintos, verificadas com porcentagem, pendentes e avisos QA por
 arquivo.
 
+Sob o seletor ha duas ferramentas que falam da obra escolhida. **Trocas
+repetidas** lista o que a revisao mais trocou nas linhas daquele arquivo e
+oferece criar a regra automatica (ver "Glossario"). **Descartar nao revisadas**
+apaga as traducoes daquele arquivo que ninguem tocou — nao verificadas, sem
+status, sem nota, sem historico e sem uso em outro arquivo — para o livro poder
+ser traduzido de novo, por outro motor ou depois de uma correcao no glossario.
+Como "Zerar Traducoes", faz o backup antes de perguntar e exige a palavra
+digitada; o dialogo diz quantas linhas vao e onde esta o backup.
+
+Na janela principal, ao lado de "Revisar pendentes", **Reverter execucao**
+faz o mesmo para a ULTIMA execucao inteira, em todos os arquivos dela: apaga
+o que ela inseriu e ninguem tocou, e poupa o que outro arquivo tambem usa. E
+o jeito de experimentar um motor ou um glossario num livro e voltar atras num
+clique. Cada execucao fica registrada no banco (data, desfecho, par, arquivos,
+quantas linhas inseriu, quantas falharam); as ultimas 30 aparecem em
+"Estatisticas do BD". So as execucoes feitas a partir desta versao sao
+reversiveis — as traducoes antigas nao sabem de que execucao vieram.
+
 As traducoes gravadas antes desta versao nao tem procedencia — ela nao esta em
 lugar nenhum do banco, e nada e inventado para elas. Elas aparecem em "Todos os
 arquivos" e ganham a primeira ocorrencia quando o PGN delas for processado de
 novo.
+
+## O que o pipeline conserta na prosa
+
+Depois das regras automaticas e antes de gravar, o programa repoe o que a
+traducao automatica perde de forma mecanica e o original prova (ROADMAP 28.2
+e 28.4). Quatro consertos, todos guiados pelo comentario original:
+
+- o espaco entre o numero ou a reticencia e o lance (`10...d5` -> `10... d5`,
+  `12h5` -> `12 h5`), so quando o original tem o mesmo lance com espaco;
+- `cavalo-d5` -> `cavalo de d5`, so quando o original tem `d5-knight`, e so
+  para o portugues;
+- o espaco de largura zero (`U+200B`) que a API insere, quando o original nao
+  tem nenhum;
+- o fragmento que termina em `after` sai em "depois de", e nao em "depois" —
+  nunca quando a traducao ja termina em "depois de" ou "apos", e respeitando
+  o `after` adverbial ("immediately after").
+
+Medido no banco de desenvolvimento, sao 731 linhas de 6.500 na saida da
+maquina. O resumo da execucao conta os consertos. E o par de nomes de uma
+citacao de partida (`G. Sax-G. Mohr, Maribor 2000`) atravessa a API mascarado,
+como as anotacoes `[%...]`: a maquina traduzia o nome em 19 de 821 citacoes
+("E. Can" -> "E. Pode"). A sede continua sendo traduzida. Um sentinela de nome
+que a maquina engula custa uma segunda requisicao sem a mascara, e o resumo
+conta quantas foram (ROADMAP 28.3). **"Consertar Prosa"**, em
+Ferramentas, aplica os mesmos consertos as traducoes **pendentes** ja gravadas
+do par selecionado — com backup, previa e historico; uma traducao verificada
+nunca e tocada por ele.
 
 ## Avisos de qualidade
 
@@ -388,9 +607,19 @@ curta demais, longa demais) e os demais sabem que o texto e xadrez:
 - **`U+FFFD`** no texto (bytes perdidos na leitura) e **`|||`** vazado de um lote;
 - **traducao quase identica** ao original;
 - **terminologia suspeita**, pelo `Termos-suspeitos.txt`: "check" no original com
-  "cheque" na traducao, "file" com "arquivo", "square" com "quadrado". Medido nas
-  6.500 traducoes do banco de desenvolvimento, isto marca 347 linhas (5,3%) que
-  antes passavam limpas.
+  "cheque" na traducao, "file" com "arquivo", "square" com "quadrado" — 57
+  entradas, cada uma com o numero medido no proprio arquivo;
+- **tres avisos de prosa** para o portugues (ROADMAP 28.2): o fragmento
+  terminado em `after` que saiu "depois" sem "de", "Brancas"/"Pretas" com
+  maiuscula no meio da frase, e "as brancas sao melhores" (a convencao e
+  "estao"). Medido nas 6.500 traducoes do banco de desenvolvimento, a versao 2
+  das heuristicas marca 1.254 linhas da saida da maquina, com 96% de precisao
+  contra o que o revisor humano de fato editou.
+
+**"Avisos QA" lista so as pendentes.** O aviso e sobre o texto e nao sabe quem
+o revisou; sem esse recorte, cada versao nova das heuristicas devolveria a fila
+as linhas ja aprovadas. As verificadas com aviso continuam alcancaveis pelo
+filtro "Verificadas" com "Proximo aviso QA", e "Exportar QA" leva todas.
 
 O aviso e **cache**: fica materializado numa coluna para que contar e paginar por
 "com aviso" seja uma consulta indexada. As heuristicas tem versao, e quando ela
@@ -399,6 +628,79 @@ cancelamento (~25 s em 200 mil traducoes, uma vez). O botao **Reavaliar QA** faz
 mesmo na hora — para quem cancelou, ou para quem editou o `Termos-suspeitos.txt` a
 mao.
 
+## Traduzir com um modelo de linguagem (Claude, ChatGPT, DeepSeek)
+
+O motor de sempre e o Google, sem chave e sem custo. Desde o ROADMAP 28.7 da
+para traduzir com um modelo de linguagem, que sabe xadrez e recebe o seu
+glossario e o lance anterior e o seguinte de cada comentario antes de
+traduzir: no piloto de 200 comentarios, o Claude deixou 1
+aviso de qualidade contra 30 do Google, sem perder um lance nem uma anotacao.
+Custa dinheiro — da ordem de US$ 25 por livro de 7.500 comentarios com o
+`claude-opus-5` — e por isso nunca e ligado sozinho.
+
+1. Em **Configurações**, secao "Modelos de linguagem", cole a chave de API do
+   provedor (Claude/Anthropic, ChatGPT/OpenAI ou DeepSeek) e, se quiser, troque
+   o nome do modelo pelo que o console do provedor oferece. A chave vai para
+   `chaves-api.json` na pasta de dados, cifrada com o DPAPI do Windows (so esta
+   conta, nesta maquina); nunca aparece inteira em tela ou log. Uma variavel
+   de ambiente (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`) tem
+   precedencia sobre o arquivo. **Testar chaves e modelos** confere, com uma
+   requisicao gratuita, se a chave e o nome do modelo valem — antes de gastar
+   uma execucao para descobrir.
+2. Para o Claude e preciso o SDK: `uv sync --extra llm`. ChatGPT e DeepSeek
+   nao precisam de nada.
+3. Com pelo menos uma chave gravada, **Iniciar tradução** (e **Reprocessar
+   falhas**) pergunta qual motor usar — Google ou um dos modelos —, com o da
+   execucao anterior pre-selecionado. Sem chave nenhuma, nao pergunta.
+4. Com um modelo, o programa carrega o cache, conta o que vai mesmo para a
+   API e mostra a **estimativa** — comentarios, tokens e dolares, pela tabela
+   de precos datada de `tradutor_pgn/llm_costs.py` — antes da primeira
+   requisicao; "Não" nao envia nada. Um modelo fora da tabela mostra so os
+   tokens. No fim, o log diz "estimado -> real".
+
+Tudo o mais e igual: o lote, a mascara das anotacoes, o glossario, a
+correcao de lances, o aviso de qualidade e o **Reverter execução** — que e a
+rede de seguranca para experimentar um motor novo e jogar fora o que ele
+deixou. Uma diferenca a mais, a favor: um lance que o modelo REESCREVA em
+vez de traduzir (`Nf3` que volta `Cf6`) e reenviado sozinho uma vez e, se
+insistir, recusado — o comentario fica no idioma original, contado como
+falha, em vez de gravado com cara de certo. A execucao fica registrada com
+`provedor:modelo`, e o fim do log diz quantas requisicoes e tokens o modelo
+gastou.
+
+## Piloto do modelo de linguagem
+
+O piloto e o que mede se um modelo vale, antes de gastar um livro nele
+(ROADMAP 28.7). E um script fora do programa,
+`ferramentas/piloto_llm.py`, que roda da raiz do projeto e escreve tudo em
+`piloto/` (fora do repositorio — a amostra e texto do livro):
+
+```bash
+python ferramentas/piloto_llm.py amostrar
+```
+
+sorteia 200 comentarios do banco de dev (100 fragmentos terminados em
+preposicao, 50 longos, 50 com citacao de partida), de preferencia entre os que
+um humano ja julgou. Depois, com `pip install anthropic` e `ANTHROPIC_API_KEY`
+no ambiente:
+
+```bash
+python ferramentas/piloto_llm.py traduzir --modelo claude-opus-5
+```
+
+```bash
+python ferramentas/piloto_llm.py avaliar
+```
+
+```bash
+python ferramentas/piloto_llm.py folha --modelo claude-opus-5
+```
+
+`avaliar` compara Google e modelo pelos detectores de qualidade, pelas ancoras
+de lance e pelo texto que o revisor deixou; `folha` gera a planilha de leitura
+cega (A e B sorteados, sem dizer quem e quem) e `apurar` le a planilha
+preenchida e diz a taxa de "aceito sem editar" de cada motor. A barra e 80 %.
+
 ## Arquivos principais
 
 - `PGN_Tradutor_Pro.py`: ponto de entrada da aplicacao.
@@ -406,17 +708,20 @@ mao.
 - `tradutor_pgn/`: pacote Python com os modulos da aplicacao.
 - `tradutor_pgn/app.py`: classe principal e estado da aplicacao.
 - `tradutor_pgn/app_actions.py`: acoes da interface, controle da traducao e atalhos para ferramentas.
+- `tradutor_pgn/app_log.py`: o log pelo `logging` — a porta `log_message`, o nivel pelo prefixo, a fila do widget, o arquivo da execucao e os avisos das bibliotecas.
 - `tradutor_pgn/app_config.py`: constantes compartilhadas do projeto.
 - `tradutor_pgn/background_task.py`: executa operacoes longas fora da thread da interface, com progresso e cancelamento.
 - `tradutor_pgn/backup_retention.py`: politica de retencao de `backups/` e `logs/`, com a decisao separada da remocao.
-- `tradutor_pgn/chess_notation.py`: letras das pecas por idioma, correcao dos lances da traducao contra o comentario original e as ancoras que o aviso de qualidade compara.
+- `tradutor_pgn/chess_notation.py`: letras das pecas por idioma, correcao dos lances da traducao contra o comentario original e as ancoras que o aviso de qualidade e o portao dos modelos (T6) comparam.
+- `tradutor_pgn/llm_costs.py`: a estimativa de custo de uma execucao com modelo (calibrada no piloto), a tabela de precos datada e o custo real ao fim.
 - `tradutor_pgn/chess_terms.py`: leitura da lista de termos cuja traducao errada da para reconhecer pelo texto, escopada por idioma.
 - `tradutor_pgn/confirm_dialog.py`: confirmacao que exige digitar `delete`, usada pelas duas ferramentas que apagam trabalho do usuario.
 - `tradutor_pgn/database.py`: inicializacao, conexao e cache do SQLite, indexado pelo par de idiomas (origem, destino).
-- `tradutor_pgn/db_tools.py`: estatisticas, backup/restauracao, importacao/exportacao CSV, regras automaticas, correcao dos lances do banco ja gravado e as duas ferramentas de zerar — todas em segundo plano.
+- `tradutor_pgn/db_tools.py`: a orquestracao das ferramentas de banco (dialogos, confirmacao, progresso em segundo plano): regras automaticas, correcao dos lances e da prosa do banco ja gravado, zerar, descartar, reverter execucao. As partes puras moram ao lado e ele as re-exporta: `db_backup.py` (copia e restauracao pela API de backup do SQLite), `db_export.py` (CSV e TMX, leitura e gravacao) e `db_stats.py` (estatisticas e o relatorio).
 - `tradutor_pgn/edit_window.py`: janela de revisao e edicao de traducoes, com filtro por par de idiomas e por arquivo de origem (que traz a obra em ordem de leitura).
 - `tradutor_pgn/editor_common.py`: logica pura compartilhada pelas duas janelas de edicao (geometria, paginacao, preview).
 - `tradutor_pgn/editor_text.py`: busca, substituicao e diff por palavra do texto no editor.
+- `tradutor_pgn/settings_window.py`: a tela de Configuracoes (gravacao, aparencia, tabuleiro, modelos de linguagem, pasta de dados).
 - `tradutor_pgn/stats_window.py`: janela copiavel das estatisticas do banco.
 - `tradutor_pgn/word_count.py`: a definicao de "palavra" do programa, num lugar so.
 - `tradutor_pgn/editor_widgets.py`: pecas de interface compartilhadas pelas duas janelas (mensagens, linhas da lista, divisor, gravacao das configuracoes).
@@ -424,21 +729,29 @@ mao.
 - `tradutor_pgn/glossario.py`: leitura e aplicacao do glossario.
 - `tradutor_pgn/glossary_editor.py`: janela dedicada para manter o glossario persistente.
 - `tradutor_pgn/history_window.py`: subjanela com o historico de alteracoes de uma traducao.
+- `tradutor_pgn/llm_prompt.py`: o prompt, o lote JSON numerado e a validacao por id dos modelos de linguagem — o mesmo texto do piloto e do programa.
+- `tradutor_pgn/llm_providers.py`: os tres provedores de modelo (Claude pelo SDK da Anthropic; ChatGPT e DeepSeek pelo `chat/completions`) na costura de lote do worker.
+- `tradutor_pgn/api_keys.py`: as chaves de API, num arquivo proprio cifrado com o DPAPI, com a mascara `****wxyz` que log e tela mostram.
+- `tradutor_pgn/provider_dialog.py`: o dialogo "Motor de tradução" do Iniciar tradução.
 - `tradutor_pgn/main_window.py`: montagem da janela principal.
 - `tradutor_pgn/pgn_spellcheck.py`: normalizacao opcional de metadados PGN com `spelling.ssp`.
 - `tradutor_pgn/prose_spellcheck.py`: corretor ortografico da PROSA traduzida, com o filtro que separa erro de digitacao de notacao, nome proprio e terminologia do glossario.
 - `tradutor_pgn/pgn_utils.py`: leitura, escrita, encoding e manipulacao de arquivos PGN.
+- `ferramentas/piloto_llm.py`: o piloto do modelo de linguagem (ROADMAP 28.7, passo 0) — amostra estratificada, traducao em lotes JSON pela API da Anthropic (com o prompt de `llm_prompt`), avaliacao automatica e folha de leitura cega.
+- `tradutor_pgn/repeated_edits.py`: o ranking puro das trocas `antes -> depois` que a revisao mais fez num arquivo, e se ja ha regra do glossario para cada uma.
+- `tradutor_pgn/repeated_edits_window.py`: a subjanela "Trocas repetidas nesta obra" do editor, que cria a regra automatica e a aplica as pendentes do arquivo.
 - `tradutor_pgn/review_quality.py`: avisos de qualidade das traducoes, genericos e de xadrez (lance perdido, anotacao rompida, NAG, terminologia), com a versao das heuristicas que decide quando reavaliar o banco.
 - `tradutor_pgn/settings.py`: preferencias da interface e rascunhos de edicao.
 - `tradutor_pgn/translation_api.py`: chamadas de traducao e divisao de comentarios longos.
 - `tradutor_pgn/translation_worker.py`: orquestracao do processamento em segundo plano.
 - `tradutor_pgn/window_utils.py`: utilitarios de janela.
-- `tests/`: suite automatizada; `tests/gui_harness.py` traz o sandbox de caminhos e o silenciamento de dialogos que os testes de janela compartilham.
+- `tests/`: suite automatizada, por dominio (`test_banco.py`, `test_worker.py`, `test_glossario.py`, ...); `tests/helpers.py` traz os dubles e o sandbox por modulo dos testes sem janela, e `tests/gui_harness.py` o sandbox de caminhos e o silenciamento de dialogos dos testes de janela.
 - `.claude/skills/run-tradutor-pgn/`: ferramenta para abrir e dirigir o app sem interacao manual (inclusive o worker de traducao, sem abrir janela) e capturar telas.
 - `dicionarios/`: dicionarios hunspell do idioma de destino, para o corretor de prosa. So `pt_BR` por enquanto, e a janela diz isso nos outros idiomas.
-- `Substituicoes.txt`: as regras do glossario do usuario (original, substituicao e, quando ha, tipo, prioridade e escopo de idioma).
+- `glossario-v2.db`: catalogo autoritativo do glossario, com IDs estaveis, revisoes e metadados; dado de usuario, nao versionado.
+- `Substituicoes.txt`: espelho legivel do catalogo e formato explicito de importacao (original, substituicao, tipo, prioridade e escopo).
 - `tradutor_pgn/Substituicoes-semente.txt`: a terminologia que vem com o programa, escopada por idioma de destino. Nunca sobrepoe o `Substituicoes.txt`.
 - `tradutor_pgn/Termos-suspeitos.txt`: os pares "termo no original / forma errada na traducao" que geram aviso de qualidade. Vem com o programa, medido no banco de desenvolvimento, e nao corrige nada — leva o revisor ate a linha.
-- `glossario.db`: indice SQLite do glossario, derivado do `Substituicoes.txt`. E versionado para que um clone ja abra com o indice pronto, e ele proprio guarda de qual arquivo veio (caminho relativo e hash do conteudo), de modo que reconstroi sozinho assim que as regras mudam.
+- `glossario.db`: indice SQLite legado, conservado para compatibilidade e backup pre-migracao; o V2 nao o usa como autoridade.
 - `traducoes.db`: cache local de traducoes, uma linha por (comentario, idioma de origem, idioma de destino). Ao lado dela, a tabela `occurrences` guarda onde cada comentario foi lido — arquivo, partida, indice e numero do lance —, que e o que da ordem de leitura da obra ao editor e progresso por livro as estatisticas. As traducoes gravadas antes desta versao nao tem essa procedencia e a ganham ao reprocessar o PGN.
 - `backups/`, `logs/`: gerados em tempo de execucao, nao versionados.

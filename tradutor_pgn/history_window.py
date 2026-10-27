@@ -50,6 +50,8 @@ ACTION_LABELS = {
     "mark_pending": "Voltou para pendente",
     "fill_empty": "Preenchimento inicial",
     "restore": "Restauracao",
+    "move_notation": "Correcao de lances",
+    "prose_fix": "Consertos de prosa",
     "status": "Status",
 }
 

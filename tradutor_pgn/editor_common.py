@@ -44,6 +44,12 @@ WARNING_TEXT_COLOR = ("#92400e", "#f59e0b")
 ERROR_TEXT_COLOR = ("#991b1b", "#f87171")
 MUTED_TEXT_COLOR = ("#475569", "#94a3b8")
 
+# Vermelho das acoes que destroem trabalho ("Zerar" na janela principal,
+# "Descartar nao revisadas" no editor), em par claro/escuro como o resto. Aqui
+# pela mesma regra das quatro acima: duas janelas, uma cor, um lugar.
+DESTRUCTIVE_COLOR = ("#b91c1c", "#7f1d1d")
+DESTRUCTIVE_HOVER_COLOR = ("#991b1b", "#991b1b")
+
 # Os dois fundos contra os quais as cores acima foram medidas. O claro nao e
 # chute: foi amostrado dos pixels de uma captura real da janela; o escuro e o do
 # codigo (`pane_bg`). Ficam aqui para o teste medir contra os mesmos.

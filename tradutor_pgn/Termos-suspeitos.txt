@@ -88,4 +88,70 @@ termos = [
     # 0 linhas no banco de desenvolvimento, e mantido: "castle" e rocar, e
     # "castelo" e o erro que o item 14.2 do ROADMAP ja corrigiu no glossario.
     ('castle', 'castelo', 'pt'),
+
+    # ------------------------------------------------------------------------
+    # Revisao de 2026-09-14 (ROADMAP 28.2, camada 1). Cada forma foi medida de
+    # dois jeitos: contra as decisoes HUMANAS do banco de desenvolvimento (as
+    # linhas cujo primeiro evento do historico nao e da sessao de IA de
+    # 2026-08-01 — "editou / aceitou") e, onde nao havia amostra humana, lendo
+    # o que ela marca na saida da maquina, como a secao 16.1 fez. O que ficou de
+    # fora e dito no fim.
+    # ------------------------------------------------------------------------
+    # 92 linhas na saida da maquina; humano 8/0. "move" e lance.
+    ('move', 'movimento', 'pt'),
+    # 80 linhas; humano 7/0. "endgame" e o final, nao o final de jogo.
+    ('endgame', 'final de jogo', 'pt'),
+    # 13 linhas, sem amostra humana; as 13 lidas: "decidiu renunciar" por
+    # "abandonar". "resign" e abandonar a partida.
+    ('resign', 'renunci', 'pt'),
+    ('resigned', 'renunci', 'pt'),
+    ('resignation', 'renunci', 'pt'),
+    # 5 + 9 linhas; humano 3/0 e 4/0. "trade" e troca, nunca comercio.
+    ('trade', 'comérci', 'pt'),
+    ('trade', 'negoci', 'pt'),
+    ('traded', 'negoci', 'pt'),
+    ('trading', 'negoci', 'pt'),
+    # 11 linhas, sem amostra humana; as lidas: "verificacao perpetua". "check"
+    # e xeque — a forma "cheque" ja esta acima.
+    ('check', 'verific', 'pt'),
+    # 5 linhas, sem amostra humana; as lidas: "variantes nitidas" por "agudas".
+    ('sharp', 'nítid', 'pt'),
+    # 6 linhas; humano 1/0, e a revisao trocou as 6 por "cravada".
+    ('pin', 'imobiliz', 'pt'),
+    # 5 linhas, sem amostra humana; a revisao trocou as 5 por "ala do rei".
+    ('kingside', 'lado do rei', 'pt'),
+    ('queenside', 'lado da dama', 'pt'),
+    ('queenside', 'lado da rainha', 'pt'),
+    # 3 linhas; humano 1/0. "draw" e empate.
+    ('draw', 'sorteio', 'pt'),
+    # 1 linha cada, sem amostra humana; lidas: "limas b e c", "nesta praca",
+    # "posto" para rank.
+    ('file', 'lima', 'pt'),
+    ('square', 'praça', 'pt'),
+    ('rank', 'posto', 'pt'),
+    # "the exchange" (a qualidade) ficou de fora em 16.1 porque o verbo "to
+    # exchange" e troca mesmo. As formas abaixo sao as em que "exchange" e
+    # substantivo: com "for", "up", "win/lose" e "sacrifice". 44 + 4 + 5 + 27
+    # linhas; humano 2/0 e 1/0, e as lidas eram todas "qualidade".
+    ('for the exchange', 'troca', 'pt'),
+    ('up the exchange', 'troca', 'pt'),
+    ('down the exchange', 'troca', 'pt'),
+    ('win the exchange', 'troca', 'pt'),
+    ('wins the exchange', 'troca', 'pt'),
+    ('winning the exchange', 'troca', 'pt'),
+    ('lose the exchange', 'troca', 'pt'),
+    ('loses the exchange', 'troca', 'pt'),
+    ('losing the exchange', 'troca', 'pt'),
+    ('exchange sacrifice', 'troca', 'pt'),
+    ('sacrifice the exchange', 'troca', 'pt'),
+    ('sacrifices the exchange', 'troca', 'pt'),
+    ('sacrificed the exchange', 'troca', 'pt'),
+    ('sacrificing the exchange', 'troca', 'pt'),
+    # FICARAM DE FORA, com o numero:
+    #   - ('game', 'jogo'): 492 linhas, humano 39/14 (74%). "a pleasant game"
+    #     e jogo mesmo; a distincao e semantica.
+    #   - ('move', 'jogada'): humano 4/1 (80%). "jogada" e aceitavel.
+    #   - ('the exchange', 'troca') sem contexto: humano 3/2 (60%).
+    #   - ('fork', 'bifurca'): 2 linhas, e as duas eram "fork in the road" —
+    #     bifurcacao no caminho, legitimo.
 ]

@@ -20,6 +20,96 @@ from .editor_common import clamped_sash_position, flash_duration_ms
 from .settings import update_settings
 
 
+# Quanto o ponteiro fica parado sobre o controle antes de a dica aparecer
+# (ROADMAP 28.9, item 4). Meio segundo e o padrao do Windows: mais curto
+# atrapalha quem so passa o ponteiro, mais longo parece que nao ha dica.
+TOOLTIP_DELAY_MS = 500
+TOOLTIP_COLORS = ("#1f2937", "#e5e7eb")
+TOOLTIP_TEXT_COLORS = ("#f9fafb", "#111827")
+
+
+class Tooltip:
+    """Uma dica sob o ponteiro, para os controles que nao tem palavra.
+
+    `▤/▥`, "B", "Aa", "A-/A+", "?", "Priorizar esta"/"Manter esta": cada um
+    e curto porque a faixa em que vive nao tem largura para uma frase (22.8),
+    e a dica e o que devolve a frase sem gastar largura. E um `Toplevel` sem
+    decoracao com um `CTkLabel` dentro — o rotulo recebe pares de cor e troca
+    sozinho com o tema (F18). Nasce no `<Enter>` depois de `TOOLTIP_DELAY_MS`,
+    some no `<Leave>`, no clique e quando o controle e destruido: a dica de um
+    botao que ja nao existe seria uma janela orfa flutuando na tela.
+    """
+
+    def __init__(self, widget, text, delay_ms=TOOLTIP_DELAY_MS):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self.after_id = None
+        self.window = None
+        widget.bind("<Enter>", self.schedule, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+        widget.bind("<Destroy>", self.hide, add="+")
+
+    def schedule(self, _event=None):
+        self.cancel()
+        try:
+            self.after_id = self.widget.after(self.delay_ms, self.show)
+        except tk.TclError:  # pragma: no cover - widget ja destruido
+            self.after_id = None
+
+    def cancel(self):
+        if self.after_id is not None:
+            try:
+                self.widget.after_cancel(self.after_id)
+            except tk.TclError:  # pragma: no cover
+                pass
+            self.after_id = None
+
+    def show(self):
+        self.after_id = None
+        if self.window is not None:
+            return
+        try:
+            if not self.widget.winfo_exists() or not self.widget.winfo_ismapped():
+                return
+            x = self.widget.winfo_rootx()
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        except tk.TclError:
+            return
+        janela = tk.Toplevel(self.widget)
+        janela.overrideredirect(True)
+        janela.attributes("-topmost", True)
+        rotulo = ctk.CTkLabel(
+            janela,
+            text=self.text,
+            fg_color=TOOLTIP_COLORS,
+            text_color=TOOLTIP_TEXT_COLORS,
+            corner_radius=4,
+            padx=8,
+            pady=4,
+        )
+        rotulo.pack()
+        janela.geometry(f"+{x}+{y}")
+        self.window = janela
+
+    def hide(self, _event=None):
+        self.cancel()
+        if self.window is not None:
+            try:
+                self.window.destroy()
+            except tk.TclError:  # pragma: no cover
+                pass
+            self.window = None
+
+
+def attach_tooltip(widget, text, delay_ms=TOOLTIP_DELAY_MS):
+    """Liga uma dica ao controle e a devolve (para o teste dirigir)."""
+    dica = Tooltip(widget, text, delay_ms)
+    widget.tooltip = dica
+    return dica
+
+
 def flash_message(label, window, text, milliseconds=None, **configure):
     """Escreve no rotulo de status e apaga sozinho depois de um tempo.
 

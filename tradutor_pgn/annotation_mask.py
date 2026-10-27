@@ -35,13 +35,34 @@ from .chess_notation import COMMAND_TAG_RE
 _SENTINEL_TEMPLATE = "⟦{n}⟧"
 _SENTINEL_RE = re.compile(r"⟦\s*(\d+)\s*⟧")
 
+# O par de nomes de uma citacao de partida — `V. Kramnik-D. Navara` em
+# `V. Kramnik-D. Navara, Prague 2008` (garantia X4, ROADMAP 28.3). A maquina
+# traduzia o NOME em ~2,5 % das citacoes do banco de desenvolvimento (E. Can ->
+# "E. Pode", K. Lie -> "K. Mentira", J. Hammer -> "J. Martelo"); a sede fica
+# de fora da mascara de proposito — o revisor a traduz (Berna, Praga) em um
+# terco das citacoes verificadas, e "correspondence" e "correspondencia".
+#
+# Inicial (uma letra, ou duas: `Ju.`), ponto, espaco opcional, sobrenome com
+# uma particula opcional ("N. De Firmian", "L. Van Wely"); o hifen entre os
+# dois; e a virgula logo depois, que e o que separa uma citacao de qualquer
+# outro par com hifen. Medido no banco de desenvolvimento: casa as 821
+# citacoes, e 2 pares fora do formato `Sede ANO` que tambem sao citacoes.
+_PLAYER_NAME = r"[A-Z][a-z]?\. ?(?:[A-Z][\w'-]*(?: [A-Z][\w'-]*)?)"
+PLAYER_PAIR_RE = re.compile(rf"(?<![\w.])(?:{_PLAYER_NAME})-(?:{_PLAYER_NAME})(?=,)")
 
-def mask_annotations(text):
-    """Troca cada anotacao `[%...]` por um sentinela numerado.
+
+def mask_annotations(text, player_names=True):
+    """Troca cada anotacao `[%...]` — e cada par de nomes de citacao — por um
+    sentinela numerado.
 
     Devolve `(texto_mascarado, tokens)`, onde `tokens[i]` e o texto original do
     sentinela `i`, byte a byte. A lista vazia significa "nada a proteger" — e o
     caso de quase todo comentario de livro, que segue pelo caminho de sempre.
+
+    Os nomes entram na MESMA lista e voltam pela mesma restauracao verificada
+    (X4 e X1 pelo mesmo mecanismo): um sentinela de nome que a maquina
+    engoliu conta como falha do comentario, e nao como nome errado gravado.
+    `player_names=False` desliga so essa metade — e para quem mede.
     """
     tokens = []
 
@@ -49,7 +70,20 @@ def mask_annotations(text):
         tokens.append(match.group(0))
         return _SENTINEL_TEMPLATE.format(n=len(tokens) - 1)
 
-    return COMMAND_TAG_RE.sub(_swap, text or ""), tokens
+    mascarado = COMMAND_TAG_RE.sub(_swap, text or "")
+    if player_names:
+        mascarado = PLAYER_PAIR_RE.sub(_swap, mascarado)
+    return mascarado, tokens
+
+
+
+def has_player_name_tokens(tokens):
+    """Ha algum par de nomes entre os `tokens` de uma mascara?
+
+    E o que decide se uma restauracao que falhou merece a segunda tentativa
+    sem a mascara de nomes (X4): so faz sentido quando havia nome mascarado.
+    """
+    return any(not COMMAND_TAG_RE.fullmatch(token) for token in tokens)
 
 
 def restore_annotations(text, tokens):

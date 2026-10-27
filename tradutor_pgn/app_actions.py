@@ -5,7 +5,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-from . import app_paths
+from . import app_log, app_paths
 from .backup_retention import (
     prune_database_backups,
     prune_glossary_backups,
@@ -17,10 +17,12 @@ from .db_tools import export_csv as export_translations_csv
 from .db_tools import export_tmx as export_translations_tmx
 from .db_tools import import_csv as import_translations_csv
 from .db_tools import fix_move_notation_in_database
+from .db_tools import normalize_prose_in_database
 from .db_tools import reevaluate_quality_in_database
 from .db_tools import reset_glossary as reset_glossary_file
 from .db_tools import reset_translations as reset_translations_database
 from .db_tools import restore_database as restore_database_file
+from .db_tools import revert_last_translation_run as revert_last_run_in_database
 from .db_tools import show_db_stats as show_database_stats
 from .edit_window import open_translation_editor
 from .failed_runs import (
@@ -32,7 +34,15 @@ from .failed_runs import (
 from .glossario import load_interactive_substitutions, report_glossary_error
 from .glossary_editor import open_glossary_editor
 from .pgn_spellcheck import normalize_pgn_metadata_path
-from .settings import write_main_window_settings
+from .llm_providers import (
+    GOOGLE_PROVIDER,
+    PROVIDERS,
+    anthropic_sdk_available,
+    configured_providers,
+)
+from .provider_dialog import ask_translation_provider
+from .settings import load_settings, read_llm_settings, write_main_window_settings
+from .settings_window import open_settings_window as open_settings_editor
 from .translation_worker import run_translation
 
 
@@ -81,6 +91,25 @@ def report_glossary_failure(app, message):
     app._glossary_error_shown = message
 
     app.root.after(0, lambda texto=message: messagebox.showerror("Glossário", texto))
+
+
+def report_settings_failure(app, message):
+    """Handler do canal de aviso das configuracoes: leva o aviso a interface.
+
+    Garantia M3. Pode ser chamado da thread que grava o rascunho, entao o
+    `messagebox` vai por `root.after` (garantia C1). A mesma mensagem so abre o
+    dialogo uma vez; as repeticoes ficam no log — um arquivo que o antivirus
+    segura por alguns segundos falharia em varias gravacoes seguidas.
+    """
+    app.log_message(f"[CONFIGURACOES] {message}")
+
+    if getattr(app, "_settings_warning_shown", None) == message:
+        return
+    app._settings_warning_shown = message
+
+    app.root.after(
+        0, lambda texto=message: messagebox.showwarning("Configurações", texto)
+    )
 
 
 def load_interactive_glossary(app):
@@ -201,15 +230,9 @@ def select_directory(app):
 
 
 def log_message(app, message: str):
-    app.log_queue.put(message)
-    log_handle = getattr(app, "_log_file_handle", None)
-    if log_handle is not None:
-        try:
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            log_handle.write(f"[{timestamp}] {message}\n")
-            log_handle.flush()
-        except OSError:
-            pass
+    """A porta do log: pelo `logging` (ROADMAP 28.11), que leva a mensagem a
+    fila do widget e ao arquivo da execucao do `app` instalado — este."""
+    app_log.log(message)
 
 
 def log_is_at_the_end(log_text):
@@ -274,6 +297,10 @@ def start_translation(app):
         messagebox.showerror("Erro", "O caminho informado não existe.")
         return
 
+    provider = choose_translation_provider(app)
+    if provider is None:
+        return
+
     _begin_translation_run(app)
 
     target_language = app.target_language.get()
@@ -282,9 +309,47 @@ def start_translation(app):
     threading.Thread(
         target=run_translation,
         args=(app, source_path, target_language, process_subdirs),
-        kwargs={"source_language": app.source_language.get()},
+        kwargs={"source_language": app.source_language.get(), "provider": provider},
         daemon=True,
     ).start()
+
+
+def choose_translation_provider(app):
+    """Google ou um modelo de linguagem? `None` quando o usuario cancelou.
+
+    Sem chave configurada nao ha pergunta: o Google e o unico motor. Com
+    chave, o dialogo aparece SEMPRE (ROADMAP 28.7) — o motor da ultima
+    execucao vem pre-selecionado, e a escolha e lembrada em `main_window`.
+    Um provedor escolhido cujo SDK falta e recusado ANTES de a execucao
+    comecar, com a instrucao de instalar: nunca trocar de motor em silencio
+    (garantia M1).
+    """
+    configurados = configured_providers()
+    if not configurados:
+        return GOOGLE_PROVIDER
+    settings = load_settings()
+    lembrado = getattr(app, "translation_provider", GOOGLE_PROVIDER)
+    escolhido = ask_translation_provider(
+        app, configurados, read_llm_settings(settings), lembrado
+    )
+    if escolhido is None:
+        return None
+    spec = PROVIDERS.get(escolhido)
+    if spec is not None and spec.kind == "anthropic" and not anthropic_sdk_available():
+        messagebox.showerror(
+            "Motor de tradução",
+            f"O pacote 'anthropic' não está instalado, e sem ele o {spec.label} "
+            f"não pode ser usado.\n\nInstale com:\n    uv sync --extra llm\n\n"
+            f"A tradução não foi iniciada.",
+        )
+        return None
+    if escolhido != lembrado:
+        app.translation_provider = escolhido
+        try:
+            write_main_window_settings({"translation_provider": escolhido})
+        except OSError:
+            pass
+    return escolhido
 
 
 def _begin_translation_run(app):
@@ -353,7 +418,12 @@ def retry_failed_translation(app):
             "Reprocessar falhas",
             describe_failed_run(record) + "\n\nRemover a lista?",
         ):
-            clear_failed_run()
+            try:
+                clear_failed_run()
+            except OSError:
+                # O canal das configuracoes (M3) ja avisou; um segundo dialogo
+                # pelo relator de callbacks so repetiria a mensagem.
+                pass
         return
 
     if not messagebox.askyesno(
@@ -378,11 +448,15 @@ def retry_failed_translation(app):
             f"{origem or 'detectar'}"
         )
 
+    provider = choose_translation_provider(app)
+    if provider is None:
+        return
+
     _begin_translation_run(app)
     threading.Thread(
         target=run_translation,
         args=(app, presentes[0], idioma, False),
-        kwargs={"only_files": presentes, "source_language": origem},
+        kwargs={"only_files": presentes, "source_language": origem, "provider": provider},
         daemon=True,
     ).start()
 
@@ -488,6 +562,7 @@ def reset_buttons(app):
     app.pause_button.configure(state="disabled")
     app.resume_button.configure(state="disabled")
     app.cancel_button.configure(state="disabled")
+    refresh_last_run_buttons(app)
     log_handle = getattr(app, "_log_file_handle", None)
     if log_handle is not None:
         log_path = getattr(app, "_log_file_path", None)
@@ -498,6 +573,95 @@ def reset_buttons(app):
         app._log_file_handle = None
         if log_path:
             app.log_queue.put(f"Log salvo em: {log_path}")
+
+
+def refresh_last_run_buttons(app):
+    """"Revisar pendentes" e "Abrir pasta" acordam quando ha uma execucao a rever.
+
+    Chamado com os outros botoes no fim de cada execucao: e o worker quem grava
+    `app.last_run`, e so grava quando alguma posicao foi registrada — sem isso o
+    filtro do editor nao conhece o arquivo e nao haveria o que abrir.
+    """
+    ultima = getattr(app, "last_run", None)
+    estado = "normal" if ultima and ultima.get("files") else "disabled"
+    app.review_run_button.configure(state=estado)
+    app.open_folder_button.configure(state=estado)
+
+
+def review_last_run(app):
+    """Abre o editor no arquivo que acabou de ser traduzido, em "Pendentes".
+
+    E a porta de entrada do dia (ROADMAP 28.10): traduzir e revisar sao o mesmo
+    fluxo, e ate aqui o segundo passo exigia abrir o editor, achar o arquivo no
+    seletor e trocar o status. O destino e o DA EXECUCAO, e nao o que o radio
+    marca agora — o usuario pode ter mudado o radio depois, e a revisao e do
+    que foi gravado. Com mais de um arquivo abre no primeiro; os outros estao no
+    seletor, e o log diz isso.
+    """
+    ultima = getattr(app, "last_run", None)
+    if not ultima or not ultima.get("files"):
+        messagebox.showinfo(
+            "Revisar pendentes",
+            "Nenhuma execução registrou posições ainda. Traduza um arquivo primeiro.",
+        )
+        return None
+    arquivos = ultima["files"]
+    if len(arquivos) > 1:
+        app.log_message(
+            f"Revisar pendentes: abrindo {os.path.basename(arquivos[0])}; os outros "
+            f"{len(arquivos) - 1} arquivo(s) da execução estão no seletor \"Arquivo\"."
+        )
+    return open_translation_editor(
+        app,
+        source_file=arquivos[0],
+        status_filter="Pendentes",
+        target_language=ultima.get("target_language"),
+    )
+
+
+def revert_last_run(app):
+    """"Reverter execucao" (Z5): a mais recente do banco. Guarda T5 como toda
+    escrita em massa — reverter durante uma traducao apagaria linhas que o
+    worker acabou de gravar e que o cache dele ainda considera existentes."""
+    if _busy_with_translation(app, "Reverter execução", "reverter uma execução"):
+        return
+    revert_last_run_in_database(app)
+
+
+def open_last_run_folder(app):
+    """Abre no Explorer a pasta do PGN gerado (ou do de origem, se nada saiu).
+
+    O PGN traduzido nasce ao lado do original (`translated_output_path`), entao
+    as duas pastas sao quase sempre a mesma; a do gerado vem primeiro porque e
+    ele que o usuario vai abrir no ChessBase.
+    """
+    ultima = getattr(app, "last_run", None)
+    if not ultima or not ultima.get("files"):
+        messagebox.showinfo(
+            "Abrir pasta", "Nenhuma execução registrou arquivos ainda."
+        )
+        return None
+    caminhos = ultima.get("generated") or ultima["files"]
+    pasta = os.path.dirname(caminhos[0])
+    try:
+        open_path_in_explorer(pasta)
+    except OSError as exc:
+        messagebox.showerror("Abrir pasta", f"Não foi possível abrir a pasta:\n{pasta}\n\n{exc}")
+        return None
+    return pasta
+
+
+def open_path_in_explorer(path):
+    """`os.startfile` no Windows; `xdg-open`/`open` fora dele. Separado para o
+    teste substituir — abrir o Explorer de verdade numa suite e roubar o foco."""
+    if hasattr(os, "startfile"):
+        os.startfile(path)  # noqa: S606 - caminho de pasta, nao comando
+        return
+    import subprocess
+    import sys
+
+    abridor = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([abridor, path])
 
 
 def show_db_stats(app):
@@ -556,6 +720,24 @@ def fix_move_notation(app):
     ):
         return
     fix_move_notation_in_database(
+        app,
+        app.source_language.get(),
+        app.target_language.get(),
+    )
+
+
+def normalize_prose(app):
+    """Conserta a prosa das traducoes pendentes ja gravadas do par selecionado.
+
+    O par sai dos mesmos seletores que "Corrigir Lances" usa, pelo mesmo motivo:
+    nao ha uma segunda pergunta a fazer. "Detectar" e aceito — as normalizacoes
+    de prosa sao guiadas pelo texto do original, nao pelo alfabeto declarado.
+    """
+    if _busy_with_translation(
+        app, "Consertar Prosa", "consertar as traduções já gravadas"
+    ):
+        return
+    normalize_prose_in_database(
         app,
         app.source_language.get(),
         app.target_language.get(),
@@ -689,3 +871,10 @@ def open_edit_window(app):
 
 def open_glossary_window(app):
     open_glossary_editor(app)
+
+
+def open_settings_window(app):
+    # Sem guarda de traducao em andamento: a tela so grava o JSON, e o worker
+    # le as opcoes de saida no COMECO de cada execucao — o que se salvar agora
+    # vale para a proxima, e a tela diz isso.
+    return open_settings_editor(app)
