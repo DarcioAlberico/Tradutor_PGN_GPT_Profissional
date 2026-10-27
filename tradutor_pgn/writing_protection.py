@@ -44,7 +44,10 @@ _MOVES = _move_pattern(_all_known_letters())
 _CASTLING = re.compile(r"(?<!\w)(?:O-O(?:-O)?|0-0(?:-0)?)[+#]?(?!\w)")
 _MOVE_NUMBER = re.compile(r"(?<!\w)\d+\.(?:\.\.)?")
 _NAG = re.compile(r"\$\d+|(?<![\w!?])[!?]{1,2}(?![!?])|[±∓∞⩲⩱]")
-_URL = re.compile(r"(?:https?://|ftp://|www\.)[^\s<>\[\]{}\"']+", re.IGNORECASE)
+_URL = re.compile(
+    r"(?:https?://|ftp://|www\.)(?:\[[^\s<>\[\]{}\"]+\]|[^\s<>\[\]{}\"])+",
+    re.IGNORECASE,
+)
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+", re.UNICODE)
 _IDENTIFIER = re.compile(r"(?<!\w)\w+(?:_\w+)+(?!\w)", re.UNICODE)
 
@@ -123,8 +126,14 @@ def protect_text(request: WritingRequest) -> ProtectedText:
         for match in pattern.finditer(text):
             start, end = match.span()
             if kind == "url":
-                # Sentence punctuation is prose, not part of an address.
-                end = start + len(match.group().rstrip(".,;:!?"))
+                # IPv6 brackets and internal apostrophes belong to the URL;
+                # surrounding prose punctuation and quotes do not.
+                address = match.group().rstrip(".,;:!?")
+                while address.endswith(")") and address.count(")") > address.count("("):
+                    address = address[:-1].rstrip(".,;:!?")
+                if text[start - 1:start] == "'" and address.endswith("'"):
+                    address = address[:-1]
+                end = start + len(address)
             ranges.append(ProtectedRange(start, end, kind))
             if kind == "notation":
                 suffix = re.match(r"[!?]{1,2}", text[end:])

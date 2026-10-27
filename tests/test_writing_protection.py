@@ -44,6 +44,31 @@ def test_technical_fragments_are_masked_without_moving_offsets(fragment, kind):
     assert restore_issue_offsets(projected_issue(protected, start, end), protected) is None
 
 
+@pytest.mark.parametrize("url", [
+    "https://[2001:db8::1]/recurso",
+    "https://example.org/author's/report",
+    "https://example.org/entry_(chess)",
+])
+@pytest.mark.parametrize("opening,closing", [
+    ("", ""), ("(", ")"), ("[", "]"), ("<", ">"),
+    ("'", "'"), ('"', '"'), ("{", "}"),
+])
+def test_complete_urls_are_protected_with_external_delimiters_separate(url, opening, closing):
+    text = f"🙂 Consulte {opening}{url}{closing}, depois."
+    protected = protect_text(WritingRequest(text, 1, "pt"))
+    start = text.index(url)
+    end = start + len(url)
+    assert [(r.start, r.end) for r in protected.ranges if r.kind == "url"] == [(start, end)]
+    assert protected.projected_text == text[:start] + " " * len(url) + text[end:]
+    for index in range(start, end):
+        assert restore_issue_offsets(projected_issue(protected, index, index + 1), protected) is None
+    if opening:
+        assert restore_issue_offsets(projected_issue(protected, start - 1, start, "PUNCTUATION"),
+                                     protected) is not None
+        assert restore_issue_offsets(projected_issue(protected, end, end + 1, "PUNCTUATION"),
+                                     protected) is not None
+
+
 def test_adjacent_move_number_and_san_are_both_protected():
     protected = protect_text(WritingRequest("Após 13.Cd4 a posição é ativa.", 1, "pt"))
     assert protected.projected_text[5:11] == "      "
