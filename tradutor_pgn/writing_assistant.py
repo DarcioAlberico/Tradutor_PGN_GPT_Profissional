@@ -109,9 +109,17 @@ class SpyllsAdapter:
             ("", unicodedata.normalize("NFC", term)) for term in request.glossary_terms
         ))
         try:
-            tokens = (token for token in _tokens(protected.projected_text) if _key(token[2]) not in known)
+            # Masking can split a compound into new words (cor-de-rosa with
+            # rosa protected becomes cor-de). Keep original token boundaries
+            # and discard the whole token on any protected overlap.
+            tokens = (
+                token for token in _tokens(request.text)
+                if _key(token[2]) not in known
+                and not any(interval.start < token[1] and token[0] < interval.end
+                            for interval in protected.ranges)
+            )
             candidates = prose_spellcheck.spelling_candidates(
-                protected.projected_text, dictionary, tokens=tokens,
+                request.text, dictionary, tokens=tokens,
             )
             issues = []
             replacements: dict[str, tuple[str, ...]] = {}

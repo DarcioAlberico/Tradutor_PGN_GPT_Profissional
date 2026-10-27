@@ -71,6 +71,51 @@ def test_protected_notation_and_technical_text_never_reach_lookup(tmp_path):
     assert [issue.original for issue in issues] == ["posiçao"]
 
 
+@pytest.mark.parametrize("protection", ["source", "glossary"])
+@pytest.mark.parametrize("compound,term,start", [
+    ("cor-de-rosa", "rosa", 12),
+    ("pseudo-sacrificio", "pseudo", 18),
+    ("contra-jogo", "jogo", 12),
+    ("d'Alembert", "Alembert", 11),
+    ("d’Alembert", "Alembert", 11),
+])
+def test_partial_protection_never_creates_spelling_fragments(tmp_path, protection, compound, term, start):
+    request = WritingRequest(
+        f"{compound} posiçao", 4, "pt",
+        source_text=term if protection == "source" else "",
+        glossary_terms=frozenset({term}) if protection == "glossary" else frozenset(),
+    )
+    provider = adapter(tmp_path)
+    issues = provider.analyze(request, protect_text(request))
+    # A protected part prevents editing the complete token. Its independent
+    # neighbor must still be checked at its real code-point offsets.
+    assert [(issue.start, issue.end, issue.original) for issue in issues] == [(start, start + 7, "posiçao")]
+    unprotected = replace(request, source_text="", glossary_terms=frozenset())
+    assert [issue.original for issue in provider.analyze(unprotected, protect_text(unprotected))] == [compound, "posiçao"]
+
+
+@pytest.mark.parametrize("compound,term,protection,legacy_words", [
+    ("cor-de-rosa", "rosa", "source", []),
+    ("pseudo-sacrificio", "pseudo", "source", ["pseudo-sacrificio"]),
+    ("contra-jogo", "jogo", "glossary", ["contra-jogo"]),
+])
+def test_real_compound_boundaries_survive_partial_protection(tmp_path, compound, term, protection, legacy_words):
+    dictionary = prose_spellcheck.load_dictionary("pt")
+    assert dictionary is not None
+    known = prose_spellcheck.source_vocabulary(term)
+    assert [word for _, _, word in prose_spellcheck.misspelled_spans(compound, dictionary, known)] == legacy_words
+    request = WritingRequest(
+        compound, 1, "pt", source_text=term if protection == "source" else "",
+        glossary_terms=frozenset({term}) if protection == "glossary" else frozenset(),
+    )
+    # The stricter new span protection can suppress a complete compound; it
+    # must never offer to replace a fragment manufactured by masking.
+    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path, dictionary))
+    result = assistant.analyze(request)
+    assert result.mode == "spelling_only"
+    assert result.issues == ()
+
+
 def test_known_vocabulary_is_filtered_before_dictionary_lookup(tmp_path):
     class FailingDictionary(Dictionary):
         def lookup(self, word):
