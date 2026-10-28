@@ -144,7 +144,7 @@ class WritingController:
             # Completed status is derived from this request's own result.
             if self._active is work and work.request.grammar_enabled:
                 status = self._assistant.status()
-                if status != self._last_status:
+                if status.state in {"starting", "restarting"} and status != self._last_status:
                     self._events.append(work.event("status", status=status))
                     self._last_status = status
             events = tuple(self._events)

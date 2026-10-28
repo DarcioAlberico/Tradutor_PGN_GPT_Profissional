@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+from tradutor_pgn.writing_assistant import PortugueseWritingAssistant, SpellingUnavailable
 from tradutor_pgn.languagetool_client import LanguageToolLocalAdapter
 from tradutor_pgn.languagetool_process import LanguageToolProcess
 from tradutor_pgn.writing_controller import WritingController
@@ -109,6 +109,59 @@ def test_two_windows_share_service_but_closing_one_does_not_close_other():
         provider.release.set()
         one.shutdown()
         two.shutdown()
+        assistant.shutdown()
+
+
+@pytest.mark.parametrize("other_mode", ["unavailable", "spelling_only", "full"])
+@pytest.mark.parametrize("grammar_enabled, own_mode", [(True, "full"), (False, "spelling_only")])
+def test_poll_never_attributes_other_windows_completed_status_to_active_request(
+    other_mode, grammar_enabled, own_mode,
+):
+    entered, release = threading.Event(), threading.Event()
+
+    class SpellingByWindow:
+        def analyze(self, request, protected):
+            if request.text == "janela A":
+                entered.set()
+                assert release.wait(3), "test must release window A"
+            elif other_mode == "unavailable":
+                raise SpellingUnavailable("DIAGNOSTICO_DA_JANELA_B")
+            return ()
+
+    class Grammar:
+        def analyze(self, request, protected):
+            return ()
+
+        def status(self):
+            return AssistantStatus("ready", "full")
+
+    assistant = PortugueseWritingAssistant(spelling_adapter=SpellingByWindow(), grammar_adapter=Grammar())
+    one, two = WritingController(assistant, window_id="A"), WritingController(assistant, window_id="B")
+    try:
+        one.submit(WritingRequest("janela A", 10, "pt", grammar_enabled=grammar_enabled), record_id="registro A")
+        assert entered.wait(3)
+        two.submit(WritingRequest("janela B", 20, "pt", grammar_enabled=other_mode == "full"),
+                   record_id="registro B")
+        other_events = wait_result(two)
+        assert all(event.context.window_id == "B" and event.text_version == 20 for event in other_events)
+        assert [event.result.mode for event in other_events if event.kind == "result"] == [other_mode]
+
+        # B has completed while A is still in spelling: its status is not A's.
+        assert one.poll() == ()
+        release.set()
+        own_events = wait_result(one)
+        assert all(event.context.window_id == "A" and event.context.record_id == "registro A"
+                   and event.text_version == 10 for event in own_events)
+        assert [event.status for event in own_events if event.kind == "status"] == [
+            AssistantStatus("ready", own_mode),
+        ]
+        assert [event.result.mode for event in own_events if event.kind == "result"] == [own_mode]
+    finally:
+        release.set()
+        one.shutdown()
+        two.shutdown()
+        one._executor.shutdown(wait=True)
+        two._executor.shutdown(wait=True)
         assistant.shutdown()
 
 
