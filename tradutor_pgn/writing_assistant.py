@@ -5,13 +5,17 @@ per-process dictionary cache. UI callers can keep using request_dictionary's
 asynchronous warm-up. No failure is presented as a successful empty analysis.
 """
 
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
+from dataclasses import replace
+import hashlib
+import json
 import threading
 from typing import Protocol
 import unicodedata
 
 from . import prose_spellcheck
-from .languagetool_client import LanguageToolLocalAdapter
+from .languagetool_client import EXPECTED_VERSION, LanguageToolLocalAdapter
 from .personal_dictionary import PersonalDictionary
 from .writing_protection import ProtectedText, protect_text, restore_issue_offsets
 from .writing_types import AssistantMode, AssistantStatus, WritingIssue, WritingRequest, WritingResult
@@ -83,6 +87,12 @@ class SpyllsAdapter:
         self._load_dictionary = dictionary_loader
         self._personal_dictionary = personal_dictionary if personal_dictionary is not None else PersonalDictionary()
 
+    @property
+    def cache_revision(self) -> str:
+        """Observe external vocabulary edits without retaining words in keys."""
+        words = sorted({_key(word) for word in self._personal_dictionary.list_words()})
+        return hashlib.sha256(json.dumps(["spylls-v1", words], ensure_ascii=True).encode("ascii")).hexdigest()
+
     def analyze(self, request: WritingRequest, protected: ProtectedText) -> tuple[WritingIssue, ...]:
         language = _dictionary_language(request.target_language)
         if language not in prose_spellcheck.DICTIONARY_NAMES:
@@ -148,7 +158,10 @@ class PortugueseWritingAssistant:
         self, *, spelling_adapter: WritingAdapter | None = None,
         grammar_adapter: WritingAdapter | None = None,
         protector: Callable[[WritingRequest], ProtectedText] = protect_text,
+        cache_capacity: int = 128,
     ) -> None:
+        if type(cache_capacity) is not int or cache_capacity < 0:
+            raise ValueError("cache_capacity must be a non-negative integer")
         self._spelling = spelling_adapter if spelling_adapter is not None else SpyllsAdapter()
         self._grammar = grammar_adapter if grammar_adapter is not None else LanguageToolLocalAdapter()
         self._protect = protector
@@ -156,8 +169,90 @@ class PortugueseWritingAssistant:
         self._closed = False
         self._grammar_activity_lock = threading.Lock()
         self._active_grammar_checks = 0
+        self._cache_lock = threading.RLock()
+        self._cache: OrderedDict[tuple[int, str], WritingResult] = OrderedDict()
+        self._cache_capacity = cache_capacity
+        self._cache_epoch = 0
+        self._cache_revisions: dict[str, str | int] = {
+            "glossary": 0, "vocabulary": 0, "rules": 0, "providers": 0,
+        }
+
+    def set_cache_revisions(self, **revisions: str | int) -> None:
+        """Publish glossary/vocabulary/rules/providers revisions on settings edits.
+
+        Request values also belong to the key. Revisions invalidate entries
+        when a data source changes without changing that request's fields.
+        """
+        if any(name not in self._cache_revisions or type(value) not in {str, int}
+               for name, value in revisions.items()):
+            raise ValueError("invalid writing cache revision")
+        with self._cache_lock:
+            if any(self._cache_revisions[name] != value for name, value in revisions.items()):
+                self._cache_revisions.update(revisions)
+                self.invalidate_cache()
+
+    def invalidate_cache(self) -> None:
+        """Clear memory only; an old in-flight check cannot refill this epoch."""
+        with self._cache_lock:
+            self._cache_epoch += 1
+            self._cache.clear()
+
+    def _cache_key(self, request: WritingRequest) -> tuple[int, str] | None:
+        if not self._cache_capacity:
+            return None
+        try:
+            provider_revisions = [
+                [type(adapter).__module__, type(adapter).__qualname__,
+                 str(getattr(adapter, "cache_revision", "v1"))]
+                for adapter in (self._spelling, self._grammar)
+            ]
+        except Exception:
+            # A vocabulary read error must reach normal analysis and produce
+            # its visible unavailable result, never reuse an earlier success.
+            return None
+        with self._cache_lock:
+            epoch, revisions = self._cache_epoch, self._cache_revisions.copy()
+        payload = [
+            "writing-v1", EXPECTED_VERSION, provider_revisions, revisions,
+            request.text, request.target_language, request.source_text,
+            sorted(request.glossary_terms), sorted(request.session_ignored_words),
+            sorted(request.disabled_rule_ids), request.grammar_enabled,
+        ]
+        digest = hashlib.sha256(json.dumps(payload, ensure_ascii=True).encode("ascii")).hexdigest()
+        return epoch, digest
 
     def analyze(self, request: WritingRequest) -> WritingResult:
+        with self._cache_lock:
+            if self._closed:
+                return WritingResult(request.text_version, (), "unavailable", "Assistente de escrita encerrado.")
+        key = self._cache_key(request)
+        with self._cache_lock:
+            cached = self._cache.get(key) if key is not None else None
+            if cached is not None and key is not None and not self._closed:
+                grammar_status = self._grammar_status() if request.grammar_enabled else None
+                # A cached full response cannot hide a later sidecar failure.
+                if grammar_status is None or grammar_status.mode == "full":
+                    self._cache.move_to_end(key)
+                    result = replace(cached, text_version=request.text_version, issues=tuple(
+                        replace(issue, text_version=request.text_version) for issue in cached.issues
+                    ))
+                    self._status = AssistantStatus("ready", result.mode, result.diagnostic,
+                                                   grammar_status.restart_attempted if grammar_status else False)
+                    return result
+        result = self._analyze_uncached(request)
+        current_key = self._cache_key(request) if key is not None else None
+        with self._cache_lock:
+            if self._closed:
+                return WritingResult(request.text_version, (), "unavailable", "Assistente de escrita encerrado.")
+            if (key is not None and key == current_key and result.mode != "unavailable"
+                    and not result.diagnostic):
+                self._cache[key] = result
+                self._cache.move_to_end(key)
+                while len(self._cache) > self._cache_capacity:
+                    self._cache.popitem(last=False)
+        return result
+
+    def _analyze_uncached(self, request: WritingRequest) -> WritingResult:
         if self._closed:
             return self._unavailable(request, "Assistente de escrita encerrado.")
         try:
@@ -167,6 +262,9 @@ class PortugueseWritingAssistant:
             return self._unavailable(request, str(error))
         except Exception:
             return self._unavailable(request, "Ortografia indisponível: falha no motor local.")
+        with self._cache_lock:
+            if self._closed:
+                return self._unavailable(request, "Assistente de escrita encerrado.")
         mode: AssistantMode = "spelling_only"
         diagnostic = ""
         if request.grammar_enabled:
@@ -202,38 +300,47 @@ class PortugueseWritingAssistant:
             issue.start, issue.end, issue.category, issue.rule_id, issue.provider,
         )))
         grammar_status = self._grammar_status() if request.grammar_enabled else None
-        self._status = AssistantStatus("ready", mode, diagnostic,
-                                       grammar_status.restart_attempted if grammar_status else False)
+        with self._cache_lock:
+            if not self._closed:
+                self._status = AssistantStatus("ready", mode, diagnostic,
+                                               grammar_status.restart_attempted if grammar_status else False)
         return WritingResult(request.text_version, ordered, mode, diagnostic)
 
     def _unavailable(self, request: WritingRequest, diagnostic: str) -> WritingResult:
-        self._status = AssistantStatus("failed", "unavailable", diagnostic)
+        with self._cache_lock:
+            if not self._closed:
+                self._status = AssistantStatus("failed", "unavailable", diagnostic)
         return WritingResult(request.text_version, (), "unavailable", diagnostic)
 
     def status(self) -> AssistantStatus:
-        with self._grammar_activity_lock:
-            grammar_active = self._active_grammar_checks > 0
-        if grammar_active or self._status.mode == "full":
-            grammar_status = self._grammar_status()
-            if grammar_status is not None:
-                if grammar_active and grammar_status.state in {"starting", "restarting"}:
-                    return AssistantStatus(grammar_status.state, "spelling_only", grammar_status.diagnostic,
-                                           grammar_status.restart_attempted)
-                if self._status.mode == "full" and grammar_status.mode != "full":
-                    self._status = AssistantStatus(grammar_status.state, "spelling_only",
-                                                   "Concordância indisponível; somente ortografia.",
-                                                   grammar_status.restart_attempted)
-        return self._status
+        with self._cache_lock:
+            if self._closed:
+                return AssistantStatus("stopped", "unavailable")
+            with self._grammar_activity_lock:
+                grammar_active = self._active_grammar_checks > 0
+            if grammar_active or self._status.mode == "full":
+                grammar_status = self._grammar_status()
+                if grammar_status is not None:
+                    if grammar_active and grammar_status.state in {"starting", "restarting"}:
+                        return AssistantStatus(grammar_status.state, "spelling_only", grammar_status.diagnostic,
+                                               grammar_status.restart_attempted)
+                    if self._status.mode == "full" and grammar_status.mode != "full":
+                        self._status = AssistantStatus(grammar_status.state, "spelling_only",
+                                                       "Concordância indisponível; somente ortografia.",
+                                                       grammar_status.restart_attempted)
+            return self._status
 
     def _grammar_status(self) -> AssistantStatus | None:
         status = getattr(self._grammar, "status", None)
         return status() if callable(status) else None
 
     def shutdown(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        with self._cache_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self.invalidate_cache()
+            self._status = AssistantStatus("stopped", "unavailable")
         shutdown = getattr(self._grammar, "shutdown", None)
         if callable(shutdown):
             shutdown()
-        self._status = AssistantStatus("stopped", "unavailable")

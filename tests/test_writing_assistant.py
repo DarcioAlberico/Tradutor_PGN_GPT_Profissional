@@ -440,3 +440,238 @@ def test_assistant_publishes_active_grammar_transitions_before_first_full_result
     assert not worker.is_alive() and not errors
     assert len(results) == 1 and results[0].mode == "full"
     assert assistant.status().state == "ready" and assistant.status().mode == "full"
+
+
+class CountingSpelling:
+    cache_revision = "adapter-v1"
+
+    def __init__(self):
+        self.calls = []
+
+    def analyze(self, request, protected):
+        self.calls.append(request.text)
+        return (WritingIssue("", "TYPO", "SPELLING", 0, len(request.text), request.text,
+                             "Grafia", "Confira", ("correta",), "error", "test", request.text_version),)
+
+
+def test_cache_reuses_content_across_versions_and_rebinds_every_issue(tmp_path):
+    provider = CountingSpelling()
+    assistant = PortugueseWritingAssistant(spelling_adapter=provider)
+    request = WritingRequest("palavra", 1, "pt")
+    first = assistant.analyze(request)
+    second = assistant.analyze(replace(request, text_version=9))
+    second.validate_for(replace(request, text_version=9))
+    assert second.text_version == second.issues[0].text_version == 9
+    assert second.issues[0].issue_id == first.issues[0].issue_id
+    assert provider.calls == ["palavra"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cache_has_bounded_lru_eviction():
+    provider = CountingSpelling()
+    assistant = PortugueseWritingAssistant(spelling_adapter=provider, cache_capacity=2)
+    for version, text in enumerate(("alfa", "beta", "alfa", "gama", "beta")):
+        assert assistant.analyze(WritingRequest(text, version, "pt")).issues[0].original == text
+    assert provider.calls == ["alfa", "beta", "gama", "beta"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("source_text", "nome"), ("target_language", "pt-BR"),
+    ("glossary_terms", frozenset({"termo"})),
+    ("session_ignored_words", frozenset({"sessão"})),
+    ("disabled_rule_ids", frozenset({"REGRA"})), ("grammar_enabled", True),
+])
+def test_cache_includes_every_analysis_input(field, value):
+    class Grammar:
+        def analyze(self, request, protected):
+            return ()
+
+    provider = CountingSpelling()
+    assistant = PortugueseWritingAssistant(spelling_adapter=provider, grammar_adapter=Grammar())
+    request = WritingRequest("palavra", 1, "pt")
+    assistant.analyze(request)
+    assistant.analyze(replace(request, **{field: value}))
+    assert provider.calls == ["palavra", "palavra"]
+
+
+@pytest.mark.parametrize("revision", ["glossary", "vocabulary", "rules", "providers"])
+def test_cache_revision_change_and_explicit_invalidation_reanalyze(revision):
+    provider = CountingSpelling()
+    assistant = PortugueseWritingAssistant(spelling_adapter=provider)
+    request = WritingRequest("palavra", 1, "pt")
+    assistant.analyze(request)
+    assistant.set_cache_revisions(**{revision: "next"})
+    assistant.analyze(request)
+    assistant.set_cache_revisions(**{revision: "next"})
+    assistant.analyze(request)
+    assert len(provider.calls) == 2
+    assistant.invalidate_cache()
+    assistant.analyze(request)
+    assert len(provider.calls) == 3
+
+
+def test_cache_observes_adapter_version_changes():
+    provider = CountingSpelling()
+    assistant = PortugueseWritingAssistant(spelling_adapter=provider)
+    request = WritingRequest("palavra", 1, "pt")
+    assistant.analyze(request)
+    provider.cache_revision = "adapter-v2"
+    assistant.analyze(request)
+    assert len(provider.calls) == 2
+
+
+def test_cache_observes_personal_vocabulary_changes_from_another_instance(tmp_path):
+    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path))
+    request = WritingRequest("posiçao", 1, "pt")
+    assert len(assistant.analyze(request).issues) == 1
+    external = PersonalDictionary(tmp_path / "personal.json")
+    external.add("posiçao")
+    assert assistant.analyze(request).issues == ()
+    external.remove("posiçao")
+    assert len(assistant.analyze(request).issues) == 1
+
+
+@pytest.mark.parametrize("capacity", [0, 2])
+def test_cache_never_freezes_failure_and_disabling_cache_reanalyzes(capacity):
+    class Recovering(CountingSpelling):
+        broken = True
+
+        def analyze(self, request, protected):
+            if self.broken:
+                raise RuntimeError("unavailable")
+            return super().analyze(request, protected)
+
+    provider = Recovering()
+    assistant = PortugueseWritingAssistant(spelling_adapter=provider, cache_capacity=capacity)
+    request = WritingRequest("palavra", 1, "pt")
+    assert assistant.analyze(request).mode == "unavailable"
+    provider.broken = False
+    assert len(assistant.analyze(request).issues) == 1
+    assistant.analyze(request)
+    assert len(provider.calls) == (2 if capacity == 0 else 1)
+
+
+def test_shutdown_during_spelling_cannot_publish_ready_or_cache_late_result():
+    entered, release = threading.Event(), threading.Event()
+
+    class Blocking(CountingSpelling):
+        def analyze(self, request, protected):
+            entered.set()
+            assert release.wait(3)
+            return super().analyze(request, protected)
+
+    assistant = PortugueseWritingAssistant(spelling_adapter=Blocking())
+    request = WritingRequest("palavra", 1, "pt")
+    results = []
+    worker = threading.Thread(target=lambda: results.append(assistant.analyze(request)))
+    worker.start()
+    try:
+        assert entered.wait(3)
+        assistant.shutdown()
+    finally:
+        release.set()
+        worker.join(3)
+    assert not worker.is_alive()
+    assert assistant.status().state == "stopped"
+    assert results[0].mode == "unavailable"
+    assert assistant.analyze(request).mode == "unavailable"
+    assert assistant.status().state == "stopped"
+
+
+def test_invalidation_during_analysis_prevents_old_check_refilling_cache():
+    entered, release = threading.Event(), threading.Event()
+
+    class Blocking(CountingSpelling):
+        def analyze(self, request, protected):
+            entered.set()
+            assert release.wait(3)
+            return super().analyze(request, protected)
+
+    provider = Blocking()
+    assistant = PortugueseWritingAssistant(spelling_adapter=provider)
+    request = WritingRequest("palavra", 1, "pt")
+    results = []
+    worker = threading.Thread(target=lambda: results.append(assistant.analyze(request)))
+    worker.start()
+    try:
+        assert entered.wait(3)
+        assistant.invalidate_cache()
+    finally:
+        release.set()
+        worker.join(3)
+    assert not worker.is_alive() and len(results) == 1
+    assistant.analyze(request)
+    assert len(provider.calls) == 2
+
+
+def test_cached_full_result_cannot_hide_sidecar_failure_and_fallback_can_recover():
+    class Grammar:
+        state = AssistantStatus("ready", "full")
+
+        def status(self):
+            return self.state
+
+        def analyze(self, request, protected):
+            if self.state.mode != "full":
+                raise RuntimeError("failed")
+            return ()
+
+    provider, grammar = CountingSpelling(), Grammar()
+    assistant = PortugueseWritingAssistant(spelling_adapter=provider, grammar_adapter=grammar)
+    request = WritingRequest("palavra", 1, "pt", grammar_enabled=True)
+    assert assistant.analyze(request).mode == "full"
+    grammar.state = AssistantStatus("failed", "spelling_only", restart_attempted=True)
+    fallback = assistant.analyze(request)
+    assert fallback.mode == "spelling_only" and fallback.diagnostic
+    assert len(fallback.issues) == 1 and len(provider.calls) == 2
+    grammar.state = AssistantStatus("ready", "full", restart_attempted=True)
+    assert assistant.analyze(request).mode == "full"
+
+
+def test_cached_spelling_cannot_hide_personal_vocabulary_read_failure(tmp_path):
+    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path))
+    request = WritingRequest("posiçao", 1, "pt")
+    assert assistant.analyze(request).mode == "spelling_only"
+    path = tmp_path / "personal.json"
+    path.mkdir()
+    try:
+        result = assistant.analyze(request)
+        assert result.mode == "unavailable" and result.diagnostic
+    finally:
+        path.rmdir()
+    assert assistant.analyze(request).mode == "spelling_only"
+
+
+@pytest.mark.parametrize("capacity", [-1, True, 1.5])
+def test_cache_rejects_invalid_capacity(capacity):
+    with pytest.raises(ValueError):
+        PortugueseWritingAssistant(cache_capacity=capacity)
+
+
+def test_shutdown_during_spelling_does_not_start_grammar_after_close():
+    entered, release = threading.Event(), threading.Event()
+    grammar_calls = []
+
+    class Blocking(CountingSpelling):
+        def analyze(self, request, protected):
+            entered.set()
+            assert release.wait(3)
+            return super().analyze(request, protected)
+
+    class Grammar:
+        def analyze(self, request, protected):
+            grammar_calls.append(request.text_version)
+            return ()
+
+    assistant = PortugueseWritingAssistant(spelling_adapter=Blocking(), grammar_adapter=Grammar())
+    request = WritingRequest("palavra", 1, "pt", grammar_enabled=True)
+    worker = threading.Thread(target=lambda: assistant.analyze(request))
+    worker.start()
+    try:
+        assert entered.wait(3)
+        assistant.shutdown()
+    finally:
+        release.set()
+        worker.join(3)
+    assert not worker.is_alive()
+    assert grammar_calls == []
