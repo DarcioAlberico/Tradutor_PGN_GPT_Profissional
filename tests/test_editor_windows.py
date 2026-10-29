@@ -31,7 +31,7 @@ import customtkinter as ctk
 import types
 import unittest
 import unittest.mock
-from contextlib import closing, redirect_stderr
+from contextlib import closing, contextmanager, redirect_stderr
 from pathlib import Path
 
 from gui_harness import DISPLAY, GuiTestCase, cancel_pending_after, destroy_test_root, needs_room
@@ -8188,6 +8188,143 @@ class WritingEditorTests(GuiTestCase):
         self.wait_for(lambda: bool(self.editor.writing_panel.issues)
                       and self.editor._valid_writing_issue(self.editor.writing_panel.issues[0]))
         return self.editor.writing_panel.issues[0]
+
+    @contextmanager
+    def committed_bulk_waiting_for_delivery(self):
+        original = edit_window.apply_identical_replacements
+        committed, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def slow(conn, preview):
+            operation = original(conn, preview)
+            committed.set()
+            release.wait(10)
+            return operation
+        with unittest.mock.patch.object(edit_window, "apply_identical_replacements", slow):
+            self.editor.apply_all_identical(self.ready(), "erro")
+            self.wait_for(committed.is_set)
+            self.editor.set_translation_text("manual durante espera", mark_dirty=True, keep_undo=True)
+            self.editor.state.selected_ids = {self.editor.current["id"]}
+            snapshot = dict(current=dict(self.editor.current), rows=list(self.editor.state.rows),
+                            view=self.editor.current_view(), history=list(self.editor.state.history_stack),
+                            selected=set(self.editor.state.selected_ids), page=self.editor.state.page_index)
+            try:
+                yield snapshot
+            finally:
+                release.set()
+                self.wait_for(lambda: not self.editor._writing_busy)
+
+    def assert_pending_context_unchanged(self, snapshot):
+        self.assertEqual(self.editor.current, snapshot["current"])
+        self.assertEqual(self.editor.draft_text(), "manual durante espera")
+        self.assertTrue(self.editor.state.dirty)
+        self.assertEqual(self.editor.state.rows, snapshot["rows"])
+        self.assertEqual(self.editor.current_view(), snapshot["view"])
+        self.assertEqual(self.editor.state.history_stack, snapshot["history"])
+        self.assertEqual(self.editor.state.selected_ids, snapshot["selected"])
+        self.assertEqual(self.editor.state.page_index, snapshot["page"])
+
+    def test_busy_search_return_keeps_manual_draft_and_can_persist_it_after_delivery(self):
+        self.ready()
+        self.editor.focus_search()
+        self.pump()
+        with self.committed_bulk_waiting_for_delivery() as snapshot:
+            self.editor.win.event_generate("<Control-l>")
+            self.editor.search_text.set("nao-existe-nenhuma-linha")
+            self.editor.search_entry._entry.event_generate("<Return>")
+            self.pump()
+            self.assert_pending_context_unchanged(snapshot)
+            self.assertIn("Aguarde", self.editor.msg_label.cget("text"))
+        self.assertEqual(self.editor.current["id"], snapshot["current"]["id"])
+        self.assertEqual(self.editor.current["saved_trans"], "erro erro")
+        self.assertEqual(self.editor.draft_text(), "manual durante espera")
+        self.assertTrue(self.editor.state.dirty)
+        self.editor.persist_current_draft()
+        self.wait_for(lambda: any(draft["text"] == "manual durante espera"
+                                  for draft in settings.load_settings().get("editor_drafts", {}).values()))
+        recovered = settings.get_editor_draft(settings.load_settings(), self.db_path, "pt",
+                                             snapshot["current"]["id"], "erro erro")
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered["text"], "manual durante espera")
+        self.assertEqual(recovered["base_translation"], "erro erro")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("erro erro",), ("erro",)])
+
+    def test_busy_filter_callbacks_restore_controls_before_changing_context(self):
+        with self.committed_bulk_waiting_for_delivery() as snapshot:
+            choices = ((self.editor.status_segment, "Verificadas", self.editor.toggle_filter, "status"),
+                       (self.editor.source_menu, "Espanhol", self.editor.change_language_filter, "source"),
+                       (self.editor.target_menu, edit_window.LANGUAGE_NAMES["en"], self.editor.change_language_filter, "target"),
+                       (self.editor.file_menu, edit_window.FILE_FILTER_ALL, self.editor.change_file_filter, "file"),
+                       (self.editor.search_mode_segment, edit_window.SEARCH_MODE_LABEL_SUBSTRING, self.editor.apply_search, "mode"))
+            for control, value, action, field in choices:
+                control.set(value)  # CTk updates the value before invoking its command.
+                action()
+                self.assert_pending_context_unchanged(snapshot)
+                expected = snapshot["view"][field]
+                if field == "target":
+                    expected = edit_window.LANGUAGE_NAMES[expected]
+                self.assertEqual(control.get(), expected)
+        self.assertEqual(self.editor.draft_text(), "manual durante espera")
+
+    def test_busy_clear_search_keeps_pending_input_and_active_view(self):
+        self.editor.search_text.set("One")
+        self.editor.apply_search()
+        with self.committed_bulk_waiting_for_delivery() as snapshot:
+            self.editor.search_text.set("pending query")
+            self.editor.clear_search()
+            self.assert_pending_context_unchanged(snapshot)
+            self.assertEqual(self.editor.search_text.get(), "pending query")
+            self.assertEqual(self.editor.state.active_search, "One")
+
+    def test_busy_page_back_id_and_qa_commands_preserve_navigation_state(self):
+        with unittest.mock.patch.object(edit_window, "PAGE_SIZE", 1):
+            self.editor.reload_rows()
+            self.editor.select_index(0)
+            target_id = self.editor.current["id"] + 1
+            earlier = dict(self.editor.current_view(), id=target_id)
+            self.editor.state.history_stack.append(earlier)
+            self.editor.go_page_text.set("2")
+            self.editor.go_id_text.set(str(target_id))
+            with self.committed_bulk_waiting_for_delivery() as snapshot:
+                for action in (lambda: self.editor.change_page(1), self.editor.go_to_page,
+                               self.editor.go_to_id, self.editor.go_back,
+                               self.editor.go_to_next_quality_warning,
+                               lambda: self.editor.win.event_generate("<Control-Next>"),
+                               lambda: self.editor.win.event_generate("<Alt-BackSpace>")):
+                    action()
+                    self.pump()
+                    self.assert_pending_context_unchanged(snapshot)
+                self.assertIs(self.editor.jump_to_id(target_id), False)
+                self.assertIs(self.editor.restore_view(earlier), False)
+                self.assert_pending_context_unchanged(snapshot)
+
+    def test_busy_editor_actions_do_not_write_or_claim_success_after_skipped_save(self):
+        with self.committed_bulk_waiting_for_delivery() as snapshot:
+            dialogs_before = list(self.dialogs.calls)
+            for action in (self.editor.mark_and_next, self.editor.mark_pending,
+                           self.editor.verify_selected_rows,
+                           lambda: self.editor.set_review_status(edit_window.REVIEW_STATUS_REJECTED),
+                           lambda: self.editor.set_review_status_and_next(edit_window.REVIEW_STATUS_DOUBT),
+                           self.editor.export_selected_rows, self.editor.export_quality_report,
+                           self.editor.open_history_window, self.editor.open_repeated_edits_window,
+                           self.editor.apply_automatic_rules_for_current_language,
+                           self.editor.discard_unreviewed_in_file,
+                           self.editor.save_shortcut, self.editor.verify_shortcut,
+                           self.editor.mark_and_next_shortcut):
+                action()
+                self.assert_pending_context_unchanged(snapshot)
+                self.assertIn("Aguarde", self.editor.msg_label.cget("text"))
+                self.assertEqual(self.dialogs.calls, dialogs_before)
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                self.assertEqual(conn.execute("SELECT verified, review_status FROM comments ORDER BY id").fetchall(),
+                                 [(0, ""), (0, "")])
+
+    def test_busy_low_level_view_commands_cannot_clear_or_reload_the_draft(self):
+        with self.committed_bulk_waiting_for_delivery() as snapshot:
+            for action in (self.editor.clear_current, self.editor.reload_rows, self.editor.load_first_page):
+                action()
+                self.assert_pending_context_unchanged(snapshot)
 
     def test_current_issue_dirty_undo_and_stale_refusal(self):
         item = self.ready()

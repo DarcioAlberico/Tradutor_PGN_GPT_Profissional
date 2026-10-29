@@ -2034,6 +2034,8 @@ class TranslationEditor:
 
     def load_first_page(self):
         """Carrega a primeira pagina e seleciona o primeiro item."""
+        if self._writing_action_blocked():
+            return
         self.reload_rows()
         if self.state.rows:
             self.select_index(0)
@@ -3172,6 +3174,22 @@ class TranslationEditor:
         self._writing_dialog = dialog
         self._writing_job = (self._writing_executor.submit(work), success)
 
+    def _writing_action_blocked(self):
+        """Reject commands before they change the view or assume a save succeeded."""
+        if not getattr(self, "_writing_busy", False):
+            return False
+        # CTk selectors change before their command runs. Restore the controls
+        # to the applied view without reloading it or touching pending input.
+        view = self.state.applied_view
+        for control, field in ((self.status_segment, "status"), (self.source_menu, "source"),
+                               (self.file_menu, "file"), (self.search_mode_segment, "mode")):
+            if field in view:
+                control.set(view[field])
+        if "target" in view:
+            self.target_menu.set(LANGUAGE_NAMES.get(view["target"], self.target_menu.get()))
+        self.show_message("Aguarde a operação de revisão terminar.")
+        return True
+
     def _close_writing_dialog(self):
         if self._writing_dialog is not None:
             try:
@@ -3406,6 +3424,8 @@ class TranslationEditor:
                 )
 
     def clear_current(self):
+        if self._writing_action_blocked():
+            return
         self.orig_text.configure(state="normal")
         self.orig_text.delete("1.0", tk.END)
         self.orig_text.configure(state="disabled")
@@ -3568,6 +3588,8 @@ class TranslationEditor:
         qualquer coisa acontecer: ele e o "de onde", e tudo o que vem depois e o
         "para onde".
         """
+        if self._writing_action_blocked():
+            return
         if not self.current["id"]:
             return
         retrato = self.current_view()
@@ -3614,6 +3636,8 @@ class TranslationEditor:
         antes do `jump_to_id` porque o arquivo escolhido decide a ORDEM da lista,
         e a ordem decide a posicao do id (garantia R10).
         """
+        if self._writing_action_blocked():
+            return False
         self.search_text.set(retrato["search"])
         self.state.active_search = retrato["search"]
         self.search_mode_segment.set(retrato["mode"])
@@ -3650,6 +3674,8 @@ class TranslationEditor:
         Por isso o ponto de partida e guardado e reposto: "Nada para voltar" passa
         a querer dizer que nada mudou.
         """
+        if self._writing_action_blocked():
+            return False
         self.save_changes()
         partida = self.current_view()
         tentou = False
@@ -3702,6 +3728,8 @@ class TranslationEditor:
         lista e refeita quando o PAR muda, que e quando ela pode de fato ter outro
         conteudo.
         """
+        if self._writing_action_blocked():
+            return
         self.remember_position()
         if self.current["id"]:
             self.save_changes()
@@ -3725,6 +3753,8 @@ class TranslationEditor:
         dizer nada no novo: o filtro pode ter 3 linhas, e `clamp_page` deixaria o
         usuario numa lista vazia sem explicar por que.
         """
+        if self._writing_action_blocked():
+            return
         self.remember_position()
         if self.current["id"]:
             self.save_changes()
@@ -3870,6 +3900,8 @@ class TranslationEditor:
         depois de gravar, de filtrar e de buscar, e roubar o foco do campo de
         busca no meio de uma busca seria trocar um incomodo por outro pior.
         """
+        if self._writing_action_blocked():
+            return
         self.select_index(index, save_previous=True)
         try:
             self.trans_text.focus_set()
@@ -3973,6 +4005,8 @@ class TranslationEditor:
         self.btn_batch_clear.configure(state=estado)
 
     def reload_rows(self):
+        if self._writing_action_blocked():
+            return
         filtros = self.list_filters()
         consulta = self.list_query_args()
         with closing(initialize_database(self.app.output_db)) as conn:
@@ -4066,7 +4100,7 @@ class TranslationEditor:
         self.update_selection_label()
 
     def select_index(self, index, save_previous=False):
-        if getattr(self, "_writing_busy", False):
+        if self._writing_action_blocked():
             return
         if not self.state.rows:
             return
@@ -4093,7 +4127,7 @@ class TranslationEditor:
         self.load_item()
 
     def load_item(self):
-        if getattr(self, "_writing_busy", False):
+        if self._writing_action_blocked():
             return
         index = self.get_index()
         if index is None or not (0 <= index < len(self.state.rows)):
@@ -4280,7 +4314,7 @@ class TranslationEditor:
         return propagated
 
     def save_changes(self, silent=True, mark_verified=False):
-        if getattr(self, "_writing_busy", False):
+        if self._writing_action_blocked():
             return
         if not self.current["id"]:
             return
@@ -4452,7 +4486,7 @@ class TranslationEditor:
         O id e a posicao sao capturados ANTES da gravacao: depois dela, a posicao
         lida pode ja ser a de quem ainda nao foi visto. Ver `index_after_save`.
         """
-        if getattr(self, "_writing_busy", False):
+        if self._writing_action_blocked():
             return
         current_id = self.current["id"]
         index = self.get_index()
@@ -4481,6 +4515,8 @@ class TranslationEditor:
             self.show_message("Fim da lista")
 
     def change_page(self, delta):
+        if self._writing_action_blocked():
+            return
         self.save_changes()
         new_page = self.state.page_index + delta
         if 0 <= new_page < self.page_count():
@@ -4490,6 +4526,8 @@ class TranslationEditor:
                 self.select_index(0)
 
     def go_to_page(self):
+        if self._writing_action_blocked():
+            return
         self.save_changes()
         try:
             target_page = int(self.go_page_text.get().strip())
@@ -4516,6 +4554,8 @@ class TranslationEditor:
         Duas implementacoes de "posicionar num id" divergiriam no dia em que uma
         das duas ganhasse um filtro novo — que e a historia da garantia R10.
         """
+        if self._writing_action_blocked():
+            return False
         if not target_id:
             return False
 
@@ -4540,6 +4580,8 @@ class TranslationEditor:
         return True
 
     def go_to_id(self):
+        if self._writing_action_blocked():
+            return
         self.save_changes()
         try:
             target_id = int(self.go_id_text.get().strip())
@@ -4631,6 +4673,8 @@ class TranslationEditor:
         return None
 
     def go_to_next_quality_warning(self):
+        if self._writing_action_blocked():
+            return
         # Capturados antes da gravacao, como em `navigate`: e aqui que pular uma
         # linha mais doi, porque a fila de avisos existe justamente para nao
         # deixar nenhuma para tras (garantia F15, ROADMAP 22.5).
@@ -4693,6 +4737,8 @@ class TranslationEditor:
         self.show_message("Aviso QA: " + warnings[0])
 
     def export_quality_report(self):
+        if self._writing_action_blocked():
+            return
         self.save_changes()
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
@@ -4728,6 +4774,8 @@ class TranslationEditor:
         )
 
     def mark_and_next(self):
+        if self._writing_action_blocked():
+            return
         if not self.current["id"]:
             return
 
@@ -4776,6 +4824,8 @@ class TranslationEditor:
             self.show_message("Marcada como verificada")
 
     def mark_pending(self):
+        if self._writing_action_blocked():
+            return
         if not self.current["id"]:
             return
 
@@ -4820,6 +4870,8 @@ class TranslationEditor:
         um clique em "Verificar" com 100 linhas marcadas abrir 100 dialogos, ou —
         pior — nenhum.
         """
+        if self._writing_action_blocked():
+            return
         if not self.state.selected_ids:
             return
         self.save_changes()
@@ -4898,6 +4950,8 @@ class TranslationEditor:
 
     def export_selected_rows(self):
         """Exporta so as linhas selecionadas para CSV (ROADMAP 19, item 9)."""
+        if self._writing_action_blocked():
+            return
         if not self.state.selected_ids:
             return
         self.save_changes()
@@ -4935,6 +4989,8 @@ class TranslationEditor:
         e anotar por que e justamente o gesto de quem estava mexendo no texto e
         desistiu, e o recarregamento que vem depois descartava o que ele digitou.
         """
+        if self._writing_action_blocked():
+            return 0
         if not self.current["id"]:
             return 0
 
@@ -4995,6 +5051,8 @@ class TranslationEditor:
         linha que virou rejeitada num filtro que nao a mostra), quem ocupou o
         lugar dela JA e a proxima — a regra de F15 —, e andar seria pular uma.
         """
+        if self._writing_action_blocked():
+            return 0
         comment_id = self.current["id"]
         if not comment_id:
             return 0
@@ -5106,6 +5164,8 @@ class TranslationEditor:
         return janela
 
     def open_history_window(self):
+        if self._writing_action_blocked():
+            return
         if not self.current["id"]:
             self.show_message("Selecione uma traducao")
             return
@@ -5123,6 +5183,8 @@ class TranslationEditor:
         modeless e fala de uma obra; trocar o filtro por baixo dela nao pode
         mudar o assunto dela.
         """
+        if self._writing_action_blocked():
+            return
         arquivo = self.selected_source_file()
         if not arquivo:
             self.show_message("Escolha um arquivo no filtro \"Arquivo\"")
@@ -5143,6 +5205,8 @@ class TranslationEditor:
         porque as linhas que ela mostrava podem nao existir mais, e o menu de
         arquivos tambem, porque o arquivo pode ter ficado sem ocorrencia nenhuma.
         """
+        if self._writing_action_blocked():
+            return
         arquivo = self.selected_source_file()
         if not arquivo:
             self.show_message("Escolha um arquivo no filtro \"Arquivo\"")
@@ -5250,6 +5314,8 @@ class TranslationEditor:
         nao estava no widget, nem no banco, nem no rascunho (garantia F12,
         ROADMAP 22.1).
         """
+        if self._writing_action_blocked():
+            return
         self.remember_position()
         self.save_changes()
         self.state.page_index = 0
@@ -5261,6 +5327,8 @@ class TranslationEditor:
             self.clear_current()
 
     def apply_search(self):
+        if self._writing_action_blocked():
+            return
         # Antes de tudo: e este o salto que o item 3 existe para desfazer — usar a
         # busca como concordancia descartava a pagina em que se estava. Antes do
         # `save_changes` tambem, pelo motivo que `remember_position` explica.
@@ -5285,6 +5353,8 @@ class TranslationEditor:
         troca lista nenhuma, e gravar ali seria um efeito colateral de um botao
         que nao fez nada.
         """
+        if self._writing_action_blocked():
+            return
         if not self.state.active_search and not self.search_text.get():
             return
         self.remember_position()
@@ -5299,6 +5369,8 @@ class TranslationEditor:
             self.clear_current()
 
     def apply_automatic_rules_for_current_language(self):
+        if self._writing_action_blocked():
+            return
         self.save_changes()
         previous_id = self.current["id"]
 
@@ -5845,6 +5917,8 @@ class TranslationEditor:
         no campo da lista, ele fazia a coisa mais destrutiva possivel — a busca da
         lista TROCA a pagina, e o revisor perdia o lugar em que estava.
         """
+        if self._writing_action_blocked():
+            return "break"
         self.search_entry.focus_set()
         self.search_entry.select_range(0, tk.END)
         return "break"
