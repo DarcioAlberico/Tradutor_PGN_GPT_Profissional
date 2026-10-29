@@ -8189,6 +8189,125 @@ class WritingEditorTests(GuiTestCase):
                       and self.editor._valid_writing_issue(self.editor.writing_panel.issues[0]))
         return self.editor.writing_panel.issues[0]
 
+    def test_settings_button_opens_real_window_and_preferences_reach_both_editors(self):
+        from tradutor_pgn import settings_window
+        self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        self.editor.set_translation_text("errao rascunho", mark_dirty=True, keep_undo=True)
+        self.editor.writing_panel.action_buttons["settings"].invoke()
+        self.pump()
+        window = self.app.writing_settings_windows[-1]
+        self.assertIsInstance(window, settings_window.SettingsWindow)
+        self.addCleanup(lambda: window.win.winfo_exists() and window.win.destroy())
+        window.spelling_var.set(False)
+        self.assertTrue(window.save())
+        self.wait_for(lambda: not self.editor.writing_settings["spelling_enabled"]
+                      and not other.writing_settings["spelling_enabled"])
+        self.assertEqual(self.editor.draft_text(), "errao rascunho")
+        self.assertTrue(self.editor.state.dirty)
+        self.assertEqual(self.editor.writing_panel.issues, ())
+        self.assertIsNone(self.editor._writing_debounce)
+        window.spelling_var.set(True)
+        window.category_vars["SPELLING"].set(False)
+        self.assertTrue(window.save())
+        self.wait_for(lambda: "SPELLING" not in self.editor.writing_settings["visible_categories"])
+        self.assertEqual(self.editor.writing_panel.issues, ())
+        window.category_vars["SPELLING"].set(True)
+        self.assertTrue(window.save())
+        self.ready()
+
+    def test_disable_grammar_cancels_pending_new_analysis_and_preserves_other_controller(self):
+        self.ready()
+        settings.write_writing_settings({"grammar_enabled": True})
+        self.wait_for(lambda: self.editor.writing_settings["grammar_enabled"])
+        self.release.clear()
+        self.started.clear()
+        self.editor.set_translation_text("errao ativo", mark_dirty=True)
+        self.wait_for(self.started.is_set)
+        settings.write_writing_settings({"spelling_enabled": False, "grammar_enabled": False})
+        self.wait_for(lambda: not self.editor.writing_settings["grammar_enabled"])
+        self.release.set()
+        self.pump()
+        self.assertEqual(self.editor.writing_panel.issues, ())
+        self.assertIsNone(self.editor._writing_debounce)
+        self.assertEqual(self.editor.draft_text(), "errao ativo")
+
+    def test_real_vocabulary_and_rule_settings_reanalyze_both_editors_without_editing_drafts(self):
+        from tradutor_pgn import settings_window
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant, SpyllsAdapter
+        class Dictionary:
+            def lookup(self, word):
+                return False
+            def suggest(self, word):
+                return ["erro"]
+        self.editor.shutdown_writing()
+        self.app.writing_assistant = PortugueseWritingAssistant(spelling_adapter=SpyllsAdapter(dictionary_loader=lambda _language: Dictionary()))
+        self.editor = edit_window.TranslationEditor(self.app, source_file=self.book)
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        self.ready()
+        self.wait_for(lambda: bool(other.writing_panel.issues))
+        self.editor.set_translation_text("errao errao errao", mark_dirty=True, keep_undo=True)
+        self.ready()
+        window = settings_window.open_settings_window(self.app)
+        self.addCleanup(lambda: window.win.winfo_exists() and window.win.destroy())
+        window.word_entry_var.set("errao")
+        window.add_vocabulary_word()
+        self.wait_for(lambda: window._writing_future is None)
+        self.wait_for(lambda: not self.editor.writing_panel.issues and not other.writing_panel.issues)
+        self.assertEqual(self.editor.draft_text(), "errao errao errao")
+        self.assertTrue(self.editor.state.dirty)
+        window.word_list.selection_set(0)
+        with unittest.mock.patch.object(settings_window.messagebox, "askyesno", return_value=True):
+            window.remove_vocabulary_word()
+        self.wait_for(lambda: window._writing_future is None)
+        self.ready()
+        self.wait_for(lambda: bool(other.writing_panel.issues))
+        self.editor.disable_rule(self.editor.writing_panel.issues[0])
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.wait_for(lambda: not self.editor.writing_panel.issues and not other.writing_panel.issues)
+        window.poll_writing_settings()
+        window.rule_list.selection_set(0)
+        window.reactivate_rule()
+        self.wait_for(lambda: window._writing_future is None)
+        self.ready()
+        self.wait_for(lambda: bool(other.writing_panel.issues))
+        self.assertEqual(self.editor.draft_text(), "errao errao errao")
+
+    def test_vocabulary_commit_after_editor_close_notifies_remaining_windows(self):
+        self.ready()
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        item = self.editor.writing_panel.issues[0]
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        original = PersonalDictionary.add
+        def slow_add(vocabulary, word):
+            started.set()
+            release.wait(5)
+            return original(vocabulary, word)
+        with unittest.mock.patch.object(PersonalDictionary, "add", slow_add):
+            self.editor.add_personal_word(item)
+            self.assertTrue(started.wait(2))
+            future = self.editor._writing_job[0]
+            self.editor.shutdown_writing()
+            revision = settings.writing_settings_revision()
+            release.set()
+            future.result(timeout=5)
+            self.assertGreater(settings.writing_settings_revision(), revision)
+
+    def test_disabled_preferences_block_a_debounce_that_fires_before_the_event_poll(self):
+        self.ready()
+        self.editor.set_translation_text("errao pendente", mark_dirty=True)
+        pending = self.editor._writing_debounce
+        self.editor.win.after_cancel(pending)
+        self.editor._writing_debounce = None
+        settings.write_writing_settings({"spelling_enabled": False, "grammar_enabled": False})
+        self.editor._submit_writing()
+        self.assertIsNone(self.editor._writing_request)
+        self.assertFalse(self.editor.writing_settings["spelling_enabled"])
+        self.assertEqual(self.editor.writing_panel.issues, ())
+
     @contextmanager
     def committed_bulk_waiting_for_delivery(self):
         original = edit_window.apply_identical_replacements

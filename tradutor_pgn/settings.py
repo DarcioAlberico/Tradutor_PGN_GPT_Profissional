@@ -205,8 +205,11 @@ def update_settings(mutator, path=None):
         # A leitura estrita, e nao `load_settings`: aqui `{}` por engano vira
         # um arquivo novo por cima do velho (garantia M3).
         settings = _read_settings_for_update(path)
+        writing_before = json.dumps(settings.get("writing_assistant"), sort_keys=True)
         result = mutator(settings)
         save_settings(settings, path)
+        if writing_before != json.dumps(settings.get("writing_assistant"), sort_keys=True):
+            notify_writing_settings_changed()
     return result
 
 
@@ -475,6 +478,45 @@ class WritingSettings(TypedDict):
 
 
 WRITING_KEY = "writing_assistant"
+# Static names only: provider messages/descriptions may contain comment text.
+# Unknown/legacy IDs remain useful and are displayed without an invented name.
+WRITING_RULE_NAMES = {"SPELLING_UNKNOWN_WORD": "Palavra não reconhecida"}
+_WRITING_EVENT_LOCK = threading.Lock()
+_writing_revision = 0
+
+
+def writing_settings_revision() -> int:
+    """Thread-safe event cursor; UI consumers poll on their owning Tk thread."""
+    with _WRITING_EVENT_LOCK:
+        return _writing_revision
+
+
+def notify_writing_settings_changed() -> None:
+    """Publish successful vocabulary/settings edits without retaining widgets."""
+    global _writing_revision
+    with _WRITING_EVENT_LOCK:
+        _writing_revision += 1
+
+
+def change_disabled_writing_rules(*, disable=(), enable=(), enable_all=False, path=None):
+    """Mutate IDs under the same read/update lock as drafts and preferences.
+
+    Read-modify-write outside this lock would lose another window's rule edits.
+    Names come from a fixed local catalog; never store provider descriptions.
+    """
+    def mutate(data):
+        current = read_writing_settings(data)
+        rules = set() if enable_all else set(current["disabled_rule_ids"])
+        rules.difference_update(enable)
+        rules.update(rule.strip() for rule in disable if isinstance(rule, str) and rule.strip())
+        section = data.setdefault(WRITING_KEY, {})
+        if not isinstance(section, dict):
+            section = data[WRITING_KEY] = {}
+        section["disabled_rule_ids"] = sorted(rules)
+        return read_writing_settings(data)
+    return update_settings(mutate, path)
+
+
 WRITING_CATEGORIES: tuple[IssueCategory, ...] = get_args(IssueCategory)
 WRITING_DEFAULTS: WritingSettings = {
     "spelling_enabled": True,
@@ -618,6 +660,7 @@ USER_OPTION_SECTIONS = {
     APPEARANCE_KEY: APPEARANCE_DEFAULTS,
     BOARD_KEY: BOARD_DEFAULTS,
     LLM_KEY: LLM_DEFAULTS,
+    WRITING_KEY: WRITING_DEFAULTS,
 }
 
 

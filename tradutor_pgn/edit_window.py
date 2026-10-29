@@ -122,7 +122,9 @@ from .review_quality import (
 )
 from .settings import (
     read_writing_settings,
-    write_writing_settings,
+    change_disabled_writing_rules,
+    notify_writing_settings_changed,
+    writing_settings_revision,
     clear_editor_draft,
     get_editor_draft,
     load_settings,
@@ -2910,6 +2912,7 @@ class TranslationEditor:
         self._writing_job = None
         self._writing_dialog = None
         self.writing_settings = read_writing_settings(self.settings)
+        self._writing_settings_revision = writing_settings_revision()
         for name, default in (("writing_session_words", set()), ("writing_session_rules", set()),
                               ("writing_editors", []), ("writing_bulk_undo", {})):
             if not hasattr(self.app, name):
@@ -2920,6 +2923,7 @@ class TranslationEditor:
             on_apply_all=self.apply_all_identical, on_ignore_once=self.ignore_once,
             on_ignore_session=self.ignore_session, on_add_personal=self.add_personal_word,
             on_disable_rule=self.disable_rule, on_undo_bulk=self.undo_writing_bulk,
+            on_settings=self.open_writing_settings,
         )
         self.main_pane.add(self.writing_panel, minsize=WRITING_RAIL_MIN, width=300, stretch="never")
         self.writing_panel.on_collapse = self._layout_writing_panel
@@ -2930,6 +2934,10 @@ class TranslationEditor:
         self.trans_text.tag_configure("writing_spelling", foreground=self.spell_error_fg, underline=True)
         self.trans_text.tag_configure("writing_grammar", foreground=self.grammar_error_fg, underline=True)
         self._writing_poll = self.win.after(60, self.poll_writing)
+
+    def open_writing_settings(self):
+        from .settings_window import open_settings_window
+        return open_settings_window(self.app)
 
     def _writing_resize(self, event):
         if event.widget is self.win and not self._writing_closed:
@@ -3026,13 +3034,31 @@ class TranslationEditor:
         self._writing_debounce = None
         if self._writing_closed:
             return
+        # A debounce may fire before the periodic event consumer. Honor a
+        # committed disable before scheduling any new provider work.
+        if self._sync_writing_preferences():
+            return
+        if not (self.writing_settings["spelling_enabled"] or self.writing_settings["grammar_enabled"]):
+            return
         self._writing_request = self.writing_request()
         self.writing_controller.submit(self._writing_request, record_id=str(self.current["id"]))
+
+    def _sync_writing_preferences(self):
+        revision = writing_settings_revision()
+        if revision != self._writing_settings_revision:
+            self._writing_settings_revision = revision
+            self.writing_settings = read_writing_settings(load_settings())
+            self.writing_assistant.invalidate_cache()
+            self._writing_signature = None
+            self.highlight_spelling()
+            return True
+        return False
 
     def poll_writing(self):
         self._writing_poll = None
         if self._writing_closed:
             return
+        self._sync_writing_preferences()
         for event in self.writing_controller.poll():
             request = self.writing_request()
             if (event.context.record_id != str(self.current["id"])
@@ -3153,6 +3179,7 @@ class TranslationEditor:
         self._record_writing_action(issue, "ignorada_sessao")
 
     def refresh_writing_editors(self):
+        notify_writing_settings_changed()
         self.writing_assistant.invalidate_cache()
         for editor in tuple(self.app.writing_editors):
             if not editor._writing_closed:
@@ -3205,13 +3232,19 @@ class TranslationEditor:
             def added(_value):
                 self.refresh_writing_editors()
                 self._record_writing_action(issue, "vocabulario")
-            self._run_writing_job(lambda: vocabulary.add(issue.original), added)
+            def work():
+                changed = vocabulary.add(issue.original)
+                if changed:
+                    # Publication belongs to the commit, even if this editor
+                    # closes before Tk can deliver its completion callback.
+                    notify_writing_settings_changed()
+                return changed
+            self._run_writing_job(work, added)
 
     def disable_rule(self, issue):
         rule_id = issue.rule_id
         def work():
-            current = read_writing_settings(load_settings())
-            return write_writing_settings({"disabled_rule_ids": sorted(set(current["disabled_rule_ids"]) | {rule_id})})
+            return change_disabled_writing_rules(disable=[rule_id])
         def disabled(_value):
             self.refresh_writing_editors()
             self._record_writing_action(issue, "regra_desativada")

@@ -72,6 +72,40 @@ class DefaultPathSafetyTests(unittest.TestCase):
 
 
 class WritingSettingsTests(unittest.TestCase):
+    def test_rule_mutations_merge_concurrent_updates_and_publish_only_after_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            settings.save_settings({"editor_drafts": {"d": "vivo"}}, path)
+            revision = settings.writing_settings_revision()
+            barrier = threading.Barrier(3)
+            errors = []
+            def disable(rule):
+                try:
+                    barrier.wait(timeout=5)
+                    settings.change_disabled_writing_rules(disable={rule: "Nome estático"}, path=path)
+                except Exception as exc:
+                    errors.append(exc)
+            workers = [threading.Thread(target=disable, args=(rule,)) for rule in ("A", "B")]
+            for worker in workers:
+                worker.start()
+            barrier.wait(timeout=5)
+            for worker in workers:
+                worker.join(timeout=5)
+            self.assertEqual(errors, [])
+            disk = settings.load_settings(path)
+            self.assertEqual(disk["writing_assistant"]["disabled_rule_ids"], ["A", "B"])
+            self.assertEqual(disk["editor_drafts"], {"d": "vivo"})
+            self.assertGreater(settings.writing_settings_revision(), revision)
+            settings.change_disabled_writing_rules(enable=["A"], path=path)
+            self.assertEqual(settings.read_writing_settings(settings.load_settings(path))["disabled_rule_ids"], ["B"])
+            before = path.read_bytes()
+            revision = settings.writing_settings_revision()
+            with unittest.mock.patch.object(settings.os, "replace", side_effect=PermissionError("busy")):
+                with self.assertRaises(PermissionError):
+                    settings.change_disabled_writing_rules(enable_all=True, path=path)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(settings.writing_settings_revision(), revision)
+
     CATEGORIES = [
         "SPELLING", "NOMINAL_AGREEMENT", "VERBAL_AGREEMENT", "GRAMMAR",
         "PUNCTUATION", "REPEATED_WORD",
@@ -643,7 +677,7 @@ class UserOptionSettingsTests(unittest.TestCase):
             settings.write_settings_sections({"output": {"utf8_bom": False}}, caminho)
             self.assertEqual(settings.load_settings(caminho)["output"], {"utf8_bom": False})
 
-    def test_user_option_sections_cover_output_appearance_board_and_llm_only(self):
+    def test_user_option_sections_cover_preferences_including_writing(self):
         # A lista que M4 enumera. `main_window` e `editor_drafts` sao estado
         # das janelas, nao escolha do usuario, e ficam de fora de proposito.
         # As CHAVES de API tambem ficam de fora: nao vivem no settings (K1).
@@ -654,6 +688,7 @@ class UserOptionSettingsTests(unittest.TestCase):
                 "appearance": settings.APPEARANCE_DEFAULTS,
                 "board": settings.BOARD_DEFAULTS,
                 "llm": settings.LLM_DEFAULTS,
+                "writing_assistant": settings.WRITING_DEFAULTS,
             },
         )
 
