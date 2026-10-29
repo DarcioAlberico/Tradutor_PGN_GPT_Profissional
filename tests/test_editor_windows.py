@@ -15,6 +15,7 @@ e selecionar (garantias R7 e S6).
 Precisam de um display. Onde nao houver, a classe inteira e pulada.
 """
 
+import gc
 import inspect
 import io
 import os
@@ -30,7 +31,7 @@ import customtkinter as ctk
 import types
 import unittest
 import unittest.mock
-from contextlib import redirect_stderr
+from contextlib import closing, redirect_stderr
 from pathlib import Path
 
 from gui_harness import DISPLAY, GuiTestCase, cancel_pending_after, destroy_test_root, needs_room
@@ -8130,6 +8131,7 @@ if __name__ == "__main__":
 
 class WritingEditorTests(GuiTestCase):
     def setUp(self):
+        gc.collect()  # Dispose old Tk fixtures on their owning thread.
         super().setUp()
         self.app = FakeApp(self.root, self.db_path)
         save_glossary_entries([], glossario._default_substitutions_path(), create_backup=False)
@@ -8153,7 +8155,7 @@ class WritingEditorTests(GuiTestCase):
                 outer.started.set()
                 outer.release.wait(5)
                 issues = tuple(WritingIssue("", "SPELLING_UNKNOWN_WORD", "SPELLING", m.start(), m.end(),
-                                           "errao", "Grafia", "Confira.", ("erro",), "error", "test", request.text_version)
+                                           "errao", "Grafia", "Confira.", ("erro", "errao errao"), "error", "test", request.text_version)
                                for m in __import__("re").finditer("errao", request.text))
                 return WritingResult(request.text_version, issues, "spelling_only")
 
@@ -8166,7 +8168,14 @@ class WritingEditorTests(GuiTestCase):
         self.app.writing_assistant = Service()
         self.addCleanup(self.release.set)
         self.editor = edit_window.TranslationEditor(self.app, source_file=self.book)
-        self.addCleanup(self.editor.shutdown_writing)
+        self.addCleanup(self.close_writing_editors)
+
+    def close_writing_editors(self):
+        self.release.set()
+        for editor in {self.editor, *self.app.writing_editors}:
+            editor.shutdown_writing()
+            editor._writing_executor.shutdown(wait=True, cancel_futures=True)
+            editor.writing_controller._executor.shutdown(wait=True, cancel_futures=True)
 
     def wait_for(self, predicate):
         deadline = time.monotonic() + 5
@@ -8176,7 +8185,8 @@ class WritingEditorTests(GuiTestCase):
         self.assertTrue(predicate())
 
     def ready(self):
-        self.wait_for(lambda: bool(self.editor.writing_panel.issues))
+        self.wait_for(lambda: bool(self.editor.writing_panel.issues)
+                      and self.editor._valid_writing_issue(self.editor.writing_panel.issues[0]))
         return self.editor.writing_panel.issues[0]
 
     def test_current_issue_dirty_undo_and_stale_refusal(self):
@@ -8273,6 +8283,167 @@ class WritingEditorTests(GuiTestCase):
         self.editor.undo_translation()
         self.assertEqual(self.editor.draft_text(), "errao errao")
 
+    def test_slow_bulk_blocks_alt_navigation_and_undo_without_crossing_rows(self):
+        item = self.ready()
+        original_apply = edit_window.apply_identical_replacements
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        first_id = self.editor.current["id"]
+        def slow_apply(conn, preview):
+            entered.set()
+            release.wait(5)
+            return original_apply(conn, preview)
+        with unittest.mock.patch.object(edit_window, "apply_identical_replacements", slow_apply):
+            self.editor.apply_all_identical(item, "erro")
+            self.wait_for(entered.is_set)
+            self.editor.win.event_generate("<Alt-Right>")
+            self.pump()
+            self.editor.next_shortcut()
+            self.editor.select_index(1)
+            self.editor.undo_translation()
+            self.editor.redo_translation()
+            self.assertEqual(self.editor.current["id"], first_id)
+            release.set()
+            self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "erro erro")
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+        self.editor.next_shortcut()
+        self.assertNotEqual(self.editor.current["id"], first_id)
+        self.assertEqual(self.editor.draft_text(), "errao")
+        self.assertEqual(self.editor.current["saved_trans"], "errao")
+
+    def test_bulk_undo_follows_actions_when_later_edits_return_to_batch_text(self):
+        self.ready()
+        self.editor.set_translation_text("errao errao draft", mark_dirty=True, keep_undo=True)
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.set_translation_text("later", mark_dirty=True, keep_undo=True)
+        self.editor.set_translation_text("erro erro draft", mark_dirty=True, keep_undo=True)
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "later")
+        self.assertIsNotNone(self.editor._current_writing_bulk())
+        self.editor.redo_translation()
+        self.assertEqual(self.editor.draft_text(), "erro erro draft")
+        self.editor.undo_translation()
+        self.editor.undo_translation()
+        self.assertEqual(self.editor.draft_text(), "erro erro draft")
+        self.assertIsNotNone(self.editor._current_writing_bulk())
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao draft")
+        self.assertIsNone(self.editor._current_writing_bulk())
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("errao errao",), ("errao",)])
+
+    def test_bulk_undo_cannot_skip_later_native_paste_delete_or_redo(self):
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        text = self.editor.trans_text
+        text.edit_separator()
+        text.insert("end-1c", " pasted")
+        text.edit_separator()
+        text.delete("end-8c", "end-1c")
+        self.pump()
+        self.assertEqual(self.editor.draft_text(), "erro erro")
+        self.editor.undo_writing_bulk()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIsNotNone(self.editor._current_writing_bulk())
+        self.editor.undo_translation()
+        self.assertEqual(self.editor.draft_text(), "erro erro pasted")
+        self.editor.redo_translation()
+        self.assertEqual(self.editor.draft_text(), "erro erro")
+        self.editor.undo_translation()
+        self.editor.undo_translation()
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIsNone(self.editor._current_writing_bulk())
+        self.editor.redo_translation()
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+
+    def test_two_bulk_actions_undo_in_order_and_conflict_keeps_native_history(self):
+        self.editor.apply_all_identical(self.ready(), "errao errao")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        last = self.editor._current_writing_bulk()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            update_translation_by_id(conn.cursor(), last["record_id"], "concurrent", history_action="edit")
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIs(self.editor._current_writing_bulk(), last)
+        self.assertEqual(self.editor.draft_text(), "erro erro erro erro")
+
+    def test_two_bulk_actions_restore_each_draft_before_earlier_native_edit(self):
+        self.ready()
+        self.editor.set_translation_text("errao draft", mark_dirty=True, keep_undo=True)
+        self.editor.apply_all_identical(self.ready(), "errao errao")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao draft")
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao draft")
+        self.editor.undo_translation()
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+
+    def test_late_apply_and_undo_keep_changes_made_while_worker_finishes(self):
+        for action_name, expected_saved in (("apply_identical_replacements", "erro erro"),
+                                             ("undo_identical_replacements", "errao errao")):
+            with self.subTest(action=action_name):
+                original = getattr(edit_window, action_name)
+                entered, release = threading.Event(), threading.Event()
+                self.addCleanup(release.set)
+                def slow(conn, operation):
+                    result = original(conn, operation)
+                    entered.set()
+                    release.wait(5)
+                    return result
+                with unittest.mock.patch.object(edit_window, action_name, slow):
+                    if action_name.startswith("apply"):
+                        self.editor.apply_all_identical(self.ready(), "erro")
+                    else:
+                        self.editor.undo_writing_bulk()
+                    self.wait_for(entered.is_set)
+                    self.editor.set_translation_text("manual during " + action_name,
+                                                     mark_dirty=True, keep_undo=True)
+                    release.set()
+                    self.wait_for(lambda: not self.editor._writing_busy)
+                self.assertEqual(self.editor.draft_text(), "manual during " + action_name)
+                self.assertEqual(self.editor.current["saved_trans"], expected_saved)
+                self.assertTrue(self.editor.state.dirty)
+                if action_name.startswith("apply"):
+                    self.editor.undo_translation()
+                    self.assertEqual(self.editor.draft_text(), "errao errao")
+                    self.editor.set_translation_text("erro erro")
+
+    def test_closed_editor_discards_late_bulk_delivery(self):
+        original = edit_window.apply_identical_replacements
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def slow(conn, operation):
+            result = original(conn, operation)
+            entered.set()
+            release.wait(5)
+            return result
+        with unittest.mock.patch.object(edit_window, "apply_identical_replacements", slow):
+            self.editor.apply_all_identical(self.ready(), "erro")
+            self.wait_for(entered.is_set)
+            future = self.editor._writing_job[0]
+            self.editor.win.destroy()
+            release.set()
+            self.wait_for(future.done)
+            self.editor.poll_writing()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("erro erro",), ("erro",)])
+
     def test_other_window_dirty_draft_aborts_bulk_without_saving_either(self):
         item = self.ready()
         other = edit_window.TranslationEditor(self.app, source_file=self.book)
@@ -8356,6 +8527,65 @@ class WritingEditorTests(GuiTestCase):
         self.editor.writing_panel.toggle_collapsed()
         self.assertEqual(int(self.editor.main_pane.panecget(self.editor.writing_panel, "width")), 300)
 
+    def test_narrow_editor_manual_panel_is_whole_without_shrinking_text(self):
+        self.ready()
+        self.editor.win.state("normal")
+        self.editor.win.geometry("1360x768+0+0")
+        self.pump()
+        panel = self.editor.writing_panel
+        self.assertTrue(panel.collapsed)
+        panel.toggle_button.invoke()
+        self.pump()
+        self.assertFalse(panel.collapsed)
+        self.assertGreaterEqual(panel.winfo_width(), 300)
+        self.assertLessEqual(panel.winfo_rootx() + panel.winfo_width(),
+                             self.editor.win.winfo_rootx() + self.editor.win.winfo_width())
+        self.assertGreaterEqual(self.editor.text_frame.winfo_width(), edit_window.EDITOR_PANE_MIN)
+        panel.action_buttons["undo_bulk"].focus_set()
+        self.pump()
+        button = panel.action_buttons["undo_bulk"]
+        self.assertLessEqual(button.winfo_rooty() + button.winfo_height(),
+                             panel.winfo_rooty() + panel.winfo_height())
+
+    def test_direct_native_undo_redo_cannot_bypass_book_transaction(self):
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.trans_text.edit_undo()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("errao errao",), ("errao",)])
+        self.editor.trans_text.edit_redo()
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+
+    def test_book_undo_after_row_navigation_does_not_use_old_native_history(self):
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.next_shortcut()
+        self.editor.previous_shortcut()
+        self.editor.undo_writing_bulk()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+        self.assertIsNone(self.editor._current_writing_bulk())
+
+    def test_minimum_height_review_actions_scroll_into_view_with_keyboard_focus(self):
+        self.ready()
+        self.editor.win.state("normal")
+        self.editor.win.maxsize(2200, 1600)
+        self.editor.win.geometry("1600x680+0+0")
+        self.wait_for(lambda: self.editor.win.winfo_width() == 1600)
+        panel = self.editor.writing_panel
+        self.assertFalse(panel.collapsed)
+        for name in ("apply", "apply_all", "ignore_once", "ignore_session",
+                     "add_personal", "disable_rule", "undo_bulk"):
+            with self.subTest(action=name):
+                button = panel.action_buttons[name]
+                button.focus_set()
+                self.pump()
+                self.assertGreaterEqual(button.winfo_rooty(), panel.body._parent_canvas.winfo_rooty())
+                self.assertLessEqual(button.winfo_rooty() + button.winfo_height(),
+                                     panel.winfo_rooty() + panel.winfo_height())
+
     def test_glossary_change_invalidates_analysis_using_current_row_scope(self):
         self.ready()
         before = self.editor.writing_version
@@ -8401,6 +8631,81 @@ class WritingEditorTests(GuiTestCase):
             self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
                              [("errao errao",), ("errao",)])
         conn.close()
+
+
+class TextUndoHistoryTests(GuiTestCase):
+    def setUp(self):
+        super().setUp()
+        from tradutor_pgn.editor_undo import TextUndoHistory
+        self.text = tk.Text(self.root, undo=True)
+        self.history = TextUndoHistory(self.text)
+
+    def test_native_typing_delete_and_redo_keep_distinct_group_identities(self):
+        text, history = self.text, self.history
+        text.insert("1.0", "a")
+        first = history.undo_token
+        text.insert("end-1c", "b")
+        self.assertIs(history.undo_token, first)
+        text.delete("end-2c")
+        second = history.undo_token
+        self.assertIsNot(second, first)
+        text.edit_undo()
+        self.assertEqual(text.get("1.0", "end-1c"), "ab")
+        self.assertIs(history.undo_token, first)
+        text.edit_undo()
+        self.assertEqual(text.get("1.0", "end-1c"), "")
+        self.assertIsNone(history.undo_token)
+        text.edit_redo()
+        self.assertIs(history.undo_token, first)
+        text.edit_redo()
+        self.assertEqual(text.get("1.0", "end-1c"), "a")
+        self.assertIs(history.undo_token, second)
+
+    def test_whole_text_paste_replace_noops_and_reset_follow_native_boundaries(self):
+        text, history = self.text, self.history
+        text.configure(autoseparators=False)
+        text.edit_separator()
+        text.insert("1.0", "pasted", (), " text", ("bold",))
+        text.delete("1.0", "1.1")
+        text.edit_separator()
+        text.configure(autoseparators=True)
+        pasted = history.undo_token
+        text.replace("1.0", "1.1", "A")
+        self.assertIsNot(history.undo_token, pasted)
+        text.edit_undo()
+        self.assertEqual(text.get("1.0", "end-1c"), "asted text")
+        self.assertIs(history.undo_token, pasted)
+        text.insert("1.0", "")
+        text.delete("1.0", "1.0")
+        text.configure(state="disabled")
+        text.insert("1.0", "ignored")
+        text.configure(state="normal")
+        self.assertIs(history.undo_token, pasted)
+        text.edit_undo()
+        self.assertEqual(text.get("1.0", "end-1c"), "")
+        text.edit_redo()
+        self.assertEqual(text.get("1.0", "end-1c"), "asted text")
+        text.edit_undo()
+        text.insert("1.0", "branch")
+        self.assertIsNone(history.redo_token)
+        text.edit_reset()
+        self.assertIsNone(history.undo_token)
+        self.assertIsNone(history.redo_token)
+        with self.assertRaises(tk.TclError):
+            text.edit_undo()
+
+    def test_noop_ranges_and_terminal_newline_do_not_hide_the_next_undo(self):
+        text, history = self.text, self.history
+        text.insert("1.0", "batch")
+        batch = history.undo_token
+        text.edit_separator()
+        text.delete("end-1c", "end")
+        text.tk.call(text._w, "delete", "1.0", "1.0", "1.2", "1.2")
+        text.replace("1.0", "1.0", "")
+        self.assertIs(history.undo_token, batch)
+        text.edit_undo()
+        self.assertEqual(text.get("1.0", "end-1c"), "")
+        self.assertIsNone(history.undo_token)
 
 
 class WritingFixtureIsolationTests(GuiTestCase):

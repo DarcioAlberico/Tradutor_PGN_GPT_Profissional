@@ -6,6 +6,17 @@ from .editor_common import MUTED_TEXT_COLOR, ROW_COLOR, ROW_TEXT_COLOR
 from .writing_types import AssistantStatus
 
 
+class WritingActionButton(ctk.CTkButton):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._canvas.configure(takefocus=True)
+        self.bind("<Return>", lambda _event: self.invoke(), add="+")
+        self.bind("<space>", lambda _event: self.invoke(), add="+")
+
+    def focus_set(self):
+        self._canvas.focus_set()
+
+
 class WritingPanel(ctk.CTkFrame):
     def __init__(self, parent, *, on_select=None, on_apply=None, on_apply_all=None,
                  on_ignore_once=None, on_ignore_session=None, on_add_personal=None,
@@ -19,25 +30,24 @@ class WritingPanel(ctk.CTkFrame):
         self.selected_index = None
         self.issue_buttons = []
         self.closed = False
-        self.manual_collapsed = False
+        self.manual_collapsed = None
         self.collapsed = False
         self.available_width = 1800
         self.on_collapse = None
         self.status = AssistantStatus("starting", "spelling_only", "Carregando dicionário pt-BR")
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
-        self.toggle_button = ctk.CTkButton(self, text="Revisão linguística  ‹", width=32, command=self.toggle_collapsed)
+        self.toggle_button = WritingActionButton(self, text="Revisão linguística  ‹", width=32, command=self.toggle_collapsed)
         self.toggle_button.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
-        self.body = ctk.CTkFrame(self, fg_color="transparent")
+        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent", width=270)
         self.body.grid(row=1, column=0, sticky="nsew", padx=6, pady=4)
         self.body.columnconfigure(0, weight=1)
-        self.body.rowconfigure(2, weight=1)
         self.status_label = ctk.CTkLabel(self.body, text="", anchor="w")
         self.status_label.grid(row=0, column=0, sticky="ew")
         self.diagnostic_label = ctk.CTkLabel(self.body, text="", wraplength=270,
                                               justify="left", text_color=MUTED_TEXT_COLOR)
         self.diagnostic_label.grid(row=1, column=0, sticky="ew")
-        self.issue_list = ctk.CTkScrollableFrame(self.body, width=270, height=140)
+        self.issue_list = ctk.CTkScrollableFrame(self.body, width=245, height=100)
         self.issue_list.grid(row=2, column=0, sticky="nsew")
         self.issue_list.columnconfigure(0, weight=1)
         self.explanation = ctk.CTkLabel(self.body, text="", wraplength=270, justify="left")
@@ -51,8 +61,9 @@ class WritingPanel(ctk.CTkFrame):
                    ("settings", "Configurações de escrita"))
         self.action_buttons = {}
         for index, (name, label) in enumerate(actions, 5):
-            button = ctk.CTkButton(self.body, text=label, command=lambda action=name: self._invoke(action))
+            button = WritingActionButton(self.body, text=label, command=lambda action=name: self._invoke(action))
             button.grid(row=index, column=0, sticky="ew", pady=2)
+            button.bind("<FocusIn>", lambda _event, target=button: self._reveal_action(target), add="+")
             self.action_buttons[name] = button
         self.apply_button = self.action_buttons["apply"]
         self.set_snapshot((), self.status)
@@ -133,14 +144,28 @@ class WritingPanel(ctk.CTkFrame):
                 self.callbacks[action](self.active_issue)
 
     def toggle_collapsed(self):
-        self.manual_collapsed = not self.manual_collapsed
+        self.manual_collapsed = not self.collapsed
         self.set_available_width(self.available_width)
+
+    def _reveal_action(self, button):
+        canvas = self.body._parent_canvas
+        bounds = canvas.bbox("all")
+        if not bounds:
+            return
+        top = canvas.canvasy(0)
+        height = canvas.winfo_height()
+        y = button.winfo_y()
+        bottom = y + button.winfo_height()
+        if y < top:
+            canvas.yview_moveto(max(0, y / bounds[3]))
+        elif bottom > top + height:
+            canvas.yview_moveto(max(0, (bottom - height) / bounds[3]))
 
     def set_available_width(self, width):
         if self.closed:
             return
         self.available_width = width
-        self.collapsed = self.manual_collapsed or width < 1550
+        self.collapsed = self.manual_collapsed if self.manual_collapsed is not None else width < 1550
         self.configure(width=42 if self.collapsed else 300)
         if self.collapsed:
             self.body.grid_remove()

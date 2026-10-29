@@ -55,3 +55,48 @@ class WritingPanelTests(GuiTestCase):
         self.panel.destroy()
         self.panel.navigate(1)
         self.assertEqual(self.applied, [])
+
+    def test_narrow_screen_can_expand_manually_and_stays_expanded_on_resize(self):
+        self.root.deiconify()
+        self.root.geometry("1360x768")
+        self.panel.pack_configure(side="right", fill="y")
+        self.panel.set_available_width(1360)
+        self.assertTrue(self.panel.collapsed)
+        self.panel.toggle_button.invoke()
+        self.pump()
+        self.assertFalse(self.panel.collapsed)
+        self.assertTrue(self.panel.apply_button.winfo_ismapped())
+        self.panel.set_available_width(1300)
+        self.assertFalse(self.panel.collapsed)
+        self.panel.toggle_button.invoke()
+        self.assertTrue(self.panel.collapsed)
+
+    def test_short_panel_scrolls_to_keyboard_actions_without_clipping(self):
+        undone = []
+        self.panel.callbacks["undo_bulk"] = lambda: undone.append(True)
+        self.panel.set_snapshot((issue(),), AssistantStatus("ready", "full"))
+        self.root.deiconify()
+        self.root.geometry("300x362")
+        self.panel.pack_configure(fill="both", expand=True)
+        self.pump()
+        button = self.panel.action_buttons["undo_bulk"]
+        button.focus_set()
+        self.pump()
+        self.assertGreaterEqual(button.winfo_rooty(), self.panel.winfo_rooty())
+        self.assertLessEqual(button.winfo_rooty() + button.winfo_height(),
+                             self.panel.winfo_rooty() + self.panel.winfo_height())
+        focused = self.root.focus_get()
+        self.assertIsNotNone(focused)
+        focused.event_generate("<Return>")
+        self.pump()
+        self.assertEqual(undone, [True])
+
+    def test_keyboard_can_open_automatically_collapsed_panel(self):
+        self.root.deiconify()
+        self.panel.set_available_width(1360)
+        self.pump()
+        self.panel.toggle_button.focus_set()
+        self.pump()
+        self.root.focus_get().event_generate("<Return>")
+        self.pump()
+        self.assertFalse(self.panel.collapsed)

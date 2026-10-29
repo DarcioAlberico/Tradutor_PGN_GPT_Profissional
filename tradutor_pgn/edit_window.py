@@ -133,6 +133,7 @@ from .window_utils import bring_window_to_front, restore_or_maximize
 from .personal_dictionary import PersonalDictionary
 from .writing_controller import WritingController, get_shared_writing_assistant
 from .writing_panel import WritingPanel
+from .editor_undo import TextUndoHistory
 from .writing_types import AssistantStatus, WritingRequest
 from .writing_protection import protect_text
 
@@ -2669,8 +2670,6 @@ class TranslationEditor:
         primeiro deles deixa o editor vazio.
         """
         self.state.loading = True
-        if not keep_undo and hasattr(self, "_writing_native_epoch"):
-            self._writing_native_epoch += 1
         try:
             if keep_undo:
                 self.trans_text.configure(autoseparators=False)
@@ -2893,7 +2892,9 @@ class TranslationEditor:
         self.writing_assistant = getattr(self.app, "writing_assistant", None) or get_shared_writing_assistant()
         self.writing_controller = WritingController(self.writing_assistant)
         self.writing_version = 0
-        self._writing_native_epoch = 0
+        self._writing_history = TextUndoHistory(self.trans_text)
+        self._writing_history.allow_action = self._allow_writing_native_action
+        self._writing_undone_tokens = set()
         self._writing_window_token = object()
         self._writing_closed = False
         self._writing_busy = False
@@ -2919,10 +2920,11 @@ class TranslationEditor:
             on_disable_rule=self.disable_rule, on_undo_bulk=self.undo_writing_bulk,
         )
         self.main_pane.add(self.writing_panel, minsize=WRITING_RAIL_MIN, width=300, stretch="never")
-        self.writing_panel.on_collapse = lambda collapsed: self.main_pane.paneconfigure(
-            self.writing_panel, width=42 if collapsed else 300)
+        self.writing_panel.on_collapse = self._layout_writing_panel
         self.win.bind("<Configure>", self._writing_resize, add="+")
         self.trans_text.bind("<ButtonRelease-1>", self._writing_click, add="+")
+        self.trans_text.bind("<<Undo>>", lambda _event: (self.undo_translation(), "break")[1])
+        self.trans_text.bind("<<Redo>>", lambda _event: (self.redo_translation(), "break")[1])
         self.trans_text.tag_configure("writing_spelling", foreground=self.spell_error_fg, underline=True)
         self.trans_text.tag_configure("writing_grammar", foreground=self.grammar_error_fg, underline=True)
         self._writing_poll = self.win.after(60, self.poll_writing)
@@ -2930,6 +2932,38 @@ class TranslationEditor:
     def _writing_resize(self, event):
         if event.widget is self.win and not self._writing_closed:
             self.writing_panel.set_available_width(event.width)
+
+    def _layout_writing_panel(self, collapsed):
+        panel = self.writing_panel
+        attached = str(panel) in {str(pane) for pane in self.main_pane.panes()}
+        # A narrow window cannot fit three full-width panes. Open the review
+        # as a drawer over the right side, preserving the text pane's minimum.
+        if not collapsed and panel.available_width < 1550:
+            if attached:
+                self.main_pane.forget(panel)
+            panel.place(relx=1, rely=0, relheight=1, anchor="ne")
+            panel.lift()
+        else:
+            panel.place_forget()
+            width = 42 if collapsed else 300
+            if not attached:
+                self.main_pane.add(panel, minsize=WRITING_RAIL_MIN, width=width, stretch="never")
+            else:
+                self.main_pane.paneconfigure(panel, width=width)
+
+    def _allow_writing_native_action(self, action, token):
+        if self._writing_closed or self._writing_busy:
+            return False
+        if action == "undo":
+            bulk = self._current_writing_bulk()
+            if (bulk and token is not None and token is bulk["native_token"]
+                    and bulk["window"] is self._writing_window_token):
+                self.undo_writing_bulk()
+                return False
+        elif token in self._writing_undone_tokens:
+            self.show_message("Para reaplicar o lote, crie uma nova prévia no livro.")
+            return False
+        return True
 
     def writing_glossary_terms(self, *, whole_book=False):
         terms = {str(term) for entry in (*self.glossary, *self.automatic_glossary)
@@ -3180,6 +3214,7 @@ class TranslationEditor:
         request = self.writing_request()
         book_terms = self.writing_glossary_terms(whole_book=True)
         record_id = self.current["id"]
+        saved_before = self.current["saved_trans"]
         revision = self.current.get("writing_revision", 0)
         db_path = self.app.output_db
         def work():
@@ -3188,12 +3223,16 @@ class TranslationEditor:
                     conn, source_file, request.target_language, issue.original, replacement,
                     glossary_terms=book_terms, draft=(record_id, revision, request.text))
         def confirm(preview):
+            if self._writing_closed:
+                return
             if not preview.count:
                 self.show_message("Nenhuma ocorrência idêntica fora dos trechos protegidos.")
                 return
             if not messagebox.askyesno("Aplicar todas iguais neste livro",
                     f"Substituir {preview.count} ocorrência(s) em {len(preview.rows)} tradução(ões) de {os.path.basename(source_file)}?\n\n"
                     "O rascunho da linha aberta será incluído. O lote poderá ser desfeito em uma única ação.", parent=self.win):
+                return
+            if self._writing_closed:
                 return
             if (self.current["id"] != record_id or self.writing_request() != request
                     or self.selected_source_file() != source_file
@@ -3213,12 +3252,21 @@ class TranslationEditor:
             def applied(result):
                 operation, text, revision = result
                 entry = dict(operation=operation, record_id=record_id, before=request.text,
-                             after=text, saved_before=self.current["saved_trans"], ids=ids,
-                             window=self._writing_window_token, native_epoch=self._writing_native_epoch)
+                             after=text, saved_before=saved_before, ids=ids,
+                             window=self._writing_window_token, native_token=None)
                 key = (os.path.abspath(db_path), source_file)
                 self.app.writing_bulk_undo.setdefault(key, []).append(entry)
-                if record_id in ids:
-                    self._writing_committed(text, revision, keep_undo=True)
+                if self._writing_closed:
+                    return
+                context_matches = (self.current["id"] == record_id
+                                   and self.writing_request() == request
+                                   and self.selected_source_file() == source_file
+                                   and os.path.abspath(self.app.output_db) == os.path.abspath(db_path))
+                if record_id in ids and self.current["id"] == record_id:
+                    self._writing_committed(text, revision, keep_undo=context_matches,
+                                            preserve_widget=not context_matches)
+                    if context_matches:
+                        entry["native_token"] = self._writing_history.undo_token
                 else:
                     self._reload_writing_rows()
                 self._refresh_other_writing_rows(ids)
@@ -3270,17 +3318,26 @@ class TranslationEditor:
         return stack[-1] if stack else None
 
     def undo_writing_bulk(self):
+        if self._writing_closed or self._writing_busy:
+            return
         entry = self._current_writing_bulk()
         if not entry:
             self.show_message("Nenhum lote deste livro para desfazer.")
             return
         same_row = self.current["id"] == entry["record_id"]
+        native = (same_row and entry["window"] is self._writing_window_token
+                  and entry["native_token"] is not None
+                  and entry["native_token"] in self._writing_history.undo + self._writing_history.redo)
+        if native and self._writing_history.undo_token is not entry["native_token"]:
+            self.show_message("Há edições posteriores abertas. Desfaça-as primeiro.")
+            return
         if self._other_writing_drafts(entry["ids"]) or (self.current["id"] in entry["ids"]
                 and self.state.dirty and (not same_row or self.draft_text() != entry["after"])):
             self.show_message("Há edições posteriores abertas. Desfaça ou salve-as primeiro.")
             return
         db_path = self.app.output_db
         row_id = self.current["id"]
+        request = self.writing_request()
         key = (os.path.abspath(db_path), self.selected_source_file())
         def work():
             with closing(initialize_database(db_path)) as conn:
@@ -3288,21 +3345,28 @@ class TranslationEditor:
                 return conn.execute("SELECT translated_comment, writing_revision FROM comments WHERE id = ?", (row_id,)).fetchone()
         def undone(result):
             self.app.writing_bulk_undo[key].pop()
-            if result and row_id in entry["ids"]:
+            if self._writing_closed:
+                return
+            if entry["native_token"] is not None:
+                self._writing_undone_tokens.add(entry["native_token"])
+            if result and row_id in entry["ids"] and self.current["id"] == row_id:
                 text, revision = result
-                native = (same_row and entry["window"] is self._writing_window_token
-                          and entry["native_epoch"] == self._writing_native_epoch)
-                if native:
+                context_matches = (self.writing_request() == request
+                                   and self.selected_source_file() == key[1]
+                                   and os.path.abspath(self.app.output_db) == os.path.abspath(db_path))
+                use_native = (native and context_matches
+                              and self._writing_history.undo_token is entry["native_token"])
+                if use_native:
                     self.state.loading = True
                     try:
                         self.trans_text.edit_undo()
                         self.trans_text.edit_modified(False)
                     except tk.TclError:
-                        native = False
+                        use_native = False
                     finally:
                         self.state.loading = False
-                self._writing_committed(text, revision, preserve_widget=native)
-                if same_row and not native and entry["before"] != text:
+                self._writing_committed(text, revision, preserve_widget=use_native or not context_matches)
+                if same_row and not use_native and context_matches and entry["before"] != text:
                     self.set_translation_text(entry["before"], mark_dirty=True)
             else:
                 self._reload_writing_rows()
@@ -4002,6 +4066,8 @@ class TranslationEditor:
         self.update_selection_label()
 
     def select_index(self, index, save_previous=False):
+        if getattr(self, "_writing_busy", False):
+            return
         if not self.state.rows:
             return
 
@@ -4027,6 +4093,8 @@ class TranslationEditor:
         self.load_item()
 
     def load_item(self):
+        if getattr(self, "_writing_busy", False):
+            return
         index = self.get_index()
         if index is None or not (0 <= index < len(self.state.rows)):
             return
@@ -4212,6 +4280,8 @@ class TranslationEditor:
         return propagated
 
     def save_changes(self, silent=True, mark_verified=False):
+        if getattr(self, "_writing_busy", False):
+            return
         if not self.current["id"]:
             return
 
@@ -4382,6 +4452,8 @@ class TranslationEditor:
         O id e a posicao sao capturados ANTES da gravacao: depois dela, a posicao
         lida pode ja ser a de quem ainda nao foi visto. Ver `index_after_save`.
         """
+        if getattr(self, "_writing_busy", False):
+            return
         current_id = self.current["id"]
         index = self.get_index()
         self.save_changes()
@@ -5107,8 +5179,13 @@ class TranslationEditor:
         )
 
     def undo_translation(self):
+        if self._writing_closed or self._writing_busy:
+            return
         bulk = self._current_writing_bulk()
-        if bulk and self.current["id"] == bulk["record_id"] and self.draft_text() == bulk["after"]:
+        if (bulk and self.current["id"] == bulk["record_id"]
+                and bulk["window"] is self._writing_window_token
+                and bulk["native_token"] is not None
+                and self._writing_history.undo_token is bulk["native_token"]):
             self.undo_writing_bulk()
             return
         try:
@@ -5122,6 +5199,11 @@ class TranslationEditor:
         self.refresh_find_matches()
 
     def redo_translation(self):
+        if self._writing_closed or self._writing_busy:
+            return
+        if self._writing_history.redo_token in self._writing_undone_tokens:
+            self.show_message("Para reaplicar o lote, crie uma nova prévia no livro.")
+            return
         try:
             self.trans_text.edit_redo()
         except tk.TclError:
