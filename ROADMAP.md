@@ -9648,3 +9648,55 @@ Nao houve warnings nas execucoes pytest desta tarefa.
 `Substituicoes.txt` real permaneceu igual ao HEAD:
 `d54cf12ba5d51ad51afc7eba234908a53b6eaac6`. Dados, bancos, locks e backups
 ficaram fora do commit. Mudancas preexistentes do usuario foram preservadas.
+
+## Assistente pt-BR — Task 8: prototipo de empacotamento (2026-10-29)
+
+Incremento ainda **bloqueado para entrega**, por auditoria de redistribuicao e
+aceite literal TA-004 pendentes. O build agora prepara fontes fixas, verifica
+SHA-256 antes de extrair, gera Java reduzido com jdeps/jlink e recusa recursos,
+checksums ou auditoria incompletos antes de construir as entregas.
+
+O primeiro gate real reprovou: startup **10,450 s**, primeiro resultado
+**12,022 s**, pico de working set **606,8 MB**. A medicao foi preservada.
+Uma campanha fixa de 25 execucoes identificou repeticao de health checks de
+0,5 s durante a inicializacao do pipeline pt-BR. Health de 5 s, limitado ao
+tempo restante do deadline total, corrigiu essa repeticao sem alterar regras,
+JARs, heap, cache de texto ou intervalos protegidos.
+
+| Configuracao | n | Startup minimo / mediana / p95 (s) | Pico maximo (MB) |
+|---|---:|---:|---:|
+| JVM original, health 0,5 s | 5 | 9,106 / 9,808 / 10,700 | 664,3 |
+| SerialGC, health 0,5 s | 5 | 15,379 / 15,504 / 18,368 | 537,5 |
+| C1, health 0,5 s | 5 | 5 falhas de readiness | nao certificado |
+| JVM original, health 5 s | 5 | 3,948 / 4,006 / 4,835 | 683,5 |
+| C1, health 5 s | 5 | 4,039 / 4,082 / 4,209 | 584,8 |
+
+P95 usa nearest rank; com n=5 e o maximo da amostra, sem intervalo de confianca
+populacional. Cada rodada criou uma JVM; o cache de disco do Windows nao foi
+limpo. Os controles usaram teto diagnostico de 30 s para registrar configuracoes
+ruins; o gate de release continua em 10 s e 1.000.000.000 bytes. SerialGC e C1
+nao foram promovidos. Com health de 5 s, C1 piorou a analise warm mediana de
+0,434 s para 0,611 s. Runtime real apos o fix: startup **4,672 s**, primeiro
+resultado **6,420 s**, pico **604,4 MB**, sem Java no PATH do subprocesso.
+
+Downloads: LanguageTool **251.998.221 B**, Temurin **190.817.615 B**; hashes
+literais e fontes oficiais em `recursos/languagetool-lock.json`. Runtime jlink:
+**47.838.546 B**; LanguageTool: **405.072.337 B**. A soma de dados e 452.910.883 B;
+nao representa um aumento medido de dist/instalador. As entregas completas nao
+foram construidas enquanto o gate de licencas estiver bloqueado.
+
+Auditoria: 141 JARs, 110 arquivos de dicionario, 37 binarios nativos internos e
+92 notices do runtime; 42 JARs sem POM embutido identificados por SHA-256 contra
+Maven Central e 72 POMs ancestrais examinados. Declaracoes de dependencias
+sombreadas nao sao atribuidas ao JAR inteiro. Fontes correspondentes, termos
+especificos dos dicionarios e cobertura completa de notices continuam pendentes;
+`validate` bloqueia release. A evidencia esta em `LICENSES/LanguageTool-6.6-evidence.json`.
+
+Concordancia nominal e verbal e protecao de notacao foram preservadas em todos
+os controles funcionais. TA-004 recebe `As pretas tem` → `As pretas têm` e
+`posiçao` → `posição`; o gabarito exige o span `tem` → `têm`. Esse aceite literal
+permanece pendente, sem alterar o gabarito nesta tarefa.
+
+Dados completos, script de replay, validacoes e pendencias:
+`docs/superpowers/reports/task-8-report.md` e `languagetool-startup-measurements.json`
+na mesma pasta. Nenhum ZIP, JDK ou runtime binario foi versionado.

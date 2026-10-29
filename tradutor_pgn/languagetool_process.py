@@ -92,7 +92,7 @@ class LanguageToolProcess:
         self, *, resource_resolver: Callable[[str], Path] = resource_path,
         process_factory: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
         port_allocator: Callable[[], int] = _free_port,
-        startup_timeout: float = 10.0, health_timeout: float = 0.5, poll_interval: float = 0.05,
+        startup_timeout: float = 10.0, health_timeout: float = 5.0, poll_interval: float = 0.05,
     ) -> None:
         if min(startup_timeout, health_timeout, poll_interval) <= 0:
             raise ValueError("process timeouts must be positive")
@@ -212,22 +212,28 @@ class LanguageToolProcess:
             self._port = port
             url = f"http://127.0.0.1:{port}"
             deadline = time.monotonic() + self._startup_timeout
-            health = LanguageToolLocalAdapter(url, timeout=min(self._health_timeout, self._startup_timeout))
-            try:
-                while time.monotonic() < deadline:
-                    if self._child.poll() is not None:
-                        raise LanguageToolUnavailable(_FALLBACK)
-                    if self._owned():
-                        try:
-                            health.check("", frozenset())
-                            if self._owned():
-                                self._status = AssistantStatus("ready", "full", "", self._restarted)
-                                return url
-                        except LanguageToolUnavailable:
-                            pass
-                    time.sleep(min(self._poll_interval, max(0, deadline - time.monotonic())))
-            finally:
-                health.shutdown()
+            while time.monotonic() < deadline:
+                if self._child.poll() is not None:
+                    raise LanguageToolUnavailable(_FALLBACK)
+                if self._owned():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    # The first pt-BR check initializes its pipeline. Short
+                    # read timeouts created repeated server work during that
+                    # warmup; give one check time while bounding every retry
+                    # by the remaining total startup budget.
+                    health = LanguageToolLocalAdapter(url, timeout=min(self._health_timeout, remaining))
+                    try:
+                        health.check("", frozenset())
+                        if self._owned() and time.monotonic() <= deadline:
+                            self._status = AssistantStatus("ready", "full", "", self._restarted)
+                            return url
+                    except LanguageToolUnavailable:
+                        pass
+                    finally:
+                        health.shutdown()
+                time.sleep(min(self._poll_interval, max(0, deadline - time.monotonic())))
             raise LanguageToolUnavailable(_FALLBACK)
         except Exception:
             self._set_failed()

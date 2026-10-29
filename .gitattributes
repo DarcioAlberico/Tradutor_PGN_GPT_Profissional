@@ -24,3 +24,7 @@ dicionarios/*.aff binary
 # antes de o build sair com o icone quebrado.
 recursos/*.ico binary
 recursos/*.png binary
+
+# Textos de licenca de terceiros sao copias verbatim, inclusive espacos e
+# quebras de linha originais; nao aplicar autocrlf nem regras de whitespace.
+LICENSES/*.txt -text -whitespace

@@ -1336,6 +1336,17 @@ class DeliverableContentsTests(unittest.TestCase):
             roteiro.index('_rodar("instalador (Inno Setup)"'),
         )
 
+    def test_no_zip_is_started_when_offline_resources_are_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pasta = self._pasta_do_programa(tmp)
+            saida = Path(tmp) / "saida"
+            with unittest.mock.patch.object(self.empacotador, "DIST", str(pasta)), \
+                    unittest.mock.patch.object(self.empacotador, "SAIDA", str(saida)), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                codigo = self.empacotador.main()
+            self.assertEqual(codigo, 1)
+            self.assertFalse(saida.exists())
+
     def test_the_first_run_never_brings_a_key_file_from_beside_the_exe(self):
         """A migracao de uma instalacao antiga copia o que esta ao lado do
         `.exe`; uma chave ali nunca pode virar a chave de quem abriu."""

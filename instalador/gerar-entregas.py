@@ -24,12 +24,15 @@ Tudo sai em `instalador/saida/`. So usa a biblioteca padrao: roda com qualquer
 Python 3, e o `uv` tem de estar no PATH.
 """
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 import time
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, RAIZ)
+from ferramentas.preparar_languagetool import validate_bundle, validate_distribution  # noqa: E402
 AMBIENTE = os.path.join(RAIZ, "build", "venv-exe")
 SAIDA = os.path.join(RAIZ, "instalador", "saida")
 EXE = os.path.join(RAIZ, "dist", "PGN_Tradutor_Pro", "PGN_Tradutor_Pro.exe")
@@ -60,6 +63,12 @@ def _rodar(passo, comando, env=None):
 
 def main(argv):
     inicio = time.time()
+    try:
+        validate_bundle(Path(RAIZ) / "build/vendor", allow_jdk=True)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"ERRO: recursos offline indisponiveis: {exc}")
+        print("Prepare com: python ferramentas/preparar_languagetool.py fetch e runtime.")
+        return 1
     uv = shutil.which("uv")
     if not uv:
         print("ERRO: `uv` nao esta no PATH (https://docs.astral.sh/uv/).")
@@ -77,6 +86,7 @@ def main(argv):
     )
     if not os.path.isfile(EXE):
         raise SystemExit(f"\nFALHOU: o PyInstaller terminou sem gerar {EXE}")
+    validate_distribution(Path(EXE).parent)
     if "--so-exe" in argv:
         print(f"\nPronto: {os.path.dirname(EXE)}")
         return 0

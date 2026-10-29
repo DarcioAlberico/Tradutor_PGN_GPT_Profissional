@@ -1,0 +1,1184 @@
+{
+  "schema": 1,
+  "method": "Fixed five runs per arm, rotating sequential order, fresh JVM each run; OS disk cache not cleared. p95 uses nearest rank (with n=5 it is the maximum); not a population confidence bound.",
+  "jvm_campaign": {
+    "health_timeout_seconds": 0.5,
+    "startup_measurement_ceiling_seconds": 30,
+    "runs": [
+      {
+        "arm": "baseline",
+        "repetition": 1,
+        "flags": [],
+        "startup_seconds": 9.807512200000929,
+        "listen_seconds": 1.5532464999996591,
+        "pt_health_after_listen_seconds": 8.25426570000127,
+        "cold_rss_bytes": 555618304,
+        "first_analysis_seconds": 1.446788999994169,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.4997979000036139,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 558538752,
+        "peak_rss_bytes": 605495296,
+        "restart_attempted": false
+      },
+      {
+        "arm": "c1",
+        "repetition": 1,
+        "flags": [
+          "-XX:TieredStopAtLevel=1"
+        ],
+        "error": "LanguageToolUnavailable: Concordância indisponível; somente ortografia."
+      },
+      {
+        "arm": "serial",
+        "repetition": 1,
+        "flags": [
+          "-XX:+UseSerialGC"
+        ],
+        "startup_seconds": 15.503564700004063,
+        "listen_seconds": 1.61788279999746,
+        "pt_health_after_listen_seconds": 13.885681900006603,
+        "cold_rss_bytes": 453812224,
+        "first_analysis_seconds": 1.4424731000035536,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.42939550000301097,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 504479744,
+        "peak_rss_bytes": 504483840,
+        "restart_attempted": false
+      },
+      {
+        "arm": "c1",
+        "repetition": 2,
+        "flags": [
+          "-XX:TieredStopAtLevel=1"
+        ],
+        "error": "LanguageToolUnavailable: Concordância indisponível; somente ortografia."
+      },
+      {
+        "arm": "serial",
+        "repetition": 2,
+        "flags": [
+          "-XX:+UseSerialGC"
+        ],
+        "startup_seconds": 18.367906700004824,
+        "listen_seconds": 1.549363900005119,
+        "pt_health_after_listen_seconds": 16.818542799999705,
+        "cold_rss_bytes": 470519808,
+        "first_analysis_seconds": 1.9883091999945464,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.48490809999930207,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 504369152,
+        "peak_rss_bytes": 515178496,
+        "restart_attempted": false
+      },
+      {
+        "arm": "baseline",
+        "repetition": 2,
+        "flags": [],
+        "startup_seconds": 9.206656399997883,
+        "listen_seconds": 1.4032979000039632,
+        "pt_health_after_listen_seconds": 7.803358499993919,
+        "cold_rss_bytes": 611151872,
+        "first_analysis_seconds": 1.3811023000016576,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.4095289000106277,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 636112896,
+        "peak_rss_bytes": 649764864,
+        "restart_attempted": false
+      },
+      {
+        "arm": "serial",
+        "repetition": 3,
+        "flags": [
+          "-XX:+UseSerialGC"
+        ],
+        "startup_seconds": 15.379316200007452,
+        "listen_seconds": 1.532873500007554,
+        "pt_health_after_listen_seconds": 13.846442699999898,
+        "cold_rss_bytes": 464781312,
+        "first_analysis_seconds": 1.7108322999993106,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.4535747000045376,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 528625664,
+        "peak_rss_bytes": 531709952,
+        "restart_attempted": false
+      },
+      {
+        "arm": "baseline",
+        "repetition": 3,
+        "flags": [],
+        "startup_seconds": 9.106419599993387,
+        "listen_seconds": 1.4265811999939615,
+        "pt_health_after_listen_seconds": 7.679838399999426,
+        "cold_rss_bytes": 621903872,
+        "first_analysis_seconds": 1.4489752000081353,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.3970499999995809,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 662179840,
+        "peak_rss_bytes": 664342528,
+        "restart_attempted": false
+      },
+      {
+        "arm": "c1",
+        "repetition": 3,
+        "flags": [
+          "-XX:TieredStopAtLevel=1"
+        ],
+        "error": "LanguageToolUnavailable: Concordância indisponível; somente ortografia."
+      },
+      {
+        "arm": "baseline",
+        "repetition": 4,
+        "flags": [],
+        "startup_seconds": 10.24576839999645,
+        "listen_seconds": 1.4220686000044225,
+        "pt_health_after_listen_seconds": 8.823699799992028,
+        "cold_rss_bytes": 600772608,
+        "first_analysis_seconds": 1.4671825999976136,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.4432398000062676,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 653619200,
+        "peak_rss_bytes": 662196224,
+        "restart_attempted": false
+      },
+      {
+        "arm": "c1",
+        "repetition": 4,
+        "flags": [
+          "-XX:TieredStopAtLevel=1"
+        ],
+        "error": "LanguageToolUnavailable: Concordância indisponível; somente ortografia."
+      },
+      {
+        "arm": "serial",
+        "repetition": 4,
+        "flags": [
+          "-XX:+UseSerialGC"
+        ],
+        "startup_seconds": 15.471269200003007,
+        "listen_seconds": 1.5683528000081424,
+        "pt_health_after_listen_seconds": 13.902916399994865,
+        "cold_rss_bytes": 448663552,
+        "first_analysis_seconds": 1.7647738000086974,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.4445670999994036,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 536158208,
+        "peak_rss_bytes": 537468928,
+        "restart_attempted": false
+      },
+      {
+        "arm": "c1",
+        "repetition": 5,
+        "flags": [
+          "-XX:TieredStopAtLevel=1"
+        ],
+        "error": "LanguageToolUnavailable: Concordância indisponível; somente ortografia."
+      },
+      {
+        "arm": "serial",
+        "repetition": 5,
+        "flags": [
+          "-XX:+UseSerialGC"
+        ],
+        "startup_seconds": 15.534679099990171,
+        "listen_seconds": 1.64080219999596,
+        "pt_health_after_listen_seconds": 13.893876899994211,
+        "cold_rss_bytes": 467206144,
+        "first_analysis_seconds": 1.7737299000000348,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.49411629998940043,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 492826624,
+        "peak_rss_bytes": 515391488,
+        "restart_attempted": false
+      },
+      {
+        "arm": "baseline",
+        "repetition": 5,
+        "flags": [],
+        "startup_seconds": 10.699774100008653,
+        "listen_seconds": 1.3251154000026872,
+        "pt_health_after_listen_seconds": 9.374658700005966,
+        "cold_rss_bytes": 523296768,
+        "first_analysis_seconds": 1.375865399997565,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.4216327000031015,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 571535360,
+        "peak_rss_bytes": 581881856,
+        "restart_attempted": false
+      }
+    ],
+    "summary": {
+      "baseline": {
+        "n": 5,
+        "errors": 0,
+        "startup_seconds": {
+          "min": 9.106419599993387,
+          "median": 9.807512200000929,
+          "p95": 10.699774100008653,
+          "max": 10.699774100008653
+        },
+        "listen_seconds": {
+          "min": 1.3251154000026872,
+          "median": 1.4220686000044225,
+          "p95": 1.5532464999996591,
+          "max": 1.5532464999996591
+        },
+        "pt_health_after_listen_seconds": {
+          "min": 7.679838399999426,
+          "median": 8.25426570000127,
+          "p95": 9.374658700005966,
+          "max": 9.374658700005966
+        },
+        "first_analysis_seconds": {
+          "min": 1.375865399997565,
+          "median": 1.446788999994169,
+          "p95": 1.4671825999976136,
+          "max": 1.4671825999976136
+        },
+        "warm_analysis_seconds": {
+          "min": 0.3970499999995809,
+          "median": 0.4216327000031015,
+          "p95": 0.4997979000036139,
+          "max": 0.4997979000036139
+        },
+        "peak_rss_bytes": {
+          "min": 581881856,
+          "median": 649764864,
+          "p95": 664342528,
+          "max": 664342528
+        },
+        "ta004_all": false,
+        "nominal_all": true,
+        "verbal_all": true,
+        "protected_all": true
+      },
+      "c1": {
+        "n": 5,
+        "errors": 5,
+        "ta004_all": false,
+        "nominal_all": false,
+        "verbal_all": false,
+        "protected_all": false
+      },
+      "serial": {
+        "n": 5,
+        "errors": 0,
+        "startup_seconds": {
+          "min": 15.379316200007452,
+          "median": 15.503564700004063,
+          "p95": 18.367906700004824,
+          "max": 18.367906700004824
+        },
+        "listen_seconds": {
+          "min": 1.532873500007554,
+          "median": 1.5683528000081424,
+          "p95": 1.64080219999596,
+          "max": 1.64080219999596
+        },
+        "pt_health_after_listen_seconds": {
+          "min": 13.846442699999898,
+          "median": 13.893876899994211,
+          "p95": 16.818542799999705,
+          "max": 16.818542799999705
+        },
+        "first_analysis_seconds": {
+          "min": 1.4424731000035536,
+          "median": 1.7647738000086974,
+          "p95": 1.9883091999945464,
+          "max": 1.9883091999945464
+        },
+        "warm_analysis_seconds": {
+          "min": 0.42939550000301097,
+          "median": 0.4535747000045376,
+          "p95": 0.49411629998940043,
+          "max": 0.49411629998940043
+        },
+        "peak_rss_bytes": {
+          "min": 504483840,
+          "median": 515391488,
+          "p95": 537468928,
+          "max": 537468928
+        },
+        "ta004_all": false,
+        "nominal_all": true,
+        "verbal_all": true,
+        "protected_all": true
+      }
+    }
+  },
+  "health_campaign": {
+    "health_timeout_seconds": 5,
+    "startup_measurement_ceiling_seconds": 30,
+    "runs": [
+      {
+        "arm": "long_health",
+        "repetition": 1,
+        "flags": [],
+        "startup_seconds": 4.834761000005528,
+        "listen_seconds": 1.4565259000082733,
+        "pt_health_after_listen_seconds": 3.378235099997255,
+        "cold_rss_bytes": 503775232,
+        "first_analysis_seconds": 1.8523650000133784,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.4248996999958763,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 623857664,
+        "peak_rss_bytes": 650481664,
+        "restart_attempted": false
+      },
+      {
+        "arm": "c1_long_health",
+        "repetition": 1,
+        "flags": [
+          "-XX:TieredStopAtLevel=1"
+        ],
+        "startup_seconds": 4.209401000000071,
+        "listen_seconds": 1.6442039999965345,
+        "pt_health_after_listen_seconds": 2.5651970000035362,
+        "cold_rss_bytes": 419045376,
+        "first_analysis_seconds": 1.8118775999901118,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.6267920999962371,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 546549760,
+        "peak_rss_bytes": 546553856,
+        "restart_attempted": false
+      },
+      {
+        "arm": "c1_long_health",
+        "repetition": 2,
+        "flags": [
+          "-XX:TieredStopAtLevel=1"
+        ],
+        "startup_seconds": 4.042063299988513,
+        "listen_seconds": 1.5725024999992456,
+        "pt_health_after_listen_seconds": 2.4695607999892673,
+        "cold_rss_bytes": 407724032,
+        "first_analysis_seconds": 1.8208608999993885,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.6056877999944845,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 547528704,
+        "peak_rss_bytes": 547532800,
+        "restart_attempted": false
+      },
+      {
+        "arm": "long_health",
+        "repetition": 2,
+        "flags": [],
+        "startup_seconds": 3.9476910999946995,
+        "listen_seconds": 1.310361899988493,
+        "pt_health_after_listen_seconds": 2.6373292000062065,
+        "cold_rss_bytes": 480694272,
+        "first_analysis_seconds": 1.6031451000017114,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.4339682999998331,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 632541184,
+        "peak_rss_bytes": 644804608,
+        "restart_attempted": false
+      },
+      {
+        "arm": "long_health",
+        "repetition": 3,
+        "flags": [],
+        "startup_seconds": 3.977965400001267,
+        "listen_seconds": 1.3136837000056403,
+        "pt_health_after_listen_seconds": 2.6642816999956267,
+        "cold_rss_bytes": 476307456,
+        "first_analysis_seconds": 1.6677238999982364,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.4140324000036344,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 563163136,
+        "peak_rss_bytes": 608706560,
+        "restart_attempted": false
+      },
+      {
+        "arm": "c1_long_health",
+        "repetition": 3,
+        "flags": [
+          "-XX:TieredStopAtLevel=1"
+        ],
+        "startup_seconds": 4.039252400005353,
+        "listen_seconds": 1.5258380000013858,
+        "pt_health_after_listen_seconds": 2.513414400003967,
+        "cold_rss_bytes": 416464896,
+        "first_analysis_seconds": 1.8678652000089642,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.6113747999916086,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 550735872,
+        "peak_rss_bytes": 550739968,
+        "restart_attempted": false
+      },
+      {
+        "arm": "c1_long_health",
+        "repetition": 4,
+        "flags": [
+          "-XX:TieredStopAtLevel=1"
+        ],
+        "startup_seconds": 4.116383500004304,
+        "listen_seconds": 1.5883642999979202,
+        "pt_health_after_listen_seconds": 2.5280192000063835,
+        "cold_rss_bytes": 407801856,
+        "first_analysis_seconds": 1.8006460999895353,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.6307926000008592,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 547311616,
+        "peak_rss_bytes": 547315712,
+        "restart_attempted": false
+      },
+      {
+        "arm": "long_health",
+        "repetition": 4,
+        "flags": [],
+        "startup_seconds": 4.006425100000342,
+        "listen_seconds": 1.3125147999962792,
+        "pt_health_after_listen_seconds": 2.693910300004063,
+        "cold_rss_bytes": 469073920,
+        "first_analysis_seconds": 1.687447299991618,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.5299028000008548,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 683483136,
+        "peak_rss_bytes": 683487232,
+        "restart_attempted": false
+      },
+      {
+        "arm": "long_health",
+        "repetition": 5,
+        "flags": [],
+        "startup_seconds": 4.314812700002221,
+        "listen_seconds": 1.4076358000020264,
+        "pt_health_after_listen_seconds": 2.907176900000195,
+        "cold_rss_bytes": 459599872,
+        "first_analysis_seconds": 1.6903529000119306,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.4700254000053974,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 562970624,
+        "peak_rss_bytes": 566669312,
+        "restart_attempted": false
+      },
+      {
+        "arm": "c1_long_health",
+        "repetition": 5,
+        "flags": [
+          "-XX:TieredStopAtLevel=1"
+        ],
+        "startup_seconds": 4.081503199995495,
+        "listen_seconds": 1.581288899993524,
+        "pt_health_after_listen_seconds": 2.5002143000019714,
+        "cold_rss_bytes": 421752832,
+        "first_analysis_seconds": 1.8758722000056878,
+        "nominal": [
+          "GENERAL_NUMBER_AGREEMENT_ERRORS"
+        ],
+        "warm_analysis_seconds": 0.5998606999928597,
+        "verbal_ok": true,
+        "ta004": [
+          {
+            "rule_id": "GENERAL_VERB_AGREEMENT_ERRORS",
+            "category": "VERBAL_AGREEMENT",
+            "original": "As pretas tem",
+            "start": 0,
+            "end": 13,
+            "suggestions": [
+              "As pretas têm",
+              "As pretas, tem"
+            ]
+          },
+          {
+            "rule_id": "SPELLING_UNKNOWN_WORD",
+            "category": "SPELLING",
+            "original": "posiçao",
+            "start": 18,
+            "end": 25,
+            "suggestions": [
+              "posição"
+            ]
+          }
+        ],
+        "ta004_expected": false,
+        "protected_ranges_clear": true,
+        "warm_rss_bytes": 584798208,
+        "peak_rss_bytes": 584802304,
+        "restart_attempted": false
+      }
+    ],
+    "summary": {
+      "long_health": {
+        "n": 5,
+        "errors": 0,
+        "startup_seconds": {
+          "min": 3.9476910999946995,
+          "median": 4.006425100000342,
+          "p95": 4.834761000005528,
+          "max": 4.834761000005528
+        },
+        "listen_seconds": {
+          "min": 1.310361899988493,
+          "median": 1.3136837000056403,
+          "p95": 1.4565259000082733,
+          "max": 1.4565259000082733
+        },
+        "pt_health_after_listen_seconds": {
+          "min": 2.6373292000062065,
+          "median": 2.693910300004063,
+          "p95": 3.378235099997255,
+          "max": 3.378235099997255
+        },
+        "first_analysis_seconds": {
+          "min": 1.6031451000017114,
+          "median": 1.687447299991618,
+          "p95": 1.8523650000133784,
+          "max": 1.8523650000133784
+        },
+        "warm_analysis_seconds": {
+          "min": 0.4140324000036344,
+          "median": 0.4339682999998331,
+          "p95": 0.5299028000008548,
+          "max": 0.5299028000008548
+        },
+        "peak_rss_bytes": {
+          "min": 566669312,
+          "median": 644804608,
+          "p95": 683487232,
+          "max": 683487232
+        },
+        "ta004_all": false,
+        "nominal_all": true,
+        "verbal_all": true,
+        "protected_all": true
+      },
+      "c1_long_health": {
+        "n": 5,
+        "errors": 0,
+        "startup_seconds": {
+          "min": 4.039252400005353,
+          "median": 4.081503199995495,
+          "p95": 4.209401000000071,
+          "max": 4.209401000000071
+        },
+        "listen_seconds": {
+          "min": 1.5258380000013858,
+          "median": 1.581288899993524,
+          "p95": 1.6442039999965345,
+          "max": 1.6442039999965345
+        },
+        "pt_health_after_listen_seconds": {
+          "min": 2.4695607999892673,
+          "median": 2.513414400003967,
+          "p95": 2.5651970000035362,
+          "max": 2.5651970000035362
+        },
+        "first_analysis_seconds": {
+          "min": 1.8006460999895353,
+          "median": 1.8208608999993885,
+          "p95": 1.8758722000056878,
+          "max": 1.8758722000056878
+        },
+        "warm_analysis_seconds": {
+          "min": 0.5998606999928597,
+          "median": 0.6113747999916086,
+          "p95": 0.6307926000008592,
+          "max": 0.6307926000008592
+        },
+        "peak_rss_bytes": {
+          "min": 546553856,
+          "median": 547532800,
+          "p95": 584802304,
+          "max": 584802304
+        },
+        "ta004_all": false,
+        "nominal_all": true,
+        "verbal_all": true,
+        "protected_all": true
+      }
+    }
+  },
+  "pre_optimization_release_smoke": {
+    "system_java_on_path": false,
+    "network": "owned IPv4 loopback only",
+    "startup_seconds": 10.450070399994729,
+    "cold_rss_bytes": 537473024,
+    "first_analysis_seconds": 1.57168300000194,
+    "ready_for_first_result_seconds": 12.021753399996669,
+    "warm_analysis_seconds": 0.4215729999996256,
+    "warm_rss_bytes": 592105472,
+    "peak_rss_bytes": 606773248,
+    "diagnostics": 1,
+    "rules": [
+      "GENERAL_NUMBER_AGREEMENT_ERRORS"
+    ],
+    "resource_bytes": {
+      "runtime": 47838546,
+      "languagetool": 405072337
+    },
+    "endpoint": "http://127.0.0.1"
+  },
+  "post_optimization_runtime": {
+    "system_java_on_path": false,
+    "network": "owned IPv4 loopback only",
+    "startup_seconds": 4.671805999998469,
+    "cold_rss_bytes": 486739968,
+    "first_analysis_seconds": 1.7478655000013532,
+    "ready_for_first_result_seconds": 6.419671499999822,
+    "warm_analysis_seconds": 0.43189159999019466,
+    "warm_rss_bytes": 585981952,
+    "peak_rss_bytes": 604426240,
+    "diagnostics": 1,
+    "rules": [
+      "GENERAL_NUMBER_AGREEMENT_ERRORS"
+    ],
+    "resource_bytes": {
+      "runtime": 47838546,
+      "languagetool": 405072337
+    },
+    "endpoint": "http://127.0.0.1"
+  },
+  "final_cli_smoke": {
+    "system_java_on_path": false,
+    "network": "owned IPv4 loopback only",
+    "startup_seconds": 4.033724499997334,
+    "cold_rss_bytes": 491880448,
+    "first_analysis_seconds": 1.5975169000012102,
+    "ready_for_first_result_seconds": 5.631241399998544,
+    "warm_analysis_seconds": 0.45082290000573266,
+    "warm_rss_bytes": 563765248,
+    "peak_rss_bytes": 602722304,
+    "diagnostics": 1,
+    "rules": [
+      "GENERAL_NUMBER_AGREEMENT_ERRORS"
+    ],
+    "resource_bytes": {
+      "runtime": 47838546,
+      "languagetool": 405072337
+    },
+    "endpoint": "http://127.0.0.1"
+  }
+}

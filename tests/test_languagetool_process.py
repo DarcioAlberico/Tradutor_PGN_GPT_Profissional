@@ -43,6 +43,10 @@ class Handler(BaseHTTPRequestHandler):
             print(data["text"], file=sys.stderr, flush=True)
         if data.get("text") and (mode == "crash_always" or mode == "crash_first" and count == 1):
             os._exit(3)
+        if mode == "slow_health":
+            checks = marker.with_suffix(".checks")
+            checks.write_text(str(int(checks.read_text()) + 1 if checks.exists() else 1))
+            time.sleep(0.75)
         payload = {"software": {"name": "LanguageTool", "version": "99" if mode == "version" else "6.6"},
                    "language": {"code": "pt-BR"}, "matches": []}
         self.send_response(503 if mode == "unhealthy" else 200)
@@ -79,10 +83,11 @@ def runtime(tmp_path):
             children.append(child)
             return child
 
+        health_options = {} if options.pop("default_health", False) else {"health_timeout": 0.1}
         return LanguageToolProcess(
             resource_resolver=lambda relative: root / relative,
             process_factory=launch, startup_timeout=options.pop("startup_timeout", 1.5),
-            poll_interval=0.02, health_timeout=0.1, **options,
+            poll_interval=0.02, **health_options, **options,
         )
 
     yield make, marker, commands, children, root
@@ -112,6 +117,45 @@ def test_start_validates_owned_listener_health_and_reuses_child(runtime, capfd, 
     assert "JAVA_TOOL_OPTIONS" not in kwargs["env"] and kwargs.get("shell", False) is False
     manager.shutdown()
     assert capfd.readouterr() == ("", "")
+
+
+def test_startup_waits_for_cold_pipeline_without_repeated_short_health_requests(runtime):
+    make, marker, _commands, _children, _root = runtime
+    manager = make("slow_health", startup_timeout=3, default_health=True)
+    try:
+        manager.start()
+        assert manager.status().mode == "full"
+        assert marker.with_suffix(".checks").read_text() == "1"
+    finally:
+        manager.shutdown()
+
+
+def test_repeated_unhealthy_probes_cannot_extend_the_total_startup_deadline(runtime, monkeypatch):
+    from tradutor_pgn import languagetool_process as lifecycle
+    make, _marker, _commands, children, _root = runtime
+    class Clock:
+        now = 0.0
+        def advance(self, seconds):
+            self.now += seconds
+    clock = Clock()
+    class Unhealthy:
+        def __init__(self, url, timeout):
+            self.timeout = timeout
+        def check(self, text, disabled):
+            clock.advance(self.timeout)
+            raise LanguageToolUnavailable("unhealthy")
+        def shutdown(self):
+            pass
+    manager = make(startup_timeout=0.65)
+    monkeypatch.setattr(manager, "_owned", lambda: True)
+    monkeypatch.setattr(lifecycle, "LanguageToolLocalAdapter", Unhealthy)
+    monkeypatch.setattr(lifecycle.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(lifecycle.time, "sleep", clock.advance)
+    with pytest.raises(LanguageToolUnavailable):
+        manager.start()
+    assert clock.now <= 0.65
+    assert all(child.poll() is not None for child in children)
+    manager.shutdown()
 
 
 def test_busy_port_is_skipped_without_sending_health_or_killing_owner(runtime):

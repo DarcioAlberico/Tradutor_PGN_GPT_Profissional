@@ -20,6 +20,7 @@ dentro de `Program Files` — exatamente o defeito que a secao 21 consertou. Aqu
 ele e escrito direto no zip, e o disco nunca o ve.
 """
 import os
+from pathlib import Path
 import sys
 import zipfile
 
@@ -28,6 +29,7 @@ sys.path.insert(0, RAIZ)
 
 from tradutor_pgn import __version__  # noqa: E402
 from tradutor_pgn.app_paths import PORTABLE_DATA_FOLDER, PORTABLE_MARKER  # noqa: E402
+from ferramentas.preparar_languagetool import validate_distribution  # noqa: E402
 
 DIST = os.path.join(RAIZ, "dist", "PGN_Tradutor_Pro")
 SAIDA = os.path.join(RAIZ, "instalador", "saida")
@@ -110,6 +112,12 @@ def main():
         print("     Program Files, e chaves de API, bancos ou uma pasta dados/")
         print("     iriam para quem recebe. Gere de novo, que o PyInstaller")
         print("     recria a pasta do zero: python instalador/gerar-entregas.py")
+        return 1
+
+    try:
+        validate_distribution(Path(DIST))
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"ERRO: recursos offline incompletos ou alterados: {exc}")
         return 1
 
     os.makedirs(SAIDA, exist_ok=True)
