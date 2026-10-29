@@ -72,6 +72,38 @@ class DefaultPathSafetyTests(unittest.TestCase):
 
 
 class WritingSettingsTests(unittest.TestCase):
+    def test_category_patches_merge_under_lock_without_erasing_drafts_or_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            settings.save_settings({"editor_drafts": {"d": "vivo"}, "writing_assistant": {"disabled_rule_ids": ["RULE"]}}, path)
+            start = threading.Barrier(3)
+            failures = []
+            def change(category):
+                try:
+                    start.wait(timeout=5)
+                    settings.write_settings_sections({}, path, writing_category_changes={category: False})
+                except Exception as exc:
+                    failures.append(exc)
+            workers = [threading.Thread(target=change, args=(category,)) for category in ("SPELLING", "PUNCTUATION")]
+            for worker in workers:
+                worker.start()
+            start.wait(timeout=5)
+            for worker in workers:
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
+            disk = settings.load_settings(path)
+            self.assertEqual(disk["writing_assistant"]["visible_categories"], ["NOMINAL_AGREEMENT", "VERBAL_AGREEMENT", "GRAMMAR", "REPEATED_WORD"])
+            self.assertEqual(disk["writing_assistant"]["disabled_rule_ids"], ["RULE"])
+            self.assertEqual(disk["editor_drafts"], {"d": "vivo"})
+            before = path.read_bytes()
+            revision = settings.writing_settings_revision()
+            with unittest.mock.patch.object(settings.os, "replace", side_effect=PermissionError("busy")):
+                with self.assertRaises(PermissionError):
+                    settings.write_settings_sections({}, path, writing_category_changes={"SPELLING": True})
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(settings.writing_settings_revision(), revision)
+
     def test_rule_mutations_merge_concurrent_updates_and_publish_only_after_success(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"

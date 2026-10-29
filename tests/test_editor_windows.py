@@ -8308,6 +8308,29 @@ class WritingEditorTests(GuiTestCase):
         self.assertFalse(self.editor.writing_settings["spelling_enabled"])
         self.assertEqual(self.editor.writing_panel.issues, ())
 
+    def test_independent_category_edits_merge_live_without_losing_editor_draft(self):
+        from tradutor_pgn import settings_window
+        self.ready()
+        self.editor.set_translation_text("errao rascunho", mark_dirty=True, keep_undo=True)
+        first, second = (settings_window.open_settings_window(self.app) for _ in range(2))
+        for window in (first, second):
+            self.addCleanup(lambda win=window.win: win.winfo_exists() and win.destroy())
+        first.category_vars["SPELLING"].set(False)
+        second.category_vars["PUNCTUATION"].set(False)
+        self.assertTrue(first.save())
+        second.poll_writing_settings()
+        self.assertTrue(second.save())
+        self.wait_for(lambda: "SPELLING" not in self.editor.writing_settings["visible_categories"]
+                      and "PUNCTUATION" not in self.editor.writing_settings["visible_categories"])
+        self.assertEqual(self.editor.draft_text(), "errao rascunho")
+        self.assertTrue(self.editor.state.dirty)
+        self.assertEqual(self.editor.writing_panel.issues, ())
+        first.poll_writing_settings()
+        first.category_vars["SPELLING"].set(True)
+        self.assertTrue(first.save())
+        self.ready()
+        self.assertNotIn("PUNCTUATION", self.editor.writing_settings["visible_categories"])
+
     @contextmanager
     def committed_bulk_waiting_for_delivery(self):
         original = edit_window.apply_identical_replacements

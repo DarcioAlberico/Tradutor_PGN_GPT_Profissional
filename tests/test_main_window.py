@@ -2228,6 +2228,131 @@ class SettingsWindowTests(MainWindowTestCase):
         self.wait_writing_job(window)
         self.assertEqual(calls, [True])
 
+    def test_category_edits_from_two_windows_merge_before_and_after_event_delivery(self):
+        for poll_before_save in (False, True):
+            with self.subTest(poll_before_save=poll_before_save):
+                settings.write_writing_settings({"visible_categories": list(settings.WRITING_CATEGORIES)})
+                first, second = self.abre(), self.abre()
+                first.category_vars["SPELLING"].set(False)
+                second.category_vars["PUNCTUATION"].set(False)
+                self.assertTrue(first.save())
+                if poll_before_save:
+                    second.poll_writing_settings()
+                self.assertTrue(second.save())
+                first.poll_writing_settings()
+                second.poll_writing_settings()
+                categories = settings.read_writing_settings(self.arquivo())["visible_categories"]
+                self.assertNotIn("SPELLING", categories)
+                self.assertNotIn("PUNCTUATION", categories)
+                for window in (first, second):
+                    self.assertFalse(window.category_vars["SPELLING"].get())
+                    self.assertFalse(window.category_vars["PUNCTUATION"].get())
+                    window.win.destroy()
+
+    def test_same_category_unsaved_intent_survives_equal_then_conflicting_remote_edits(self):
+        first, second = self.abre(), self.abre()
+        first.category_vars["SPELLING"].set(False)
+        second.category_vars["SPELLING"].set(False)
+        self.assertTrue(first.save())
+        second.poll_writing_settings()
+        first.category_vars["SPELLING"].set(True)
+        self.assertTrue(first.save())
+        second.poll_writing_settings()
+        self.assertFalse(second.category_vars["SPELLING"].get())
+        self.assertTrue(second.save())
+        self.assertNotIn("SPELLING", settings.read_writing_settings(self.arquivo())["visible_categories"])
+        first.poll_writing_settings()
+        first.category_vars["SPELLING"].set(True)
+        self.assertTrue(first.save())
+        second.poll_writing_settings()
+        self.assertTrue(second.category_vars["SPELLING"].get())
+
+    def test_deferred_grammar_start_uses_saved_preference_and_later_saved_disable_wins(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+        original = PersonalDictionary.add
+        for save_disable in (False, True):
+            with self.subTest(save_disable=save_disable):
+                settings.write_writing_settings({"grammar_enabled": False})
+                calls = []
+                started, release = threading.Event(), threading.Event()
+                self.addCleanup(release.set)
+                class Spelling:
+                    def analyze(self, request, protected):
+                        return ()
+                class Grammar:
+                    def analyze(self, request, protected):
+                        calls.append(request.grammar_enabled)
+                        return ()
+                self.app.writing_assistant = PortugueseWritingAssistant(spelling_adapter=Spelling(), grammar_adapter=Grammar())
+                def slow_add(vocabulary, word):
+                    started.set()
+                    release.wait(5)
+                    return original(vocabulary, word)
+                with unittest.mock.patch.object(PersonalDictionary, "add", slow_add):
+                    window = self.abre()
+                    window.word_entry_var.set(f"Capablanca{save_disable}")
+                    window.add_vocabulary_word()
+                    self.assertTrue(started.wait(2))
+                    window.grammar_var.set(True)
+                    self.assertTrue(window.save())
+                    window.grammar_var.set(False)
+                    if save_disable:
+                        self.assertTrue(window.save())
+                    release.set()
+                    self.wait_writing_job(window)
+                self.assertEqual(calls, [] if save_disable else [True])
+                self.assertFalse(window.grammar_var.get())
+                self.assertEqual(settings.read_writing_settings(self.arquivo())["grammar_enabled"], not save_disable)
+                window.win.destroy()
+
+    def test_automatic_grammar_revalidates_saved_disable_before_worker_execution(self):
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+        calls = []
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        class Spelling:
+            def analyze(self, request, protected):
+                return ()
+        class Grammar:
+            def analyze(self, request, protected):
+                calls.append(request.grammar_enabled)
+                return ()
+        self.app.writing_assistant = PortugueseWritingAssistant(spelling_adapter=Spelling(), grammar_adapter=Grammar())
+        window = self.abre()
+        original_submit = window._writing_executor.submit
+        def delayed_submit(work):
+            def delayed():
+                started.set()
+                release.wait(5)
+                return work()
+            return original_submit(delayed)
+        self.patch(window._writing_executor, "submit", delayed_submit)
+        window.grammar_var.set(True)
+        self.assertTrue(window.save())
+        self.assertTrue(started.wait(2))
+        settings.write_writing_settings({"grammar_enabled": False})
+        release.set()
+        self.wait_writing_job(window)
+        self.assertEqual(calls, [])
+        self.assertFalse(settings.read_writing_settings(self.arquivo())["grammar_enabled"])
+
+    def test_failed_category_save_retains_pending_intent_and_can_retry_with_other_window_changes(self):
+        first, second = self.abre(), self.abre()
+        first.category_vars["SPELLING"].set(False)
+        second.category_vars["PUNCTUATION"].set(False)
+        self.assertTrue(second.save())
+        before = Path(settings.default_settings_path()).read_bytes()
+        with unittest.mock.patch.object(settings.os, "replace", side_effect=PermissionError("busy")):
+            self.assertFalse(first.save())
+        self.assertEqual(Path(settings.default_settings_path()).read_bytes(), before)
+        first.poll_writing_settings()
+        self.assertFalse(first.category_vars["SPELLING"].get())
+        self.assertFalse(first.category_vars["PUNCTUATION"].get())
+        self.assertTrue(first.save())
+        self.assertNotIn("SPELLING", settings.read_writing_settings(self.arquivo())["visible_categories"])
+        self.assertNotIn("PUNCTUATION", settings.read_writing_settings(self.arquivo())["visible_categories"])
+
     def test_every_user_option_has_a_control(self):
         """Garantia M4: as chaves de `USER_OPTION_SECTIONS` contra a tela."""
         janela = self.abre()

@@ -441,14 +441,16 @@ def read_main_window_settings(settings, known_languages):
     return valores
 
 
-def write_settings_sections(sections, path=None):
+def write_settings_sections(sections, path=None, *, writing_category_changes=None):
     """Grava `{secao: {chave: valor}}` relendo o disco antes (garantia R4).
 
     As janelas de edicao guardam rascunhos no MESMO arquivo. Gravar o snapshot
     inteiro daqui apagaria o que elas escreveram desde que este processo abriu —
     que e exatamente o defeito que R4 existe para impedir. Varias secoes numa
     chamada so porque a tela de Configuracoes grava duas de uma vez, e duas
-    releituras seriam duas escritas para um clique.
+    releituras seriam duas escritas para um clique. Alteracoes de categorias
+    sao deltas por categoria, mesclados sob o lock com o estado atual: duas
+    janelas podem modificar categorias distintas sem perder a escolha alheia.
     """
     def mutator(settings):
         gravadas = {}
@@ -459,6 +461,19 @@ def write_settings_sections(sections, path=None):
                 settings[key] = guardado
             guardado.update(values)
             gravadas[key] = guardado
+        if writing_category_changes:
+            visible = set(read_writing_settings(settings)["visible_categories"])
+            for category, enabled in writing_category_changes.items():
+                if category in WRITING_CATEGORIES and isinstance(enabled, bool):
+                    if enabled:
+                        visible.add(category)
+                    else:
+                        visible.discard(category)
+            stored = settings.get(WRITING_KEY)
+            if not isinstance(stored, dict):
+                stored = settings[WRITING_KEY] = {}
+            stored["visible_categories"] = [category for category in WRITING_CATEGORIES if category in visible]
+            gravadas[WRITING_KEY] = stored
         return gravadas
 
     return update_settings(mutator, path)

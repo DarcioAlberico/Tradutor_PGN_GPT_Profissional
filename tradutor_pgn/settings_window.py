@@ -96,6 +96,8 @@ class SettingsWindow:
         self.board = read_board_settings(settings)
         self.llm = read_llm_settings(settings)
         self.writing = read_writing_settings(settings)
+        self._writing_category_changes = {}
+        self._syncing_writing_categories = False
         self._writing_revision = writing_settings_revision()
         self._writing_closed = False
         self._writing_after = None
@@ -173,6 +175,7 @@ class SettingsWindow:
         for index, (category, label) in enumerate(CATEGORY_LABELS.items()):
             variable = tk.BooleanVar(master=self.win, value=category in self.writing["visible_categories"])
             self.category_vars[category] = variable
+            variable.trace_add("write", lambda *_args, key=category: self._category_changed(key))
             ctk.CTkCheckBox(categories, text=label, variable=variable).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 12), pady=4)
         self.controls[(WRITING_KEY, "visible_categories")] = categories
         self.hint(frame, 7, "Categorias exibidas no painel e no texto. Ocultar não altera a tradução.")
@@ -209,6 +212,24 @@ class SettingsWindow:
             "grammar_enabled": bool(self.grammar_var.get()),
             "visible_categories": [key for key, variable in self.category_vars.items() if variable.get()],
         }
+
+    def _category_changed(self, category):
+        if self._syncing_writing_categories:
+            return
+        enabled = bool(self.category_vars[category].get())
+        if enabled == (category in self.writing["visible_categories"]):
+            self._writing_category_changes.pop(category, None)
+        else:
+            self._writing_category_changes[category] = enabled
+
+    def _sync_category_controls(self, categories):
+        self._syncing_writing_categories = True
+        try:
+            for category, variable in self.category_vars.items():
+                if category not in self._writing_category_changes:
+                    variable.set(category in categories)
+        finally:
+            self._syncing_writing_categories = False
 
     def refresh_vocabulary(self):
         if self._writing_closed:
@@ -293,16 +314,27 @@ class SettingsWindow:
                 or self._writing_assistant)
 
     def test_writing(self):
+        self._start_writing_test(grammar_enabled=bool(self.grammar_var.get()))
+
+    def _start_writing_test(self, *, grammar_enabled=False, automatic=False):
         if self._writing_future is not None or self._writing_closed:
             return
         assistant = self._current_writing_assistant() or get_shared_writing_assistant()
         self._writing_assistant = assistant
         self.app.writing_assistant = assistant
-        request = WritingRequest("As peças estão no tabuleiro.", 0, "pt", grammar_enabled=bool(self.grammar_var.get()))
+        def work():
+            # Automatic startup belongs to the committed preference, not the
+            # editable checkbox. Revalidate on the worker when it actually runs.
+            enabled = read_writing_settings(load_settings())["grammar_enabled"] if automatic else grammar_enabled
+            if automatic and not enabled:
+                return None
+            request = WritingRequest("As peças estão no tabuleiro.", 0, "pt", grammar_enabled=enabled)
+            return assistant.analyze(request)
         def tested(result):
             self._writing_testing = False
-            self.writing_message_label.configure(text="Teste local concluído." if result.mode != "unavailable" else "Teste local indisponível.")
-        self._writing_testing = self._start_writing_job(lambda: assistant.analyze(request), tested)
+            if result is not None:
+                self.writing_message_label.configure(text="Teste local concluído." if result.mode != "unavailable" else "Teste local indisponível.")
+        self._writing_testing = self._start_writing_job(work, tested)
 
     def poll_writing_settings(self):
         if self._writing_closed:
@@ -318,9 +350,7 @@ class SettingsWindow:
             for key, variable in (("spelling_enabled", self.spelling_var), ("grammar_enabled", self.grammar_var)):
                 if local[key] == self.writing[key]:
                     variable.set(current[key])
-            if local["visible_categories"] == self.writing["visible_categories"]:
-                for key, variable in self.category_vars.items():
-                    variable.set(key in current["visible_categories"])
+            self._sync_category_controls(current["visible_categories"])
             self.writing = current
             self._writing_revision = revision
             assistant = self._current_writing_assistant()
@@ -342,8 +372,8 @@ class SettingsWindow:
             self._writing_job_controls("normal")
         if self._writing_start_requested and self._writing_future is None:
             self._writing_start_requested = False
-            if self.writing["grammar_enabled"]:
-                self.test_writing()
+            if read_writing_settings(load_settings())["grammar_enabled"]:
+                self._start_writing_test(automatic=True)
         assistant = self._current_writing_assistant()
         status = assistant.status() if assistant is not None else AssistantStatus("stopped", "unavailable")
         diagnostic = status.diagnostic
@@ -682,7 +712,7 @@ class SettingsWindow:
                 for pid, var in self.model_vars.items()
             },
             WRITING_KEY: {key: value for key, value in self.writing_values().items()
-                          if value != self.writing[key]},
+                          if key != "visible_categories" and value != self.writing[key]},
         }, None
 
     def key_changes(self):
@@ -708,8 +738,9 @@ class SettingsWindow:
             return False
         mudancas_de_chave = self.key_changes()
         grammar_just_enabled = secoes[WRITING_KEY].get("grammar_enabled") is True
+        category_changes = dict(self._writing_category_changes)
         try:
-            write_settings_sections(secoes)
+            saved = write_settings_sections(secoes, writing_category_changes=category_changes)
             for pid, chave in mudancas_de_chave.items():
                 api_keys.save_api_key(pid, chave)
         except OSError:
@@ -732,7 +763,12 @@ class SettingsWindow:
             self.appearance["theme"] = tema
         self.output = dict(secoes[OUTPUT_KEY])
         self.llm = dict(secoes[LLM_KEY])
-        if secoes[WRITING_KEY]:
+        if category_changes:
+            self._writing_category_changes.clear()
+            categories = read_writing_settings(saved)["visible_categories"]
+            self.writing["visible_categories"] = categories
+            self._sync_category_controls(categories)
+        if secoes[WRITING_KEY] or category_changes:
             # The event is published by the atomic settings update, only on
             # success. Consume it here too, retaining any concurrent rule IDs.
             self.poll_writing_settings()
