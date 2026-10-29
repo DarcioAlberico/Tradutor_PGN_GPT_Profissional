@@ -505,6 +505,9 @@ def close_main_window(app):
     pergunta — e o worker precisa de tempo para fechar o arquivo que esta
     escrevendo.
     """
+    if any(editor._writing_busy for editor in getattr(app, "writing_editors", ())):
+        messagebox.showinfo("Revisão linguística", "Aguarde a operação do livro terminar antes de fechar.", parent=app.root)
+        return False
     if app.is_processing:
         if not messagebox.askyesno(
             "Fechar",
@@ -552,6 +555,9 @@ def close_main_window(app):
         except Exception:  # noqa: BLE001 - fechar nao pode falhar por causa de uma filha
             pass
 
+    from .writing_controller import shutdown_shared_writing_assistant
+    threading.Thread(target=shutdown_shared_writing_assistant,
+                     name="writing-shutdown", daemon=False).start()
     app.root.destroy()
     return True
 

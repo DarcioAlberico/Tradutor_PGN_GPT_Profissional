@@ -37,8 +37,10 @@ def get_shared_writing_assistant() -> PortugueseWritingAssistant:
 
 def shutdown_shared_writing_assistant() -> None:
     """Application exit only; may wait for the owned sidecar, so use a worker."""
+    global _shared_assistant
     with _shared_lock:
         assistant = _shared_assistant
+        _shared_assistant = None
     if assistant is not None:
         assistant.shutdown()
 

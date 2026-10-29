@@ -19,6 +19,7 @@ import inspect
 import io
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -65,6 +66,7 @@ from tradutor_pgn.glossario import (
     save_glossary_entries,
 )
 from tradutor_pgn.review_quality import row_quality_flag, row_quality_warnings
+from tradutor_pgn.writing_types import AssistantStatus, WritingIssue, WritingResult
 
 
 def com_prioridade(entries, priority=0, scope=""):
@@ -80,6 +82,23 @@ def com_prioridade(entries, priority=0, scope=""):
     ]
 
 
+class EmptyWritingAssistant:
+    """Keep unrelated window fixtures independent of the real engine's I/O.
+
+    Real editor/provider integration runs in a fresh interpreter below; action
+    tests supply their own issues. The controller and Tk delivery remain real.
+    """
+
+    def analyze(self, request):
+        return WritingResult(request.text_version, (), "spelling_only")
+
+    def status(self):
+        return AssistantStatus("ready", "spelling_only")
+
+    def invalidate_cache(self):
+        pass
+
+
 class FakeApp:
     """O minimo que as duas janelas usam do app real."""
 
@@ -90,6 +109,7 @@ class FakeApp:
         self.glossary_substitutions = []
         self.glossary_change_callbacks = []
         self.logs = []
+        self.writing_assistant = EmptyWritingAssistant()
 
     def log_message(self, message):
         self.logs.append(message)
@@ -105,6 +125,7 @@ class EditorWindowTestCase(GuiTestCase):
         self.app = FakeApp(self.root, self.db_path)
         # A normal installation supplies this source before catalog migration.
         save_glossary_entries([], glossario._default_substitutions_path(), create_backup=False)
+
 
     # ---------------- helpers de widget ----------------
 
@@ -5184,7 +5205,9 @@ class LabelsAndWidthsFitTests(EditorWindowTestCase):
             edit_window.LIST_PANE_MIN
             + edit_window.SASH_WIDTH
             + edit_window.BOTTOM_PANE_MIN
-            + edit_window.MAIN_PANE_PADX,
+            + edit_window.MAIN_PANE_PADX
+            + edit_window.WRITING_RAIL_MIN
+            + edit_window.SASH_WIDTH,
         )
 
     def test_the_window_asks_the_manager_for_the_width_it_computed(self):
@@ -5207,6 +5230,7 @@ class LabelsAndWidthsFitTests(EditorWindowTestCase):
             ("baixo", self.editor.bottom_pane, edit_window.BOTTOM_PANE_MIN),
             ("editor", self.editor.text_frame, edit_window.EDITOR_PANE_MIN),
             ("sugestoes", self.editor.sugg_frame, edit_window.SUGGESTION_PANE_MIN),
+            ("revisão", self.editor.writing_panel, edit_window.WRITING_RAIL_MIN),
         ):
             self.assertGreaterEqual(
                 painel.winfo_width(), minimo,
@@ -8102,3 +8126,340 @@ class ReviewStatusShortcutTests(EditorWindowTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WritingEditorTests(GuiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.app = FakeApp(self.root, self.db_path)
+        save_glossary_entries([], glossario._default_substitutions_path(), create_backup=False)
+        self.book = str(self.base / "book.pgn")
+        conn = initialize_database(self.db_path)
+        for source, text in (("One", "errao errao"), ("Two", "errao")):
+            save_translation(conn.cursor(), source, text, "pt", source_language="en")
+        ids = resolve_comment_ids(conn.cursor(), "pt", ["One", "Two"], source_language="en")
+        record_occurrences(conn.cursor(), self.book, [(1, 1, 1, "One"), (2, 1, 2, "Two")], ids)
+        conn.commit()
+        conn.close()
+        self.release = threading.Event()
+        self.release.set()
+        self.started = threading.Event()
+        self.worker_threads = []
+        outer = self
+
+        class Service:
+            def analyze(self, request):
+                outer.worker_threads.append(threading.get_ident())
+                outer.started.set()
+                outer.release.wait(5)
+                issues = tuple(WritingIssue("", "SPELLING_UNKNOWN_WORD", "SPELLING", m.start(), m.end(),
+                                           "errao", "Grafia", "Confira.", ("erro",), "error", "test", request.text_version)
+                               for m in __import__("re").finditer("errao", request.text))
+                return WritingResult(request.text_version, issues, "spelling_only")
+
+            def status(self):
+                return AssistantStatus("ready", "spelling_only")
+
+            def invalidate_cache(self):
+                pass
+
+        self.app.writing_assistant = Service()
+        self.addCleanup(self.release.set)
+        self.editor = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(self.editor.shutdown_writing)
+
+    def wait_for(self, predicate):
+        deadline = time.monotonic() + 5
+        while not predicate() and time.monotonic() < deadline:
+            self.pump()
+            time.sleep(0.01)
+        self.assertTrue(predicate())
+
+    def ready(self):
+        self.wait_for(lambda: bool(self.editor.writing_panel.issues))
+        return self.editor.writing_panel.issues[0]
+
+    def test_current_issue_dirty_undo_and_stale_refusal(self):
+        item = self.ready()
+        self.editor.focus_writing_issue(item)
+        self.assertEqual(self.editor.trans_text.get(tk.SEL_FIRST, tk.SEL_LAST), "errao")
+        self.editor.apply_issue(item, "erro")
+        self.assertEqual(self.editor.draft_text(), "erro errao")
+        self.assertTrue(self.editor.state.dirty)
+        self.editor.undo_translation()
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+        self.editor.set_translation_text("manual", mark_dirty=True, keep_undo=True)
+        self.editor.apply_issue(item, "erro")
+        self.assertEqual(self.editor.draft_text(), "manual")
+        self.assertTrue(all(ident != threading.get_ident() for ident in self.worker_threads))
+
+    def test_pending_result_after_edit_navigation_and_close_never_tags(self):
+        self.release.clear()
+        self.wait_for(self.started.is_set)
+        version = self.editor.writing_version
+        self.editor.set_translation_text("manual", mark_dirty=True, keep_undo=True)
+        self.assertGreater(self.editor.writing_version, version)
+        self.editor.select_index(1)
+        self.editor.set_translation_text("segunda", mark_dirty=True, keep_undo=True)
+        self.release.set()
+        self.wait_for(lambda: not self.editor.writing_panel.issues)
+        self.assertFalse(self.editor.trans_text.tag_ranges("writing_spelling"))
+        self.editor.win.destroy()
+        self.assertTrue(self.editor._writing_closed)
+        self.editor.poll_writing()
+
+    def test_book_apply_confirmation_cancel_then_atomic_undo_keeps_draft_and_selection(self):
+        self.ready()
+        self.editor.set_translation_text("errao errao extra", mark_dirty=True, keep_undo=True)
+        item = self.ready()
+        self.editor.state.selected_ids = {self.editor.current["id"]}
+        self.dialogs.askyesno_result = False
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao extra")
+        self.assertTrue(self.editor.state.dirty)
+        self.assertTrue(any("3 ocorrência" in call[2] for call in self.dialogs.calls if call[0] == "askyesno"), self.dialogs.calls)
+        self.dialogs.askyesno_result = True
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "erro erro extra")
+        self.assertEqual(self.editor.state.selected_ids, {self.editor.current["id"]})
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao extra")
+        self.assertTrue(self.editor.state.dirty)
+        conn = initialize_database(self.db_path)
+        self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(), [("errao errao",), ("errao",)])
+        conn.close()
+
+    def test_ignore_once_session_personal_and_rule_never_create_glossary(self):
+        item = self.ready()
+        self.editor.ignore_once(item)
+        self.assertEqual(len(self.editor.writing_panel.issues), 1)
+        self.editor.ignore_session(self.editor.writing_panel.issues[0])
+        self.wait_for(lambda: not self.editor.writing_panel.issues)
+        self.assertIn("errao", self.app.writing_session_words)
+        self.app.writing_session_words.clear()
+        self.editor.highlight_spelling()
+        item = self.ready()
+        self.editor.add_personal_word(item)
+        self.wait_for(lambda: not self.editor._writing_busy)
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        self.assertTrue(PersonalDictionary().contains("errao"))
+        self.editor.disable_rule(item)
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIn(item.rule_id, settings.read_writing_settings(settings.load_settings())["disabled_rule_ids"])
+        self.assertEqual(self.app.glossary_substitutions, [])
+
+    def test_f7_prioritizes_issues_then_uses_qa(self):
+        first = self.ready()
+        self.editor.next_quality_warning_shortcut()
+        self.assertNotEqual(self.editor.writing_panel.active_issue.issue_id, first.issue_id)
+        self.editor.previous_writing_shortcut()
+        self.assertEqual(self.editor.writing_panel.active_issue.issue_id, first.issue_id)
+        self.editor.set_translation_text("manual", mark_dirty=True)
+        with unittest.mock.patch.object(self.editor, "go_to_next_quality_warning") as qa:
+            self.editor.next_quality_warning_shortcut()
+            qa.assert_called_once()
+
+    def test_bulk_undo_preserves_earlier_native_undo(self):
+        self.ready()
+        self.editor.set_translation_text("errao errao extra", mark_dirty=True, keep_undo=True)
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao extra")
+        self.editor.undo_translation()
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+
+    def test_other_window_dirty_draft_aborts_bulk_without_saving_either(self):
+        item = self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        other.select_index(1)
+        other.set_translation_text("revisão manual", mark_dirty=True, keep_undo=True)
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(other.draft_text(), "revisão manual")
+        self.assertTrue(other.state.dirty)
+        conn = initialize_database(self.db_path)
+        self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(), [("errao errao",), ("errao",)])
+        conn.close()
+
+    def test_unicode_spans_protected_text_and_main_thread_rendering(self):
+        self.ready()
+        self.editor.set_translation_text("😀 errao [%cal errao]", mark_dirty=True, keep_undo=True)
+        item = self.ready()
+        self.assertEqual(len(self.editor.writing_panel.issues), 1)
+        self.editor.focus_writing_issue(item)
+        self.assertEqual(self.editor.trans_text.get(tk.SEL_FIRST, tk.SEL_LAST), "errao")
+        self.editor.apply_issue(item, "erro")
+        self.assertEqual(self.editor.draft_text(), "😀 erro [%cal errao]")
+        protected = WritingIssue("", "SPELLING_UNKNOWN_WORD", "SPELLING", 13, 18,
+                                 "errao", "Grafia", "Confira.", ("erro",), "error", "test", self.editor.writing_version)
+        self.editor.apply_issue(protected, "erro")
+        self.assertEqual(self.editor.draft_text(), "😀 erro [%cal errao]")
+
+    def test_sidecar_starting_and_stale_response_cannot_repaint(self):
+        self.ready()
+        self.release.clear()
+        self.started.clear()
+        self.editor.writing_settings["grammar_enabled"] = True
+        self.editor.set_translation_text("errao novo", mark_dirty=True, keep_undo=True)
+        self.app.writing_assistant.status = lambda: AssistantStatus("starting", "spelling_only", "Concordância iniciando")
+        self.wait_for(self.started.is_set)
+        self.wait_for(lambda: "Concordância iniciando" in self.editor.writing_panel.diagnostic_label.cget("text"))
+        self.editor.set_translation_text("novo texto", mark_dirty=True, keep_undo=True)
+        self.release.set()
+        self.wait_for(lambda: self.editor._writing_result is not None)
+        self.assertEqual(self.editor.writing_panel.issues, ())
+        self.assertEqual(self.editor.trans_text.tag_ranges("writing_spelling"), ())
+
+    def test_main_close_shutdowns_shared_service_in_worker(self):
+        from tradutor_pgn import app_actions, writing_controller
+        closed = threading.Event()
+        threads = []
+        class Shared:
+            def shutdown(self):
+                threads.append(threading.get_ident())
+                closed.set()
+        self.app.is_processing = False
+        with unittest.mock.patch.object(writing_controller, "_shared_assistant", Shared()):
+            self.assertTrue(app_actions.close_main_window(self.app))
+            self.assertTrue(closed.wait(2))
+        self.assertTrue(all(ident != threading.get_ident() for ident in threads))
+
+    def test_main_close_waits_for_pending_book_operation(self):
+        from tradutor_pgn import app_actions
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.editor._run_writing_job(lambda: release.wait(5), lambda _result: None)
+        self.app.is_processing = False
+        self.assertFalse(app_actions.close_main_window(self.app))
+        self.assertTrue(self.root.winfo_exists())
+        release.set()
+        self.wait_for(lambda: not self.editor._writing_busy)
+
+    def test_bulk_preserves_unsaved_reviewer_note_and_dirty_indicator(self):
+        item = self.ready()
+        self.editor.reviewer_note_text.set("Conferir com autor")
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.reviewer_note_text.get(), "Conferir com autor")
+        self.assertTrue(self.editor.state.dirty)
+
+    def test_manual_panel_collapse_reclaims_editor_width(self):
+        self.editor.writing_panel.set_available_width(1800)
+        self.editor.writing_panel.toggle_collapsed()
+        self.assertEqual(int(self.editor.main_pane.panecget(self.editor.writing_panel, "width")), 42)
+        self.editor.writing_panel.toggle_collapsed()
+        self.assertEqual(int(self.editor.main_pane.panecget(self.editor.writing_panel, "width")), 300)
+
+    def test_glossary_change_invalidates_analysis_using_current_row_scope(self):
+        self.ready()
+        before = self.editor.writing_version
+        save_glossary_entries([("errao", "termo", "suggestion", 0, "en>pt")],
+                              path=glossario._default_substitutions_path(), create_backup=False)
+        self.editor.reload_glossary(show_feedback=False)
+        self.assertGreater(self.editor.writing_version, before)
+        self.wait_for(lambda: self.editor._writing_result is not None)
+        self.assertEqual(self.editor.writing_panel.issues, ())
+
+    def test_actions_log_metadata_without_the_comment(self):
+        item = self.ready()
+        with self.assertLogs("tradutor_pgn.edit_window", level="INFO") as captured:
+            self.editor.apply_issue(item, "erro")
+        message = " ".join(captured.output)
+        self.assertIn("SPELLING_UNKNOWN_WORD", message)
+        self.assertIn("aplicada", message)
+        self.assertNotIn("errao", message)
+
+    def test_book_operation_preserves_current_draft_when_only_other_rows_match(self):
+        from dataclasses import replace
+
+        self.ready()
+        self.editor.set_translation_text("erraos rascunho", mark_dirty=True, keep_undo=True)
+        # Grammar may target a substring, while book replacements require a
+        # whole form. Only the second database row belongs to this operation.
+        item = replace(self.ready(), category="GRAMMAR", issue_id="")
+        self.editor._writing_result = WritingResult(self.editor.writing_version, (item,), "full")
+        self.editor._render_writing_result()
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "erraos rascunho")
+        self.assertTrue(self.editor.state.dirty)
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("errao errao",), ("erro",)])
+        conn.close()
+        self.editor.undo_writing_bulk()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "erraos rascunho")
+        self.assertTrue(self.editor.state.dirty)
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("errao errao",), ("errao",)])
+        conn.close()
+
+
+class WritingFixtureIsolationTests(GuiTestCase):
+    def test_legacy_window_uses_injected_service_without_starting_real_engine(self):
+        app = FakeApp(self.root, self.db_path)
+        save_glossary_entries([], glossario._default_substitutions_path(), create_backup=False)
+        with initialize_database(self.db_path) as conn:
+            save_translation(conn.cursor(), "One", "errao", "pt", source_language="en")
+        conn.close()
+        with unittest.mock.patch.object(edit_window, "get_shared_writing_assistant",
+                                        side_effect=AssertionError("real engine started in legacy fixture")):
+            editor = edit_window.TranslationEditor(app)
+            self.addCleanup(editor.shutdown_writing)
+            deadline = time.monotonic() + 5
+            while editor._writing_result is None and time.monotonic() < deadline:
+                self.pump()
+                time.sleep(0.01)
+        self.assertIsNotNone(editor._writing_result)
+        self.assertEqual(editor.writing_panel.issues, ())
+        self.assertEqual(editor.draft_text(), "errao")
+
+
+class WritingRealEngineTests(GuiTestCase):
+    def test_editor_and_real_spylls_in_fresh_interpreter(self):
+        # A fresh interpreter exercises the real provider without hundreds of
+        # destroyed Tk interpreters from unrelated window tests.
+        flag = "PGN_TEST_REAL_WRITING_CHILD"
+        if os.environ.get(flag) != "1":
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", f"{__file__}::{type(self).__name__}::{self._testMethodName}", "-q", "--tb=short"],
+                env={**os.environ, flag: "1"}, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=45,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
+        from tradutor_pgn import writing_controller
+
+        app = FakeApp(self.root, self.db_path)
+        if hasattr(app, "writing_assistant"):
+            del app.writing_assistant
+        save_glossary_entries([], glossario._default_substitutions_path(), create_backup=False)
+        with initialize_database(self.db_path) as conn:
+            save_translation(conn.cursor(), "A position.", "Uma posiçao.", "pt", source_language="en")
+        conn.close()
+        editor = edit_window.TranslationEditor(app)
+        self.addCleanup(writing_controller.shutdown_shared_writing_assistant)
+        self.addCleanup(editor.shutdown_writing)
+        deadline = time.monotonic() + 20
+        while editor._writing_result is None and time.monotonic() < deadline:
+            self.pump()
+            time.sleep(0.01)
+        self.assertIsNotNone(editor._writing_result)
+        issues = editor.writing_panel.issues
+        item = next((issue for issue in issues if issue.original == "posiçao"), None)
+        self.assertIsNotNone(item, (issues, editor._writing_result))
+        self.assertIn("posição", item.suggestions)
+        self.assertTrue(editor.trans_text.tag_ranges("writing_spelling"))
+        editor.apply_issue(item, "posição")
+        self.assertEqual(editor.draft_text(), "Uma posição.")
+        self.assertTrue(editor.state.dirty)
+        editor.undo_translation()
+        self.assertEqual(editor.draft_text(), "Uma posiçao.")

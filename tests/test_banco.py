@@ -11,6 +11,7 @@ import time
 import unittest
 import unittest.mock
 from pathlib import Path
+from dataclasses import replace
 
 from tradutor_pgn import (
     database,
@@ -89,6 +90,104 @@ def setUpModule():
 
 def tearDownModule():
     teardown_module_sandbox()
+
+
+class WritingBulkTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = str(Path(self.temp.name) / "book.db")
+        self.conn = initialize_database(self.path)
+        self.addCleanup(self.conn.close)
+        self.book = str(Path(self.temp.name) / "one.pgn")
+        for original, text in (("One", "errao errao"), ("Two", "errao [%cal errao]"),
+                               ("Other", "errao")):
+            save_translation(self.conn.cursor(), original, text, "pt", source_language="en")
+        self.ids = resolve_comment_ids(self.conn.cursor(), "pt", ["One", "Two", "Other"], source_language="en")
+        record_occurrences(self.conn.cursor(), self.book, [(1, 1, 1, "One"), (2, 1, 2, "Two")], self.ids)
+        record_occurrences(self.conn.cursor(), str(Path(self.temp.name) / "two.pgn"), [(1, 1, 1, "Other")], self.ids)
+        self.conn.commit()
+
+    def preview(self, original="errao", replacement="erro", **kwargs):
+        return database.preview_identical_replacements(self.conn, self.book, "pt", original, replacement, **kwargs)
+
+    def texts(self):
+        return self.conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall()
+
+    def test_book_count_history_and_transactional_undo(self):
+        preview = self.preview()
+        self.assertEqual(preview.count, 3)
+        operation = database.apply_identical_replacements(self.conn, preview)
+        self.assertEqual(self.texts(), [("erro erro",), ("erro [%cal errao]",), ("errao",)])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM comment_history WHERE bulk_operation_id = ?", (operation,)).fetchone()[0], 2)
+        database.undo_identical_replacements(self.conn, operation)
+        self.assertEqual(self.texts(), [("errao errao",), ("errao [%cal errao]",), ("errao",)])
+
+    def test_concurrent_aba_edit_aborts_all_rows(self):
+        preview = self.preview()
+        with sqlite3.connect(self.path) as other:
+            other.execute("UPDATE comments SET translated_comment = 'changed' WHERE id = ?", (self.ids["Two"],))
+            other.execute("UPDATE comments SET translated_comment = 'errao [%cal errao]' WHERE id = ?", (self.ids["Two"],))
+        other.close()
+        with self.assertRaises(database.WritingConflictError):
+            database.apply_identical_replacements(self.conn, preview)
+        self.assertEqual(self.texts()[0], ("errao errao",))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM comment_history").fetchone()[0], 0)
+
+    def test_shared_comment_added_after_preview_aborts(self):
+        preview = self.preview()
+        record_occurrences(self.conn.cursor(), str(Path(self.temp.name) / "shared.pgn"), [(1, 1, 1, "One")], self.ids)
+        self.conn.commit()
+        with self.assertRaises(database.WritingConflictError):
+            database.apply_identical_replacements(self.conn, preview)
+        with self.assertRaises(database.WritingConflictError):
+            self.preview()
+
+    def test_undo_conflict_preserves_entire_operation(self):
+        operation = database.apply_identical_replacements(self.conn, self.preview())
+        update_translation_by_id(self.conn.cursor(), self.ids["Two"], "manual")
+        self.conn.commit()
+        with self.assertRaises(database.WritingConflictError):
+            database.undo_identical_replacements(self.conn, operation)
+        self.assertEqual(self.texts(), [("erro erro",), ("manual",), ("errao",)])
+
+    def test_failure_on_later_write_rolls_back_history_and_text(self):
+        preview = self.preview()
+        self.conn.execute("CREATE TRIGGER reject_second BEFORE UPDATE ON comments WHEN OLD.original_comment = 'Two' BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+        self.conn.commit()
+        with self.assertRaises(sqlite3.IntegrityError):
+            database.apply_identical_replacements(self.conn, preview)
+        self.assertEqual(self.texts()[0], ("errao errao",))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM comment_history").fetchone()[0], 0)
+
+    def test_protection_boundaries_and_overlap_revalidation(self):
+        update_translation_by_id(self.conn.cursor(), self.ids["One"], "Nf3 errao erraos")
+        self.conn.commit()
+        self.assertEqual(self.preview("Nf3", "Nf4").count, 0)
+        self.assertEqual(self.preview(glossary_terms=frozenset({"errao"})).count, 0)
+        preview = self.preview()
+        self.assertEqual(preview.count, 2)
+        row = preview.rows[0]
+        corrupted = replace(preview, rows=(replace(row, spans=((4, 9), (4, 9))), *preview.rows[1:]))
+        with self.assertRaises((ValueError, database.WritingConflictError)):
+            database.apply_identical_replacements(self.conn, corrupted)
+        self.assertEqual(self.texts()[0], ("Nf3 errao erraos",))
+
+    def test_sequential_book_operations_undo_in_reverse_order(self):
+        first = database.apply_identical_replacements(self.conn, self.preview())
+        second = database.apply_identical_replacements(self.conn, self.preview("erro", "erros"))
+        database.undo_identical_replacements(self.conn, second)
+        database.undo_identical_replacements(self.conn, first)
+        self.assertEqual(self.texts(), [("errao errao",), ("errao [%cal errao]",), ("errao",)])
+
+    def test_draft_repair_equal_to_saved_text_does_not_relabel_previous_history(self):
+        update_translation_by_id(self.conn.cursor(), self.ids["One"], "erro erro")
+        self.conn.commit()
+        history_id = self.conn.execute("SELECT MAX(id) FROM comment_history").fetchone()[0]
+        revision = self.conn.execute("SELECT writing_revision FROM comments WHERE id = ?", (self.ids["One"],)).fetchone()[0]
+        operation = database.apply_identical_replacements(self.conn, self.preview(draft=(self.ids["One"], revision, "errao errao")))
+        self.assertIsNone(self.conn.execute("SELECT bulk_operation_id FROM comment_history WHERE id = ?", (history_id,)).fetchone()[0])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM comment_history WHERE bulk_operation_id = ?", (operation,)).fetchone()[0], 2)
 
 
 class CoveringIndexTests(unittest.TestCase):
