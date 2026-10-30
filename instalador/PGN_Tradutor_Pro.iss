@@ -62,6 +62,18 @@
   #error Manifesto, SBOM ou auditoria ausentes.
 #endif
 
+; The direct compiler path must run the same validation, not trust a marker or
+; the existence of resources. The build environment is created by gerar-entregas.
+; SourcePath anchors the repository-owned validator and approval decision.
+#define ValidationPython AddBackslash(SourcePath) + "..\build\venv-exe\Scripts\python.exe"
+#if !FileExists(ValidationPython)
+  #error Candidato recusado: ambiente de validacao ausente. Execute gerar-entregas.py.
+#endif
+#define ValidationArgs '"' + AddBackslash(SourcePath) + '..\ferramentas\preparar_languagetool.py" validate-dist --vendor "' + DistDir + '"'
+#if Exec(ValidationPython, ValidationArgs, SourcePath, 1, 0) != 0
+  #error Candidato recusado: validacao de hashes, dados privados ou aprovacao de licencas falhou.
+#endif
+
 ; A VERSAO E LIDA DO PROPRIO EXECUTAVEL, e nao declarada aqui (ROADMAP 21.6). O
 ; `.spec` carimba nele o que `tradutor_pgn/__version__` diz, e este arquivo le de
 ; la — entao nao existe um segundo numero para esquecer de atualizar. Um

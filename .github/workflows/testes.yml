@@ -18,6 +18,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      self_contained_release:
+        description: Preparar release autocontido (exige auditoria aprovada)
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -57,6 +64,11 @@ jobs:
         run: uv run python -m pytest tests/test_editor_windows.py tests/test_main_window.py -q -p no:cacheprovider
 
   build:
+    name: Release autocontido (manual)
+    # Ordinary verification is the suite above; it never publishes an
+    # incomplete executable. The product's release remains self-contained,
+    # and this explicit release path cannot bypass redistribution approval.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.self_contained_release }}
     runs-on: windows-latest
     timeout-minutes: 30
     needs: suite

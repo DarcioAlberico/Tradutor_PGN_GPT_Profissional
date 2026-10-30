@@ -33,6 +33,27 @@ inventory, exporting embedded POMs and notices byte for byte into
 `LICENSES/embedded/`. `smoke` may inspect this local prototype, while `validate`,
 PyInstaller and delivery scripts reject an unresolved release audit.
 
+Release approval is a separate, repository-owned decision in
+`recursos/languagetool-release-approval.json`, currently **blocked**. The tool
+never generates approval. Clearing an inventory's `unresolved` list or rewriting
+its checksums does not authorize release. The primary evidence's status must
+also be approved, and the shipped decision must exactly match the repository.
+
+A future reviewed decision must bind the complete candidate inventory hash and
+cover every JAR, shaded POM, dictionary, native payload and runtime/resource
+aggregate. Each component needs an explicit reviewed license expression with
+hashed evidence files, a reviewed HTTPS source URL/archive hash with evidence
+of availability, and reviewed notice files with matching hashes. Reviewer/date
+attribution and exact coverage are required. These are review records, not
+legal conclusions inferred from package names. Synthetic approvals exist only
+in isolated tests; no real component is approved here.
+
+Ordinary push/PR CI performs verification and publishes no executable. The
+self-contained release job requires an explicit workflow_dispatch input and
+still runs all approval/resource gates. Direct Inno compilation invokes the
+same validator from the repository build environment; existence-only guards or
+a stale marker cannot authorize a candidate.
+
 Primary sources:
 
 - [LanguageTool 6.6 announcement and ZIP checksum](https://forum.languagetool.org/t/ann-languagetool-6-6/11206)

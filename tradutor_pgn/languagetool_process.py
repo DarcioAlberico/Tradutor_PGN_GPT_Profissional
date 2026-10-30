@@ -8,6 +8,9 @@ healthy service on a chosen port alone cannot establish process identity.
 from collections.abc import Callable
 import atexit
 import ctypes
+import http.client
+import io
+import json
 import os
 from pathlib import Path
 import socket
@@ -17,9 +20,9 @@ import sys
 import tempfile
 import threading
 import time
-from typing import TypeVar
+from typing import Any, TypeVar
 
-from .languagetool_client import LanguageToolLocalAdapter, LanguageToolUnavailable
+from .languagetool_client import LanguageToolUnavailable, _issues
 from .writing_types import AssistantStatus
 
 
@@ -223,21 +226,78 @@ class LanguageToolProcess:
                     # read timeouts created repeated server work during that
                     # warmup; give one check time while bounding every retry
                     # by the remaining total startup budget.
-                    health = LanguageToolLocalAdapter(url, timeout=min(self._health_timeout, remaining))
                     try:
-                        health.check("", frozenset())
+                        self._check_health(min(deadline, time.monotonic() + self._health_timeout))
                         if self._owned() and time.monotonic() <= deadline:
                             self._status = AssistantStatus("ready", "full", "", self._restarted)
                             return url
                     except LanguageToolUnavailable:
                         pass
-                    finally:
-                        health.shutdown()
                 time.sleep(min(self._poll_interval, max(0, deadline - time.monotonic())))
             raise LanguageToolUnavailable(_FALLBACK)
         except Exception:
             self._set_failed()
             self._stop_child()
+            raise LanguageToolUnavailable(_FALLBACK) from None
+
+    def _check_health(self, deadline: float) -> None:
+        """One empty-text probe with an absolute budget, including HTTP framing.
+
+        Socket read timeouts alone reset on each byte. Put the deadline below
+        HTTPResponse's buffered header/chunk parsing so a dripping owned server
+        cannot extend startup. No background worker or watchdog is left behind.
+        """
+        def remaining() -> float:
+            budget = deadline - time.monotonic()
+            if budget <= 0:
+                raise TimeoutError("startup health deadline")
+            return budget
+
+        class BudgetReader(io.RawIOBase):
+            def __init__(self, connection: socket.socket) -> None:
+                super().__init__()
+                self.connection = connection
+
+            def readable(self) -> bool:
+                return True
+
+            def readinto(self, buffer: Any) -> int:
+                self.connection.settimeout(remaining())
+                return self.connection.recv_into(buffer)
+
+        try:
+            if self._port is None:
+                raise LanguageToolUnavailable(_FALLBACK)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+                connection.settimeout(remaining())
+                connection.connect(("127.0.0.1", self._port))
+                if not self._owned():
+                    raise LanguageToolUnavailable(_FALLBACK)
+                body = b"text=&language=pt-BR"
+                request = (f"POST /v2/check HTTP/1.1\r\nHost: 127.0.0.1:{self._port}\r\n"
+                           f"Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {len(body)}\r\n"
+                           "Connection: close\r\n\r\n").encode("ascii") + body
+                connection.settimeout(remaining())
+                connection.sendall(request)
+                response = http.client.HTTPResponse(connection)
+                # HTTPResponse has not read anything yet. Replace its default
+                # buffered file with one that reapplies the remaining budget
+                # before every recv, including inside readline/read_chunked.
+                assert response.fp is not None
+                response.fp.close()
+                response.fp = io.BufferedReader(BudgetReader(connection))
+                try:
+                    response.begin()
+                    if response.status != 200:
+                        raise LanguageToolUnavailable(_FALLBACK)
+                    payload = response.read(1_048_577)
+                    if len(payload) > 1_048_576:
+                        raise LanguageToolUnavailable(_FALLBACK)
+                    _issues(json.loads(payload), "", frozenset(), 0)
+                    remaining()
+                finally:
+                    response.close()
+        except (OSError, ValueError, KeyError, TypeError, IndexError, http.client.HTTPException):
             raise LanguageToolUnavailable(_FALLBACK) from None
 
     def start(self) -> str:

@@ -9700,3 +9700,15 @@ permanece pendente, sem alterar o gabarito nesta tarefa.
 Dados completos, script de replay, validacoes e pendencias:
 `docs/superpowers/reports/task-8-report.md` e `languagetool-startup-measurements.json`
 na mesma pasta. Nenhum ZIP, JDK ou runtime binario foi versionado.
+
+Task 8, fix round 1: cinco Important corrigidos por RED/GREEN. Aprovacao de
+redistribuicao agora e uma decisao separada do repositorio, inicialmente
+bloqueada, com vinculo ao candidato e decisoes por componente/licenca/fonte/
+notices. Portatil inspeciona toda `_internal`, fontes exigem inventario exato,
+health tem deadline absoluto por recv e Inno direto executa a mesma validacao.
+CI ordinaria faz verificacao sem executavel; release autocontido exige opt-in
+manual e mantem todos os gates, sem criar entrega incompleta para passar CI.
+Gate focado: **162 passed, 19 subtests**; Ruff/mypy/diff-check verdes. Smoke
+real final: **4,470 s** de startup, **6,390 s** ate o primeiro resultado e pico
+**592,0 MB**. Licencas, TA-004 literal e validacao das entregas reais seguem
+pendentes; a Task 8 continua parcial. Detalhes no adendo do relatorio.

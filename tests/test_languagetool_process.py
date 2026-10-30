@@ -49,6 +49,18 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.75)
         payload = {"software": {"name": "LanguageTool", "version": "99" if mode == "version" else "6.6"},
                    "language": {"code": "pt-BR"}, "matches": []}
+        if mode in {"drip_body", "drip_headers"}:
+            body = json.dumps(payload).encode()
+            headers = b"HTTP/1.0 200 OK\\r\\nContent-Length: " + str(len(body)).encode() + b"\\r\\n\\r\\n"
+            if mode == "drip_headers":
+                for byte in headers:
+                    self.wfile.write(bytes([byte])); self.wfile.flush(); time.sleep(0.04)
+                self.wfile.write(body)
+            else:
+                self.wfile.write(headers)
+                for byte in body:
+                    self.wfile.write(bytes([byte])); self.wfile.flush(); time.sleep(0.02)
+            return
         self.send_response(503 if mode == "unhealthy" else 200)
         self.end_headers()
         self.wfile.write(json.dumps(payload).encode())
@@ -130,6 +142,21 @@ def test_startup_waits_for_cold_pipeline_without_repeated_short_health_requests(
         manager.shutdown()
 
 
+@pytest.mark.parametrize("mode", ["drip_headers", "drip_body"])
+def test_owned_server_dripping_cannot_extend_startup_wall_clock_budget(runtime, mode):
+    make, _marker, _commands, children, _root = runtime
+    manager = make(mode, startup_timeout=0.65, default_health=True)
+    before = time.monotonic()
+    try:
+        with pytest.raises(LanguageToolUnavailable):
+            manager.start()
+        assert time.monotonic() - before < 1.25
+        assert manager.pid is None
+        assert all(child.poll() is not None for child in children)
+    finally:
+        manager.shutdown()
+
+
 def test_repeated_unhealthy_probes_cannot_extend_the_total_startup_deadline(runtime, monkeypatch):
     from tradutor_pgn import languagetool_process as lifecycle
     make, _marker, _commands, children, _root = runtime
@@ -138,17 +165,12 @@ def test_repeated_unhealthy_probes_cannot_extend_the_total_startup_deadline(runt
         def advance(self, seconds):
             self.now += seconds
     clock = Clock()
-    class Unhealthy:
-        def __init__(self, url, timeout):
-            self.timeout = timeout
-        def check(self, text, disabled):
-            clock.advance(self.timeout)
-            raise LanguageToolUnavailable("unhealthy")
-        def shutdown(self):
-            pass
+    def unhealthy(deadline):
+        clock.advance(deadline - clock.now)
+        raise LanguageToolUnavailable("unhealthy")
     manager = make(startup_timeout=0.65)
     monkeypatch.setattr(manager, "_owned", lambda: True)
-    monkeypatch.setattr(lifecycle, "LanguageToolLocalAdapter", Unhealthy)
+    monkeypatch.setattr(manager, "_check_health", unhealthy)
     monkeypatch.setattr(lifecycle.time, "monotonic", lambda: clock.now)
     monkeypatch.setattr(lifecycle.time, "sleep", clock.advance)
     with pytest.raises(LanguageToolUnavailable):

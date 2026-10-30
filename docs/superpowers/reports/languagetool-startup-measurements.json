@@ -1180,5 +1180,45 @@
       "languagetool": 405072337
     },
     "endpoint": "http://127.0.0.1"
+  },
+  "fix_round_1_runtime": {
+    "system_java_on_path": false,
+    "network": "owned IPv4 loopback only",
+    "startup_seconds": 4.2449747000064235,
+    "cold_rss_bytes": 452452352,
+    "first_analysis_seconds": 1.7075332999957027,
+    "ready_for_first_result_seconds": 5.952508000002126,
+    "warm_analysis_seconds": 0.4337933999922825,
+    "warm_rss_bytes": 589090816,
+    "peak_rss_bytes": 632750080,
+    "diagnostics": 1,
+    "rules": [
+      "GENERAL_NUMBER_AGREEMENT_ERRORS"
+    ],
+    "resource_bytes": {
+      "runtime": 47838546,
+      "languagetool": 405072337
+    },
+    "endpoint": "http://127.0.0.1"
+  },
+  "fix_round_1_cli_smoke": {
+    "system_java_on_path": false,
+    "network": "owned IPv4 loopback only",
+    "startup_seconds": 4.469913799999631,
+    "cold_rss_bytes": 471498752,
+    "first_analysis_seconds": 1.9202559999976074,
+    "ready_for_first_result_seconds": 6.390169799997238,
+    "warm_analysis_seconds": 0.5316554000019096,
+    "warm_rss_bytes": 576471040,
+    "peak_rss_bytes": 592023552,
+    "diagnostics": 1,
+    "rules": [
+      "GENERAL_NUMBER_AGREEMENT_ERRORS"
+    ],
+    "resource_bytes": {
+      "runtime": 47838546,
+      "languagetool": 405072337
+    },
+    "endpoint": "http://127.0.0.1"
   }
 }

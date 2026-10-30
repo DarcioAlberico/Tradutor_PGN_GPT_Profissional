@@ -33,10 +33,11 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / "recursos/languagetool-lock.json"
+APPROVAL = ROOT / "recursos/languagetool-release-approval.json"
 VENDOR = ROOT / "build/vendor"
 CACHE = ROOT / "build/vendor-cache"
 MANIFEST = "vendor-manifest.json"
-SHIP = {"runtime", "languagetool", "LICENSES", "languagetool-lock.json", "sbom.json", "license-audit.json"}
+SHIP = {"runtime", "languagetool", "LICENSES", "languagetool-lock.json", "sbom.json", "license-audit.json", "release-approval.json"}
 LICENSES = ("LanguageTool-LGPL-2.1.txt", "Eclipse-Temurin-GPL2-Classpath.txt", "Eclipse-Temurin-NOTICE.txt")
 HOSTS = {"languagetool.org", "github.com", "release-assets.githubusercontent.com"}
 
@@ -203,9 +204,78 @@ def write_manifest(root: Path) -> None:
     (root / MANIFEST).write_text(json.dumps({"schema": 1, "files": _inventory(root)}, indent=2) + "\n", encoding="utf-8")
 
 
+def _json_digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def approval_components(root: Path) -> dict[str, str]:
+    """Coverage comes from the bytes, including shaded POMs, data and natives."""
+    components = license_artifacts(root)
+    for jar in sorted((root / "languagetool").rglob("*.jar")):
+        relative = jar.relative_to(root).as_posix()
+        with zipfile.ZipFile(jar) as zipped:
+            for name in zipped.namelist():
+                if name.endswith("/"):
+                    continue
+                path = _safe_path(name)
+                if (name.endswith("pom.xml") or path.suffix.lower() in DICTIONARY_SUFFIXES
+                        or re.search(r"(?i)\.(dll|so(?:\.\d+)*|dylib|jnilib|exe|a)$", path.name)):
+                    components[relative + "!/" + name] = hashlib.sha256(zipped.read(name)).hexdigest()
+    inventory = _inventory(root)
+    for prefix in ("runtime/", "languagetool/"):
+        components[prefix] = _json_digest({name: digest for name, digest in inventory.items() if name.startswith(prefix)})
+    return components
+
+
+def validate_release_approval(root: Path) -> None:
+    """A generated inventory cannot authorize redistribution.
+
+    The repository-owned review decision is the trust anchor. Its shipped copy,
+    exact candidate hash and per-component license/source/notice decisions must
+    agree. No command in this tool generates or approves that decision.
+    """
+    evidence = json.loads((root / "LICENSES/LanguageTool-6.6-evidence.json").read_text(encoding="utf-8"))
+    if evidence.get("status") != "approved":
+        raise ValueError("primary evidence remains blocked; release approval required")
+    try:
+        approval = json.loads(APPROVAL.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError("repository release approval is absent") from exc
+    if approval.get("schema") != 1 or approval.get("status") != "approved":
+        raise ValueError("repository release approval is blocked")
+    if (root / "release-approval.json").read_bytes() != APPROVAL.read_bytes():
+        raise ValueError("shipped release approval differs from repository decision")
+    candidate = {name: digest for name, digest in _inventory(root).items() if name != "release-approval.json"}
+    if approval.get("candidate_sha256") != _json_digest(candidate):
+        raise ValueError("release approval does not cover this candidate")
+    if not approval.get("reviewed_by") or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", approval.get("reviewed_on", "")):
+        raise ValueError("release approval lacks review attribution")
+    decisions = approval.get("components", [])
+    coverage = approval_components(root)
+    if (not isinstance(decisions, list) or len(decisions) != len(coverage)
+            or {item.get("id") for item in decisions} != set(coverage)):
+        raise ValueError("release approval omits or duplicates components")
+    for item in decisions:
+        if item.get("sha256") != coverage[item["id"]] or item.get("decision") != "approved":
+            raise ValueError("component approval hash or decision mismatch")
+        for part, field in (("license", "evidence"), ("source", "evidence"), ("notices", "files")):
+            decision = item.get(part, {})
+            records = decision.get(field, [])
+            if decision.get("decision") != "approved" or not records:
+                raise ValueError("component approval lacks license/source/notices evidence")
+            for record in records:
+                path = root.joinpath(*_safe_path(record["path"]).parts)
+                if not path.is_file() or sha256(path) != record.get("sha256"):
+                    raise ValueError("component approval evidence checksum mismatch")
+        if (not item["license"].get("expression")
+                or urlsplit(item["source"].get("url", "")).scheme != "https"
+                or not re.fullmatch(r"[0-9a-f]{64}", item["source"].get("sha256", ""))):
+            raise ValueError("component approval lacks explicit license/source decision")
+
+
 def required_files(lock: dict[str, Any]) -> list[str]:
     return ["runtime/bin/java.exe", "runtime/lib/modules", "runtime/legal/java.base/LICENSE",
-            "languagetool/server.properties", "languagetool/logback.xml", "languagetool-lock.json", "sbom.json", "license-audit.json",
+            "languagetool/server.properties", "languagetool/logback.xml", "languagetool-lock.json", "sbom.json", "license-audit.json", "release-approval.json", "LICENSES/LanguageTool-6.6-evidence.json",
             *("LICENSES/" + name for name in LICENSES),
             *("languagetool/" + name for name in lock["packages"]["languagetool"]["expected"])]
 
@@ -228,10 +298,25 @@ def validate_bundle(root: Path, *, allow_jdk: bool = False, release: bool = True
     audit = json.loads((root / "license-audit.json").read_text(encoding="utf-8"))
     if release and (audit.get("unresolved") != [] or audit.get("artifacts") != license_artifacts(root)):
         raise ValueError("incomplete license audit; see license-audit.json")
-    forbidden = {"jdk", "jmods", "include", "cache", "logs", "corpus", "dados", "backups", "javac.exe", "jdeps.exe", "jlink.exe", "chaves-api.json"}
-    for name in actual:
+    if release:
+        validate_release_approval(root)
+    # Scan every file that the portable/installer will copy, including Python
+    # application/dependency trees outside the sidecar's checksum namespace.
+    inspected = _inventory(root, shipped_only=not application)
+    forbidden_files = {"javac.exe", "jdeps.exe", "jlink.exe", "chaves-api.json", "pgn_tradutor_pro_settings.json", "portatil.txt"}
+    private_folders = {"cache", "logs", "corpus", "dados", "backups"}
+    program_suffixes = {".py", ".pyc", ".pyd", ".dll", ".so", ".jar", ".tcl", ".tm"}
+    for name in inspected:
         path = PurePosixPath(name)
-        if forbidden.intersection(p.lower() for p in path.parts) or path.suffix.lower() in {".db", ".log", ".pgn"}:
+        parts = {part.lower() for part in path.parts}
+        private_payload = bool(parts & private_folders) and path.suffix.lower() not in program_suffixes
+        if re.match(r"(?i)(readme|licen[cs]es?|notices?|copying)([._-]|$)", path.name):
+            private_payload = False  # dependency/package notices are program data
+        if (parts & {"jdk", "jmods"} or path.name.lower() in forbidden_files
+                or path.name.lower().startswith("chaves-api.json")
+                or re.search(r"(?i)\.(db|sqlite3?)(?:-(wal|shm|journal))?$", path.name)
+                or path.suffix.lower() in {".db", ".sqlite", ".sqlite3", ".log", ".pgn"}
+                or private_payload or (path.parts[0] == "runtime" and "include" in parts)):
             raise ValueError(f"forbidden bundle resource: {name}")
 
 
@@ -259,6 +344,7 @@ def fetch(vendor: Path = VENDOR, cache: Path = CACHE) -> None:
             extract_zip(archive, staged / name, package)
         shutil.copytree(ROOT / "LICENSES", staged / "LICENSES")
         shutil.copyfile(LOCK, staged / "languagetool-lock.json")
+        shutil.copyfile(APPROVAL, staged / "release-approval.json")
         (staged / "languagetool/server.properties").write_text("skipLoggingChecks=true\nskipLoggingRuleMatches=true\ncacheSize=0\nmaxCheckThreads=1\npipelineCaching=false\n", encoding="ascii")
         (staged / "languagetool/logback.xml").write_text('<configuration><root level="OFF"/></configuration>\n', encoding="ascii")
         (staged / "source-manifest.json").write_text(json.dumps(_inventory(staged, shipped_only=False), indent=2), encoding="utf-8")
@@ -328,6 +414,8 @@ def smoke(vendor: Path = VENDOR) -> dict[str, Any]:
     """
     if sys.platform != "win32":
         raise ValueError("release smoke requires Windows x64")
+    if (vendor / "source-manifest.json").is_file():
+        validate_sources(vendor)
     sys.path.insert(0, str(ROOT))
     from tradutor_pgn.languagetool_process import LanguageToolProcess
     from tradutor_pgn.languagetool_client import LanguageToolLocalAdapter
@@ -503,15 +591,31 @@ def preserve_evidence(staged: Path, build: Path) -> None:
             shutil.copyfile(staged / name, output / name)
 
 
+def validate_sources(vendor: Path) -> dict[str, str]:
+    sources: dict[str, str] = json.loads((vendor / "source-manifest.json").read_text(encoding="utf-8"))
+    generated = {"runtime", MANIFEST, "measurements.json", "sbom.json", "license-audit.json", "modules.txt", "source-manifest.json"}
+    actual = {name: digest for name, digest in _inventory(vendor, shipped_only=False).items()
+              if PurePosixPath(name).parts[0] not in generated and not name.startswith("LICENSES/embedded/")}
+    if actual != sources:
+        raise ValueError("prepared source inventory mismatch; run fetch")
+    return sources
+
+
 def runtime(vendor: Path = VENDOR) -> None:
     if sys.platform != "win32":
         raise ValueError("runtime generation requires Windows x64")
-    sources = json.loads((vendor / "source-manifest.json").read_text(encoding="utf-8"))
-    if any(not (vendor / name).is_file() or sha256(vendor / name) != digest for name, digest in sources.items()):
-        raise ValueError("prepared source checksum mismatch; run fetch")
+    sources = validate_sources(vendor)
     with tempfile.TemporaryDirectory(dir=vendor.parent, prefix="vendor-runtime-") as work:
         staged = Path(work) / "vendor"
-        shutil.copytree(vendor, staged, ignore=shutil.ignore_patterns("runtime", MANIFEST, "measurements.json", "sbom.json"))
+        staged.mkdir()
+        # Copy only verified inputs into a fresh tree; previous generated
+        # output/evidence cannot become a source or leak into the new bundle.
+        for name in sources:
+            relative = Path(*_safe_path(name).parts)
+            target = staged / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(vendor / relative, target)
+        shutil.copyfile(vendor / "source-manifest.json", staged / "source-manifest.json")
         jdeps, _ = runtime_commands(staged, staged / "runtime", "")
         result = subprocess.run(jdeps, check=True, capture_output=True, text=True, env=isolated_environment(), cwd=staged / "languagetool")
         modules = result.stdout.strip().splitlines()[-1]
@@ -536,10 +640,13 @@ def runtime(vendor: Path = VENDOR) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("fetch", "runtime", "smoke", "validate"))
+    parser.add_argument("command", choices=("fetch", "runtime", "smoke", "validate", "validate-dist"))
     parser.add_argument("--vendor", type=Path, default=VENDOR)
     args = parser.parse_args()
     vendor = args.vendor.resolve()
+    if args.command == "validate-dist":
+        validate_distribution(vendor)
+        return 0
     if args.command in {"smoke", "validate"}:
         validate_bundle(vendor, allow_jdk=vendor == VENDOR.resolve(), release=args.command == "validate")
         if args.command == "smoke":

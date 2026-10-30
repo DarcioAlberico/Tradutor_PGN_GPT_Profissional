@@ -25,8 +25,10 @@ publicado, e nenhum ZIP/JDK/runtime binario foi adicionado ao Git.
 - CI unitario usa fakes. Job Windows prepara fontes/runtime, faz smoke sem Java
   no PATH, exige o gate e publica evidencias mesmo quando bloquear. Actions
   foram fixadas por SHAs conferidos na API oficial; permissoes: contents/read.
-  O workflow remoto ainda nao foi executado. **O job build falhara no gate de
-  licencas enquanto a auditoria estiver incompleta.**
+  O workflow remoto ainda nao foi executado. Apos o fix round 1, a suite
+  ordinaria roda em push/PR sem executavel; o job de release autocontido exige
+  workflow_dispatch e opt-in explicito. Esse job continua recusando release
+  enquanto a aprovacao separada de redistribuicao estiver bloqueada.
 
 ## Fontes e hashes
 
@@ -215,3 +217,96 @@ e as entregas completas nao foram executados sobre um candidato nao aprovado.
 
 Commit deste incremento e informado pelo implementador apos staging seletivo.
 Este relatorio nao marca a Task 8 como concluida nem autoriza publicacao.
+
+## Fix round 1 — cinco Important da revisao
+
+Estado: cinco correcoes implementadas; auditoria real continua **blocked**.
+
+1. **Inventario nao aprova redistribuicao.** Ha uma decisao separada, controlada
+   pelo repositorio, em `recursos/languagetool-release-approval.json`. O arquivo
+   real esta bloqueado, sem componentes aprovados. A copia no candidato precisa
+   ser identica a decisao confiavel, e o hash precisa cobrir a arvore completa
+   de recursos, inventario/SBOM e evidencias. Cobertura e derivada dos bytes:
+   JARs, POMs sombreados, dicionarios, nativos e agregados runtime/recursos. Cada
+   componente exige decisao/hash e partes aprovadas separadamente para licenca
+   (expressao/evidencias), fonte (HTTPS/hash/evidencias de disponibilidade) e
+   notices (arquivos/hashes). Evidencia primaria `blocked` tambem recusa release.
+   Nenhum comando gera aprovacao. Os testes de aprovacao usam apenas autoridade
+   sintetica isolada, sem alterar a decisao real do projeto.
+2. **Arvore inteira da entrega verificada.** A validacao inspeciona tambem os
+   arquivos de aplicacao/dependencias de `_internal`, fora do namespace de hash
+   do sidecar. Chaves, temporarios de chaves, bancos/SQLite WAL, logs, corpus e
+   payloads privados sao recusados antes de abrir o ZIP. Codigo compilado e
+   notices legitimos em pacotes chamados cache/logs nao sao confundidos com
+   dados pessoais.
+3. **Inventario de fontes completo.** Adicoes, remocoes e alteracoes sao
+   comparadas antes de jdeps e de smoke. Saidas geradas conhecidas ficam fora
+   desse conjunto; o staging novo copia somente as entradas verificadas. Saidas
+   ou evidencias de uma rodada anterior nao viram entradas no novo candidato.
+4. **Deadline absoluto do health.** Requests deixou de transportar o health
+   de startup. O leitor HTTP aplica o deadline abaixo do buffering do parser,
+   antes de cada recv, incluindo cabecalhos e chunks/body, com corpo limitado.
+   O listener continua sendo atribuido ao filho antes de enviar a requisicao.
+   Timeout fecha resposta/socket e o lifecycle termina e recolhe o proprio
+   filho. Nao ha thread de watchdog ou worker abandonado. Analises comuns
+   continuam usando o adapter existente; essa correcao e do startup.
+5. **Inno direto executa a validacao real.** O preprocessador chama o validator
+   ancorado em SourcePath usando o Python do ambiente de build, aguarda exit 0
+   e valida o proprio DistDir. Ausencia do ambiente, decisao bloqueada, recursos
+   adulterados ou dados privados recusam compilacao; nao ha marker de aprovacao.
+   Em projeto isolado, o compilador real recusou os dois casos e compilou a
+   fixture sintetica aprovada, comprovando que a guarda nao recusa tudo.
+
+Assinatura/retorno do Exec e ancoragem SourcePath conferidos na documentacao
+primaria do [ISPP Exec](https://jrsoftware.org/ispphelp/topic_exec.htm) e nas
+[variaveis predefinidas](https://jrsoftware.org/ispphelp/topic_predefinedvars.htm).
+
+**Decisao operacional de CI:** push/PR fazem verificacao ordinaria, sem gerar
+ou publicar um executavel incompleto. A preparacao autocontida permanece um
+release explicito/manual (`self_contained_release`, default false), com todos
+os gates. O compromisso de produto de distribuir Java/LanguageTool juntos foi
+preservado; nao foi criado um binario alternativo sem concordancia para passar
+CI. A sintaxe YAML e a separacao de eventos foram conferidas localmente; nao
+houve execucao remota do workflow nem publicacao.
+
+RED/GREEN observados nesta rodada:
+
+- limpar `unresolved`/manifesto e evidencia bloqueada: 2 falhas antes; depois
+  recusados, com caminho positivo sintetico e decisoes por parte legal cobertos;
+- portatil com chave/banco/log/cache em `_internal/application`: 4 falhas antes;
+  variantes chave `.tmp` e SQLite WAL tambem tiveram RED/GREEN; 6 casos privados
+  sao recusados sem criar ZIP, e dependencias de programa continuam aceitas;
+- JAR extra entrou em jdeps antes da correcao; depois adicao/remocao/alteracao
+  das fontes sao recusadas antes das ferramentas;
+- servidor owned gotejando: antes cabecalhos **1,790 s** e body **2,221 s**
+  ultrapassaram budget **0,65 s**. Depois ambos passam o teste de retorno/cleanup
+  (<1,25 s incluindo lancamento e recolhimento), PID limpo e nenhum filho vivo;
+  pipeline normal de 0,75 s segue completando numa unica requisicao;
+- Inno direto gerou instalador sintetico com decisao bloqueada e com runtime
+  adulterado antes do fix (exit 0). Depois ambos sao recusados (sem saida),
+  enquanto o candidato sintetico aprovado compila.
+
+Verificacao final do round:
+
+```text
+uv run python -m pytest tests/test_languagetool_packaging.py tests/test_languagetool_process.py tests/test_settings.py -q
+162 passed, 19 subtests passed in 15.72s
+uv run ruff check <arquivos Python alterados>
+All checks passed!
+uv run mypy ferramentas/preparar_languagetool.py tradutor_pgn/languagetool_process.py
+Success: no issues found in 2 source files
+git diff --check
+exit 0 (avisos de conversao LF/CRLF, sem erros)
+Workflow parse/manual release separation: PASS
+```
+
+Fetch/runtime reais passaram com o inventario completo. Runtime com o novo
+transporte: startup **4,244975 s**, primeiro resultado **5,952508 s**, pico JVM
+**632.750.080 B**. CLI smoke final: startup **4,469914 s**, primeira analise
+**1,920256 s**, primeiro resultado **6,390170 s**, warm **0,531655 s**, pico
+**592.023.552 B**, sem Java no PATH. A regra nominal exigida permaneceu presente.
+
+Os bloqueios anteriores de termos/fontes/notices, TA-004 literal e entregas
+reais permanecem. Nenhum componente real foi aprovado nesta rodada. Nenhuma
+suite completa foi rodada, conforme o escopo recebido; nenhum binario de teste
+ou de vendor entra no commit.
