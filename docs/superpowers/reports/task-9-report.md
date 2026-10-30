@@ -249,3 +249,114 @@ aprovação de redistribuição, evidências de licença ou recursos de vendor.
 Nenhum dado métrico, banco ou binário entra no commit. Relatórios de máquina
 ficam em `build/reports`; os resultados e limitações estão preservados neste
 relatório versionado.
+
+## Fix round 1 — validação de rule IDs na exportação
+
+Achado Important confirmado sobre o commit `5520493`: o parser real do
+LanguageTool aceita qualquer string não vazia como rule ID, e o avaliador
+copiava esse valor para listas de regras em JSON/Markdown. Uma resposta com
+payload no campo de ID atravessava parser, assistente e replay com
+`failed_cases=0`, expondo o conteúdo no relatório.
+
+A correção fica na fronteira de exportação: o avaliador valida **todos** os
+rule IDs de cada resultado antes de agregar ocorrências, inclusive antes de
+filtrar diagnósticos suprimidos. Foi extraído o validador já usado pelas
+métricas (`is_valid_writing_rule_id`): ASCII, inicial maiúscula, demais caracteres
+maiúsculos/dígitos/underscore e comprimento máximo de 128. Métricas e replay
+compartilham a mesma política; não se alterou o parser ou a análise linguística.
+
+Qualquer ID inválido descarta o resultado completo do caso, sem aproveitar uma
+ocorrência válida anterior da mesma resposta. O caso permanece no denominador,
+incrementa `failed_cases`, mantém os misses e produz exit 1 no replay. A exceção
+interna usa uma mensagem fixa, é capturada e não entra em relatórios ou logs;
+o ID inválido nunca é citado no diagnóstico.
+
+O teste exercita `_issues` real (inclusive conversão UTF-16 após emoji),
+`PortugueseWritingAssistant`, CLI do replay e arquivos JSON/Markdown. O controle
+com ID ASCII válido é exportado normalmente. Os casos inválidos cobrem payload
+igual ao comentário, acento Unicode, homóglifo grego, newline e ID acima do
+limite. As verificações abrangem conteúdo dos dois formatos, stdout/logs,
+ausência de sucesso parcial, falha registrada e exit não zero. As métricas
+também ganharam variantes Unicode/comprimento contra criação de arquivo.
+
+RED observado antes da correção (vazamento efetivamente constatado nos arquivos):
+
+```text
+uv run python -m pytest tests/test_writing_corpus.py -k real_parser_assistant_replay -q --tb=short
+5 failed, 1 passed, 25 deselected in 0.67s
+```
+
+GREEN depois da correção:
+
+```text
+uv run python -m pytest tests/test_writing_corpus.py -k real_parser_assistant_replay -q
+6 passed, 25 deselected in 0.56s
+```
+
+Não houve alteração de corpus, thresholds, preferência experimental/default,
+recursos de vendor ou gate de licenças. As medições reais anteriores continuam
+válidas como registro daquela campanha; não foram apresentadas como novas
+medições nesta rodada. A suíte completa permanece para o gate integrado.
+
+### Gates finais do fix round 1 e isolamento explícito de vendor
+
+O gate focado inicial, sem isolamento, encontrou um pressuposto de ambiente no
+teste legado `test_grammar_requested_without_adapter_has_visible_fallback`:
+
+```text
+uv run python -m pytest tests/test_writing_corpus.py tests/test_writing_metrics.py tests/test_languagetool_client.py tests/test_writing_assistant.py tests/test_writing_performance.py -q
+1 failed, 175 passed in 66.15s
+
+uv run python -m pytest tests/test_writing_assistant.py::test_grammar_requested_without_adapter_has_visible_fallback -q
+1 failed in 8.14s
+```
+
+O teste pressupõe runtime indisponível ao construir o adapter padrão, mas o
+vendor real deste worktree respondeu em modo `full`. O teste e
+`writing_assistant.py` são idênticos ao HEAD (`git diff --quiet HEAD --` nesses
+dois arquivos: exit 0). Não foi alterado nem excluído o teste, e os recursos
+reais não foram movidos, removidos ou mascarados para a aplicação.
+
+Conforme orientação do controlador, a mesma seleção foi repetida com fixture
+diagnóstica explícita. O driver ignorado pelo Git
+`.superpowers/sdd/2026-10-27-assistente-escrita-portugues/task9_missing_vendor.py`
+registra uma fixture autouse que, **somente nesse teste**, envolve
+`LanguageToolProcess.__init__` para fornecer o seam já existente
+`resource_resolver=lambda relative: tmp_path / 'absent-vendor' / relative`.
+Assim o teste exercita a indisponibilidade real de arquivos; não há stub de
+análise ou fallback. O monkeypatch é desfeito ao final do teste, e todos os
+demais testes mantêm seus recursos normais.
+
+```text
+uv run python .superpowers/sdd/2026-10-27-assistente-escrita-portugues/task9_missing_vendor.py tests/test_writing_corpus.py tests/test_writing_metrics.py tests/test_languagetool_client.py tests/test_writing_assistant.py tests/test_writing_performance.py -q
+176 passed in 52.12s
+```
+
+O replay com LanguageTool real ficou separado desse isolamento:
+
+```text
+uv run python ferramentas/avaliar_corretor_portugues.py --mode full --output-dir build/reports/task-9-fix-1-real
+exit 0; expected=11, presented=12, true_positives=8, false_positives=4, misses=3
+precision=0.6666666666666666; recall=0.7272727272727273
+failed_cases=0; protected_violations=0; ta004_literal=true; stable=false
+```
+
+Ruff, incluindo o driver diagnóstico, e mypy dos dois módulos de produção
+alterados passaram:
+
+```text
+uv run ruff check .superpowers/sdd/2026-10-27-assistente-escrita-portugues/task9_missing_vendor.py ferramentas/avaliar_corretor_portugues.py tradutor_pgn/writing_metrics.py tests/test_writing_corpus.py tests/test_writing_metrics.py
+All checks passed!
+
+uv run mypy ferramentas/avaliar_corretor_portugues.py tradutor_pgn/writing_metrics.py
+Success: no issues found in 2 source files
+
+git diff --check
+exit 0 (avisos LF/CRLF, sem erros)
+```
+
+O commit seletivo inclui somente avaliador, validador compartilhado, testes de
+corpus/métricas e este relatório. Não contém driver diagnóstico, payloads,
+bancos, arquivos do vendor ou alterações dos testes legados. A execução sem
+fixture continua documentada como falha de pressuposto de ambiente; o gate
+integrado deve manter explícita essa distinção.

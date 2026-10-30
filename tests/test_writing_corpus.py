@@ -196,3 +196,63 @@ def test_real_spylls_baseline_is_independent_of_personal_vocabulary():
     assert report["overall"]["false_positives"] == 1
     assert report["overall"]["misses"] == 1
     assert report["protected_violations"] == report["failed_cases"] == 0
+
+
+@pytest.mark.parametrize("rule_id,invalid", [
+    ("UNKNOWN_RULE_7", False),
+    ("request_text", True),
+    ("REGRA_É", True),
+    ("RΕGRA_7", True),  # Greek epsilon must not impersonate an ASCII ID.
+    ("RULE\nPRIVATE_PAYLOAD", True),
+    ("R" * 129, True),
+])
+def test_real_parser_assistant_replay_exports_only_valid_rule_ids(
+    tmp_path, monkeypatch, caplog, capsys, rule_id, invalid,
+):
+    from ferramentas import avaliar_corretor_portugues as evaluator
+    from tradutor_pgn.languagetool_client import _issues
+
+    text = "🙂 Informação particular."
+    rule_id = text if rule_id == "request_text" else rule_id
+
+    def match(identifier):
+        return {"offset": 3, "length": 10, "message": text, "shortMessage": text,
+                "replacements": [{"value": "Informações"}],
+                "rule": {"id": identifier, "description": text, "issueType": "grammar",
+                         "category": {"id": "GRAMMAR"}}}
+
+    class ParsedGrammar:
+        def analyze(self, request, protected):
+            # Exercise the production parser, including its UTF-16 conversion.
+            # A valid issue before a malicious ID must not permit partial success.
+            matches = [match("UNKNOWN_RULE_7"), match(rule_id)] if invalid else [match(rule_id)]
+            return _issues({"software": {"name": "LanguageTool", "version": "6.6"},
+                            "language": {"code": "pt-BR"}, "matches": matches},
+                           protected.projected_text, frozenset(), request.text_version)
+
+    assistant = PortugueseWritingAssistant(spelling_adapter=EmptySpelling(), grammar_adapter=ParsedGrammar())
+    monkeypatch.setattr(evaluator, "create_assistant", lambda: assistant)
+    corpus_path = tmp_path / "corpus.json"
+    corpus_path.write_text(json.dumps({"schema_version": 1, "cases": [{
+        "id": "rule-metadata", "text": text, "expected_issues": [{
+            "start": 2, "end": 12, "original": "Informação", "category": "GRAMMAR",
+            "suggestions": ["Informações"],
+        }], "forbidden_ranges": [],
+    }]}), encoding="utf-8")
+    output = tmp_path / "reports"
+    exit_code = evaluator.main(["--mode", "full", "--corpus", str(corpus_path), "--output-dir", str(output)])
+    report = json.loads((output / "portuguese-writing-full.json").read_text(encoding="utf-8"))
+    markdown = (output / "portuguese-writing-full.md").read_text(encoding="utf-8")
+    exported = json.dumps(report, ensure_ascii=False) + markdown + capsys.readouterr().out + caplog.text
+    for private in (text, "Informação", "Informações"):
+        assert private not in exported
+    if invalid:
+        assert rule_id not in exported
+    assert exit_code == int(invalid)
+    assert report["failed_cases"] == int(invalid)
+    assert report["overall"]["presented"] == int(not invalid)
+    assert report["overall"]["misses"] == int(invalid)
+    assert report["cases"][0]["true_positive_rule_ids"] == ([] if invalid else ["UNKNOWN_RULE_7"])
+    assert report["cases"][0]["false_positive_rule_ids"] == []
+    if invalid:
+        assert report["gate"]["stable"] is False

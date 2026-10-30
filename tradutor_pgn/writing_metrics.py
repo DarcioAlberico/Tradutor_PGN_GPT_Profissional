@@ -26,9 +26,14 @@ _RULE_ID = re.compile(r"[A-Z][A-Z0-9_]{0,127}", re.ASCII)
 _COLUMNS = ("day", "category", "rule_id", "action", "count")
 
 
+def is_valid_writing_rule_id(value: object) -> bool:
+    """Accept only bounded ASCII metadata, never free-form provider content."""
+    return isinstance(value, str) and _RULE_ID.fullmatch(value) is not None
+
+
 def _metadata(category: str, rule_id: str, action: str, day: str | None) -> dict[str, str]:
     if (category not in get_args(IssueCategory) or action not in _ACTIONS
-            or not isinstance(rule_id, str) or _RULE_ID.fullmatch(rule_id) is None):
+            or not is_valid_writing_rule_id(rule_id)):
         raise ValueError("invalid writing metric metadata")
     day = date.today().isoformat() if day is None else day
     if not isinstance(day, str) or date.fromisoformat(day).isoformat() != day:

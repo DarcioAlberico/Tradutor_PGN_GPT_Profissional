@@ -52,6 +52,7 @@ def test_concurrent_windows_and_processes_do_not_lose_increments(tmp_path):
 @pytest.mark.parametrize("kwargs", [
     {"category": "private user text"}, {"rule_id": "private user text"},
     {"rule_id": "RULE\nsecret"}, {"action": "correction payload"}, {"day": "2026-02-30"},
+    {"rule_id": "REGRA_É"}, {"rule_id": "RΕGRA_7"}, {"rule_id": "R" * 129},
 ])
 def test_invalid_metadata_is_dropped_before_any_file_is_created(tmp_path, kwargs):
     from tradutor_pgn.writing_metrics import WritingMetrics

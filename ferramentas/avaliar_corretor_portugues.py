@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from tradutor_pgn.languagetool_client import EXPECTED_VERSION  # noqa: E402
 from tradutor_pgn.writing_assistant import PortugueseWritingAssistant, SpyllsAdapter  # noqa: E402
+from tradutor_pgn.writing_metrics import is_valid_writing_rule_id  # noqa: E402
 from tradutor_pgn.writing_protection import protect_text  # noqa: E402
 from tradutor_pgn.writing_types import IssueCategory, WritingIssue, WritingRequest, WritingResult  # noqa: E402
 
@@ -93,6 +94,10 @@ def evaluate_corpus(corpus: dict[str, Any], assistant: Assistant, *, mode: str) 
         try:
             result = assistant.analyze(request)
             result.validate_for(request)
+            if any(not is_valid_writing_rule_id(issue.rule_id) for issue in result.issues):
+                # Provider IDs are untrusted strings too. Reject the complete
+                # case before aggregation/export; never quote the invalid ID.
+                raise ValueError("invalid writing rule metadata")
             failed = result.mode != ("full" if mode == "full" else "spelling_only") or bool(result.diagnostic)
             issues = [issue for issue in result.issues if issue.state == "active"]
         except Exception:
