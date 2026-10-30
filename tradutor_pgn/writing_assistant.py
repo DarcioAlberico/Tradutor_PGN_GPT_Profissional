@@ -42,6 +42,66 @@ def _dictionary_language(language: str) -> str:
     return "pt" if normalized in {"pt", "pt-br"} else normalized
 
 
+def _narrow_replacement_span(issue: WritingIssue) -> WritingIssue:
+    """Remove only context shared byte-for-byte by every replacement.
+
+    Changes remain whole Unicode words (including combining marks). Never
+    choose one alternative's narrower span at the expense of another, or
+    turn repetitions/punctuation into zero-width/deletion-only diagnostics.
+    Protection and provider offsets must be checked before AND after this.
+    """
+    if (issue.category in {"SPELLING", "REPEATED_WORD", "PUNCTUATION"}
+            or not issue.suggestions or issue.original in issue.suggestions):
+        return issue
+    original, suggestions = issue.original, issue.suggestions
+    start, limit = 0, min(len(value) for value in (original, *suggestions))
+    while start < limit and all(value[start] == original[start] for value in suggestions):
+        start += 1
+    suffix = 0
+    while suffix < limit - start and all(value[-suffix - 1] == original[-suffix - 1] for value in suggestions):
+        suffix += 1
+    end = len(original) - suffix
+
+    def word(char: str) -> bool:
+        return char.isalnum() or unicodedata.category(char).startswith("M") or char in "_-'’"
+
+    while start > 0 and word(original[start - 1]):
+        start -= 1
+    while end < len(original) and word(original[end]):
+        end += 1
+    suffix = len(original) - end
+    replacements = tuple(value[start:len(value) - suffix] for value in suggestions)
+    if (start >= end or not original[start:end].strip() or any(not value for value in replacements)
+            or any(original[:start] + value + original[end:] != full
+                   for value, full in zip(replacements, suggestions))):
+        return issue
+    return replace(issue, issue_id="", start=issue.start + start, end=issue.start + end,
+                   original=original[start:end], suggestions=replacements)
+
+
+def _agreement_alternatives(issue: WritingIssue) -> tuple[WritingIssue, int]:
+    """Agreement cannot be repaired solely by changing punctuation.
+
+    Keep punctuation when a replacement ALSO changes morphology. Compare
+    exact Unicode code points after removing only punctuation/whitespace;
+    symbols, accents and case remain significant. This is not rule-ID tuning.
+    """
+    if issue.category not in {"NOMINAL_AGREEMENT", "VERBAL_AGREEMENT"}:
+        return issue, 0
+
+    def content(value: str) -> str:
+        return "".join(char for char in value if not char.isspace() and not unicodedata.category(char).startswith("P"))
+
+    def punctuation(value: str) -> str:
+        return "".join(char for char in value if unicodedata.category(char).startswith("P"))
+
+    original_content, original_punctuation = content(issue.original), punctuation(issue.original)
+    suggestions = tuple(value for value in issue.suggestions
+                        if content(value) != original_content or punctuation(value) == original_punctuation)
+    dropped = len(issue.suggestions) - len(suggestions)
+    return (replace(issue, suggestions=suggestions) if dropped else issue), dropped
+
+
 def _tokens(text: str) -> Iterator[tuple[int, int, str]]:
     """Historical word boundaries, including a word's Unicode combining marks.
 
@@ -173,6 +233,7 @@ class PortugueseWritingAssistant:
         self._cache: OrderedDict[tuple[int, str], WritingResult] = OrderedDict()
         self._cache_capacity = cache_capacity
         self._cache_epoch = 0
+        self._normalization_counts: dict[str, int] = {}
         self._cache_revisions: dict[str, str | int] = {
             "glossary": 0, "vocabulary": 0, "rules": 0, "providers": 0,
         }
@@ -196,6 +257,11 @@ class PortugueseWritingAssistant:
         with self._cache_lock:
             self._cache_epoch += 1
             self._cache.clear()
+
+    def normalization_counts(self) -> dict[str, int]:
+        """Process-local aggregate diagnostics; no issue/text/offset retained."""
+        with self._cache_lock:
+            return self._normalization_counts.copy()
 
     def _cache_key(self, request: WritingRequest) -> tuple[int, str] | None:
         if not self._cache_capacity:
@@ -291,6 +357,17 @@ class PortugueseWritingAssistant:
             issue = restore_issue_offsets(candidate, protected)
             if issue is None:
                 continue
+            if issue.state == "active":
+                # Reject the provider's complete protected/stale span first;
+                # trimming must never rescue an unsafe diagnostic. Restore
+                # again from projection coordinates after narrowing.
+                candidate, dropped = _agreement_alternatives(candidate)
+                if dropped:
+                    with self._cache_lock:
+                        self._normalization_counts[candidate.category] = self._normalization_counts.get(candidate.category, 0) + dropped
+                issue = restore_issue_offsets(_narrow_replacement_span(candidate), protected)
+                if issue is None:
+                    continue
             issue.validate_for(request)
             # Collapse repeated spelling spans; keep distinct grammar reasons.
             key = ((issue.start, issue.end, issue.category, issue.state) if issue.category == "SPELLING"

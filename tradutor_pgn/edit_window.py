@@ -137,6 +137,7 @@ from .writing_controller import WritingController, get_shared_writing_assistant
 from .writing_panel import WritingPanel
 from .editor_undo import TextUndoHistory
 from .writing_types import AssistantStatus, WritingRequest
+from .writing_metrics import is_valid_writing_action, record_writing_action
 from .writing_protection import protect_text
 
 
@@ -3159,8 +3160,15 @@ class TranslationEditor:
         self._record_writing_action(issue, "aplicada")
 
     def _record_writing_action(self, issue, action):
-        logging.getLogger(__name__).info("writing category=%s rule=%s action=%s",
-                                         issue.category, issue.rule_id, action)
+        try:
+            if not is_valid_writing_action(category=issue.category, rule_id=issue.rule_id, action=action):
+                return
+            logging.getLogger(__name__).info("writing category=%s rule=%s action=%s",
+                                             issue.category, issue.rule_id, action)
+            record_writing_action(category=issue.category, rule_id=issue.rule_id, action=action)
+        except Exception:
+            # Metrics are optional and cannot change an editorial operation.
+            pass
 
     def ignore_once(self, issue):
         if self._valid_writing_issue(issue):

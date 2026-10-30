@@ -9712,3 +9712,52 @@ Gate focado: **162 passed, 19 subtests**; Ruff/mypy/diff-check verdes. Smoke
 real final: **4,470 s** de startup, **6,390 s** ate o primeiro resultado e pico
 **592,0 MB**. Licencas, TA-004 literal e validacao das entregas reais seguem
 pendentes; a Task 8 continua parcial. Detalhes no adendo do relatorio.
+
+## Assistente pt-BR — Task 9: qualidade e metricas locais (2026-10-30)
+
+Concordancia continua **experimental**, com `grammar_enabled=false` por padrao.
+O replay dos 18 casos revisados, com VERO/Spylls e LanguageTool 6.6 reais do
+`build/vendor`, passou TA-004 literal e nao apresentou nenhuma sugestao em
+intervalo protegido. O corpus permaneceu inalterado.
+
+| Baseline | Esperados | Apresentados | TP | FP | Misses | Precisao | Recall |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Ortografia | 4 | 4 | 3 | 1 | 1 | 75,00% | 75,00% |
+| Completo | 11 | 12 | 8 | 4 | 3 | 66,67% | 72,73% |
+
+Os gates de 95%/80% **nao foram atingidos**. Sugestoes ortograficas estao
+presentes em 4/4 typos; presenca nao implica que a correcao editorial esteja
+entre elas. O avaliador exige span/categoria exatos e pelo menos uma correcao
+do gabarito, com correspondencia um a um. Falhas e duplicatas nao inflam recall.
+Ha misses nominais e um erro de classificacao de categoria; todos os quatro FP
+foram triados por case ID e rule ID no relatorio, sem supressoes globais.
+
+A normalizacao remove contexto comum de todas as alternativas, preservando
+palavras Unicode e revalidando offsets e protecao antes e depois. Em regras de
+concordancia, duas alternativas que so alteravam pontuacao foram descartadas;
+alternativas que tambem mudam morfologia continuam disponiveis. O contador por
+categoria nao retem payload. Nao ha escolha arbitraria da primeira sugestao.
+
+Benchmarks warm, cache do assistente desligado, nearest rank, 18 amostras por
+tamanho: ortografia p95 de **2656,37 / 265,01 / 53,43 ms por linha** para
+comentarios com 1/10/50 linhas; modo completo p95 de **3041,09 / 3084,70 /
+3272,18 ms por comentario**. Nenhuma analise falhou; as metas de 20/500 ms nao
+foram atingidas. O modo completo mede o caminho inteiro, incluindo ortografia
+e sugestoes, e nao a JVM isolada. Sao medidas locais, sem inferencia populacional.
+
+`writing-metrics.db` e global na pasta de dados, independente do banco do livro:
+somente data, categoria, rule ID, acao e contagem, com schema versionado e
+incrementos SQLite atomicos. A UI envia metadados para uma fila limitada fora
+do Tk; overflow/falhas podem perder metricas, sem impedir correcao ou desfazer.
+Replays JSON/Markdown em `build/reports/` nao exportam texto, sugestoes ou offsets.
+
+Gate final focado: **49 passed** (48 novos e a regressao do log); Ruff e mypy
+verdes. Testes de Tk comprovam que um
+provider bloqueado permite heartbeats e entrega somente o resultado mais novo;
+LRU limitado, concorrencia entre threads/processos e falhas de armazenamento
+foram exercitados. O gate integrado da suite completa permanece a cargo da
+validacao final da branch. Evidencias e limitacoes em
+`docs/superpowers/reports/task-9-report.md`.
+
+O bloqueio de licencas/fontes/notices e smoke das entregas da Task 8 permanece.
+Passar TA-004 no fonte nao aprova redistribuicao nem certifica o instalado/portatil.
