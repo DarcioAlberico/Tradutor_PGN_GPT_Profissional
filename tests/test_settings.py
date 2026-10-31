@@ -72,6 +72,32 @@ class DefaultPathSafetyTests(unittest.TestCase):
 
 
 class WritingSettingsTests(unittest.TestCase):
+    def test_old_settings_upgrade_and_legacy_write_preserve_user_data(self):
+        # A destructive migration or whole-file overwrite would lose these
+        # unrelated keys. Simulate an older version updating just its section.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            legacy = {
+                "editor_drafts": {"book": {"text": "rascunho preservado"}},
+                "output": {"utf8_bom": True},
+                "future_section": {"nested": [1, "valor", None]},
+            }
+            save_settings(legacy, path)
+            original = path.read_bytes()
+            defaults = settings.read_writing_settings(load_settings(path))
+            self.assertTrue(defaults["spelling_enabled"])
+            self.assertFalse(defaults["grammar_enabled"])
+            self.assertEqual(path.read_bytes(), original)
+            settings.write_writing_settings({}, path)
+            for key, value in legacy.items():
+                self.assertEqual(load_settings(path)[key], value)
+            update_settings(lambda data: data.update({"legacy_window": {"width": 900}}), path)
+            reopened = load_settings(path)
+            self.assertEqual(settings.read_writing_settings(reopened), defaults)
+            self.assertEqual(reopened["legacy_window"], {"width": 900})
+            for key, value in legacy.items():
+                self.assertEqual(reopened[key], value)
+
     def test_category_patches_merge_under_lock_without_erasing_drafts_or_rules(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"

@@ -8,6 +8,8 @@ import threading
 import pytest
 
 from tradutor_pgn import prose_spellcheck
+from tradutor_pgn.languagetool_client import LanguageToolLocalAdapter
+from tradutor_pgn.languagetool_process import LanguageToolProcess
 from tradutor_pgn.personal_dictionary import PersonalDictionary
 from tradutor_pgn.writing_assistant import PortugueseWritingAssistant, SpyllsAdapter
 from tradutor_pgn.writing_protection import protect_text
@@ -163,11 +165,18 @@ def test_personal_vocabulary_read_error_is_visible_and_can_recover(tmp_path):
 
 
 def test_grammar_requested_without_adapter_has_visible_fallback(tmp_path):
-    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path))
-    result = assistant.analyze(WritingRequest("posiçao", 1, "pt", grammar_enabled=True))
-    assert result.mode == "spelling_only" and result.diagnostic
-    assert len(result.issues) == 1
-    assistant.shutdown()
+    # Exercise missing files through the real lifecycle, independently of
+    # whether this checkout has prepared vendor resources for the real smoke.
+    process = LanguageToolProcess(resource_resolver=lambda relative: tmp_path / "absent-vendor" / relative)
+    assistant = PortugueseWritingAssistant(
+        spelling_adapter=adapter(tmp_path), grammar_adapter=LanguageToolLocalAdapter(process=process),
+    )
+    try:
+        result = assistant.analyze(WritingRequest("posiçao", 1, "pt", grammar_enabled=True))
+        assert result.mode == "spelling_only" and result.diagnostic
+        assert len(result.issues) == 1
+    finally:
+        assistant.shutdown()
     assert assistant.status().state == "stopped"
 
 

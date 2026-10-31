@@ -8296,6 +8296,57 @@ class WritingEditorTests(GuiTestCase):
             future.result(timeout=5)
             self.assertGreater(settings.writing_settings_revision(), revision)
 
+    def assert_pending_vocabulary_survives_dialog_idle_interruption(self, *, reentrant):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        item = self.ready()
+        draft = self.editor.draft_text()
+        dirty = self.editor.state.dirty
+        with sqlite3.connect(self.db_path) as conn:
+            before = conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall()
+        conn.close()
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        original = PersonalDictionary.add
+
+        def slow_add(vocabulary, word):
+            started.set()
+            release.wait(5)
+            return original(vocabulary, word)
+
+        with unittest.mock.patch.object(PersonalDictionary, "add", slow_add):
+            self.editor.add_personal_word(item)
+            self.assertTrue(started.wait(2))
+            future = self.editor._writing_job[0]
+            dialog = self.editor._writing_dialog
+            # Settle the real native window before injecting an idle failure;
+            # otherwise the fault injection itself leaves a Tk native job.
+            dialog.update_idletasks()
+
+            def interrupted_idle():
+                if reentrant:
+                    self.editor._close_writing_dialog()
+                else:
+                    raise tk.TclError("injected idle failure")
+
+            with unittest.mock.patch.object(dialog, "update_idletasks", interrupted_idle):
+                self.editor.shutdown_writing()
+            self.assertIsNone(self.editor._writing_dialog)
+            self.assertFalse(dialog.winfo_exists())
+            release.set()
+            future.result(timeout=5)
+        self.assertIn(item.original, PersonalDictionary().list_words())
+        self.assertEqual(self.editor.draft_text(), draft)
+        self.assertEqual(self.editor.state.dirty, dirty)
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(), before)
+        conn.close()
+
+    def test_dialog_idle_error_still_destroys_window_and_preserves_vocabulary_commit(self):
+        self.assert_pending_vocabulary_survives_dialog_idle_interruption(reentrant=False)
+
+    def test_dialog_idle_reentrant_close_preserves_window_cleanup_and_vocabulary_commit(self):
+        self.assert_pending_vocabulary_survives_dialog_idle_interruption(reentrant=True)
+
     def test_disabled_preferences_block_a_debounce_that_fires_before_the_event_poll(self):
         self.ready()
         self.editor.set_translation_text("errao pendente", mark_dirty=True)
@@ -8370,8 +8421,12 @@ class WritingEditorTests(GuiTestCase):
         self.editor.focus_search()
         self.pump()
         with self.committed_bulk_waiting_for_delivery() as snapshot:
+            # The modal owns native focus. Target these synthetic key events
+            # explicitly so they exercise the guards rather than get dropped.
+            self.editor.win.focus_force()
             self.editor.win.event_generate("<Control-l>")
             self.editor.search_text.set("nao-existe-nenhuma-linha")
+            self.editor.search_entry._entry.focus_force()
             self.editor.search_entry._entry.event_generate("<Return>")
             self.pump()
             self.assert_pending_context_unchanged(snapshot)
@@ -8988,6 +9043,18 @@ class TextUndoHistoryTests(GuiTestCase):
 
 
 class WritingFixtureIsolationTests(GuiTestCase):
+    def test_closing_pending_vocabulary_dialog_allows_next_native_window(self):
+        # Keep native crashes observable as a test failure, with the original
+        # commit-after-close and next-window tests unchanged in a fresh process.
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest",
+             f"{__file__}::WritingEditorTests::test_vocabulary_commit_after_editor_close_notifies_remaining_windows",
+             f"{__file__}::{type(self).__name__}::test_legacy_window_uses_injected_service_without_starting_real_engine",
+             "-q"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_legacy_window_uses_injected_service_without_starting_real_engine(self):
         app = FakeApp(self.root, self.db_path)
         save_glossary_entries([], glossario._default_substitutions_path(), create_backup=False)

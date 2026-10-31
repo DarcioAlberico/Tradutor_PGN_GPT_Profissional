@@ -52,6 +52,16 @@ files = [
     "tradutor_pgn/llm_providers.py",
     "tradutor_pgn/llm_costs.py",
     "tradutor_pgn/app_log.py",
+    "tradutor_pgn/writing_types.py",
+    "tradutor_pgn/writing_protection.py",
+    "tradutor_pgn/personal_dictionary.py",
+    "tradutor_pgn/writing_assistant.py",
+    "tradutor_pgn/languagetool_process.py",
+    "tradutor_pgn/languagetool_client.py",
+    "tradutor_pgn/writing_controller.py",
+    "tradutor_pgn/writing_metrics.py",
+    "ferramentas/preparar_languagetool.py",
+    "ferramentas/avaliar_corretor_portugues.py",
 ]
 python_version = "3.10"
 ignore_missing_imports = true

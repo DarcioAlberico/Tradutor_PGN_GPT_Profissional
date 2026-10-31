@@ -9761,3 +9761,58 @@ validacao final da branch. Evidencias e limitacoes em
 
 O bloqueio de licencas/fontes/notices e smoke das entregas da Task 8 permanece.
 Passar TA-004 no fonte nao aprova redistribuicao nem certifica o instalado/portatil.
+
+## Assistente português — Task 10: integração e operação (2026-10-30)
+
+O README documenta painel/atalhos, aplicação explícita e lote por livro,
+vocabulário global, regras reversíveis, defaults, modos, recuperação e dados
+locais. Concordância continua **experimental e desligada por padrão**. Os
+resultados reais da Task 9 permanecem **66,67% de precisão / 72,73% de recall**,
+com latência acima das metas; os critérios de aceite não foram reduzidos.
+
+O teste de fallback que pressupunha vendor ausente foi reproduzido RED com
+runtime preparado (`full` em vez de `spelling_only`). Agora injeta no próprio
+teste um `resource_resolver` apontando para arquivos ausentes e percorre o
+lifecycle real, preservando o smoke real em execução separada. Nenhum adapter
+de produção mudou. Um roundtrip de settings antigos comprova defaults sem
+reescrita na leitura, criação explícita da seção e preservação de rascunhos e
+chaves desconhecidas após escrita legada por seção. Isso não promete que toda
+versão histórica desconhecida preserve campos: downgrade exige backup.
+
+Mypy passa a incluir os módulos tipados de escrita, proteção, vocabulário,
+processo/client, controller, métricas e ferramentas, além dos oito anteriores.
+O gate legal real permanece recusado por auditoria incompleta: **não houve
+build, instalação ou publicação**. Runtime/dados somam 452.910.883 B antes dos
+metadados; o tamanho das entregas reais continua sem medição. O smoke de fonte
+e a sentinela de privacidade não substituem validação instalada/portátil.
+
+`CONTEXT.md` e `REVISAO_GERAL.md`/`REVISAO_GERAL_SPEC.md` existem apenas como
+arquivos locais no checkout principal. Foram lidos e preservados; não se
+criaram versões substitutas no worktree. A atualização desses documentos exige
+integrar seu conteúdo local posteriormente, sem sobrescrever o material existente.
+
+Os gates iniciais ampliado/completo encontraram access violation nativo ao
+construir uma janela Tk/CustomTkinter. A bissecção no HEAD anterior reduziu a
+causa a fechar o diálogo transient de vocabulário antes de resolver seus idles
+nativos, seguido de nova janela. O fechamento agora resolve esses idles antes
+da destruição e destaca a referência antes de fazê-lo, tolerando reentrada e
+erro Tcl sem deixar a janela viva. RED observado em subprocesso; cinco testes
+direcionados passaram, preservando vocabulário/draft/dirty/banco. Nenhum harness
+ou teste antigo foi desativado. Os gates completos são repetidos após esse fix;
+as execuções desfavoráveis permanecem documentadas, sem se confundirem com PASS.
+
+A suíte completa depois desse reparo terminou sem crash nativo, mas com uma
+falha de teclado sintético já registrada na Task 7: o contexto/draft estavam
+preservados e o aviso “Aguarde” não aparecia. O caso falhou também no baseline;
+o contraste de foco mostrou que o modal recebia o foco e os handlers não eram
+chamados. O teste agora estabelece foco no alvo imediatamente antes de cada
+evento, preservando bindings, handlers e todas as asserções. Seis testes de
+busca/lifecycle passaram sem probe. A repetição integral passou com **2426
+testes, 12 skips documentados e 6761 subtestes**, exit 0 em 1040,81 s, sem crash
+nativo. O gate focado anterior terminou com 978 testes e 68 subtestes passando;
+Ruff global e mypy em 18 módulos passaram. O full com falha continua preservado.
+
+Resultados e limitações dos gates desta rodada ficam no
+[relatório da Task 10](docs/superpowers/reports/task-10-report.md), com cópia local
+em `.superpowers/sdd/2026-10-27-assistente-escrita-portugues/task-10-report.md`.
+O estado é de integração com ressalvas; Task 8 e release continuam bloqueados.

@@ -2043,6 +2043,41 @@ class SettingsWindowTests(MainWindowTestCase):
         self.assertEqual(settings.read_writing_settings(self.arquivo())["disabled_rule_ids"], ["RULE"])
         self.assertEqual(settings.read_output_settings(self.arquivo())["wrap_columns"], 80)
 
+    def test_legacy_settings_open_without_optional_engines_and_preserve_draft(self):
+        from tradutor_pgn.languagetool_client import LanguageToolLocalAdapter
+        from tradutor_pgn.languagetool_process import LanguageToolProcess
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant, SpyllsAdapter
+
+        legacy = {
+            "editor_drafts": {"book": {"text": "rascunho intacto"}},
+            "future_section": {"keep": [1, 2]},
+        }
+        self.grava(**legacy)
+        missing = Path(self.base) / "absent-vendor"
+        assistant = PortugueseWritingAssistant(
+            spelling_adapter=SpyllsAdapter(
+                dictionary_loader=lambda _language: None,
+                personal_dictionary=PersonalDictionary(Path(self.base) / "words.json"),
+            ),
+            grammar_adapter=LanguageToolLocalAdapter(process=LanguageToolProcess(
+                resource_resolver=lambda relative: missing / relative,
+            )),
+        )
+        self.app.writing_assistant = assistant
+        self.addCleanup(assistant.shutdown)
+        window = self.abre()
+        self.assertTrue(window.spelling_var.get())
+        self.assertFalse(window.grammar_var.get())
+        window.test_writing()
+        self.wait_writing_job(window)
+        self.assertIn("Indisponível", window.writing_status_label.cget("text"))
+        self.assertTrue(window.save())
+        reopened = self.arquivo()
+        for key, value in legacy.items():
+            self.assertEqual(reopened[key], value)
+        self.assertFalse(settings.read_writing_settings(reopened)["grammar_enabled"])
+
     def test_vocabulary_search_duplicate_confirmation_and_failed_write(self):
         from tradutor_pgn.personal_dictionary import PersonalDictionary
         vocabulary = PersonalDictionary()

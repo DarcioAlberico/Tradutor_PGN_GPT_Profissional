@@ -3226,13 +3226,21 @@ class TranslationEditor:
         return True
 
     def _close_writing_dialog(self):
-        if self._writing_dialog is not None:
+        dialog, self._writing_dialog = self._writing_dialog, None
+        if dialog is not None:
             try:
-                self._writing_dialog.grab_release()
-                self._writing_dialog.destroy()
+                dialog.grab_release()
+                # On Windows Tk 8.6.15, destroying a just-created transient
+                # before its geometry idle runs can leave UpdateGeometryInfo
+                # pointing at a dead window. Drain while the window is alive;
+                # detach first so an idle callback can safely reenter close.
+                dialog.update_idletasks()
             except tk.TclError:
                 pass
-            self._writing_dialog = None
+            try:
+                dialog.destroy()
+            except tk.TclError:
+                pass
 
     def add_personal_word(self, issue):
         if self._valid_writing_issue(issue):
