@@ -2903,6 +2903,8 @@ class TranslationEditor:
         self._writing_window_token = object()
         self._writing_closed = False
         self._writing_busy = False
+        self._writing_delivering = False
+        self._writing_internal_undo_token = None
         self._writing_signature = None
         self._writing_request = None
         self._writing_result = None
@@ -2963,7 +2965,12 @@ class TranslationEditor:
                 self.main_pane.paneconfigure(panel, width=width)
 
     def _allow_writing_native_action(self, action, token):
-        if self._writing_closed or self._writing_busy:
+        if self._writing_closed:
+            return False
+        if action == "undo" and token is not None and token is self._writing_internal_undo_token:
+            self._writing_internal_undo_token = None
+            return True
+        if self._writing_busy:
             return False
         if action == "undo":
             bulk = self._current_writing_bulk()
@@ -3056,6 +3063,8 @@ class TranslationEditor:
         return False
 
     def poll_writing(self):
+        if self._writing_delivering:
+            return
         self._writing_poll = None
         if self._writing_closed:
             return
@@ -3076,19 +3085,31 @@ class TranslationEditor:
             else:
                 self.writing_panel.set_snapshot((), AssistantStatus("failed", "unavailable", event.diagnostic))
         job = self._writing_job
-        if job and job[0].done():
-            self._writing_job = None
-            self._writing_busy = False
-            self._close_writing_dialog()
-            try:
-                result = job[0].result()
-            except Exception as error:
-                message = str(error) if isinstance(error, (WritingConflictError, ValueError)) else "Não foi possível concluir a operação. Nada foi alterado."
-                messagebox.showwarning("Revisão linguística", message, parent=self.win)
-            else:
-                job[1](result)
-        if not self._writing_closed:
-            self._writing_poll = self.win.after(60, self.poll_writing)
+        try:
+            if job and job[0].done():
+                self._writing_job = None
+                self._writing_delivering = True
+                next_job = None
+                try:
+                    # Idle callbacks must see busy until the committed result
+                    # has reconciled the widget, saved text and undo history.
+                    self._close_writing_dialog()
+                    try:
+                        result = job[0].result()
+                    except Exception as error:
+                        message = str(error) if isinstance(error, (WritingConflictError, ValueError)) else "Não foi possível concluir a operação. Nada foi alterado."
+                        if not self._writing_closed:
+                            messagebox.showwarning("Revisão linguística", message, parent=self.win)
+                    else:
+                        next_job = job[1](result)
+                finally:
+                    self._writing_delivering = False
+                    self._writing_busy = False
+                if next_job is not None:
+                    self._run_writing_job(*next_job)
+        finally:
+            if not self._writing_closed and self._writing_poll is None:
+                self._writing_poll = self.win.after(60, self.poll_writing)
 
     def _render_writing_result(self):
         if self._writing_result is None:
@@ -3339,7 +3360,9 @@ class TranslationEditor:
                 self._refresh_other_writing_rows(ids)
                 self._record_writing_action(issue, "aplicada_lote")
                 self.show_message(f"{preview.count} ocorrência(s) aplicadas. Ctrl+Z desfaz o lote.")
-            self._run_writing_job(apply, applied)
+            # The poller starts the continuation after this delivery releases
+            # its barrier; idle callbacks cannot start a competing operation.
+            return apply, applied
         self._run_writing_job(work, confirm)
 
     def _other_writing_drafts(self, ids):
@@ -3372,7 +3395,7 @@ class TranslationEditor:
 
     def _reload_writing_rows(self):
         row_id = self.current["id"]
-        self.reload_rows()
+        self._reload_rows()
         index = row_index_for_id(self.state.rows, row_id, fallback=None)
         self.update_row_selection(index)
         self.update_selection_label()
@@ -3425,12 +3448,14 @@ class TranslationEditor:
                               and self._writing_history.undo_token is entry["native_token"])
                 if use_native:
                     self.state.loading = True
+                    self._writing_internal_undo_token = entry["native_token"]
                     try:
                         self.trans_text.edit_undo()
                         self.trans_text.edit_modified(False)
                     except tk.TclError:
                         use_native = False
                     finally:
+                        self._writing_internal_undo_token = None
                         self.state.loading = False
                 self._writing_committed(text, revision, preserve_widget=use_native or not context_matches)
                 if same_row and not use_native and context_matches and entry["before"] != text:
@@ -4056,6 +4081,9 @@ class TranslationEditor:
     def reload_rows(self):
         if self._writing_action_blocked():
             return
+        self._reload_rows()
+
+    def _reload_rows(self):
         filtros = self.list_filters()
         consulta = self.list_query_args()
         with closing(initialize_database(self.app.output_db)) as conn:

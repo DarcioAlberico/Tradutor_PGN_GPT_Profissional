@@ -8383,7 +8383,7 @@ class WritingEditorTests(GuiTestCase):
         self.assertNotIn("PUNCTUATION", self.editor.writing_settings["visible_categories"])
 
     @contextmanager
-    def committed_bulk_waiting_for_delivery(self):
+    def committed_bulk_waiting_for_delivery(self, *, pending_text="manual durante espera"):
         original = edit_window.apply_identical_replacements
         committed, release = threading.Event(), threading.Event()
         self.addCleanup(release.set)
@@ -8395,16 +8395,111 @@ class WritingEditorTests(GuiTestCase):
         with unittest.mock.patch.object(edit_window, "apply_identical_replacements", slow):
             self.editor.apply_all_identical(self.ready(), "erro")
             self.wait_for(committed.is_set)
-            self.editor.set_translation_text("manual durante espera", mark_dirty=True, keep_undo=True)
+            if pending_text is not None:
+                self.editor.set_translation_text(pending_text, mark_dirty=True, keep_undo=True)
             self.editor.state.selected_ids = {self.editor.current["id"]}
             snapshot = dict(current=dict(self.editor.current), rows=list(self.editor.state.rows),
                             view=self.editor.current_view(), history=list(self.editor.state.history_stack),
-                            selected=set(self.editor.state.selected_ids), page=self.editor.state.page_index)
+                            selected=set(self.editor.state.selected_ids), page=self.editor.state.page_index,
+                            release=release)
             try:
                 yield snapshot
             finally:
                 release.set()
                 self.wait_for(lambda: not self.editor._writing_busy)
+
+    def assert_committed_bulk_survives_idle_action(self, action, *, during_reconciliation=False):
+        calls = []
+        with self.committed_bulk_waiting_for_delivery(pending_text=None) as snapshot:
+            future = self.editor._writing_job[0]
+            snapshot["release"].set()
+            future.result(timeout=5)
+            self.editor.win.after_cancel(self.editor._writing_poll)
+            self.editor._writing_poll = None
+
+            def idle_action():
+                calls.append(self.editor._writing_busy)
+                action()
+
+            original = self.editor._writing_committed
+
+            def reconcile(*args, **kwargs):
+                if during_reconciliation:
+                    self.editor.win.after_idle(idle_action)
+                    self.editor.win.update_idletasks()
+                return original(*args, **kwargs)
+
+            if not during_reconciliation:
+                self.editor.win.after_idle(idle_action)
+            with unittest.mock.patch.object(self.editor, "_writing_committed", reconcile):
+                self.editor.poll_writing()
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                                 [("erro erro",), ("erro",)])
+            self.assertEqual(calls, [True])
+            self.assertTrue(self.editor.win.winfo_exists())
+            self.assertEqual(self.editor.draft_text(), "erro erro")
+            self.assertEqual(self.editor.current["saved_trans"], "erro erro")
+            self.assertFalse(self.editor.state.dirty)
+            pending = self.editor.win.tk.splitlist(self.editor.win.tk.call("after", "info"))
+            polls = [ident for ident in pending
+                     if "poll_writing" in str(self.editor.win.tk.call("after", "info", ident))]
+            self.assertEqual(polls, [self.editor._writing_poll])
+        self.assertFalse(self.editor._writing_busy)
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("errao errao",), ("errao",)])
+
+    def test_delivery_idle_save_cannot_overwrite_the_committed_bulk(self):
+        self.assert_committed_bulk_survives_idle_action(self.editor.save_shortcut)
+
+    def test_delivery_idle_close_cannot_overwrite_the_committed_bulk(self):
+        self.assert_committed_bulk_survives_idle_action(self.editor.close_editor)
+
+    def test_delivery_stays_blocked_until_bulk_widget_reconciliation(self):
+        self.assert_committed_bulk_survives_idle_action(self.editor.save_shortcut, during_reconciliation=True)
+
+    def test_delivery_idle_close_is_blocked_during_widget_reconciliation(self):
+        self.assert_committed_bulk_survives_idle_action(self.editor.close_editor, during_reconciliation=True)
+
+    def test_delivery_reentrant_idle_poll_cannot_consume_or_unlock_the_bulk_twice(self):
+        self.assert_committed_bulk_survives_idle_action(self.editor.poll_writing)
+
+    def test_delivery_idle_cannot_start_a_competing_vocabulary_job(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        issue = self.ready()
+        self.assert_committed_bulk_survives_idle_action(lambda: self.editor.add_personal_word(issue))
+        self.assertFalse(PersonalDictionary().contains(issue.original))
+        self.editor.add_personal_word(self.ready())
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertTrue(PersonalDictionary().contains(issue.original))
+
+    def test_delivery_worker_error_keeps_idle_commands_blocked_and_allows_a_new_bulk(self):
+        issue = self.ready()
+        with unittest.mock.patch.object(edit_window, "preview_identical_replacements", side_effect=ValueError("preview failure")):
+            self.editor.apply_all_identical(issue, "erro")
+            with self.assertRaises(ValueError):
+                self.editor._writing_job[0].result(timeout=5)
+            self.editor.win.after_cancel(self.editor._writing_poll)
+            self.editor._writing_poll = None
+            self.editor.win.after_idle(self.editor.save_shortcut)
+            self.editor.win.after_idle(self.editor.close_editor)
+            self.editor.win.after_idle(self.editor.poll_writing)
+            self.editor.poll_writing()
+        self.assertFalse(self.editor._writing_busy)
+        self.assertFalse(self.editor._writing_delivering)
+        self.assertIsNone(self.editor._writing_dialog)
+        self.assertTrue(self.editor.win.winfo_exists())
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+        self.assertEqual(self.dialogs.titles("warning"), ["Revisão linguística"])
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "erro erro")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("erro erro",), ("erro",)])
 
     def assert_pending_context_unchanged(self, snapshot):
         self.assertEqual(self.editor.current, snapshot["current"])

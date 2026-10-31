@@ -1,7 +1,8 @@
 # Task 10 — documentação, migração e validação integrada
 
 Data: 2026-10-30. Worktree: `assistente-escrita-portugues`.
-Gates de fonte aprovados; Task 10 parcial por entregas Windows e integração
+Integração original validada em `5754cb5`; evidências do fix round 1 no adendo
+final. Task 10 parcial por entregas Windows e integração
 dos documentos locais pendentes. **Release bloqueado**;
 concordância **experimental**, `grammar_enabled=false` por padrão.
 
@@ -354,3 +355,91 @@ de tamanho continuam pendentes. Não houve PR, merge ou push.
   exceção permanece para a revisão final contra a spec.
 
 Este incremento não declara projeto, concordância estável ou release concluídos.
+
+## Fix round 1 — barreira durante entrega e callbacks idle
+
+Achado Important confirmado contra `5754cb5`: `poll_writing` liberava
+`_writing_busy` antes de fechar o diálogo. O `update_idletasks` necessário ao
+fix nativo também executa callbacks Python `after_idle`. Com o lote já
+comitado, mas o widget ainda antigo, salvar ou fechar nesse intervalo
+regravava a primeira tradução como `errao errao`; depois a entrega mostrava
+`erro erro` como salvo/limpo. Essa era perda real da correção no banco.
+
+RED novo, sem alterar produto: dois testes com lote/SQLite/Tk reais e Events
+para concluir o worker antes de agendar `after_idle(save_shortcut)` ou
+`after_idle(close_editor)`. Ambos observaram banco `errao errao` onde deveria
+estar `erro erro` (**2 failed, 41 deselected in 6.02s**;
+`task-10-fix1-red-idle-delivery.log`). A seleção ampliada acrescentou entrega
+reentrante e idle antes da reconciliação do widget:
+
+```text
+uv run python -m pytest tests/test_editor_windows.py::WritingEditorTests -k 'delivery_idle or delivery_stays or delivery_reentrant' -q
+4 failed, 41 deselected in 8.17s
+```
+
+Log: `task-10-fix1-red-delivery-all.log`.
+
+A barreira agora permanece ativa durante a drenagem, o consumo do Future e
+o callback de reconciliação. Uma entrega em andamento rejeita polling
+reentrante; `finally` restaura os flags e garante um único poll agendado.
+Para preservar o fluxo normal, a confirmação devolve a continuação
+prévia→aplicação ao poller, que a inicia ao liberar essa entrega. O refresh
+interno das linhas usa `_reload_rows`, enquanto o comando público mantém seu
+guard. O undo nativo interno recebe autorização para um único token esperado,
+consumida na chamada e limpa em `finally`; o guard continua bloqueando ações
+nativas externas enquanto a entrega está ocupada.
+
+Sete testes novos exercitam salvar/fechar durante a drenagem e antes da
+reconciliação, polling reentrante, tentativa de job de vocabulário concorrente
+e falha do worker seguida de um novo lote. As asserções verificam banco,
+widget, `saved_trans`, dirty, janela viva, um único timer, ausência de gravação
+de vocabulário concorrente e undo real com restauração do banco. Os testes
+nativos anteriores de crash/TclError/reentrada continuam na seleção.
+
+Primeiro GREEN, incluindo confirmação/aplicação/undo real: **5 passed, 40
+deselected in 10.65s** (`task-10-fix1-green-delivery.log`). Houve duas tentativas
+de gate não aprovadas e preservadas: uma seleção apontava para o arquivo
+inexistente `tests/test_database.py` (**exit 4, nenhum teste**, em
+`task-10-fix1-focused.log`); a seleção corrigida terminou **1 failed, 262 passed,
+60 subtests passed in 131.65s** (`task-10-fix1-focused-valid.log`). A falha era
+do teste novo: consultava o recorder por `showwarning`, mas o harness registra
+o tipo `warning`. A consulta foi corrigida sem alterar produto ou harness.
+
+```text
+uv run python -m pytest tests/test_editor_windows.py::WritingEditorTests -k delivery -q
+9 passed, 39 deselected in 18.74s
+```
+
+Log: `task-10-fix1-green-delivery-all.log`. A repetição integral corrigida
+(`task-10-fix1-focused-final.log`) passou nos 263 testes principais, mas teve
+**7 subfalhas e 53 subtestes passando**, exit 1 em 139.93s, no teste legado
+`test_minimum_height_review_actions_scroll_into_view_with_keyboard_focus`.
+Cada botão permaneceu fora do limite vertical após `focus_set`; esse caso
+havia passado na seleção anterior. O teste exato isolado passou tanto no
+estado atual quanto no baseline detached `2ccfd12`: **1 passed, 7 subtests
+passed in 3.08s** em cada processo (`task-10-fix1-focus-current.log` e
+`task-10-fix1-focus-baseline.log`). Essa comparação não comprova a causa da
+intermitência nem permite atribuí-la ou excluí-la como regressão. Painel,
+foco e o teste legado não foram alterados neste fix. Uma última seleção
+integral, sem exclusões, terminou com exit 0:
+
+```text
+uv run python -m pytest tests/test_editor_windows.py::WritingEditorTests tests/test_editor_windows.py::WritingFixtureIsolationTests tests/test_editor_windows.py::TextUndoHistoryTests tests/test_banco.py tests/test_editor.py -q
+263 passed, 60 subtests passed in 214.89s (0:03:34)
+```
+
+Log: `task-10-fix1-focused-replay.log`. Esse resultado não resolve por
+presunção a intermitência anterior. Outro job pytest também estava ativo no
+computador ao fim da execução; não houve contraste que prove relação causal
+com a falha de foco ou com a duração da seleção.
+
+Ruff global, mypy em 18 módulos e `git diff --check` passaram nesta rodada
+(`task-10-fix1-ruff-final.log`, `task-10-fix1-mypy-final.log`). A suíte completa **não foi
+repetida neste fix round**, conforme escopo explícito da revisão; os 2426
+passes acima pertencem ao commit anterior, não certificam o novo patch.
+
+O minor do driver local de privacidade permanece deferred, fora deste loop:
+o driver atual inclui a pasta de evidências, mas o log final anterior descreve
+o escopo anterior. Não se atribui àquele log a ampliação posterior do driver.
+Licenças, entregas Windows, preferência experimental, corpus e thresholds
+permaneceram inalterados; este fix não aprova release.
