@@ -183,3 +183,42 @@ Não houve benchmark, teste UI/múltiplas janelas ou aprovação de distribuiç�
 `pipelineCaching=false` permanece: a retenção caracterizada em `a92db95`
 continua impedindo habilitar o pool. Nenhum diagnóstico não rastreado de outra
 rodada, arquivo de vendor ou configuração compartilhada foi alterado.
+
+## Ajuste após revisão — separadores U+001C/U+001D/U+001E
+
+A revisão identificou que `\s` também aceita os três controles reconhecidos
+como quebras por `str.splitlines()`. Eles não estavam excluídos do espaço
+horizontal nem presentes na fronteira de capitalização; assim, os filtros
+podiam descartar um alerta real entre linhas. O ajuste acrescenta esses três
+controles às duas classes de exclusão e à fronteira original, sem ampliar
+qualquer supressão ou alterar as demais decisões.
+
+Foram acrescentados nove negativos aos testes HTTP: três separadores entre
+nome protegido e palavra minúscula, três antes da reticência e três após a
+reticência. RED e GREEN observados, respectivamente:
+
+```text
+uv run python -m pytest tests/test_languagetool_client.py -k 'x1c or x1d or x1e' -q --tb=short
+9 failed, 99 deselected in 5.26s
+
+uv run python -m pytest tests/test_languagetool_client.py -k 'x1c or x1d or x1e' -q
+9 passed, 99 deselected in 5.06s
+
+uv run python -m pytest tests/test_languagetool_client.py -q
+108 passed in 54.06s
+```
+
+Um probe sintético em memória, sem exportar texto/sugestões/offsets, verificou
+os mesmos nove controles com LT 6.6 real: **9/9** tinham um alerta bruto da
+regra relevante e preservaram sua identidade completa em `analyze`. O probe
+usou apenas projeção no transporte normal e desligou o filho ao terminar.
+
+```text
+uv run python ferramentas/avaliar_corretor_portugues.py --mode full --output-dir build/reports/task-9-quality-line-boundaries
+exit 0; TP=9, FP=1, misses=2; precision=0.9; recall=0.8181818181818182
+failed_cases=0; protected_violations=0; ta004_literal=true; stable=false
+```
+
+O replay intacto confirmou os mesmos números da melhoria anterior. Ruff dos
+dois arquivos e mypy do adapter passaram; `git diff --check` passou, e o hash
+do corpus permaneceu igual ao fixado. Não foi executada a suíte completa.

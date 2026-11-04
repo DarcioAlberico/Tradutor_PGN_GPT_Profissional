@@ -217,6 +217,9 @@ def test_masked_capitalization_requires_hidden_initial_lexical_context(text, sou
     ("Kasparov\r\nanalisou a posição.", "Kasparov"),
     ("Kasparov\u2028analisou a posição.", "Kasparov"),
     ("Kasparov\u2029analisou a posição.", "Kasparov"),
+    ("Kasparov\x1canalisou a posição.", "Kasparov"),
+    ("Kasparov\x1danalisou a posição.", "Kasparov"),
+    ("Kasparov\x1eanalisou a posição.", "Kasparov"),
     ("[%eval +0.35] analisou a posição.", ""),
     ("$5 analisou a posição.", ""),
     ("Cd4 analisou a posição.", "Cd4"),
@@ -277,6 +280,7 @@ def test_terminal_ellipsis_preserves_standalone_editorial_punctuation(text, word
 @pytest.mark.parametrize("suffix", [
     " .", " ,", " !", " ?", " ;", " :", " ..", " ....", " . . .",
     " ... talvez.", "\n...", "\r\n...", "\u2028...", " ...\u2029", " ...”",
+    "\x1c...", "\x1d...", "\x1e...", " ...\x1c", " ...\x1d", " ...\x1e",
 ])
 def test_terminal_ellipsis_does_not_hide_other_spacing_or_boundaries(suffix):
     text = "Talvez" + suffix

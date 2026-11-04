@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 
 EXPECTED_VERSION = "6.6"
 _TERMINAL_ELLIPSIS = re.compile(
-    r"(?P<space>[^\S\r\n\v\f\x85\u2028\u2029]+)(?P<dots>\.{3}|…)"
-    r"[^\S\r\n\v\f\x85\u2028\u2029]*\Z"
+    r"(?P<space>[^\S\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029]+)(?P<dots>\.{3}|…)"
+    r"[^\S\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029]*\Z"
 )
 
 
@@ -109,7 +109,7 @@ def _artificial_sentence_start(issue: WritingIssue, protected: ProtectedText) ->
                    for value in issue.suggestions)):
         return False
     start = max((index + 1 for index, char in enumerate(protected.original_text[:issue.start])
-                 if char in ".!?…\r\n\v\f\x85\u2028\u2029"), default=0)
+                 if char in ".!?…\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"), default=0)
     prefix = protected.original_text[start:issue.start]
     ranges = [interval for interval in protected.ranges
               if interval.start < issue.start and start < interval.end]
