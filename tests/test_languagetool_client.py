@@ -12,6 +12,8 @@ import pytest
 import requests
 
 from tradutor_pgn.languagetool_client import LanguageToolLocalAdapter, LanguageToolUnavailable
+from tradutor_pgn.writing_protection import protect_text
+from tradutor_pgn.writing_types import WritingRequest
 
 
 @contextmanager
@@ -96,6 +98,9 @@ def test_post_explicit_pt_br_disabled_rules_and_utf16_offsets(caplog):
     ("CONCORDANCIA_QUALQUER", "GRAMMAR", "grammar", "VERBAL_AGREEMENT"),
     ("SER_ADJECTIVE_AGREEMENT", "GRAMMAR", "grammar", "NOMINAL_AGREEMENT"),
     ("TODOS_NUMBER_AGREEMENT", "GRAMMAR", "grammar", "NOMINAL_AGREEMENT"),
+    ("LIGACAO_ECG_V3", "GRAMMAR", "grammar", "NOMINAL_AGREEMENT"),
+    ("LIGACAO_ECG_V30", "GRAMMAR", "grammar", "GRAMMAR"),
+    ("LIGACAO_ECG_V2", "GRAMMAR", "grammar", "GRAMMAR"),
 ])
 def test_category_mapping_retains_rule_identity(rule_id, category, issue_type, expected):
     with http_server(response(match(0, 5, rule_id=rule_id, category=category, issue_type=issue_type))) as (url, _):
@@ -175,3 +180,125 @@ def test_redirect_never_forwards_post_payload(status):
             with pytest.raises(LanguageToolUnavailable):
                 LanguageToolLocalAdapter(url).check("segredo", frozenset())
     assert external_requests == []
+
+
+@pytest.mark.parametrize("text,source,glossary", [
+    ("Kasparov analisou a posição.", "Kasparov", ()),
+    ("🙂 Sa\u0303o analisou a posição.", "São", ()),
+    ('“Érica analisou a posição.”', "Érica", ()),
+    ("Concluiu. Kasparov analisou a posição.", "Kasparov", ()),
+    ("Defesa Índia do Rei analisou a posição.", "", ("Defesa Índia do Rei",)),
+])
+def test_masked_capitalization_requires_hidden_initial_lexical_context(text, source, glossary):
+    request = WritingRequest(text, 4, "pt-BR", source_text=source,
+                             glossary_terms=frozenset(glossary), grammar_enabled=True)
+    protected = protect_text(request)
+    start = text.index("analisou")
+    offset = len(protected.projected_text[:start].encode("utf-16-le")) // 2
+    raw = match(offset, 8, rule_id="UPPERCASE_SENTENCE_START")
+    raw["replacements"] = [{"value": "Analisou"}]
+    with http_server(response(raw)) as (url, received):
+        adapter = LanguageToolLocalAdapter(url)
+        # Parsing/check remain lossless. Only the protected-context analysis
+        # can establish that this capitalization premise was manufactured.
+        assert len(adapter.check(protected.projected_text, frozenset(), text_version=4)) == 1
+        assert adapter.analyze(request, protected) == ()
+    assert all(post[1]["text"] == [protected.projected_text] for post in received)
+
+
+@pytest.mark.parametrize("text,source", [
+    ("analisou a posição.", ""),
+    ("🙂 analisou a posição.", ""),
+    ("Kasparov. analisou a posição.", "Kasparov"),
+    ("Kasparov! analisou a posição.", "Kasparov"),
+    ("Kasparov? analisou a posição.", "Kasparov"),
+    ("Kasparov… analisou a posição.", "Kasparov"),
+    ("Kasparov\nanalisou a posição.", "Kasparov"),
+    ("Kasparov\r\nanalisou a posição.", "Kasparov"),
+    ("Kasparov\u2028analisou a posição.", "Kasparov"),
+    ("Kasparov\u2029analisou a posição.", "Kasparov"),
+    ("[%eval +0.35] analisou a posição.", ""),
+    ("$5 analisou a posição.", ""),
+    ("Cd4 analisou a posição.", "Cd4"),
+    ("13.Cd4 analisou a posição.", ""),
+    ("Kasparov [%eval +0.35] analisou a posição.", "Kasparov"),
+    ("kasparov analisou a posição.", "kasparov"),
+    ("Kasparov; analisou a posição.", "Kasparov"),
+    ("Kasparov errado analisou a posição.", "Kasparov"),
+])
+def test_masked_capitalization_preserves_boundaries_and_uncertain_context(text, source):
+    request = WritingRequest(text, 4, "pt-BR", source_text=source, grammar_enabled=True)
+    protected = protect_text(request)
+    start = text.index("analisou")
+    offset = len(protected.projected_text[:start].encode("utf-16-le")) // 2
+    raw = match(offset, 8, rule_id="UPPERCASE_SENTENCE_START")
+    raw["replacements"] = [{"value": "Analisou"}]
+    with http_server(response(raw)) as (url, _):
+        issues = LanguageToolLocalAdapter(url).analyze(request, protected)
+    assert len(issues) == 1
+    assert (issues[0].start, issues[0].end, issues[0].original) == (start, start + 8, "analisou")
+    assert issues[0].suggestions == ("Analisou",)
+    issues[0].validate_for(request)
+
+
+@pytest.mark.parametrize("rule_id,suggestions", [
+    ("OTHER_RULE", ("Analisou",)),
+    ("UPPERCASE_SENTENCE_START", ("Analisou", "Analisaram")),
+    ("UPPERCASE_SENTENCE_START", ()),
+])
+def test_masked_context_does_not_suppress_other_grammar_edits(rule_id, suggestions):
+    request = WritingRequest("Kasparov analisou.", 4, "pt-BR", source_text="Kasparov")
+    protected = protect_text(request)
+    raw = match(9, 8, rule_id=rule_id)
+    raw["replacements"] = [{"value": value} for value in suggestions]
+    with http_server(response(raw)) as (url, _):
+        assert len(LanguageToolLocalAdapter(url).analyze(request, protected)) == 1
+
+
+@pytest.mark.parametrize("text,word", [
+    ("Se 13.Cd4, então ...", "então"),
+    ("Talvez …", "Talvez"),
+    ("Talvez\u00a0...", "Talvez"),
+    ("🙂 e\u0301 ...", "e\u0301"),
+    ("Talvez ...  ", "Talvez"),
+])
+def test_terminal_ellipsis_preserves_standalone_editorial_punctuation(text, word):
+    request = WritingRequest(text, 3, "pt-BR", grammar_enabled=True)
+    protected = protect_text(request)
+    start = text.index(word)
+    punctuation = next(index for index in range(start + len(word), len(text)) if text[index] in ".…")
+    offset = len(text[:start].encode("utf-16-le")) // 2
+    raw = match(offset, punctuation + 1 - start, rule_id="SPACE_BEFORE_PUNCTUATION2")
+    raw["replacements"] = [{"value": word + text[punctuation]}]
+    with http_server(response(raw)) as (url, _):
+        assert LanguageToolLocalAdapter(url).analyze(request, protected) == ()
+
+
+@pytest.mark.parametrize("suffix", [
+    " .", " ,", " !", " ?", " ;", " :", " ..", " ....", " . . .",
+    " ... talvez.", "\n...", "\r\n...", "\u2028...", " ...\u2029", " ...”",
+])
+def test_terminal_ellipsis_does_not_hide_other_spacing_or_boundaries(suffix):
+    text = "Talvez" + suffix
+    request = WritingRequest(text, 3, "pt-BR", grammar_enabled=True)
+    punctuation = next(index for index in range(6, len(text)) if text[index] in ".,…!?;:")
+    raw = match(0, punctuation + 1, rule_id="SPACE_BEFORE_PUNCTUATION2")
+    raw["replacements"] = [{"value": "Talvez" + text[punctuation]}]
+    protected = protect_text(request)
+    with http_server(response(raw)) as (url, _):
+        issues = LanguageToolLocalAdapter(url).analyze(request, protected)
+    assert len(issues) == 1
+    assert issues[0].original == protected.projected_text[:punctuation + 1]
+
+
+@pytest.mark.parametrize("rule_id,suggestions", [
+    ("SPACE_BEFORE_PUNCTUATION2", ("Outro.",)),
+    ("SPACE_BEFORE_PUNCTUATION2", ("Talvez.", "Outro.")),
+    ("OTHER_RULE", ("Talvez.",)),
+])
+def test_terminal_ellipsis_requires_only_the_same_whitespace_edit(rule_id, suggestions):
+    request = WritingRequest("Talvez ...", 3, "pt-BR")
+    raw = match(0, 8, rule_id=rule_id)
+    raw["replacements"] = [{"value": value} for value in suggestions]
+    with http_server(response(raw)) as (url, _):
+        assert len(LanguageToolLocalAdapter(url).analyze(request, protect_text(request))) == 1

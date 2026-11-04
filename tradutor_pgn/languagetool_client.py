@@ -1,7 +1,9 @@
 """Private loopback-only LanguageTool HTTP boundary and issue normalization."""
 
 from collections.abc import Callable
+import re
 from typing import TYPE_CHECKING, Any
+import unicodedata
 from urllib.parse import urlsplit
 
 import requests
@@ -17,6 +19,10 @@ if TYPE_CHECKING:
 
 
 EXPECTED_VERSION = "6.6"
+_TERMINAL_ELLIPSIS = re.compile(
+    r"(?P<space>[^\S\r\n\v\f\x85\u2028\u2029]+)(?P<dots>\.{3}|…)"
+    r"[^\S\r\n\v\f\x85\u2028\u2029]*\Z"
+)
 
 
 class LanguageToolUnavailable(RuntimeError):
@@ -81,9 +87,69 @@ def _category(rule: dict[str, Any]) -> IssueCategory:
     if rule_id.startswith(("PT_AGREEMENT", "PT_NOMINAL_AGREEMENT")) or rule_id in {
         "GENERAL_GENDER_AGREEMENT_ERRORS", "GENERAL_NUMBER_AGREEMENT_ERRORS",
         "GENERAL_GENDER_NUMBER_AGREEMENT_ERRORS", "SER_ADJECTIVE_AGREEMENT", "TODOS_NUMBER_AGREEMENT",
+        # LT 6.6: one pattern, feminine subject + ser/estar + masculine
+        # adjective; the suggestion changes only the adjective's gender.
+        "LIGACAO_ECG_V3",
     }:
         return "NOMINAL_AGREEMENT"
     return "GRAMMAR"
+
+
+def _artificial_sentence_start(issue: WritingIssue, protected: ProtectedText) -> bool:
+    """Recognize capitalization whose initial lexical context was masked.
+
+    Require an uppercase source/glossary word in the same original sentence,
+    with no visible lexical context or technical masks before this issue.
+    Original punctuation/line boundaries take precedence over the projection.
+    No original/protected text is sent to the provider to establish this.
+    """
+    if (issue.rule_id != "UPPERCASE_SENTENCE_START" or not issue.original[0].islower()
+            or not issue.suggestions
+            or any(value != issue.original[0].upper() + issue.original[1:]
+                   for value in issue.suggestions)):
+        return False
+    start = max((index + 1 for index, char in enumerate(protected.original_text[:issue.start])
+                 if char in ".!?…\r\n\v\f\x85\u2028\u2029"), default=0)
+    prefix = protected.original_text[start:issue.start]
+    ranges = [interval for interval in protected.ranges
+              if interval.start < issue.start and start < interval.end]
+    if not ranges or any(interval.kind not in {"source_name", "glossary"} for interval in ranges):
+        return False
+    # Quotation marks and emoji can precede an initial word without supplying
+    # lexical context. Combining marks belong to the masked word, except the
+    # explicit emoji variation selector/ZWJ, which may remain visible.
+    if any(not (char.isspace() or char in "\"'“”‘’«»()[]{}\ufe0f\u200d"
+                or unicodedata.category(char) == "So")
+           for char in protected.projected_text[start:issue.start]):
+        return False
+    first_letter = next((char for char in prefix if char.isalpha()), "")
+    return first_letter.isupper()
+
+
+def _terminal_editorial_ellipsis(issue: WritingIssue, protected: ProtectedText) -> bool:
+    """Keep a spaced, standalone terminal ellipsis as an editorial choice.
+
+    LT 6.6 marks only the first dot of ``...``. Require exactly three dots
+    (or one ellipsis character), a preceding word, and alternatives that do
+    nothing except join that word to the ellipsis. Inline/quoted fragments,
+    line breaks, other punctuation and other edits remain unclassified.
+    """
+    if issue.rule_id != "SPACE_BEFORE_PUNCTUATION2" or not issue.suggestions:
+        return False
+    text = protected.original_text
+    match = _TERMINAL_ELLIPSIS.search(text)
+    if match is None or match.start() == 0:
+        return False
+    before = text[match.start() - 1]
+    if not (before.isalpha() or unicodedata.category(before).startswith("M")):
+        return False
+    start, end = match.span("space")
+    if not (issue.start <= start < end < issue.end <= match.end("dots")):
+        return False
+    if issue.original != text[issue.start:issue.end]:
+        return False
+    joined = issue.original[:start - issue.start] + issue.original[end - issue.start:]
+    return all(value == joined for value in issue.suggestions)
 
 
 def _issues(payload: Any, text: str, disabled: frozenset[str], version: int) -> tuple[WritingIssue, ...]:
@@ -196,7 +262,10 @@ class LanguageToolLocalAdapter:
         return self._check_url(self._url, text, disabled, text_version)
 
     def analyze(self, request: WritingRequest, protected: ProtectedText) -> tuple[WritingIssue, ...]:
-        return self.check(protected.projected_text, request.disabled_rule_ids, text_version=request.text_version)
+        return tuple(issue for issue in self.check(
+            protected.projected_text, request.disabled_rule_ids, text_version=request.text_version,
+        ) if not (_artificial_sentence_start(issue, protected)
+                  or _terminal_editorial_ellipsis(issue, protected)))
 
     def status(self) -> AssistantStatus:
         return self._process.status() if self._process is not None else AssistantStatus("ready", "full")
