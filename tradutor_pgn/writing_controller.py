@@ -8,15 +8,18 @@ application's shared assistant. The application owns service shutdown.
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 import hashlib
 import threading
-from typing import Literal, Protocol
+from typing import Iterator, Literal, Protocol
 import uuid
 
 from .writing_assistant import PortugueseWritingAssistant
 from .spelling_suggestions_process import SuggestionSnapshot
-from .writing_types import AssistantStatus, WritingIssue, WritingRequest, WritingResult
+from .writing_types import (
+    AssistantStatus, WritingIssue, WritingRequest, WritingResult, WritingRevision, WritingRevisionChanged,
+)
 
 
 class AnalysisService(Protocol):
@@ -56,13 +59,14 @@ class WritingContext:
 
 @dataclass(frozen=True)
 class WritingEvent:
-    kind: Literal["status", "result", "error"]
+    kind: Literal["status", "result", "error", "invalidated"]
     context: WritingContext
     text_version: int
     text_digest: str
     status: AssistantStatus | None = None
     result: WritingResult | None = None
     diagnostic: str = ""
+    revision: WritingRevision | None = None
 
 
 @dataclass(frozen=True)
@@ -72,11 +76,11 @@ class _Work:
     request: WritingRequest
     digest: str
 
-    def event(self, kind: Literal["status", "result", "error"], *,
+    def event(self, kind: Literal["status", "result", "error", "invalidated"], *,
               status: AssistantStatus | None = None, result: WritingResult | None = None,
               diagnostic: str = "") -> WritingEvent:
         return WritingEvent(kind, self.context, self.request.text_version, self.digest,
-                            status, result, diagnostic)
+                            status, result, diagnostic, result.revision if result else None)
 
 
 class WritingController:
@@ -120,8 +124,56 @@ class WritingController:
     def _start(self, work: _Work) -> None:
         self._active = work
         initial = getattr(self._assistant, "analyze_initial", self._assistant.analyze)
-        future = self._executor.submit(initial, work.request)
+
+        def analyze() -> WritingResult:
+            try:
+                revision = self._revision()
+            except Exception:
+                revision = None
+            result = initial(work.request)
+            return result if result.revision is not None else result.with_revision(revision)
+
+        future = self._executor.submit(analyze)
         future.add_done_callback(lambda done: self._finished(work, done))
+
+    def _revision(self) -> WritingRevision | None:
+        revision = getattr(self._assistant, "suggestion_revision", None)
+        return revision() if callable(revision) else None
+
+    def _revision_current(self, result: WritingResult) -> bool:
+        if result.mode == "unavailable" and not result.issues:
+            return True
+        try:
+            return result.revision == self._revision()
+        except Exception:
+            return False
+
+    def is_current_issue(self, issue: WritingIssue) -> bool:
+        """Validate displayed references again, even without a newly queued event."""
+        with self._lock:
+            work, result = self._latest, self._result
+            if self._closed or work is None or result is None or issue.revision != result.revision:
+                return False
+            try:
+                issue.validate_for(work.request)
+            except ValueError:
+                return False
+            current = next((item for item in result.issues if item.issue_id == issue.issue_id), None)
+            return (current is not None and current.suggestions[:len(issue.suggestions)] == issue.suggestions
+                    and self._revision_current(result))
+
+    @contextmanager
+    def guard_issue(self, issue: WritingIssue) -> Iterator[None]:
+        with self._lock:
+            if not self.is_current_issue(issue):
+                raise WritingRevisionChanged("Ocorrência desatualizada; aguarde nova análise.")
+            guard = getattr(self._assistant, "guard_revision", None)
+            result = self._result
+            assert result is not None
+            with guard(result.revision) if callable(guard) else nullcontext():
+                if not self.is_current_issue(issue):
+                    raise WritingRevisionChanged("Ocorrência desatualizada; aguarde nova análise.")
+                yield
 
     def _finished(self, work: _Work, future: Future[WritingResult]) -> None:
         try:
@@ -157,7 +209,8 @@ class WritingController:
                 return
             current = next((item for item in result.issues if item.issue_id == issue.issue_id
                             and item.text_version == issue.text_version and item.start == issue.start
-                            and item.end == issue.end and item.original == issue.original), None)
+                            and item.end == issue.end and item.original == issue.original
+                            and item.revision == issue.revision), None)
             if current is None:
                 return
             issue = current
@@ -243,6 +296,9 @@ class WritingController:
             work = self._latest
             if self._closed or work is None:
                 return ()
+            if self._result is not None and not self._revision_current(self._result):
+                self.submit(work.request, record_id=work.context.record_id)
+                return (work.event("invalidated", diagnostic="Revisão alterada; atualizando análise."),)
             # Only grammar's global lifecycle is observable while working.
             # Completed status is derived from this request's own result.
             if self._active is work and work.request.grammar_enabled:

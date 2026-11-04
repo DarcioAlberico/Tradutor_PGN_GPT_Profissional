@@ -46,6 +46,10 @@ class ProgressiveService:
     def __init__(self):
         self.callbacks = []
         self.cancelled = []
+        self.revision = (0, "initial")
+
+    def suggestion_revision(self):
+        return self.revision
 
     def analyze(self, request):
         raise AssertionError("interactive controller must prefer initial analysis")
@@ -133,6 +137,27 @@ def test_selection_bursts_keep_only_one_pending_preparation():
         assert controller._executor._work_queue.qsize() <= 1
     finally:
         release.set()
+        controller.shutdown()
+
+
+def test_revision_is_transported_and_rechecked_when_already_queued_events_are_polled():
+    service = ProgressiveService()
+    controller = WritingController(service)
+    try:
+        controller.submit(WritingRequest("posiçao", 4, "pt"))
+        initial = next(event for event in wait_result(controller) if event.kind == "result")
+        issue = initial.result.issues[0]
+        controller.request_suggestions(issue)
+        deadline = time.monotonic() + 3
+        while not service.callbacks and time.monotonic() < deadline:
+            time.sleep(.001)
+        service.callbacks[-1](SuggestionSnapshot(("posição",), "partial"))
+        service.revision = (1, "changed-after-enqueue")
+        events = controller.poll()
+        assert not any(event.result and event.result.issues[0].suggestions for event in events)
+        assert issue.revision == initial.revision == (0, "initial")
+        assert not controller.is_current_issue(issue)
+    finally:
         controller.shutdown()
 
 

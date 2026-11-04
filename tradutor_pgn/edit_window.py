@@ -3083,6 +3083,11 @@ class TranslationEditor:
             elif event.kind == "result":
                 self._writing_result = event.result
                 self._render_writing_result()
+            elif event.kind == "invalidated":
+                self._writing_result = None
+                self.writing_panel.set_snapshot((), AssistantStatus("starting", "spelling_only", event.diagnostic))
+                for tag in ("spell_error", "writing_spelling", "writing_grammar"):
+                    self.trans_text.tag_remove(tag, "1.0", tk.END)
             else:
                 self.writing_panel.set_snapshot((), AssistantStatus("failed", "unavailable", event.diagnostic))
         job = self._writing_job
@@ -3163,25 +3168,31 @@ class TranslationEditor:
         self.trans_text.focus_set()
 
     def _valid_writing_issue(self, issue):
+        if self._sync_writing_preferences():
+            return False
         if self._writing_closed or self._writing_request != self.writing_request():
             return False
         try:
             issue.validate_for(self.writing_request())
         except ValueError:
             return False
-        return issue in self.writing_panel.issues
+        return issue in self.writing_panel.issues and self.writing_controller.is_current_issue(issue)
 
     def apply_issue(self, issue, replacement):
         if not self._valid_writing_issue(issue):
             self.show_message("Ocorrência desatualizada; aguarde uma nova análise.")
             return
         try:
-            updated = apply_writing_issue(self.writing_request(), issue, replacement)
+            request = self.writing_request()
+            updated = apply_writing_issue(request, issue, replacement)
+            with self.writing_controller.guard_issue(issue):
+                if request != self.writing_request() or not self._valid_writing_issue(issue):
+                    raise ValueError("writing context changed")
+                self.current["auto_only"] = False
+                self.set_translation_text(updated, mark_dirty=True, focus_editor=True, keep_undo=True)
         except ValueError:
             self.show_message("Trecho protegido ou desatualizado; nenhuma alteração.")
             return
-        self.current["auto_only"] = False
-        self.set_translation_text(updated, mark_dirty=True, focus_editor=True, keep_undo=True)
         self.trans_text.mark_set(tk.INSERT, self.writing_index(issue.start + len(replacement)))
         self._record_writing_action(issue, "aplicada")
 
@@ -3327,7 +3338,8 @@ class TranslationEditor:
                 return
             if self._writing_closed:
                 return
-            if (self.current["id"] != record_id or self.writing_request() != request
+            if (not self._valid_writing_issue(issue)
+                    or self.current["id"] != record_id or self.writing_request() != request
                     or self.selected_source_file() != source_file
                     or self.writing_glossary_terms(whole_book=True) != book_terms):
                 self.show_message("O contexto mudou; crie uma nova prévia.")
@@ -3338,7 +3350,12 @@ class TranslationEditor:
                 return
             def apply():
                 with closing(initialize_database(db_path)) as conn:
-                    operation = apply_identical_replacements(conn, preview)
+                    guard = getattr(self.writing_assistant, "guard_revision", None)
+                    if callable(guard):
+                        operation = apply_identical_replacements(
+                            conn, preview, commit_guard=lambda: guard(issue.revision))
+                    else:
+                        operation = apply_identical_replacements(conn, preview)
                     text = conn.execute("SELECT translated_comment FROM comments WHERE id = ?", (record_id,)).fetchone()[0]
                     revision = conn.execute("SELECT writing_revision FROM comments WHERE id = ?", (record_id,)).fetchone()[0]
                 return operation, text, revision

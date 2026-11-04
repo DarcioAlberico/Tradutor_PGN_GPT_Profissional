@@ -8189,6 +8189,193 @@ class WritingEditorTests(GuiTestCase):
                       and self.editor._valid_writing_issue(self.editor.writing_panel.issues[0]))
         return self.editor.writing_panel.issues[0]
 
+    def progressive_ready(self):
+        from test_writing_progressive import assistant
+        from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
+        self.editor.shutdown_writing()
+        number = getattr(self, "_progressive_count", 0) + 1
+        self._progressive_count = number
+        service, suggestions, vocabulary = assistant(self.base / f"progressive-{number}")
+        self.app.writing_assistant = service
+        self.addCleanup(service.shutdown)
+        self.editor = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.editor.set_translation_text("errao errao!", mark_dirty=True, keep_undo=True)
+        self.ready()
+        self.wait_for(lambda: bool(suggestions.callbacks))
+        suggestions.callbacks[-1](SuggestionSnapshot(("erro",), "partial"))
+        self.wait_for(lambda: bool(self.editor.writing_panel.issues[0].suggestions))
+        return service, suggestions, vocabulary, self.editor.writing_panel.issues[0]
+
+    def test_external_vocabulary_revokes_displayed_prefix_in_two_editors_without_editing_drafts(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
+        service, suggestions, vocabulary, first = self.progressive_ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        other.set_translation_text("errao errao?", mark_dirty=True, keep_undo=True)
+        self.wait_for(lambda: bool(other.writing_panel.issues) and len(suggestions.callbacks) >= 2)
+        suggestions.callbacks[-1](SuggestionSnapshot(("erro",), "partial"))
+        self.wait_for(lambda: bool(other.writing_panel.issues[0].suggestions))
+        second = other.writing_panel.issues[0]
+        before = [(editor.draft_text(), editor.state.dirty, editor.writing_version,
+                   editor._writing_history.undo_token) for editor in (self.editor, other)]
+        PersonalDictionary(vocabulary.path).add("errao")
+        for editor, item in ((self.editor, first), (other, second)):
+            editor.apply_issue(item, "erro")
+        self.wait_for(lambda: not self.editor.writing_panel.issues and not other.writing_panel.issues)
+        after = [(editor.draft_text(), editor.state.dirty, editor.writing_version,
+                  editor._writing_history.undo_token) for editor in (self.editor, other)]
+        self.assertEqual(before, after)
+        self.assertEqual(service.analyze_initial(self.editor.writing_request()).issues, ())
+
+    def test_revision_change_between_replacement_calculation_and_mutation_preserves_draft(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        original = edit_window.apply_writing_issue
+        for revision in ("file", "cache", "rules", "glossary"):
+            with self.subTest(revision=revision):
+                service, _, vocabulary, item = self.progressive_ready()
+                before = (self.editor.draft_text(), self.editor.state.dirty,
+                          self.editor._writing_history.undo_token)
+                calculated = []
+                def calculate_then_change(request, issue, replacement):
+                    updated = original(request, issue, replacement)
+                    calculated.append(True)
+                    if revision == "file":
+                        PersonalDictionary(vocabulary.path).add("errao")
+                    elif revision == "cache":
+                        service.invalidate_cache()
+                    else:
+                        service.set_cache_revisions(**{revision: "updated"})
+                    return updated
+                with unittest.mock.patch.object(edit_window, "apply_writing_issue", calculate_then_change):
+                    self.editor.apply_issue(item, "erro")
+                self.assertEqual(calculated, [True])
+                self.assertEqual((self.editor.draft_text(), self.editor.state.dirty,
+                                  self.editor._writing_history.undo_token), before)
+
+    def test_nonblocking_vocabulary_lock_refuses_apply_and_keeps_tk_responsive(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        _, _, vocabulary, item = self.progressive_ready()
+        entered, release = threading.Event(), threading.Event()
+        def hold_writer():
+            with PersonalDictionary(vocabulary.path)._locked():
+                entered.set()
+                release.wait(4)
+        holder = threading.Thread(target=hold_writer)
+        holder.start()
+        self.assertTrue(entered.wait(3))
+        try:
+            before = self.editor.draft_text()
+            started = time.monotonic()
+            self.editor.apply_issue(item, "erro")
+            self.assertLess(time.monotonic() - started, .1)
+            beats = []
+            for index in range(10):
+                self.root.after(0, lambda value=index: beats.append(value))
+            self.pump()
+            self.assertEqual(beats, list(range(10)))
+            self.assertEqual(self.editor.draft_text(), before)
+        finally:
+            release.set()
+            holder.join(4)
+
+    def test_glossary_change_during_calculation_keeps_newly_protected_draft(self):
+        _, _, _, item = self.progressive_ready()
+        before = self.editor.draft_text()
+        terms = [self.editor.writing_glossary_terms()]
+        original = edit_window.apply_writing_issue
+        def calculate_then_protect(request, issue, replacement):
+            updated = original(request, issue, replacement)
+            terms[0] = terms[0] | {"errao"}
+            return updated
+        with unittest.mock.patch.object(self.editor, "writing_glossary_terms", lambda **kwargs: terms[0]):
+            with unittest.mock.patch.object(edit_window, "apply_writing_issue", calculate_then_protect):
+                self.editor.apply_issue(item, "erro")
+        self.assertEqual(self.editor.draft_text(), before)
+
+    def test_bulk_revision_change_at_confirmation_preserves_database_and_draft(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        _, _, vocabulary, item = self.progressive_ready()
+        before = self.editor.draft_text()
+        with initialize_database(self.db_path) as conn:
+            saved = conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall()
+        conn.close()
+        def confirm_then_change(*args, **kwargs):
+            PersonalDictionary(vocabulary.path).add("errao")
+            return True
+        with unittest.mock.patch.object(edit_window.messagebox, "askyesno", confirm_then_change):
+            self.editor.apply_all_identical(item, "erro")
+            self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), before)
+        with initialize_database(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(), saved)
+        conn.close()
+
+    def test_bulk_revision_change_after_sql_updates_rolls_back_every_row(self):
+        from tradutor_pgn import database
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        original = database._write_bulk_translation
+        for change in ("file", "cache", "rules", "glossary"):
+            with self.subTest(change=change):
+                service, _, vocabulary, item = self.progressive_ready()
+                before = (self.editor.draft_text(), self.editor.state.dirty,
+                          self.editor.writing_version, self.editor._writing_history.undo_token)
+                with initialize_database(self.db_path) as conn:
+                    saved = conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall()
+                conn.close()
+                def write_then_change(*args, **kwargs):
+                    original(*args, **kwargs)
+                    if change == "file":
+                        PersonalDictionary(vocabulary.path).add("errao")
+                    elif change == "cache":
+                        service.invalidate_cache()
+                    else:
+                        service.set_cache_revisions(**{change: "updated"})
+                with unittest.mock.patch.object(database, "_write_bulk_translation", write_then_change):
+                    self.editor.apply_all_identical(item, "erro")
+                    self.wait_for(lambda: not self.editor._writing_busy)
+                self.assertEqual((self.editor.draft_text(), self.editor.state.dirty,
+                                  self.editor.writing_version, self.editor._writing_history.undo_token), before)
+                with initialize_database(self.db_path) as conn:
+                    self.assertEqual(conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall(), saved)
+                    self.assertEqual(conn.execute("SELECT count(*) FROM writing_bulk_rows").fetchone()[0], 0)
+                    self.assertEqual(conn.execute("SELECT count(*) FROM comment_history").fetchone()[0], 0)
+                conn.close()
+
+    def test_bulk_busy_vocabulary_rolls_back_and_keeps_tk_responsive(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        _, _, vocabulary, item = self.progressive_ready()
+        before = (self.editor.draft_text(), self.editor.state.dirty,
+                  self.editor._writing_history.undo_token)
+        with initialize_database(self.db_path) as conn:
+            saved = conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall()
+        conn.close()
+        entered, release = threading.Event(), threading.Event()
+        def hold_writer():
+            with PersonalDictionary(vocabulary.path)._locked():
+                entered.set()
+                release.wait(5)
+        holder = threading.Thread(target=hold_writer)
+        holder.start()
+        self.assertTrue(entered.wait(3))
+        try:
+            beats = []
+            self.root.after(0, lambda: beats.append(True))
+            started = time.monotonic()
+            self.editor.apply_all_identical(item, "erro")
+            self.wait_for(lambda: not self.editor._writing_busy)
+            self.assertTrue(beats)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual((self.editor.draft_text(), self.editor.state.dirty,
+                              self.editor._writing_history.undo_token), before)
+            with initialize_database(self.db_path) as conn:
+                self.assertEqual(conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall(), saved)
+                self.assertEqual(conn.execute("SELECT count(*) FROM writing_bulk_rows").fetchone()[0], 0)
+            conn.close()
+        finally:
+            release.set()
+            holder.join(6)
+
     def test_settings_button_opens_real_window_and_preferences_reach_both_editors(self):
         from tradutor_pgn import settings_window
         self.ready()
@@ -9041,11 +9228,19 @@ class WritingEditorTests(GuiTestCase):
         self.editor.set_translation_text("erraos rascunho", mark_dirty=True, keep_undo=True)
         # Grammar may target a substring, while book replacements require a
         # whole form. Only the second database row belongs to this operation.
-        item = replace(self.ready(), category="GRAMMAR", issue_id="")
-        self.editor._writing_result = WritingResult(self.editor.writing_version, (item,), "full")
-        self.editor._render_writing_result()
-        self.editor.apply_all_identical(item, "erro")
-        self.wait_for(lambda: not self.editor._writing_busy)
+        service = self.app.writing_assistant
+        original = service.analyze
+        def grammar(request):
+            result = original(request)
+            return replace(result, mode="full", issues=tuple(
+                replace(issue, category="GRAMMAR", issue_id="") for issue in result.issues))
+        with unittest.mock.patch.object(service, "analyze", grammar):
+            self.editor._writing_signature = None
+            self.editor.highlight_spelling()
+            item = self.ready()
+            self.assertEqual(item.category, "GRAMMAR")
+            self.editor.apply_all_identical(item, "erro")
+            self.wait_for(lambda: not self.editor._writing_busy)
         self.assertEqual(self.editor.draft_text(), "erraos rascunho")
         self.assertTrue(self.editor.state.dirty)
         with sqlite3.connect(self.db_path) as conn:

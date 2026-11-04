@@ -8,6 +8,7 @@ so other instances' additions and removals are immediately visible.
 from collections.abc import Iterator
 from contextlib import contextmanager
 import errno
+import hashlib
 import json
 import logging
 import math
@@ -79,13 +80,27 @@ class PersonalDictionary:
     def list_words(self) -> list[str]:
         return self.load()
 
+    def content_revision(self) -> str:
+        """Hash actual bytes; metadata can collide after external replacement."""
+        try:
+            raw = b"present\0" + self.path.read_bytes()
+        except FileNotFoundError:
+            raw = b"missing"
+        return hashlib.sha256(raw).hexdigest()
+
+    @contextmanager
+    def guard_snapshot(self) -> Iterator[None]:
+        """Never wait on Tk for a cooperating vocabulary writer."""
+        with self._locked(timeout=0):
+            yield
+
     def contains(self, word: str) -> bool:
         _validate_word(word)
         words, _ = self._read()
         return _key(word) in words
 
     @contextmanager
-    def _locked(self) -> Iterator[None]:
+    def _locked(self, *, timeout: float | None = None) -> Iterator[None]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.path.with_name(self.path.name + ".lock")
         with lock_path.open("a+b") as lock_file:
@@ -112,7 +127,7 @@ class PersonalDictionary:
                 def release() -> None:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
-            deadline = time.monotonic() + self.lock_timeout
+            deadline = time.monotonic() + (self.lock_timeout if timeout is None else timeout)
             while True:
                 try:
                     acquire()

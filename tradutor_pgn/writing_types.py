@@ -5,7 +5,7 @@ An issue validates its own shape at construction; ``validate_for`` additionally
 checks the complete request before displaying or applying a suggestion.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from typing import Literal, get_args
@@ -22,6 +22,11 @@ AssistantMode = Literal["full", "spelling_only", "unavailable"]
 AssistantState = Literal["stopped", "starting", "ready", "restarting", "failed"]
 IssueState = Literal["active", "suppressed_by_glossary"]
 IssueSeverity = Literal["error", "warning"]
+WritingRevision = tuple[int, str]
+
+
+class WritingRevisionChanged(ValueError):
+    """A snapshot can no longer authorize an editorial action."""
 
 
 def _version(value: int) -> None:
@@ -81,6 +86,7 @@ class WritingIssue:
     text_version: int
     state: IssueState = "active"
     suggestions_state: SuggestionState = "complete"
+    revision: WritingRevision | None = None
 
     def __post_init__(self) -> None:
         _version(self.text_version)
@@ -122,6 +128,10 @@ class WritingResult:
     issues: tuple[WritingIssue, ...]
     mode: AssistantMode
     diagnostic: str = ""
+    revision: WritingRevision | None = None
+
+    def with_revision(self, revision: WritingRevision | None) -> "WritingResult":
+        return replace(self, revision=revision, issues=tuple(replace(issue, revision=revision) for issue in self.issues))
 
     def __post_init__(self) -> None:
         _version(self.text_version)

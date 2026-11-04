@@ -7,6 +7,7 @@ asynchronous warm-up. No failure is presented as a successful empty analysis.
 
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 import hashlib
 import json
@@ -16,13 +17,16 @@ import unicodedata
 
 from . import prose_spellcheck
 from .languagetool_client import EXPECTED_VERSION, LanguageToolLocalAdapter
-from .personal_dictionary import PersonalDictionary
+from .personal_dictionary import DictionaryLockTimeout, PersonalDictionary
 from .spelling_suggestions_process import (
     SpellingSuggestionService, SuggestionSnapshot, get_shared_spelling_suggestions,
     shutdown_shared_spelling_suggestions,
 )
 from .writing_protection import ProtectedText, protect_text, restore_issue_offsets
-from .writing_types import AssistantMode, AssistantStatus, WritingIssue, WritingRequest, WritingResult
+from .writing_types import (
+    AssistantMode, AssistantStatus, WritingIssue, WritingRequest, WritingResult,
+    WritingRevision, WritingRevisionChanged,
+)
 
 
 class SpellingUnavailable(RuntimeError):
@@ -156,6 +160,19 @@ class SpyllsAdapter:
         """Observe external vocabulary edits without retaining words in keys."""
         words = sorted({_key(word) for word in self._personal_dictionary.list_words()})
         return hashlib.sha256(json.dumps(["spylls-v1", words], ensure_ascii=True).encode("ascii")).hexdigest()
+
+    @property
+    def delivery_revision(self) -> str:
+        if isinstance(self._personal_dictionary, PersonalDictionary):
+            return self._personal_dictionary.content_revision()
+        return self.cache_revision
+
+    @contextmanager
+    def guard_vocabulary(self) -> Iterator[None]:
+        guard = (self._personal_dictionary.guard_snapshot()
+                 if isinstance(self._personal_dictionary, PersonalDictionary) else nullcontext())
+        with guard:
+            yield
 
     def analyze(self, request: WritingRequest, protected: ProtectedText) -> tuple[WritingIssue, ...]:
         return self._analyze(request, protected, suggestion_limit=5)
@@ -311,6 +328,10 @@ class PortugueseWritingAssistant:
         with self._cache_lock:
             if self._closed:
                 return WritingResult(request.text_version, (), "unavailable", "Assistente de escrita encerrado.")
+        try:
+            revision = self.suggestion_revision()
+        except Exception:
+            revision = None
         key = self._cache_key(request, initial=initial)
         with self._cache_lock:
             cached = self._cache.get(key) if key is not None else None
@@ -324,8 +345,8 @@ class PortugueseWritingAssistant:
                     ))
                     self._status = AssistantStatus("ready", result.mode, result.diagnostic,
                                                    grammar_status.restart_attempted if grammar_status else False)
-                    return result
-        result = self._analyze_uncached(request, initial=initial)
+                    return result.with_revision(revision)
+        result = self._analyze_uncached(request, initial=initial).with_revision(revision)
         current_key = self._cache_key(request, initial=initial) if key is not None else None
         with self._cache_lock:
             if self._closed:
@@ -411,7 +432,9 @@ class PortugueseWritingAssistant:
         return WritingResult(request.text_version, (), "unavailable", diagnostic)
 
     def status(self) -> AssistantStatus:
-        with self._cache_lock:
+        if not self._cache_lock.acquire(blocking=False):
+            return AssistantStatus("starting", "spelling_only", "Revisão em atualização; aguarde nova análise.")
+        try:
             if self._closed:
                 return AssistantStatus("stopped", "unavailable")
             with self._grammar_activity_lock:
@@ -427,12 +450,38 @@ class PortugueseWritingAssistant:
                                                        "Concordância indisponível; somente ortografia.",
                                                        grammar_status.restart_attempted)
             return self._status
+        finally:
+            self._cache_lock.release()
 
-    def suggestion_revision(self) -> tuple[int, str]:
-        """Worker-only revision read, including externally edited vocabulary."""
-        with self._cache_lock:
+    def suggestion_revision(self) -> WritingRevision:
+        """Opaque content fingerprint, including externally edited vocabulary."""
+        if not self._cache_lock.acquire(blocking=False):
+            raise WritingRevisionChanged("Revisão em atualização; aguarde nova análise.")
+        try:
             epoch = self._cache_epoch
-        return epoch, str(getattr(self._spelling, "cache_revision", "v1"))
+        finally:
+            self._cache_lock.release()
+        marker = getattr(self._spelling, "delivery_revision", None)
+        return epoch, str(marker if marker is not None else getattr(self._spelling, "cache_revision", "v1"))
+
+    @contextmanager
+    def guard_revision(self, revision: WritingRevision | None) -> Iterator[None]:
+        """Recheck at the mutation boundary; fail immediately on a busy writer."""
+        if not self._cache_lock.acquire(blocking=False):
+            raise WritingRevisionChanged("Revisão alterada; aguarde nova análise.")
+        try:
+            guard = getattr(self._spelling, "guard_vocabulary", nullcontext)
+            try:
+                with guard():
+                    if self._closed or revision is None or revision != self.suggestion_revision():
+                        raise WritingRevisionChanged("Revisão alterada; aguarde nova análise.")
+                    yield
+            except DictionaryLockTimeout:
+                raise WritingRevisionChanged("Vocabulário em atualização; aguarde nova análise.") from None
+            except OSError:
+                raise WritingRevisionChanged("Vocabulário indisponível; aguarde nova análise.") from None
+        finally:
+            self._cache_lock.release()
 
     def request_suggestions(self, request: WritingRequest, issue: WritingIssue, *, owner: str,
                             emit: Callable[[SuggestionSnapshot], None]) -> None:

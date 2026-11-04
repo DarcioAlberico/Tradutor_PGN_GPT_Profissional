@@ -1,6 +1,7 @@
 """The real assistant/controller seam keeps suggestion jobs contextual and private."""
 
 from dataclasses import replace
+import os
 import threading
 import time
 from pathlib import Path
@@ -14,7 +15,7 @@ from tradutor_pgn.personal_dictionary import PersonalDictionary
 from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
 from tradutor_pgn.writing_assistant import PortugueseWritingAssistant, SpyllsAdapter
 from tradutor_pgn.writing_controller import WritingController
-from tradutor_pgn.writing_types import WritingIssue, WritingRequest
+from tradutor_pgn.writing_types import WritingIssue, WritingRequest, WritingRevisionChanged
 
 
 class Dictionary:
@@ -148,3 +149,117 @@ def test_spawned_frozen_worker_diverts_before_gui_import_or_main(monkeypatch):
     monkeypatch.setitem(sys.modules, "tradutor_pgn.app", SimpleNamespace(PGNTranslatorApp=object))
     with pytest.raises(SpawnDiverted):
         runpy.run_path(str(Path(__file__).resolve().parents[1] / "PGN_Tradutor_Pro.py"), run_name="__main__")
+
+
+def wait_result(controller):
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        for event in controller.poll():
+            if event.kind == "result":
+                return event.result
+        time.sleep(.001)
+    pytest.fail("result missing")
+
+
+def test_worker_commit_guard_never_makes_other_editor_wait_for_revision(tmp_path):
+    service, _, _ = assistant(tmp_path)
+    one, two = WritingController(service), WritingController(service)
+    entered, release = threading.Event(), threading.Event()
+    try:
+        request = WritingRequest("posiçao", 2, "pt-BR")
+        one.submit(request)
+        two.submit(request)
+        first, second = wait_result(one).issues[0], wait_result(two).issues[0]
+        def hold_commit():
+            with service.guard_revision(first.revision):
+                entered.set()
+                release.wait(1)
+        holder = threading.Thread(target=hold_commit)
+        holder.start()
+        assert entered.wait(3)
+        started = time.monotonic()
+        assert not two.is_current_issue(second)
+        assert time.monotonic() - started < .1
+        started = time.monotonic()
+        with pytest.raises(WritingRevisionChanged):
+            with two.guard_issue(second):
+                pytest.fail("a busy commit cannot authorize an action")
+        assert time.monotonic() - started < .1
+        started = time.monotonic()
+        service.status()
+        assert time.monotonic() - started < .1
+    finally:
+        release.set()
+        if "holder" in locals():
+            holder.join(3)
+        one.shutdown()
+        two.shutdown()
+        service.shutdown()
+
+
+def test_guard_read_failure_refuses_mutation_without_exposing_exception_payload(tmp_path, monkeypatch):
+    service, _, vocabulary = assistant(tmp_path)
+    try:
+        issue = service.analyze_initial(WritingRequest("posiçao", 2, "pt-BR")).issues[0]
+        def cannot_read():
+            raise PermissionError("private-vocabulary-payload")
+        monkeypatch.setattr(vocabulary, "content_revision", cannot_read)
+        with pytest.raises(WritingRevisionChanged) as error:
+            with service.guard_revision(issue.revision):
+                pytest.fail("a failed vocabulary read cannot authorize mutation")
+        assert "private-vocabulary-payload" not in str(error.value)
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("edit", ["writer", "inplace", "atomic", "cache", "rules", "glossary"])
+def test_queued_prefix_is_revoked_at_delivery_and_old_issue_cannot_apply(tmp_path, edit):
+    service, suggestions, vocabulary = assistant(tmp_path)
+    vocabulary.add("posiçax")  # Same UTF-8 length as the accepted word below.
+    one, two = WritingController(service), WritingController(service)
+    try:
+        request = WritingRequest("posiçao [%eval secret]", 2, "pt-BR")
+        one.submit(request, record_id="one")
+        two.submit(request, record_id="two")
+        first, second = wait_result(one).issues[0], wait_result(two).issues[0]
+        one.request_suggestions(first)
+        two.request_suggestions(second)
+        deadline = time.monotonic() + 3
+        while len(suggestions.callbacks) < 2 and time.monotonic() < deadline:
+            time.sleep(.001)
+        for callback in suggestions.callbacks:
+            callback(SuggestionSnapshot(("posição",), "partial"))
+        assert one._events and two._events  # Prefixes have already crossed emit.
+        if edit == "writer":
+            PersonalDictionary(vocabulary.path).add("posiçao")
+        elif edit in {"inplace", "atomic"}:
+            before = vocabulary.path.stat()
+            raw = vocabulary.path.read_bytes()
+            updated = raw.replace("posiçax".encode(), "posiçao".encode())
+            assert updated != raw and len(updated) == len(raw)
+            if edit == "atomic":
+                replacement = vocabulary.path.with_suffix(".replacement")
+                replacement.write_bytes(updated)
+                os.replace(replacement, vocabulary.path)
+            else:
+                vocabulary.path.write_bytes(updated)  # External writer ignores the lock.
+            os.utime(vocabulary.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            assert vocabulary.path.stat().st_mtime_ns == before.st_mtime_ns
+        elif edit == "cache":
+            service.invalidate_cache()
+        else:
+            service.set_cache_revisions(**{edit: "updated"})
+        for controller, old in ((one, first), (two, second)):
+            events = controller.poll()
+            assert not any(event.kind == "result" and event.result.issues[0].suggestions
+                           for event in events if event.result and event.result.issues)
+            assert not controller.is_current_issue(old)
+            fresh = wait_result(controller)
+            if edit in {"writer", "inplace", "atomic"}:
+                assert fresh.issues == ()
+            else:
+                assert fresh.issues[0].revision != old.revision
+    finally:
+        one.shutdown()
+        two.shutdown()
+        service.shutdown()

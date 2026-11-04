@@ -154,3 +154,134 @@ em fonte. RAM do segundo dicionário não foi perfilada; o limite é de quantida
 de filhos/filas/tamanhos e de duração da busca, não de RSS em bytes. Concordância
 continua experimental, e estes resultados não aprovam seus gates de qualidade,
 distribuição ou licenças.
+
+## Revisão de segurança editorial — fix round 1 (2026-11-04)
+
+O defeito confirmado estava depois da publicação do prefixo: uma callback já
+aceita podia ficar na fila enquanto outra instância alterava o vocabulário ou
+uma revisão de cache mudava. A versão do texto permanecia igual e o editor
+ainda podia exibir/aplicar a sugestão anterior. Também havia duas janelas no
+lote: a confirmação podia mudar a revisão, e ela podia mudar depois dos UPDATEs
+antes do commit.
+
+Resultados, ocorrências e eventos agora transportam uma revisão composta pelo
+epoch do cache e SHA-256 dos bytes do vocabulário. Arquivo ausente tem marcador
+distinto de arquivo presente. O fingerprint não depende de tamanho/mtime:
+testes fazem edição in-place e substituição atômica, preservando ambos. O
+controller revalida no polling e no uso da ocorrência, remove snapshots velhos
+e agenda nova análise. O painel limpa sublinhados e opções enquanto atualiza;
+essa invalidação não edita rascunho, dirty, versão ou histórico de desfazer.
+
+Aplicar uma ocorrência repete a validação depois de calcular a substituição e
+adquire um guard antes da mutação. O lote repete a validação após a confirmação.
+No worker, `apply_identical_replacements` aceita o argumento opcional keyword-only
+`commit_guard`, mantido até o fim de `conn.commit()`. O guard verifica a revisão
+depois de todos os UPDATEs e antes da persistência. Divergência, lock ocupado ou
+falha de leitura passam pelo rollback existente: texto, `writing_revision`,
+`comment_history` e `writing_bulk_rows` retornam juntos ao estado anterior.
+Chamadas legadas de dois argumentos, análise síncrona e desfazer continuam
+disponíveis. Não há mudança de schema, corpus, regras, ranking, orçamento ou IPC.
+
+### Locks e limites de atomicidade
+
+- Aplicação individual: lock reentrante do controller → lock de cache do
+  assistant (aquisição sem espera) → lock permanente do vocabulário (timeout 0).
+- Lote: reserva SQLite no worker → lock de cache sem espera → lock do
+  vocabulário sem espera → validação/hash → commit → liberação dos guards.
+  O worker não adquire lock do controller nem acessa widget nesse trecho.
+- Escritores de vocabulário usam apenas o lock permanente; soltam-no antes de
+  notificar/invalidate. Invalidação do cache não adquire SQLite. Os caminhos de
+  aquisição dos guards recusam contenção; não existe espera em ordem inversa.
+  Leituras de revisão e `status()` também recusam lock de cache ocupado, em vez
+  de prender o polling de outra janela atrás do commit. A reserva SQLite e o
+  trabalho SQL continuam fora do Tk.
+
+O lock protege escritores cooperantes durante o commit/mutação. Um programa que
+ignora esse lock pode mudar o arquivo imediatamente depois da leitura; não se
+promete exclusão mútua ou linearizabilidade contra esse escritor. Alterações
+anteriores à validação são detectadas pelos bytes, mesmo com size/mtime iguais.
+Nenhum fingerprint é persistido em log ou métrica; erros do guard usam mensagens
+fixas, sem conteúdo da exceção de I/O.
+
+O hash completo custa O(bytes) por validação. O polling de 60 ms lê o arquivo
+enquanto há resultado ativo, por editor, além das leituras no clique/guard.
+Não há cache por metadata que pudesse ocultar uma substituição externa.
+Medição local com 200 leituras por arquivo sintético, sem texto de usuário:
+
+| Palavras | Bytes | Mediana ms | p95 ms (nearest-rank) | Máximo ms |
+|---:|---:|---:|---:|---:|
+| 0 | 34 | 0,0703 | 0,0763 | 0,1354 |
+| 1000 | 14032 | 0,0788 | 0,0811 | 0,1059 |
+| 10000 | 140032 | 0,2322 | 0,2531 | 0,2702 |
+
+O probe criou JSON schema 1 com `word{index:06d}` em `TemporaryDirectory`, mediu
+`PersonalDictionary.content_revision()` com `perf_counter` e ordenou 200 tempos
+(p95 = posição 190). Não representa disco frio, pasta de rede ou arquivo enorme.
+O guard elimina espera por lock; leitura de arquivo local ainda é I/O síncrono,
+sem teto de duração imposto pelo Python. O lock de cache é mantido apenas no
+commit do lote, não na preparação nem durante seus UPDATEs. Mutadores de cache
+continuam sincronizados com esse commit.
+
+### RED/GREEN e comandos
+
+Nesta continuação, os dois testes GUI de lote foram executados antes da mudança
+de produção: ambos falharam porque `errao errao!` virava `erro erro!` após a
+revisão mudar. Dois testes novos do banco falharam por ausência de
+`commit_guard`; após implementar o hook, os quatro casos e o restante de
+`WritingBulkTests` passaram (12 testes, 6,61 s).
+
+Um novo teste com duas controllers e guard pausado no worker demonstrou RED
+porque a segunda janela aguardava o lock e aceitava a ocorrência depois da
+espera. A leitura não bloqueante tornou-o GREEN. O mesmo teste revelou outra
+espera em `status()` (1,007 s para limite de 0,1 s); a consulta agora retorna
+estado transitório sem aguardar. Um teste de erro de leitura observou RED com
+`PermissionError` escapando do guard e GREEN após converter em diagnóstico
+fixo de revisão indisponível. Nenhum payload de usuário foi usado nas falhas.
+
+```text
+uv run python -m pytest tests/test_banco.py::WritingBulkTests tests/test_editor_windows.py::WritingEditorTests::test_bulk_revision_change_at_confirmation_preserves_database_and_draft tests/test_editor_windows.py::WritingEditorTests::test_bulk_revision_change_after_sql_updates_rolls_back_every_row -q
+12 passed in 6.61s
+
+uv run python -m pytest tests/test_writing_controller.py tests/test_writing_progressive.py tests/test_writing_assistant.py tests/test_personal_dictionary.py tests/test_writing_types.py tests/test_banco.py::WritingBulkTests -q
+172 passed in 16.48s
+
+uv run python -m pytest tests/test_editor_windows.py::WritingEditorTests::test_bulk_revision_change_after_sql_updates_rolls_back_every_row tests/test_editor_windows.py::WritingEditorTests::test_bulk_busy_vocabulary_rolls_back_and_keeps_tk_responsive -q
+2 passed, 4 subtests passed in 11.05s
+```
+
+A segunda execução acima precede os casos suplementares de status/I/O. A
+execução de `uv run
+pytest` sem `python -m` falhou na coleta por não incluir o pacote local no
+sys.path deste worktree; os comandos de validação usam `python -m pytest`.
+
+O gate ampliado com os mesmos seis grupos puros/banco e toda a classe
+`WritingEditorTests` terminou com **227 passed, 17 subtests passed, 1 failed e
+1 error** em 162,82 s. A falha foi
+`test_book_operation_preserves_current_draft_when_only_other_rows_match`: sua
+fixture fabricava uma ocorrência gramatical apenas no painel, enquanto o novo
+guard exigia a ocorrência publicada pelo controller. A fixture foi ajustada
+para o provider retornar a ocorrência através da análise real; não se relaxou
+a validação de produção. O erro de teardown era `WinError 32` na conexão que o
+traceback da assertiva conservou antes de alcançar `conn.close()`. Reexecução
+isolada do caso corrigido: **1 passed in 3.22s**. Os 227 casos verdes desse gate
+não foram repetidos integralmente após essa mudança exclusiva na fixture.
+
+Gate final atualizado, com todos os casos novos e o caso ajustado:
+
+```text
+uv run python -m pytest tests/test_writing_controller.py tests/test_writing_progressive.py tests/test_writing_assistant.py tests/test_personal_dictionary.py tests/test_writing_types.py tests/test_banco.py::WritingBulkTests tests/test_editor_windows.py::WritingEditorTests::test_external_vocabulary_revokes_displayed_prefix_in_two_editors_without_editing_drafts tests/test_editor_windows.py::WritingEditorTests::test_revision_change_between_replacement_calculation_and_mutation_preserves_draft tests/test_editor_windows.py::WritingEditorTests::test_nonblocking_vocabulary_lock_refuses_apply_and_keeps_tk_responsive tests/test_editor_windows.py::WritingEditorTests::test_glossary_change_during_calculation_keeps_newly_protected_draft tests/test_editor_windows.py::WritingEditorTests::test_bulk_revision_change_at_confirmation_preserves_database_and_draft tests/test_editor_windows.py::WritingEditorTests::test_bulk_revision_change_after_sql_updates_rolls_back_every_row tests/test_editor_windows.py::WritingEditorTests::test_bulk_busy_vocabulary_rolls_back_and_keeps_tk_responsive tests/test_editor_windows.py::WritingEditorTests::test_book_operation_preserves_current_draft_when_only_other_rows_match -q
+181 passed, 8 subtests passed in 50.06s
+
+uv run ruff check tradutor_pgn/writing_types.py tradutor_pgn/personal_dictionary.py tradutor_pgn/writing_assistant.py tradutor_pgn/writing_controller.py tradutor_pgn/edit_window.py tradutor_pgn/database.py tests/test_writing_controller.py tests/test_writing_progressive.py tests/test_editor_windows.py tests/test_banco.py
+All checks passed!
+
+uv run mypy tradutor_pgn/writing_types.py tradutor_pgn/personal_dictionary.py tradutor_pgn/writing_assistant.py tradutor_pgn/writing_controller.py tradutor_pgn/database.py
+Success: no issues found in 5 source files
+
+git diff --check
+exit 0 (somente avisos de conversão LF/CRLF do Git)
+```
+
+A suíte completa não foi executada por orientação explícita desta rodada.
+Os três diagnósticos não rastreados de terceiros permaneceram fora do fix e do
+commit. Não houve push, publicação ou alteração de dados de produção.

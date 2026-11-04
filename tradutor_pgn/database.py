@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any
 import uuid
@@ -235,8 +236,16 @@ def preview_identical_replacements(
             conn.rollback()
 
 
-def apply_identical_replacements(conn: sqlite3.Connection, preview: WritingReplacementPreview) -> str:
-    """Reserve the writer, revalidate the full preview, commit all or none."""
+def apply_identical_replacements(
+    conn: sqlite3.Connection, preview: WritingReplacementPreview, *,
+    commit_guard: Callable[[], AbstractContextManager[None]] | None = None,
+) -> str:
+    """Revalidate and commit all or none, optionally guarding editorial state.
+
+    The worker reserves SQLite before acquiring the final revision guard.
+    The guard must fail without waiting and stay held through commit; no UI
+    or controller lock may be acquired while it is held.
+    """
     from .editor_common import replace_writing_spans
     from .writing_types import WritingRequest
 
@@ -269,7 +278,8 @@ def apply_identical_replacements(conn: sqlite3.Connection, preview: WritingRepla
             cursor.execute("INSERT INTO writing_bulk_rows (operation_id, comment_id, before_text, after_text, applied_revision, source_file, occurrences, previous_revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                            (operation_id, row.comment_id, row.saved_text, updated, revision,
                             preview.source_file, json.dumps(occurrences), row.revision))
-        conn.commit()
+        with commit_guard() if commit_guard is not None else nullcontext():
+            conn.commit()
         return operation_id
     except BaseException:
         conn.rollback()

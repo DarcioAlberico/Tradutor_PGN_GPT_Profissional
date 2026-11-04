@@ -3,6 +3,7 @@
 Parte da divisao de `test_core.py` (ROADMAP 28.11); ver `tests/helpers.py`."""
 
 from difflib import SequenceMatcher
+from contextlib import contextmanager
 import os
 import sqlite3
 import tempfile
@@ -159,6 +160,36 @@ class WritingBulkTests(unittest.TestCase):
             database.apply_identical_replacements(self.conn, preview)
         self.assertEqual(self.texts()[0], ("errao errao",))
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM comment_history").fetchone()[0], 0)
+
+    def test_commit_guard_failure_rolls_back_rows_revisions_and_history(self):
+        preview = self.preview()
+        before = self.conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall()
+        @contextmanager
+        def refuse_commit():
+            self.assertTrue(self.conn.in_transaction)
+            self.assertEqual(self.texts()[:2], [("erro erro",), ("erro [%cal errao]",)])
+            self.assertEqual(self.conn.execute("SELECT count(*) FROM writing_bulk_rows").fetchone()[0], 2)
+            raise database.WritingConflictError("Revision changed before commit")
+            yield
+        with self.assertRaises(database.WritingConflictError):
+            database.apply_identical_replacements(self.conn, preview, commit_guard=refuse_commit)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall(), before)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM writing_bulk_rows").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM comment_history").fetchone()[0], 0)
+
+    def test_commit_guard_is_held_until_commit_and_legacy_undo_remains_available(self):
+        entered = []
+        @contextmanager
+        def guard_commit():
+            self.assertTrue(self.conn.in_transaction)
+            entered.append(True)
+            yield
+            self.assertFalse(self.conn.in_transaction)
+        operation = database.apply_identical_replacements(self.conn, self.preview(), commit_guard=guard_commit)
+        self.assertEqual(entered, [True])
+        database.undo_identical_replacements(self.conn, operation)
+        self.assertEqual(self.texts(), [("errao errao",), ("errao [%cal errao]",), ("errao",)])
 
     def test_protection_boundaries_and_overlap_revalidation(self):
         update_translation_by_id(self.conn.cursor(), self.ids["One"], "Nf3 errao erraos")
