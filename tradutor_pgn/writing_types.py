@@ -11,6 +11,8 @@ import json
 from typing import Literal, get_args
 import unicodedata
 
+from .spelling_suggestions_process import SuggestionState
+
 
 IssueCategory = Literal[
     "SPELLING", "NOMINAL_AGREEMENT", "VERBAL_AGREEMENT", "GRAMMAR",
@@ -78,6 +80,7 @@ class WritingIssue:
     provider: str
     text_version: int
     state: IssueState = "active"
+    suggestions_state: SuggestionState = "complete"
 
     def __post_init__(self) -> None:
         _version(self.text_version)
@@ -87,6 +90,8 @@ class WritingIssue:
             raise ValueError("invalid issue severity")
         if self.state not in get_args(IssueState):
             raise ValueError("invalid issue state")
+        if self.suggestions_state not in get_args(SuggestionState):
+            raise ValueError("invalid suggestions state")
         if type(self.start) is not int or type(self.end) is not int:
             raise ValueError("issue offsets must be integer code-point indices")
         if self.start < 0 or self.end <= self.start:

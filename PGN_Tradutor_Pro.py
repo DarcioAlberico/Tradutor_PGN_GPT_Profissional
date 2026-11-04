@@ -3,6 +3,11 @@
 
 import os
 import sys
+import multiprocessing
+
+# PyInstaller's spawned spelling worker must divert before importing the GUI.
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
 
 # Sem console — o `.exe` do PyInstaller e o `pythonw` —, `sys.stderr` e `None`,
 # e o customtkinter escreve avisos DIRETO nele (`sys.stderr.write`), inclusive

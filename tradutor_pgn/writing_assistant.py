@@ -17,6 +17,10 @@ import unicodedata
 from . import prose_spellcheck
 from .languagetool_client import EXPECTED_VERSION, LanguageToolLocalAdapter
 from .personal_dictionary import PersonalDictionary
+from .spelling_suggestions_process import (
+    SpellingSuggestionService, SuggestionSnapshot, get_shared_spelling_suggestions,
+    shutdown_shared_spelling_suggestions,
+)
 from .writing_protection import ProtectedText, protect_text, restore_issue_offsets
 from .writing_types import AssistantMode, AssistantStatus, WritingIssue, WritingRequest, WritingResult
 
@@ -154,6 +158,12 @@ class SpyllsAdapter:
         return hashlib.sha256(json.dumps(["spylls-v1", words], ensure_ascii=True).encode("ascii")).hexdigest()
 
     def analyze(self, request: WritingRequest, protected: ProtectedText) -> tuple[WritingIssue, ...]:
+        return self._analyze(request, protected, suggestion_limit=5)
+
+    def analyze_initial(self, request: WritingRequest, protected: ProtectedText) -> tuple[WritingIssue, ...]:
+        return self._analyze(request, protected, suggestion_limit=0)
+
+    def _analyze(self, request: WritingRequest, protected: ProtectedText, *, suggestion_limit: int) -> tuple[WritingIssue, ...]:
         language = _dictionary_language(request.target_language)
         if language not in prose_spellcheck.DICTIONARY_NAMES:
             raise SpellingUnavailable("Ortografia indisponível: idioma sem dicionário local.")
@@ -197,7 +207,7 @@ class SpyllsAdapter:
             replacements: dict[str, tuple[str, ...]] = {}
             for start, end, original in candidates:
                 if original not in replacements:
-                    replacements[original] = prose_spellcheck.spelling_suggestions(original, dictionary)
+                    replacements[original] = prose_spellcheck.spelling_suggestions(original, dictionary, suggestion_limit)
                 issues.append(WritingIssue(
                     issue_id="", rule_id="SPELLING_UNKNOWN_WORD", category="SPELLING",
                     start=start, end=end, original=original,
@@ -205,6 +215,7 @@ class SpyllsAdapter:
                     explanation="Confira a grafia ou adicione a palavra ao vocabulário pessoal.",
                     suggestions=replacements[original], severity="error", provider="spylls",
                     text_version=request.text_version,
+                    suggestions_state="complete" if suggestion_limit else "pending",
                 ))
             return tuple(issues)
         except Exception:
@@ -219,6 +230,7 @@ class PortugueseWritingAssistant:
         grammar_adapter: WritingAdapter | None = None,
         protector: Callable[[WritingRequest], ProtectedText] = protect_text,
         cache_capacity: int = 128,
+        suggestion_service: SpellingSuggestionService | None = None,
     ) -> None:
         if type(cache_capacity) is not int or cache_capacity < 0:
             raise ValueError("cache_capacity must be a non-negative integer")
@@ -227,6 +239,7 @@ class PortugueseWritingAssistant:
         self._protect = protector
         self._status = AssistantStatus("stopped", "unavailable")
         self._closed = False
+        self._suggestion_service = suggestion_service
         self._grammar_activity_lock = threading.Lock()
         self._active_grammar_checks = 0
         self._cache_lock = threading.RLock()
@@ -263,7 +276,7 @@ class PortugueseWritingAssistant:
         with self._cache_lock:
             return self._normalization_counts.copy()
 
-    def _cache_key(self, request: WritingRequest) -> tuple[int, str] | None:
+    def _cache_key(self, request: WritingRequest, *, initial: bool = False) -> tuple[int, str] | None:
         if not self._cache_capacity:
             return None
         try:
@@ -279,7 +292,7 @@ class PortugueseWritingAssistant:
         with self._cache_lock:
             epoch, revisions = self._cache_epoch, self._cache_revisions.copy()
         payload = [
-            "writing-v1", EXPECTED_VERSION, provider_revisions, revisions,
+            "writing-v1", initial, EXPECTED_VERSION, provider_revisions, revisions,
             request.text, request.target_language, request.source_text,
             sorted(request.glossary_terms), sorted(request.session_ignored_words),
             sorted(request.disabled_rule_ids), request.grammar_enabled,
@@ -288,10 +301,17 @@ class PortugueseWritingAssistant:
         return epoch, digest
 
     def analyze(self, request: WritingRequest) -> WritingResult:
+        return self._analyze(request, initial=False)
+
+    def analyze_initial(self, request: WritingRequest) -> WritingResult:
+        """Publish detections and grammar without exploring spelling generators."""
+        return self._analyze(request, initial=True)
+
+    def _analyze(self, request: WritingRequest, *, initial: bool) -> WritingResult:
         with self._cache_lock:
             if self._closed:
                 return WritingResult(request.text_version, (), "unavailable", "Assistente de escrita encerrado.")
-        key = self._cache_key(request)
+        key = self._cache_key(request, initial=initial)
         with self._cache_lock:
             cached = self._cache.get(key) if key is not None else None
             if cached is not None and key is not None and not self._closed:
@@ -305,8 +325,8 @@ class PortugueseWritingAssistant:
                     self._status = AssistantStatus("ready", result.mode, result.diagnostic,
                                                    grammar_status.restart_attempted if grammar_status else False)
                     return result
-        result = self._analyze_uncached(request)
-        current_key = self._cache_key(request) if key is not None else None
+        result = self._analyze_uncached(request, initial=initial)
+        current_key = self._cache_key(request, initial=initial) if key is not None else None
         with self._cache_lock:
             if self._closed:
                 return WritingResult(request.text_version, (), "unavailable", "Assistente de escrita encerrado.")
@@ -318,12 +338,13 @@ class PortugueseWritingAssistant:
                     self._cache.popitem(last=False)
         return result
 
-    def _analyze_uncached(self, request: WritingRequest) -> WritingResult:
+    def _analyze_uncached(self, request: WritingRequest, *, initial: bool = False) -> WritingResult:
         if self._closed:
             return self._unavailable(request, "Assistente de escrita encerrado.")
         try:
             protected = self._protect(request)
-            candidates = self._spelling.analyze(request, protected)
+            detect = getattr(self._spelling, "analyze_initial", None) if initial else None
+            candidates = detect(request, protected) if callable(detect) else self._spelling.analyze(request, protected)
         except SpellingUnavailable as error:
             return self._unavailable(request, str(error))
         except Exception:
@@ -407,6 +428,56 @@ class PortugueseWritingAssistant:
                                                        grammar_status.restart_attempted)
             return self._status
 
+    def suggestion_revision(self) -> tuple[int, str]:
+        """Worker-only revision read, including externally edited vocabulary."""
+        with self._cache_lock:
+            epoch = self._cache_epoch
+        return epoch, str(getattr(self._spelling, "cache_revision", "v1"))
+
+    def request_suggestions(self, request: WritingRequest, issue: WritingIssue, *, owner: str,
+                            emit: Callable[[SuggestionSnapshot], None]) -> None:
+        """Validate on the controller worker; only the selected token reaches IPC."""
+        try:
+            issue.validate_for(request)
+            protected = self._protect(request)
+            if (self._closed or issue.provider != "spylls" or issue.category != "SPELLING"
+                    or issue.state != "active" or issue.rule_id in request.disabled_rule_ids
+                    or any(interval.start < issue.end and issue.start < interval.end for interval in protected.ranges)):
+                return
+            revision = self.suggestion_revision()
+            detect = getattr(self._spelling, "analyze_initial", None)
+            if (not callable(detect)
+                    or not any(candidate.issue_id == issue.issue_id for candidate in detect(request, protected))
+                    or revision != self.suggestion_revision()):
+                emit(SuggestionSnapshot((), "cancelled"))
+                return
+
+            def receive(snapshot: SuggestionSnapshot) -> None:
+                try:
+                    if not self._closed and revision == self.suggestion_revision():
+                        emit(snapshot)
+                except Exception:
+                    pass
+
+            with self._cache_lock:
+                if self._closed:
+                    return
+                service = self._suggestion_service
+                if service is None:
+                    service = get_shared_spelling_suggestions()
+            service.submit(owner, issue.original, receive)
+        except Exception:
+            emit(SuggestionSnapshot((), "unavailable"))
+
+    def cancel_suggestions(self, owner: str) -> None:
+        service = self._suggestion_service
+        if service is None:
+            # Do not construct a coordinator just to cancel an unused editor.
+            from .spelling_suggestions_process import cancel_shared_spelling_suggestions
+            cancel_shared_spelling_suggestions(owner)
+        else:
+            service.cancel(owner)
+
     def _grammar_status(self) -> AssistantStatus | None:
         status = getattr(self._grammar, "status", None)
         return status() if callable(status) else None
@@ -418,6 +489,10 @@ class PortugueseWritingAssistant:
             self._closed = True
             self.invalidate_cache()
             self._status = AssistantStatus("stopped", "unavailable")
+        if self._suggestion_service is not None:
+            self._suggestion_service.shutdown()
+        else:
+            shutdown_shared_spelling_suggestions()
         shutdown = getattr(self._grammar, "shutdown", None)
         if callable(shutdown):
             shutdown()

@@ -9202,6 +9202,25 @@ class WritingRealEngineTests(GuiTestCase):
         issues = editor.writing_panel.issues
         item = next((issue for issue in issues if issue.original == "posiçao"), None)
         self.assertIsNotNone(item, (issues, editor._writing_result))
+        self.assertIn(item.suggestions_state, {"pending", "loading"})
+        self.assertEqual(editor.draft_text(), "Uma posiçao.")
+        # Detection is a result of its own. Keep pumping real Tk while the
+        # isolated worker loads and publishes its first ranked alternative.
+        beats = []
+        active = [True]
+        def heartbeat():
+            if active[0]:
+                beats.append(time.monotonic())
+                self.root.after(10, heartbeat)
+        heartbeat()
+        deadline = time.monotonic() + 20
+        while not item.suggestions and time.monotonic() < deadline:
+            self.pump()
+            time.sleep(.002)
+            item = next(issue for issue in editor.writing_panel.issues if issue.original == "posiçao")
+        active[0] = False
+        self.assertGreater(len(beats), 2)
+        self.assertLess(max(b - a for a, b in zip(beats, beats[1:])), .2)
         self.assertIn("posição", item.suggestions)
         self.assertTrue(editor.trans_text.tag_ranges("writing_spelling"))
         editor.apply_issue(item, "posição")

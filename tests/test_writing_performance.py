@@ -85,6 +85,56 @@ def test_large_batch_reuses_only_bounded_cached_results():
 
 
 class BackgroundAnalysisTests(GuiTestCase):
+    def test_cpu_bound_first_suggestion_is_isolated_from_real_tk_heartbeat(self):
+        from test_spelling_suggestions_process import controlled_worker
+        from tradutor_pgn.spelling_suggestions_process import SpellingSuggestionService
+        from tradutor_pgn.writing_assistant import SpyllsAdapter
+
+        class Dictionary:
+            def lookup(self, word):
+                return False
+
+            def suggest(self, word):
+                raise AssertionError("suggestions must run in the isolated child")
+
+        service = SpellingSuggestionService(worker_target=controlled_worker, suggestion_timeout=.35)
+        assistant = PortugueseWritingAssistant(spelling_adapter=SpyllsAdapter(
+            dictionary_loader=lambda language: Dictionary()), suggestion_service=service)
+        controller = WritingController(assistant)
+        try:
+            controller.submit(WritingRequest("cpu-first", 1, "pt-BR"))
+            result = None
+            deadline = time.monotonic() + 8
+            while result is None and time.monotonic() < deadline:
+                for event in controller.poll():
+                    if event.kind == "result":
+                        result = event.result
+                self.pump()
+                time.sleep(.001)
+            self.assertIsNotNone(result)
+            controller.request_suggestions(result.issues[0])
+            beats = []
+            def beat():
+                beats.append(time.monotonic())
+                if result.issues[0].suggestions_state != "timed_out":
+                    self.root.after(10, beat)
+            beat()
+            while result.issues[0].suggestions_state != "timed_out" and time.monotonic() < deadline:
+                for event in controller.poll():
+                    if event.kind == "result":
+                        result = event.result
+                self.pump()
+                time.sleep(.001)
+            self.assertEqual(result.issues[0].suggestions_state, "timed_out")
+            self.assertEqual(result.issues[0].suggestions, ())
+            self.assertGreater(len(beats), 10)
+            self.assertLess(max(b - a for a, b in zip(beats, beats[1:])), .15)
+        finally:
+            controller.shutdown()
+            assistant.shutdown()
+            service._thread.join(8)
+            self.assertFalse(service._thread.is_alive())
+
     def test_large_comment_worker_does_not_block_tk_or_publish_old_result(self):
         entered, release = threading.Event(), threading.Event()
         threads, versions = [], []

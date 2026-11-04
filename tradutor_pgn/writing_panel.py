@@ -20,14 +20,17 @@ class WritingActionButton(ctk.CTkButton):
 class WritingPanel(ctk.CTkFrame):
     def __init__(self, parent, *, on_select=None, on_apply=None, on_apply_all=None,
                  on_ignore_once=None, on_ignore_session=None, on_add_personal=None,
-                 on_disable_rule=None, on_undo_bulk=None, on_settings=None):
+                 on_disable_rule=None, on_undo_bulk=None, on_settings=None,
+                 on_retry_suggestions=None):
         super().__init__(parent, width=300, corner_radius=8)
         self.callbacks = dict(select=on_select, apply=on_apply, apply_all=on_apply_all,
                               ignore_once=on_ignore_once, ignore_session=on_ignore_session,
                               add_personal=on_add_personal, disable_rule=on_disable_rule,
-                              undo_bulk=on_undo_bulk, settings=on_settings)
+                              undo_bulk=on_undo_bulk, settings=on_settings,
+                              retry_suggestions=on_retry_suggestions)
         self.issues = ()
         self.selected_index = None
+        self._choice_issue_id = None
         self.issue_buttons = []
         self.closed = False
         self.manual_collapsed = None
@@ -54,13 +57,20 @@ class WritingPanel(ctk.CTkFrame):
         self.explanation.grid(row=3, column=0, sticky="ew", pady=4)
         self.suggestions = ctk.CTkOptionMenu(self.body, values=["Sem sugestões"])
         self.suggestions.grid(row=4, column=0, sticky="ew", pady=4)
+        self.suggestion_status = ctk.CTkLabel(self.body, text="", wraplength=270, justify="left",
+                                             text_color=MUTED_TEXT_COLOR)
+        self.suggestion_status.grid(row=5, column=0, sticky="ew")
+        self.retry_button = WritingActionButton(self.body, text="Tentar sugestões novamente",
+                                                command=lambda: self._invoke("retry_suggestions"))
+        self.retry_button.grid(row=6, column=0, sticky="ew", pady=2)
+        self.retry_button.bind("<FocusIn>", lambda _event: self._reveal_action(self.retry_button), add="+")
         actions = (("apply", "Aplicar"), ("apply_all", "Aplicar todas iguais neste livro"),
                    ("ignore_once", "Ignorar uma vez"), ("ignore_session", "Ignorar na sessão"),
                    ("add_personal", "Adicionar ao vocabulário pessoal"),
                    ("disable_rule", "Desativar esta regra"), ("undo_bulk", "Desfazer lote do livro"),
                    ("settings", "Configurações de escrita"))
         self.action_buttons = {}
-        for index, (name, label) in enumerate(actions, 5):
+        for index, (name, label) in enumerate(actions, 7):
             button = WritingActionButton(self.body, text=label, command=lambda action=name: self._invoke(action))
             button.grid(row=index, column=0, sticky="ew", pady=2)
             button.bind("<FocusIn>", lambda _event, target=button: self._reveal_action(target), add="+")
@@ -107,8 +117,27 @@ class WritingPanel(ctk.CTkFrame):
         self.diagnostic_label.configure(text=self.status.diagnostic)
         self.explanation.configure(text=f"{issue.message}\n{issue.explanation}" if issue else "Nenhuma ocorrência ativa.")
         suggestions = list(issue.suggestions) if issue else []
+        chosen = self.suggestions.get() if issue and self._choice_issue_id == issue.issue_id else None
         self.suggestions.configure(values=suggestions or ["Sem sugestões"], state="normal" if suggestions else "disabled")
-        self.suggestions.set(suggestions[0] if suggestions else "Sem sugestões")
+        self.suggestions.set(chosen if chosen in suggestions else (suggestions[0] if suggestions else "Sem sugestões"))
+        self._choice_issue_id = issue.issue_id if issue else None
+        state = issue.suggestions_state if issue else "complete"
+        messages = {
+            "pending": "Sugestões aguardando seleção.",
+            "loading": "Buscando sugestões…",
+            "partial": "Sugestões parciais; buscando mais…",
+            "timed_out": "Busca encerrada no limite de tempo; tente novamente para repetir a busca.",
+            "unavailable": "Sugestões indisponíveis.",
+            "busy": "Busca ocupada. Tente novamente.",
+            "cancelled": "Busca cancelada.",
+            "complete": "" if suggestions or issue is None else "Sem sugestões.",
+        }
+        self.suggestion_status.configure(text=messages[state])
+        if issue and state in {"timed_out", "unavailable", "busy", "cancelled"}:
+            self.retry_button.grid()
+            self.retry_button.configure(state="normal" if self.callbacks["retry_suggestions"] else "disabled")
+        else:
+            self.retry_button.grid_remove()
         for name, button in self.action_buttons.items():
             enabled = self.callbacks[name] is not None and (name in {"settings", "undo_bulk"} or issue is not None)
             if name in {"apply", "apply_all"}:
@@ -138,8 +167,9 @@ class WritingPanel(ctk.CTkFrame):
             self.callbacks[action]()
         elif self.active_issue:
             if action in {"apply", "apply_all"}:
-                if self.active_issue.suggestions:
-                    self.callbacks[action](self.active_issue, self.suggestions.get())
+                issue, replacement = self.active_issue, self.suggestions.get()
+                if replacement in issue.suggestions:
+                    self.callbacks[action](issue, replacement)
             else:
                 self.callbacks[action](self.active_issue)
 

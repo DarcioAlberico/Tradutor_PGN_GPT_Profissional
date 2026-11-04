@@ -1,4 +1,5 @@
 from gui_harness import GuiTestCase
+from dataclasses import replace
 from tradutor_pgn import writing_panel
 from tradutor_pgn.writing_types import AssistantStatus, WritingIssue
 
@@ -19,6 +20,32 @@ class WritingPanelTests(GuiTestCase):
             on_apply=lambda item, text: self.applied.append((item, text)),
         )
         self.panel.pack()
+
+    def test_progressive_prefix_preserves_choice_and_apply_captures_it(self):
+        first = replace(issue(), suggestions_state="partial")
+        self.panel.set_snapshot((first,), AssistantStatus("ready", "spelling_only"))
+        self.panel.suggestions.set("errado")
+        updated = replace(first, suggestions=("erro", "errado", "errada"), suggestions_state="timed_out")
+        self.panel.set_snapshot((updated,))
+        self.assertEqual(self.panel.suggestions.get(), "errado")
+        self.assertIn("limite", self.panel.suggestion_status.cget("text"))
+        self.panel.apply_button.invoke()
+        self.assertEqual(self.applied, [(updated, "errado")])
+
+    def test_loading_empty_and_timeout_are_distinct_and_retry_is_explicit(self):
+        retried = []
+        self.panel.callbacks["retry_suggestions"] = retried.append
+        pending = replace(issue(), suggestions=(), suggestions_state="loading")
+        self.panel.set_snapshot((pending,))
+        self.assertIn("Buscando", self.panel.suggestion_status.cget("text"))
+        self.assertEqual(self.panel.apply_button.cget("state"), "disabled")
+        timed_out = replace(pending, suggestions_state="timed_out")
+        self.panel.set_snapshot((timed_out,))
+        self.panel.retry_button.invoke()
+        self.assertEqual(retried, [timed_out])
+        self.panel.set_snapshot((replace(pending, suggestions_state="complete"),))
+        self.assertEqual(self.panel.suggestion_status.cget("text"), "Sem sugestões.")
+        self.assertEqual(self.applied, [])
 
     def test_sorted_navigation_suggestions_and_noncolor_category(self):
         first, second = issue(), issue(10, category="GRAMMAR")

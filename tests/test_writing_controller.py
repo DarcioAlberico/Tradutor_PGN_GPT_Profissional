@@ -11,6 +11,7 @@ from tradutor_pgn.languagetool_client import LanguageToolLocalAdapter
 from tradutor_pgn.languagetool_process import LanguageToolProcess
 from tradutor_pgn.writing_controller import WritingController
 from tradutor_pgn.writing_types import AssistantStatus, WritingIssue, WritingRequest
+from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
 
 
 class Spelling:
@@ -39,6 +40,129 @@ def wait_result(controller):
             return events
         time.sleep(0.001)
     pytest.fail("analysis did not finish")
+
+
+class ProgressiveService:
+    def __init__(self):
+        self.callbacks = []
+        self.cancelled = []
+
+    def analyze(self, request):
+        raise AssertionError("interactive controller must prefer initial analysis")
+
+    def analyze_initial(self, request):
+        from tradutor_pgn.writing_types import WritingResult
+        issue = WritingIssue("", "SPELLING_UNKNOWN_WORD", "SPELLING", 0, len(request.text), request.text,
+                             "Grafia", "Confira", (), "error", "spylls", request.text_version,
+                             suggestions_state="pending")
+        return WritingResult(request.text_version, (issue,), "spelling_only")
+
+    def request_suggestions(self, request, issue, *, owner, emit):
+        self.callbacks.append(emit)
+
+    def cancel_suggestions(self, owner):
+        self.cancelled.append(owner)
+
+    def status(self):
+        return AssistantStatus("ready", "spelling_only")
+
+
+def test_initial_result_and_suggestion_prefixes_have_same_context_and_occurrence():
+    service = ProgressiveService()
+    controller = WritingController(service, window_id="one")
+    try:
+        controller.submit(WritingRequest("posiçao", 4, "pt"), record_id="record")
+        initial = next(event for event in wait_result(controller) if event.kind == "result")
+        issue = initial.result.issues[0]
+        assert issue.suggestions_state == "pending"
+        controller.request_suggestions(issue)
+        deadline = time.monotonic() + 3
+        while not service.callbacks and time.monotonic() < deadline:
+            time.sleep(.001)
+        assert service.callbacks
+        service.callbacks[-1](SuggestionSnapshot(("posição",), "partial"))
+        updated = [event for event in controller.poll() if event.kind == "result"][-1]
+        assert updated.context == initial.context and updated.text_digest == initial.text_digest
+        assert updated.result.issues[0].issue_id == issue.issue_id
+        assert updated.result.issues[0].suggestions == ("posição",)
+        service.callbacks[-1](SuggestionSnapshot(("posição", "posições"), "complete"))
+        assert [event for event in controller.poll() if event.kind == "result"][-1].result.issues[0].suggestions == (
+            "posição", "posições",
+        )
+    finally:
+        controller.shutdown()
+
+
+def test_retry_accepts_the_ui_snapshot_while_a_new_prefix_is_queued():
+    service = ProgressiveService()
+    controller = WritingController(service)
+    try:
+        controller.submit(WritingRequest("posiçao", 4, "pt"))
+        issue = next(event.result.issues[0] for event in wait_result(controller) if event.kind == "result")
+        controller.request_suggestions(issue)
+        deadline = time.monotonic() + 3
+        while not service.callbacks and time.monotonic() < deadline:
+            time.sleep(.001)
+        service.callbacks[-1](SuggestionSnapshot(("posição",), "timed_out"))
+        # The callback enriched controller state; Tk still holds its previous
+        # snapshot until the next poll. Occurrence identity remains valid.
+        controller.request_suggestions(issue, retry=True)
+        while len(service.callbacks) < 2 and time.monotonic() < deadline:
+            time.sleep(.001)
+        assert len(service.callbacks) == 2
+    finally:
+        controller.shutdown()
+
+
+def test_selection_bursts_keep_only_one_pending_preparation():
+    entered, release = threading.Event(), threading.Event()
+    class SlowPreparation(ProgressiveService):
+        def request_suggestions(self, request, issue, *, owner, emit):
+            entered.set()
+            assert release.wait(3)
+            super().request_suggestions(request, issue, owner=owner, emit=emit)
+    service = SlowPreparation()
+    controller = WritingController(service)
+    try:
+        controller.submit(WritingRequest("posiçao", 4, "pt"))
+        issue = next(event.result.issues[0] for event in wait_result(controller) if event.kind == "result")
+        controller.request_suggestions(issue)
+        assert entered.wait(3)
+        for _ in range(50):
+            controller.request_suggestions(issue, retry=True)
+        assert controller._executor._work_queue.qsize() <= 1
+    finally:
+        release.set()
+        controller.shutdown()
+
+
+@pytest.mark.parametrize("change", ["cancel", "submit", "close", "selection"])
+def test_old_suggestion_callbacks_cannot_publish_after_context_or_selection_changes(change):
+    service = ProgressiveService()
+    controller = WritingController(service)
+    try:
+        controller.submit(WritingRequest("posiçao", 1, "pt"), record_id="old")
+        issue = next(event.result.issues[0] for event in wait_result(controller) if event.kind == "result")
+        controller.request_suggestions(issue)
+        deadline = time.monotonic() + 3
+        while not service.callbacks and time.monotonic() < deadline:
+            time.sleep(.001)
+        callback = service.callbacks[-1]
+        if change == "close":
+            controller.shutdown()
+        elif change == "submit":
+            controller.submit(WritingRequest("outra", 1, "pt"), record_id="new")
+            wait_result(controller)
+        elif change == "selection":
+            controller.cancel_suggestions()
+        else:
+            controller.cancel_context()
+        controller.poll()
+        callback(SuggestionSnapshot(("posição",), "complete"))
+        assert controller.poll() == ()
+        assert service.cancelled
+    finally:
+        controller.shutdown()
 
 
 def test_only_latest_pending_request_runs_and_poll_delivers_on_caller_thread():

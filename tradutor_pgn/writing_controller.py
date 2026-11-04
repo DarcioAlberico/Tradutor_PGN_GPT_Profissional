@@ -6,15 +6,17 @@ application's shared assistant. The application owns service shutdown.
 """
 
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import threading
 from typing import Literal, Protocol
 import uuid
 
 from .writing_assistant import PortugueseWritingAssistant
-from .writing_types import AssistantStatus, WritingRequest, WritingResult
+from .spelling_suggestions_process import SuggestionSnapshot
+from .writing_types import AssistantStatus, WritingIssue, WritingRequest, WritingResult
 
 
 class AnalysisService(Protocol):
@@ -90,6 +92,12 @@ class WritingController:
         self._events: deque[WritingEvent] = deque()
         self._last_status: AssistantStatus | None = None
         self._closed = False
+        self._result: WritingResult | None = None
+        self._suggestion_generation = 0
+        self._selected_issue_id: str | None = None
+        self._suggestion_owner = uuid.uuid4().hex
+        self._suggestion_preparation: Callable[[], None] | None = None
+        self._suggestion_preparing = False
 
     def submit(self, request: WritingRequest, *, record_id: str = "") -> None:
         with self._lock:
@@ -100,6 +108,8 @@ class WritingController:
                          WritingContext(self._window_id, record_id, request.target_language),
                          request, hashlib.sha256(request.text.encode("utf-8")).hexdigest())
             self._latest = work
+            self.cancel_suggestions()
+            self._result = None
             self._events.clear()
             self._last_status = None
             if self._active is None:
@@ -109,7 +119,8 @@ class WritingController:
 
     def _start(self, work: _Work) -> None:
         self._active = work
-        future = self._executor.submit(self._assistant.analyze, work.request)
+        initial = getattr(self._assistant, "analyze_initial", self._assistant.analyze)
+        future = self._executor.submit(initial, work.request)
         future.add_done_callback(lambda done: self._finished(work, done))
 
     def _finished(self, work: _Work, future: Future[WritingResult]) -> None:
@@ -129,12 +140,102 @@ class WritingController:
             if self._closed:
                 return
             if self._latest is work:
+                self._result = event.result
                 self._events.append(work.event("status", status=status))
                 self._events.append(event)
                 self._last_status = status
             pending, self._pending = self._pending, None
             if pending is not None:
                 self._start(pending)
+
+    def request_suggestions(self, issue: WritingIssue, *, retry: bool = False) -> None:
+        """Select one occurrence; preparation and token work stay outside Tk."""
+        with self._lock:
+            work, result = self._latest, self._result
+            provider = getattr(self._assistant, "request_suggestions", None)
+            if self._closed or work is None or result is None:
+                return
+            current = next((item for item in result.issues if item.issue_id == issue.issue_id
+                            and item.text_version == issue.text_version and item.start == issue.start
+                            and item.end == issue.end and item.original == issue.original), None)
+            if current is None:
+                return
+            issue = current
+            if (issue.category != "SPELLING" or issue.provider != "spylls"
+                    or not callable(provider) or issue.suggestions_state == "complete"):
+                if self._selected_issue_id != issue.issue_id:
+                    self.cancel_suggestions()
+                return
+            if not retry and self._selected_issue_id == issue.issue_id:
+                return
+            self.cancel_suggestions()
+            self._selected_issue_id = issue.issue_id
+            generation = self._suggestion_generation
+
+            def receive(snapshot: SuggestionSnapshot) -> None:
+                self._suggestions_received(work, issue.issue_id, generation, snapshot)
+
+            def prepare() -> None:
+                with self._lock:
+                    if self._closed or self._latest is not work or generation != self._suggestion_generation:
+                        return
+                try:
+                    provider(work.request, issue, owner=self._suggestion_owner, emit=receive)
+                except Exception:
+                    receive(SuggestionSnapshot((), "unavailable"))
+                with self._lock:
+                    if self._closed or self._latest is not work or generation != self._suggestion_generation:
+                        cancel = getattr(self._assistant, "cancel_suggestions", None)
+                        if callable(cancel):
+                            cancel(self._suggestion_owner)
+
+            self._suggestion_preparation = prepare
+            if not self._suggestion_preparing:
+                self._suggestion_preparing = True
+                self._executor.submit(self._prepare_suggestions)
+
+    def _prepare_suggestions(self) -> None:
+        while True:
+            with self._lock:
+                prepare, self._suggestion_preparation = self._suggestion_preparation, None
+                if prepare is None:
+                    self._suggestion_preparing = False
+                    return
+            prepare()
+
+    def _suggestions_received(self, work: _Work, issue_id: str, generation: int,
+                              snapshot: SuggestionSnapshot) -> None:
+        with self._lock:
+            result = self._result
+            if (self._closed or self._latest is not work or result is None
+                    or generation != self._suggestion_generation or self._selected_issue_id != issue_id):
+                return
+            issue = next((item for item in result.issues if item.issue_id == issue_id), None)
+            if issue is None:
+                return
+            values = snapshot.suggestions
+            # A retry replays the same ranked prefix; keep options already shown
+            # until that replay catches up. Never replace a user's chosen option.
+            if issue.suggestions[:len(values)] == values:
+                values = issue.suggestions
+            elif values[:len(issue.suggestions)] != issue.suggestions:
+                return
+            updated = replace(issue, suggestions=values, suggestions_state=snapshot.state)
+            self._result = replace(result, issues=tuple(updated if item.issue_id == issue_id else item
+                                                       for item in result.issues))
+            self._result.validate_for(work.request)
+            # Intermediate prefixes coalesce to the latest immutable snapshot.
+            self._events = deque(event for event in self._events if event.kind != "result")
+            self._events.append(work.event("result", result=self._result))
+
+    def cancel_suggestions(self) -> None:
+        with self._lock:
+            self._suggestion_generation += 1
+            self._selected_issue_id = None
+            self._suggestion_preparation = None
+            cancel = getattr(self._assistant, "cancel_suggestions", None)
+            if callable(cancel):
+                cancel(self._suggestion_owner)
 
     def poll(self) -> tuple[WritingEvent, ...]:
         """Drain current-context events. Safe after cancel or window destruction."""
@@ -158,6 +259,8 @@ class WritingController:
         with self._lock:
             self._generation += 1
             self._latest = self._pending = None
+            self._result = None
+            self.cancel_suggestions()
             self._events.clear()
             self._last_status = None
 

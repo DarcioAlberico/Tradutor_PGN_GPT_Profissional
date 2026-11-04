@@ -45,6 +45,42 @@ def test_typo_has_stable_unique_five_suggestions_and_unicode_offsets(tmp_path):
     issue.validate_for(request)
 
 
+def test_initial_detection_never_advances_suggestions_or_delays_grammar(tmp_path):
+    class NoSuggestions(Dictionary):
+        def suggest(self, word):
+            raise AssertionError("initial analysis must not explore any suggestions")
+
+    class Grammar:
+        def analyze(self, request, protected):
+            return ()
+
+    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path, NoSuggestions()), grammar_adapter=Grammar())
+    request = WritingRequest("🙂 Uma posiçao boa.", 7, "pt-BR", grammar_enabled=True)
+    try:
+        result = assistant.analyze_initial(request)
+        result.validate_for(request)
+        assert result.mode == "full"
+        assert [(item.original, item.suggestions, item.suggestions_state) for item in result.issues] == [
+            ("posiçao", (), "pending"),
+        ]
+    finally:
+        assistant.shutdown()
+
+
+def test_initial_and_complete_analysis_have_separate_cache_entries(tmp_path):
+    assistant = PortugueseWritingAssistant(spelling_adapter=adapter(tmp_path))
+    request = WritingRequest("posiçao", 1, "pt")
+    try:
+        initial = assistant.analyze_initial(request)
+        complete = assistant.analyze(request)
+        assert initial.issues[0].suggestions == ()
+        assert len(complete.issues[0].suggestions) == 5
+        assert initial.issues[0].issue_id == complete.issues[0].issue_id
+        assert assistant.analyze_initial(replace(request, text_version=2)).issues[0].suggestions_state == "pending"
+    finally:
+        assistant.shutdown()
+
+
 def test_source_glossary_personal_and_session_vocabularies_are_respected(tmp_path):
     personal = PersonalDictionary(tmp_path / "personal.json")
     personal.add("PESSOAL")

@@ -2927,6 +2927,7 @@ class TranslationEditor:
             on_ignore_session=self.ignore_session, on_add_personal=self.add_personal_word,
             on_disable_rule=self.disable_rule, on_undo_bulk=self.undo_writing_bulk,
             on_settings=self.open_writing_settings,
+            on_retry_suggestions=lambda issue: self.writing_controller.request_suggestions(issue, retry=True),
         )
         self.main_pane.add(self.writing_panel, minsize=WRITING_RAIL_MIN, width=300, stretch="never")
         self.writing_panel.on_collapse = self._layout_writing_panel
@@ -3126,6 +3127,9 @@ class TranslationEditor:
                             {word.casefold() for word in self.app.writing_session_words}))
         self.writing_panel.set_snapshot(issues, AssistantStatus(
             "failed" if result.mode == "unavailable" else "ready", result.mode, result.diagnostic))
+        selected = self.writing_panel.active_issue
+        if selected is not None and selected.suggestions_state == "pending":
+            self.writing_controller.request_suggestions(selected)
         for tag in ("spell_error", "writing_spelling", "writing_grammar"):
             self.trans_text.tag_remove(tag, "1.0", tk.END)
         for issue in issues:
@@ -3150,6 +3154,7 @@ class TranslationEditor:
     def focus_writing_issue(self, issue):
         if not self._valid_writing_issue(issue):
             return
+        self.writing_controller.request_suggestions(issue)
         start, end = self.writing_index(issue.start), self.writing_index(issue.end)
         self.trans_text.tag_remove(tk.SEL, "1.0", tk.END)
         self.trans_text.tag_add(tk.SEL, start, end)
