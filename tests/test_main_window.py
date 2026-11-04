@@ -14,7 +14,10 @@ atributos soltos passaria por cima exatamente do que ha para verificar.
 Precisam de display. Onde nao houver, as classes sao puladas.
 """
 
+import gc
 import os
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -1988,6 +1991,7 @@ class SettingsWindowTests(MainWindowTestCase):
     """
 
     def setUp(self):
+        gc.collect()  # Dispose old Tk fixtures on their owning thread.
         super().setUp()
         # O tema e estado de CLASSE do CustomTkinter: um teste que o troque de
         # verdade deixaria a suite inteira escura. Volta ao que o lancador poe.
@@ -2021,6 +2025,47 @@ class SettingsWindowTests(MainWindowTestCase):
         self.assertEqual(len(novas), 1)
         self.assertEqual(novas[0].title(), "Configurações")
         novas[0].destroy()
+
+    def test_writing_preference_poll_during_worker_commit_is_nonblocking_and_invalidation_is_eventual(self):
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+        from tradutor_pgn.writing_types import WritingRequest
+        class Spelling:
+            calls = 0
+            def analyze(self, request, protected):
+                self.calls += 1
+                return ()
+        provider = Spelling()
+        service = PortugueseWritingAssistant(spelling_adapter=provider, grammar_adapter=provider)
+        self.app.writing_assistant = service
+        self.addCleanup(service.shutdown)
+        window = self.abre()
+        request = WritingRequest("palavra", 1, "pt")
+        revision = service.analyze(request).revision
+        entered, release = threading.Event(), threading.Event()
+        def hold_commit():
+            with service.guard_revision(revision):
+                entered.set()
+                release.wait(2)
+        holder = threading.Thread(target=hold_commit)
+        holder.start()
+        self.assertTrue(entered.wait(3))
+        try:
+            beats = []
+            self.root.after(0, lambda: beats.append(True))
+            for enabled in (False, True, False, True):
+                settings.write_writing_settings({"spelling_enabled": enabled})
+                started = time.monotonic()
+                window.poll_writing_settings()
+                self.assertLess(time.monotonic() - started, .1)
+                self.assertEqual(bool(window.spelling_var.get()), enabled)
+            self.pump()
+            self.assertTrue(beats)
+            self.assertTrue(holder.is_alive())
+        finally:
+            release.set()
+            holder.join(3)
+        self.assertNotEqual(service.analyze(request).revision, revision)
+        self.assertEqual(provider.calls, 2)
 
     def test_writing_defaults_partial_save_and_live_other_settings_window(self):
         from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
@@ -2576,6 +2621,54 @@ class SettingsWindowTests(MainWindowTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(gui_harness.DISPLAY, "sem display para o Tk")
+class SettingsFixtureIsolationTests(unittest.TestCase):
+    def test_previous_fixture_font_is_collected_on_owner_before_vocabulary_worker(self):
+        flag = "PGN_TEST_SETTINGS_GC_CHILD"
+        if os.environ.get(flag) != "1":
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest",
+                 f"{__file__}::{type(self).__name__}::{self._testMethodName}", "-q", "--tb=short"],
+                env={**os.environ, flag: "1"}, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
+        from tkinter.font import Font
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        owner = threading.get_ident()
+        disposed = []
+        class ObservedFont(Font):
+            def __del__(self):
+                disposed.append(threading.get_ident())
+                # A failed assertion must not hang or crash the test process
+                # by invoking Tcl from the wrong thread.
+                if threading.get_ident() == owner:
+                    super().__del__()
+        enabled = gc.isenabled()
+        gc.disable()
+        self.addCleanup(lambda: gc.enable() if enabled else None)
+        root = tk.Tk()
+        root.withdraw()
+        font = ObservedFont(root=root, family="Arial")
+        font.cycle = font
+        root.destroy()
+        del font, root
+        next_fixture = SettingsWindowTests("test_the_button_opens_the_window")
+        self.addCleanup(next_fixture.doCleanups)
+        next_fixture.setUp()
+        completed = threading.Event()
+        def vocabulary_work():
+            gc.collect()
+            PersonalDictionary(next_fixture.base / "probe.json").add("Capablanca")
+            completed.set()
+        worker = threading.Thread(target=vocabulary_work, daemon=True)
+        worker.start()
+        worker.join(3)
+        self.assertTrue(completed.is_set())
+        self.assertEqual(disposed, [owner])
 
 
 class SettingsCredentialCheckTests(MainWindowTestCase):

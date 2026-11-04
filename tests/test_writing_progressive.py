@@ -212,6 +212,71 @@ def test_guard_read_failure_refuses_mutation_without_exposing_exception_payload(
         service.shutdown()
 
 
+@pytest.mark.parametrize("action", ["refresh", "cancel", "controller_shutdown", "assistant_shutdown"])
+def test_pending_invalidation_survives_cancel_and_shutdown_without_republishing_old_result(tmp_path, action):
+    service, suggestions, _ = assistant(tmp_path)
+    controller = WritingController(service)
+    entered, release, shutdown_started = threading.Event(), threading.Event(), threading.Event()
+    closer = None
+    try:
+        request = WritingRequest("posiçao", 2, "pt-BR")
+        controller.submit(request)
+        issue = wait_result(controller).issues[0]
+        controller.request_suggestions(issue)
+        deadline = time.monotonic() + 3
+        while not suggestions.callbacks and time.monotonic() < deadline:
+            time.sleep(.001)
+        callback = suggestions.callbacks[-1]
+        callback(SuggestionSnapshot(("posição",), "partial"))
+        def hold_commit():
+            with service.guard_revision(issue.revision):
+                entered.set()
+                release.wait(2)
+        holder = threading.Thread(target=hold_commit)
+        holder.start()
+        assert entered.wait(3)
+        started = time.monotonic()
+        for _ in range(3):
+            service.invalidate_cache()
+        assert time.monotonic() - started < .1
+        if action == "cancel":
+            controller.cancel_context()
+        elif action == "controller_shutdown":
+            controller.shutdown()
+        elif action == "assistant_shutdown":
+            def close_service():
+                shutdown_started.set()
+                service.shutdown()
+            closer = threading.Thread(target=close_service)
+            closer.start()
+            assert shutdown_started.wait(3)
+        assert not controller.is_current_issue(issue)
+        callback(SuggestionSnapshot(("posição", "posições"), "complete"))
+        assert not any(event.result and event.result.revision == issue.revision for event in controller.poll())
+        release.set()
+        holder.join(3)
+        assert not holder.is_alive()
+        if closer is not None:
+            closer.join(3)
+            assert not closer.is_alive()
+            assert service.analyze_initial(request).mode == "unavailable"
+        else:
+            assert service.suggestion_revision()[0] == issue.revision[0] + 3
+            if action == "refresh":
+                assert wait_result(controller).revision[0] == issue.revision[0] + 3
+        callback(SuggestionSnapshot(("posição", "posições"), "complete"))
+        assert not controller.is_current_issue(issue)
+        assert not any(event.result and event.result.revision == issue.revision for event in controller.poll())
+    finally:
+        release.set()
+        if "holder" in locals():
+            holder.join(3)
+        if closer is not None:
+            closer.join(3)
+        controller.shutdown()
+        service.shutdown()
+
+
 @pytest.mark.parametrize("edit", ["writer", "inplace", "atomic", "cache", "rules", "glossary"])
 def test_queued_prefix_is_revoked_at_delivery_and_old_issue_cannot_apply(tmp_path, edit):
     service, suggestions, vocabulary = assistant(tmp_path)

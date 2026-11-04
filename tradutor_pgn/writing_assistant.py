@@ -260,6 +260,9 @@ class PortugueseWritingAssistant:
         self._grammar_activity_lock = threading.Lock()
         self._active_grammar_checks = 0
         self._cache_lock = threading.RLock()
+        self._cache_depth = threading.local()
+        self._invalidation_lock = threading.Lock()
+        self._pending_invalidations = 0
         self._cache: OrderedDict[tuple[int, str], WritingResult] = OrderedDict()
         self._cache_capacity = cache_capacity
         self._cache_epoch = 0
@@ -277,20 +280,59 @@ class PortugueseWritingAssistant:
         if any(name not in self._cache_revisions or type(value) not in {str, int}
                for name, value in revisions.items()):
             raise ValueError("invalid writing cache revision")
-        with self._cache_lock:
+        with self._locked_cache():
             if any(self._cache_revisions[name] != value for name, value in revisions.items()):
                 self._cache_revisions.update(revisions)
                 self.invalidate_cache()
 
     def invalidate_cache(self) -> None:
-        """Clear memory only; an old in-flight check cannot refill this epoch."""
-        with self._cache_lock:
-            self._cache_epoch += 1
+        """Request every epoch immediately, without waiting for an open commit.
+
+        The outer cache scope applies pending requests before releasing its
+        lock. A guard already in progress stays ordered before those requests.
+        """
+        with self._invalidation_lock:
+            self._pending_invalidations += 1
+        with self._locked_cache(blocking=False):
+            pass
+
+    def _apply_pending_invalidations(self) -> None:
+        """Both locks are held; no I/O, provider call or callback is allowed."""
+        if self._pending_invalidations:
             self._cache.clear()
+            self._cache_epoch += self._pending_invalidations
+            self._pending_invalidations = 0
+
+    @contextmanager
+    def _locked_cache(self, *, blocking: bool = True) -> Iterator[bool]:
+        if not self._cache_lock.acquire(blocking=blocking):
+            yield False
+            return
+        depth = getattr(self._cache_depth, "value", 0)
+        self._cache_depth.value = depth + 1
+        try:
+            if depth == 0:
+                with self._invalidation_lock:
+                    self._apply_pending_invalidations()
+            yield True
+        finally:
+            if depth == 0:
+                # Release while holding the short publication lock: a new
+                # notification either drains here or can acquire the cache.
+                # Nested reads must never drain in the middle of a commit.
+                with self._invalidation_lock:
+                    try:
+                        self._apply_pending_invalidations()
+                    finally:
+                        self._cache_depth.value = depth
+                        self._cache_lock.release()
+            else:
+                self._cache_depth.value = depth
+                self._cache_lock.release()
 
     def normalization_counts(self) -> dict[str, int]:
         """Process-local aggregate diagnostics; no issue/text/offset retained."""
-        with self._cache_lock:
+        with self._locked_cache():
             return self._normalization_counts.copy()
 
     def _cache_key(self, request: WritingRequest, *, initial: bool = False) -> tuple[int, str] | None:
@@ -306,7 +348,7 @@ class PortugueseWritingAssistant:
             # A vocabulary read error must reach normal analysis and produce
             # its visible unavailable result, never reuse an earlier success.
             return None
-        with self._cache_lock:
+        with self._locked_cache():
             epoch, revisions = self._cache_epoch, self._cache_revisions.copy()
         payload = [
             "writing-v1", initial, EXPECTED_VERSION, provider_revisions, revisions,
@@ -325,7 +367,7 @@ class PortugueseWritingAssistant:
         return self._analyze(request, initial=True)
 
     def _analyze(self, request: WritingRequest, *, initial: bool) -> WritingResult:
-        with self._cache_lock:
+        with self._locked_cache():
             if self._closed:
                 return WritingResult(request.text_version, (), "unavailable", "Assistente de escrita encerrado.")
         try:
@@ -333,7 +375,7 @@ class PortugueseWritingAssistant:
         except Exception:
             revision = None
         key = self._cache_key(request, initial=initial)
-        with self._cache_lock:
+        with self._locked_cache():
             cached = self._cache.get(key) if key is not None else None
             if cached is not None and key is not None and not self._closed:
                 grammar_status = self._grammar_status() if request.grammar_enabled else None
@@ -348,10 +390,10 @@ class PortugueseWritingAssistant:
                     return result.with_revision(revision)
         result = self._analyze_uncached(request, initial=initial).with_revision(revision)
         current_key = self._cache_key(request, initial=initial) if key is not None else None
-        with self._cache_lock:
+        with self._locked_cache():
             if self._closed:
                 return WritingResult(request.text_version, (), "unavailable", "Assistente de escrita encerrado.")
-            if (key is not None and key == current_key and result.mode != "unavailable"
+            if (key is not None and key == current_key and key[0] == self._cache_epoch and result.mode != "unavailable"
                     and not result.diagnostic):
                 self._cache[key] = result
                 self._cache.move_to_end(key)
@@ -370,7 +412,7 @@ class PortugueseWritingAssistant:
             return self._unavailable(request, str(error))
         except Exception:
             return self._unavailable(request, "Ortografia indisponível: falha no motor local.")
-        with self._cache_lock:
+        with self._locked_cache():
             if self._closed:
                 return self._unavailable(request, "Assistente de escrita encerrado.")
         mode: AssistantMode = "spelling_only"
@@ -405,7 +447,7 @@ class PortugueseWritingAssistant:
                 # again from projection coordinates after narrowing.
                 candidate, dropped = _agreement_alternatives(candidate)
                 if dropped:
-                    with self._cache_lock:
+                    with self._locked_cache():
                         self._normalization_counts[candidate.category] = self._normalization_counts.get(candidate.category, 0) + dropped
                 issue = restore_issue_offsets(_narrow_replacement_span(candidate), protected)
                 if issue is None:
@@ -419,22 +461,22 @@ class PortugueseWritingAssistant:
             issue.start, issue.end, issue.category, issue.rule_id, issue.provider,
         )))
         grammar_status = self._grammar_status() if request.grammar_enabled else None
-        with self._cache_lock:
+        with self._locked_cache():
             if not self._closed:
                 self._status = AssistantStatus("ready", mode, diagnostic,
                                                grammar_status.restart_attempted if grammar_status else False)
         return WritingResult(request.text_version, ordered, mode, diagnostic)
 
     def _unavailable(self, request: WritingRequest, diagnostic: str) -> WritingResult:
-        with self._cache_lock:
+        with self._locked_cache():
             if not self._closed:
                 self._status = AssistantStatus("failed", "unavailable", diagnostic)
         return WritingResult(request.text_version, (), "unavailable", diagnostic)
 
     def status(self) -> AssistantStatus:
-        if not self._cache_lock.acquire(blocking=False):
-            return AssistantStatus("starting", "spelling_only", "Revisão em atualização; aguarde nova análise.")
-        try:
+        with self._locked_cache(blocking=False) as acquired:
+            if not acquired:
+                return AssistantStatus("starting", "spelling_only", "Revisão em atualização; aguarde nova análise.")
             if self._closed:
                 return AssistantStatus("stopped", "unavailable")
             with self._grammar_activity_lock:
@@ -450,26 +492,22 @@ class PortugueseWritingAssistant:
                                                        "Concordância indisponível; somente ortografia.",
                                                        grammar_status.restart_attempted)
             return self._status
-        finally:
-            self._cache_lock.release()
 
     def suggestion_revision(self) -> WritingRevision:
         """Opaque content fingerprint, including externally edited vocabulary."""
-        if not self._cache_lock.acquire(blocking=False):
-            raise WritingRevisionChanged("Revisão em atualização; aguarde nova análise.")
-        try:
+        with self._locked_cache(blocking=False) as acquired:
+            if not acquired:
+                raise WritingRevisionChanged("Revisão em atualização; aguarde nova análise.")
             epoch = self._cache_epoch
-        finally:
-            self._cache_lock.release()
         marker = getattr(self._spelling, "delivery_revision", None)
         return epoch, str(marker if marker is not None else getattr(self._spelling, "cache_revision", "v1"))
 
     @contextmanager
     def guard_revision(self, revision: WritingRevision | None) -> Iterator[None]:
         """Recheck at the mutation boundary; fail immediately on a busy writer."""
-        if not self._cache_lock.acquire(blocking=False):
-            raise WritingRevisionChanged("Revisão alterada; aguarde nova análise.")
-        try:
+        with self._locked_cache(blocking=False) as acquired:
+            if not acquired:
+                raise WritingRevisionChanged("Revisão alterada; aguarde nova análise.")
             guard = getattr(self._spelling, "guard_vocabulary", nullcontext)
             try:
                 with guard():
@@ -480,8 +518,6 @@ class PortugueseWritingAssistant:
                 raise WritingRevisionChanged("Vocabulário em atualização; aguarde nova análise.") from None
             except OSError:
                 raise WritingRevisionChanged("Vocabulário indisponível; aguarde nova análise.") from None
-        finally:
-            self._cache_lock.release()
 
     def request_suggestions(self, request: WritingRequest, issue: WritingIssue, *, owner: str,
                             emit: Callable[[SuggestionSnapshot], None]) -> None:
@@ -508,7 +544,7 @@ class PortugueseWritingAssistant:
                 except Exception:
                     pass
 
-            with self._cache_lock:
+            with self._locked_cache():
                 if self._closed:
                     return
                 service = self._suggestion_service
@@ -532,7 +568,7 @@ class PortugueseWritingAssistant:
         return status() if callable(status) else None
 
     def shutdown(self) -> None:
-        with self._cache_lock:
+        with self._locked_cache():
             if self._closed:
                 return
             self._closed = True

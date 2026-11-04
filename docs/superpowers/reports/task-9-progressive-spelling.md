@@ -285,3 +285,102 @@ exit 0 (somente avisos de conversão LF/CRLF do Git)
 A suíte completa não foi executada por orientação explícita desta rodada.
 Os três diagnósticos não rastreados de terceiros permaneceram fora do fix e do
 commit. Não houve push, publicação ou alteração de dados de produção.
+
+## Fix round 2 — invalidação de preferências sem espera no Tk
+
+A revisão identificou outro consumidor do lock de cache: os polls reais do
+editor (`_sync_writing_preferences`) e de Configurações
+(`poll_writing_settings`) chamavam `invalidate_cache()` enquanto o worker podia
+estar no commit. Ambos esperavam o guard liberar o lock. Os testes Tk novos
+mantiveram um guard no worker por até 2 s e observaram RED de **2,030 s** e
+**2,008 s**, respectivamente, para limite de 100 ms. Não se alteraram esses
+limites nem a proteção do commit.
+
+`invalidate_cache()` agora publica uma contagem de solicitações num lock curto
+e tenta adquirir o cache sem espera. Todas as aquisições internas do cache
+passam pelo mesmo scope, que drena solicitações na entrada e na saída externa.
+Cada solicitação conserva seu incremento de epoch; várias notificações podem
+limpar a memória numa única drenagem. Não há uma thread/future/timer por
+notificação, nem fila de payloads. A API continua retornando `None`.
+
+Profundidade por thread preserva o trecho reentrante do guard: consultar status
+ou revisão dentro dele não drena notificações no meio do commit. Uma notificação
+publicada antes de adquirir o guard invalida a revisão antes de entrar nele.
+As publicadas durante um guard aberto ficam ordenadas depois desse commit e
+são aplicadas mesmo se ele terminar com exceção. Antes de liberar o lock de
+cache, a saída externa drena e o libera ainda sob o lock curto de publicação;
+isso elimina a janela que poderia deixar uma última notificação esquecida.
+
+Ordem: cache → publicação para drenar; a publicação de uma notificação solta
+seu lock antes de tentar o cache sem espera. O lock curto contém somente
+contagem, incremento de epoch e limpeza do cache limitado; nunca permanece
+adquirido durante I/O, SQLite, providers, callbacks ou espera pelo guard. A
+reserva SQLite → cache → vocabulário do lote permanece protegendo o commit.
+Análise e shutdown do serviço continuam sendo operações de worker; o
+cancelamento/shutdown do controller permanece sem espera. Não há trabalho novo
+de invalidação para cancelar ou reiniciar após fechar o serviço.
+
+Enquanto outro worker mantém o guard, status/revisão continuam recusando
+contenção e o Tk pode invalidar seu painel imediatamente. Depois da drenagem,
+eventos e ocorrências antigos falham pela nova epoch. Testes cobrem prefixo já
+enfileirado, refresh eventual sem cancelamento, cancelamento de contexto,
+shutdown de controller e shutdown do serviço em worker. Quatro notificações
+durante sucesso/falha do guard avançam exatamente quatro epochs e impedem
+reuso do cache anterior. Um RED adicional demonstrou preenchimento de chave
+antiga quando a invalidação ocorria entre o último cálculo da chave e o lock
+final; a publicação agora também compara a epoch da chave sob esse lock.
+
+### Isolamento da fixture Tk encontrado pelo gate ampliado
+
+O primeiro gate ampliado terminou com **218 passed, 16 subtests passed e
+1 failed** em 96,64 s. O caso
+`SettingsWindowTests.test_enabling_grammar_while_vocabulary_write_is_busy_starts_afterwards`
+não viu seu worker começar em 2 s; isolado passou em 2,09 s. Após o resumo, o
+processo ficou vivo. `uvx py-spy dump --pid 78696` mostrou o main em
+`concurrent.futures._python_exit → Thread.join` e `writing-settings_0` em
+`tkinter.font.Font.__del__ → Path.__init__ → PersonalDictionary.__init__`, antes
+de executar a alteração do vocabulário. O GC coletava uma fixture Tk antiga
+no worker. O processo identificado pelo PID e linha de comando desse próprio
+pytest foi encerrado; nenhum processo externo ao teste foi encerrado.
+
+A correção da fixture é a mesma já usada por `WritingEditorTests`: uma coleta
+explícita no thread dono antes de construir a próxima fixture de Configurações.
+Não houve alteração de GC em produção. Um teste de isolamento em intérprete
+novo cria uma fonte/raiz antiga cíclica e força coleta no próximo worker. Sem
+a coleta no setup, RED reproduzível: filho termina com **0x80000003** durante
+GC no worker; o teste pai registra a falha. Com a correção, a fonte é coletada
+no thread dono, o worker termina e o processo sai normalmente. Não se
+reduziram timeouts nem se relaxaram assertions dos testes existentes.
+
+```text
+uv run python -m pytest tests/test_writing_assistant.py::test_invalidation_during_commit_never_waits_and_all_epochs_apply_after_guard_exit tests/test_writing_assistant.py::test_invalidation_after_final_key_cannot_refill_an_old_cache_epoch tests/test_writing_progressive.py::test_pending_invalidation_survives_cancel_and_shutdown_without_republishing_old_result tests/test_editor_windows.py::WritingEditorTests::test_preference_sync_during_worker_commit_is_nonblocking_and_revokes_old_issues tests/test_main_window.py::SettingsWindowTests::test_writing_preference_poll_during_worker_commit_is_nonblocking_and_invalidation_is_eventual -q
+8 passed in 5.23s (antes do caso adicional refresh sem cancelamento)
+
+uv run python -m pytest tests/test_main_window.py::SettingsWindowTests -q
+31 passed, 8 subtests passed in 44.30s
+
+uv run python -m pytest tests/test_main_window.py::SettingsFixtureIsolationTests tests/test_main_window.py::SettingsWindowTests::test_enabling_grammar_while_vocabulary_write_is_busy_starts_afterwards tests/test_editor_windows.py::WritingEditorTests::test_preference_sync_during_worker_commit_is_nonblocking_and_revokes_old_issues tests/test_main_window.py::SettingsWindowTests::test_writing_preference_poll_during_worker_commit_is_nonblocking_and_invalidation_is_eventual -q
+4 passed in 8.26s
+```
+
+Gate integrado final, com saída normal do processo (exit 0):
+
+```text
+uv run python -m pytest tests/test_writing_controller.py tests/test_writing_progressive.py tests/test_writing_assistant.py tests/test_personal_dictionary.py tests/test_writing_types.py tests/test_banco.py::WritingBulkTests tests/test_editor_windows.py::WritingEditorTests::test_preference_sync_during_worker_commit_is_nonblocking_and_revokes_old_issues tests/test_editor_windows.py::WritingEditorTests::test_settings_button_opens_real_window_and_preferences_reach_both_editors tests/test_editor_windows.py::WritingEditorTests::test_external_vocabulary_revokes_displayed_prefix_in_two_editors_without_editing_drafts tests/test_editor_windows.py::WritingEditorTests::test_revision_change_between_replacement_calculation_and_mutation_preserves_draft tests/test_editor_windows.py::WritingEditorTests::test_nonblocking_vocabulary_lock_refuses_apply_and_keeps_tk_responsive tests/test_editor_windows.py::WritingEditorTests::test_bulk_revision_change_at_confirmation_preserves_database_and_draft tests/test_editor_windows.py::WritingEditorTests::test_bulk_revision_change_after_sql_updates_rolls_back_every_row tests/test_editor_windows.py::WritingEditorTests::test_bulk_busy_vocabulary_rolls_back_and_keeps_tk_responsive tests/test_main_window.py::SettingsWindowTests tests/test_main_window.py::SettingsFixtureIsolationTests -q
+220 passed, 16 subtests passed in 110.71s (0:01:50)
+
+uv run ruff check tradutor_pgn/writing_assistant.py tests/test_writing_assistant.py tests/test_writing_progressive.py tests/test_editor_windows.py tests/test_main_window.py
+All checks passed!
+
+uv run mypy tradutor_pgn/writing_types.py tradutor_pgn/personal_dictionary.py tradutor_pgn/writing_assistant.py tradutor_pgn/writing_controller.py tradutor_pgn/database.py
+Success: no issues found in 5 source files
+
+git diff --check
+exit 0 (somente avisos LF/CRLF)
+```
+
+Os limites de hash/I/O e escritores externos da rodada 1 continuam aplicáveis.
+O lock curto de publicação pode exigir sincronização breve em memória; a
+invalidação não espera o SQLite nem o guard de commit. O item minor de seleção
+automática de prefixo parcial permanece fora desta rodada. Suíte completa,
+empacotamento e publicação não foram executados.

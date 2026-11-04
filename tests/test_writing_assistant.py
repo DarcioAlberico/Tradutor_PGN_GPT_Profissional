@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import threading
+import time
 
 import pytest
 
@@ -13,7 +14,7 @@ from tradutor_pgn.languagetool_process import LanguageToolProcess
 from tradutor_pgn.personal_dictionary import PersonalDictionary
 from tradutor_pgn.writing_assistant import PortugueseWritingAssistant, SpyllsAdapter
 from tradutor_pgn.writing_protection import protect_text
-from tradutor_pgn.writing_types import AssistantStatus, WritingIssue, WritingRequest
+from tradutor_pgn.writing_types import AssistantStatus, WritingIssue, WritingRequest, WritingRevisionChanged
 
 
 class Dictionary:
@@ -553,6 +554,68 @@ def test_cache_revision_change_and_explicit_invalidation_reanalyze(revision):
     assistant.invalidate_cache()
     assistant.analyze(request)
     assert len(provider.calls) == 3
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_invalidation_during_commit_never_waits_and_all_epochs_apply_after_guard_exit(failure):
+    provider = CountingSpelling()
+    assistant = PortugueseWritingAssistant(spelling_adapter=provider)
+    request = WritingRequest("palavra", 1, "pt")
+    revision = assistant.analyze(request).revision
+    entered, release = threading.Event(), threading.Event()
+    outcomes = []
+    def commit():
+        try:
+            with assistant.guard_revision(revision):
+                entered.set()
+                release.wait(2)
+                # Invalidation requests are ordered after the open guard.
+                assistant.status()
+                assert assistant.suggestion_revision() == revision
+                assert assistant._cache_epoch == revision[0]
+                if failure:
+                    raise RuntimeError("controlled commit failure")
+                outcomes.append("committed")
+        except RuntimeError:
+            outcomes.append("rolled back")
+    worker = threading.Thread(target=commit)
+    worker.start()
+    try:
+        assert entered.wait(3)
+        for _ in range(4):
+            started = time.monotonic()
+            assistant.invalidate_cache()
+            assert time.monotonic() - started < .1
+        assert worker.is_alive()
+        with pytest.raises(WritingRevisionChanged):
+            assistant.suggestion_revision()
+    finally:
+        release.set()
+        worker.join(3)
+    assert not worker.is_alive()
+    assert outcomes == ["rolled back" if failure else "committed"]
+    fresh = assistant.analyze(request)
+    assert fresh.revision[0] == revision[0] + 4
+    assert len(provider.calls) == 2
+    with pytest.raises(WritingRevisionChanged):
+        with assistant.guard_revision(revision):
+            pytest.fail("the old revision cannot authorize a later commit")
+
+
+def test_invalidation_after_final_key_cannot_refill_an_old_cache_epoch(monkeypatch):
+    provider = CountingSpelling()
+    assistant = PortugueseWritingAssistant(spelling_adapter=provider)
+    original = assistant._cache_key
+    calls = []
+    def final_key_then_invalidate(*args, **kwargs):
+        key = original(*args, **kwargs)
+        calls.append(True)
+        if len(calls) == 2:
+            assistant.invalidate_cache()
+        return key
+    monkeypatch.setattr(assistant, "_cache_key", final_key_then_invalidate)
+    assistant.analyze(WritingRequest("palavra", 1, "pt"))
+    assert not assistant._cache
 
 
 def test_cache_observes_adapter_version_changes():

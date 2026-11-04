@@ -8376,6 +8376,46 @@ class WritingEditorTests(GuiTestCase):
             release.set()
             holder.join(6)
 
+    def test_preference_sync_during_worker_commit_is_nonblocking_and_revokes_old_issues(self):
+        from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
+        service, suggestions, _, item = self.progressive_ready()
+        before = (self.editor.draft_text(), self.editor.state.dirty,
+                  self.editor._writing_history.undo_token)
+        callback = suggestions.callbacks[-1]
+        entered, release = threading.Event(), threading.Event()
+        def hold_commit():
+            with service.guard_revision(item.revision):
+                entered.set()
+                release.wait(2)
+        holder = threading.Thread(target=hold_commit)
+        holder.start()
+        self.assertTrue(entered.wait(3))
+        try:
+            beats = []
+            self.root.after(0, lambda: beats.append(True))
+            for enabled in (False, True, False, True):
+                settings.write_writing_settings({"spelling_enabled": enabled})
+                started = time.monotonic()
+                self.assertTrue(self.editor._sync_writing_preferences())
+                self.assertLess(time.monotonic() - started, .1)
+            callback(SuggestionSnapshot(("erro", "nova"), "partial"))
+            self.editor.apply_issue(item, "erro")
+            self.pump()
+            self.assertTrue(beats)
+            self.assertTrue(holder.is_alive())
+            self.assertFalse(self.editor._valid_writing_issue(item))
+            self.assertEqual(self.editor.writing_panel.issues, ())
+            self.assertEqual((self.editor.draft_text(), self.editor.state.dirty,
+                              self.editor._writing_history.undo_token), before)
+        finally:
+            release.set()
+            holder.join(3)
+        fresh = self.ready()
+        self.assertNotEqual(fresh.revision, item.revision)
+        self.editor.apply_issue(item, "erro")
+        self.assertEqual((self.editor.draft_text(), self.editor.state.dirty,
+                          self.editor._writing_history.undo_token), before)
+
     def test_settings_button_opens_real_window_and_preferences_reach_both_editors(self):
         from tradutor_pgn import settings_window
         self.ready()
