@@ -73,6 +73,15 @@ descrição da release, mas não foi provado que esses commits e os respectivos
 patches produzam os objetos do pacote. São candidatos de investigação, não
 fontes correspondentes aprovadas.
 
+Foram localizadas também versões anteriores à data da release das receitas
+WinLibs de [GCC](https://github.com/brechtsanders/winlibs_recipes/blob/5ac8cf5ddee0371949ce55eab19b2ee767fbcd4d/recipes/gcc.winlib)
+e [MinGW-w64](https://github.com/brechtsanders/winlibs_recipes/blob/5ac8cf5ddee0371949ce55eab19b2ee767fbcd4d/recipes/mingw-w64.winlib).
+A segunda declara a versão 11.0.0 e contém patches para `winpthreads` e CRT;
+a receita GCC também contém patches. Essas receitas são evidência adicional
+de possíveis alterações em relação às fontes upstream, não prova de que o
+pacote foi produzido exatamente com esse commit. É necessário estabelecer a
+relação com o build release 5 e preservar a fonte e os patches correspondentes.
+
 Os artefatos experimentais permanecem locais e fora de controle de versão.
 Antes de qualquer entrega, ainda é necessário revisar todas as fontes, versões,
 licenças e avisos, inclusive dos componentes estáticos GCC/MinGW e dependências
