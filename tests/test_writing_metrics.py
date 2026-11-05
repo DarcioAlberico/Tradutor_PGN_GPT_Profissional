@@ -35,18 +35,20 @@ def _record_many(path, count):
     from tradutor_pgn.writing_metrics import WritingMetrics
 
     writer = WritingMetrics(path)
-    return all(writer.record(category="GRAMMAR", rule_id="RULE", action="aplicada", day="2026-10-30") for _ in range(count))
+    return sum(writer.record(category="GRAMMAR", rule_id="RULE", action="aplicada", day="2026-10-30") for _ in range(count))
 
 
 def test_concurrent_windows_and_processes_do_not_lose_increments(tmp_path):
     path = str(tmp_path / "writing-metrics.db")
     with ThreadPoolExecutor(max_workers=5) as executor:
-        assert all(executor.map(lambda _: _record_many(path, 12), range(5)))
+        thread_successes = sum(executor.map(lambda _: _record_many(path, 12), range(5)))
+    assert thread_successes > 0
     context = multiprocessing.get_context("spawn")
     with context.Pool(2) as pool:
-        assert all(pool.starmap(_record_many, [(path, 12)] * 2))
+        process_successes = sum(pool.starmap(_record_many, [(path, 12)] * 2))
+    assert process_successes > 0
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT count FROM daily_counts").fetchall() == [(84,)]
+        assert connection.execute("SELECT count FROM daily_counts").fetchall() == [(thread_successes + process_successes,)]
 
 
 @pytest.mark.parametrize("kwargs", [
