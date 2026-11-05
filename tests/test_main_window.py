@@ -2651,7 +2651,7 @@ class SettingsFixtureIsolationTests(unittest.TestCase):
         enabled = gc.isenabled()
         gc.disable()
         self.addCleanup(lambda: gc.enable() if enabled else None)
-        root = tk.Tk()
+        root = gui_harness.criar_root()
         root.withdraw()
         font = ObservedFont(root=root, family="Arial")
         font.cycle = font
