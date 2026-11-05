@@ -2904,6 +2904,7 @@ class TranslationEditor:
         self._writing_closed = False
         self._writing_busy = False
         self._writing_delivering = False
+        self._writing_deferred_refresh = set()
         self._writing_internal_undo_token = None
         self._writing_signature = None
         self._writing_request = None
@@ -3113,6 +3114,10 @@ class TranslationEditor:
                     self._writing_busy = False
                 if next_job is not None:
                     self._run_writing_job(*next_job)
+                elif self._writing_deferred_refresh and not self._writing_closed:
+                    changed = self._writing_deferred_refresh
+                    self._writing_deferred_refresh = set()
+                    self._refresh_writing_rows_after_external_change(changed)
         finally:
             if not self._writing_closed and self._writing_poll is None:
                 self._writing_poll = self.win.after(60, self.poll_writing)
@@ -3133,7 +3138,7 @@ class TranslationEditor:
         self.writing_panel.set_snapshot(issues, AssistantStatus(
             "failed" if result.mode == "unavailable" else "ready", result.mode, result.diagnostic))
         selected = self.writing_panel.active_issue
-        if selected is not None and selected.suggestions_state == "pending":
+        if selected is not None and selected.suggestions_state in {"pending", "partial"}:
             self.writing_controller.request_suggestions(selected)
         for tag in ("spell_error", "writing_spelling", "writing_grammar"):
             self.trans_text.tag_remove(tag, "1.0", tk.END)
@@ -3395,9 +3400,20 @@ class TranslationEditor:
 
     def _refresh_other_writing_rows(self, ids):
         for editor in tuple(self.app.writing_editors):
-            if (editor is not self and not editor._writing_closed
-                    and editor.current["id"] in ids and not editor.state.dirty):
-                editor.load_item()
+            if (editor is self or editor._writing_closed
+                    or os.path.abspath(editor.app.output_db) != os.path.abspath(self.app.output_db)):
+                continue
+            if editor._writing_busy:
+                editor._writing_deferred_refresh.update(ids)
+            else:
+                editor._refresh_writing_rows_after_external_change(ids)
+
+    def _refresh_writing_rows_after_external_change(self, ids):
+        if self.current["id"] in ids and not self.state.dirty:
+            self.load_item(comment_id=self.current["id"])
+        # Refresh the list even when another record is open. A dirty draft is
+        # kept in its widget; only the list, filters and counts are reloaded.
+        self._reload_writing_rows()
 
     def _writing_committed(self, text, revision, *, keep_undo=False, preserve_widget=False):
         self.current["trans"] = self.current["saved_trans"] = text
@@ -4225,14 +4241,14 @@ class TranslationEditor:
         self.update_row_selection(index)
         self.load_item()
 
-    def load_item(self):
+    def load_item(self, *, comment_id=None):
         if self._writing_action_blocked():
             return
-        index = self.get_index()
-        if index is None or not (0 <= index < len(self.state.rows)):
-            return
-
-        comment_id = self.state.rows[index][0]
+        if comment_id is None:
+            index = self.get_index()
+            if index is None or not (0 <= index < len(self.state.rows)):
+                return
+            comment_id = self.state.rows[index][0]
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
             row = fetch_translation_by_id(cur, comment_id)

@@ -9334,6 +9334,97 @@ class WritingEditorTests(GuiTestCase):
         conn.close()
 
 
+    def test_ignoring_selected_issue_resumes_previous_partial_suggestions(self):
+        from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
+        _, suggestions, _, first = self.progressive_ready()
+        self.assertEqual(len(self.editor.writing_panel.issues), 2)
+        self.editor.writing_panel.select(1)
+        self.wait_for(lambda: len(suggestions.callbacks) >= 2)
+        suggestions.callbacks[-1](SuggestionSnapshot(("erro",), "partial"))
+        self.wait_for(lambda: self.editor.writing_panel.active_issue.suggestions_state == "partial")
+        self.editor.ignore_once(self.editor.writing_panel.active_issue)
+        self.assertEqual(self.editor.writing_panel.active_issue.issue_id, first.issue_id)
+        self.wait_for(lambda: len(suggestions.callbacks) >= 3)
+
+
+    def test_bulk_refreshes_other_window_rows_and_preserves_selection(self):
+        item = self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        selected_id = other.current["id"]
+        self.dialogs.askyesno_result = True
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(other.current["id"], selected_id)
+        self.assertEqual([row[2] for row in other.state.rows], ["erro erro", "erro"])
+        self.assertEqual(other.draft_text(), "erro erro")
+        gc.collect()
+        self.editor.undo_writing_bulk()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual([row[2] for row in other.state.rows], ["errao errao", "errao"])
+        self.assertEqual(other.draft_text(), "errao errao")
+
+
+    def test_bulk_refresh_keeps_other_unrelated_dirty_draft(self):
+        with closing(initialize_database(self.db_path)) as conn:
+            save_translation(conn.cursor(), "Three", "correto", "pt", source_language="en")
+            ids = resolve_comment_ids(conn.cursor(), "pt", ["One", "Two", "Three"], source_language="en")
+            record_occurrences(conn.cursor(), self.book, [(1, 1, 1, "One"), (2, 1, 2, "Two"), (3, 1, 3, "Three")], ids)
+            conn.commit()
+        item = self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        other.select_index(2)
+        other.set_translation_text("rascunho manual", mark_dirty=True, keep_undo=True)
+        token = other._writing_history.undo_token
+        self.dialogs.askyesno_result = True
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(other.draft_text(), "rascunho manual")
+        self.assertTrue(other.state.dirty)
+        self.assertIs(other._writing_history.undo_token, token)
+        self.assertEqual([row[2] for row in other.state.rows], ["erro erro", "erro", "correto"])
+
+
+    def test_bulk_refresh_waits_for_other_window_operation(self):
+        item = self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        other._run_writing_job(lambda: release.wait(5), lambda _result: None)
+        self.dialogs.askyesno_result = True
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertTrue(other._writing_busy)
+        release.set()
+        self.wait_for(lambda: not other._writing_busy)
+        self.assertEqual([row[2] for row in other.state.rows], ["erro erro", "erro"])
+        self.assertEqual(other.draft_text(), "erro erro")
+
+
+    def test_external_bulk_undo_refreshes_current_after_filter_removes_it(self):
+        item = self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        other.search_text.set("errao")
+        other.apply_search()
+        self.assertEqual(other.draft_text(), "errao errao")
+        self.dialogs.askyesno_result = True
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIsNone(other.state.selected_index)
+        self.assertEqual(other.draft_text(), "erro erro")
+        gc.collect()
+        self.editor.undo_writing_bulk()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(other.draft_text(), "errao errao")
+        self.assertEqual(other.current["saved_trans"], "errao errao")
+        with closing(initialize_database(self.db_path)) as conn:
+            revision = conn.execute("SELECT writing_revision FROM comments WHERE id=?", (other.current["id"],)).fetchone()[0]
+        self.assertEqual(other.current["writing_revision"], revision)
+
+
 class TextUndoHistoryTests(GuiTestCase):
     def setUp(self):
         super().setUp()
