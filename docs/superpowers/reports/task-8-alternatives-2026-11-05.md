@@ -9,8 +9,9 @@ dicionários portugueses com frequências uniformes, sem as listas Gaia. O probe
 dos autômatos apontou o mesmo conjunto de palavras dos dicionários anteriores;
 isso não garante a mesma ordem de sugestões. No corpus sintético inalterado de
 18 casos, os dois candidatos produziram 10 acertos, nenhum falso positivo e um
-erro não detectado, conforme `corpus-comparison.json`. A amostra é pequena e
-não comprova equivalência geral.
+erro não detectado, conforme a [comparação do corpus](task-8-neutral-corpus-comparison-2026-11-05.json).
+A [comparação dos conjuntos](task-8-neutral-word-equivalence-2026-11-05.json)
+registra as contagens e hashes. A amostra é pequena e não comprova equivalência geral.
 
 Uma segunda experiência compilou para Windows um candidato Hunspell a partir
 da revisão `1180421f50f211984211e968eb6801ffd3390b8f`. O comando e seus
