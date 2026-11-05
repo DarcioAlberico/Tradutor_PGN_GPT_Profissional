@@ -6,6 +6,12 @@ retirada; os números de 100%/90,91% registrados neste relatório descrevem
 apenas o protótipo rejeitado e não se aplicam à versão atual do produto.
 O corpus limitado não detectou esses falsos positivos; os testes de controle
 `tests/test_portuguese_prefix_suggestions.py` os identificaram.
+Depois da retirada, o replay real de `--mode full` com o corpus intacto
+registrou 9 acertos, 1 falso positivo, 2 erros perdidos, precisão de 90%,
+recall de 81,82%, nenhuma violação de trechos protegidos e nenhuma falha de
+análise. O gate de 95% de precisão permanece não atingido. A bateria focada
+incluindo os testes de prefixos passou com 155 testes; a suíte completa da
+cópia integrada precisa ser repetida após a retirada.
 
 A regra de sugestao adicional aplica-se a prefixos produtivos selecionados,
 seguidos de hifen e uma palavra em minusculas reconhecida pelo dicionario,
