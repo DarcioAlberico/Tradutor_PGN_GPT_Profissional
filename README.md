@@ -83,11 +83,14 @@ O runtime medido tem **47.838.546 B** e os recursos LanguageTool **405.072.337 B
 (soma **452.910.883 B**, antes dos metadados). O tamanho real do novo instalador
 e portátil ainda não foi medido, pois sua geração está bloqueada.
 
-O corpus real da Task 9 obteve **66,67% de precisão** e **72,73% de recall**,
-abaixo das metas de 95%/80%. O p95 completo warm foi **3041–3272 ms/comentário**,
-acima de 500 ms; ortografia também excedeu 20 ms/linha. TA-004 literal passou,
-com zero violações protegidas, mas isso não aprova estabilidade ou distribuição.
-Veja [evidências e limitações](docs/superpowers/reports/task-9-report.md).
+No replay real mais recente do corpus sintético de 18 casos, a precisão foi
+**90%** e o recall **81,82%**: a meta de 95% de precisão ainda não foi atingida.
+Um protótipo que alcançou 100% nesse corpus foi rejeitado após outros testes
+encontrarem sugestões incorretas. As medições anteriores de desempenho também
+não aprovaram o modo completo; a publicação progressiva foi otimizada depois e
+precisa de validação final. A concordância continua experimental. Veja as
+[melhorias de qualidade](docs/superpowers/reports/task-9-quality-improvements.md)
+e o [protótipo rejeitado](docs/superpowers/reports/task-9-prefix-orthography-2026-11-05.md).
 
 ## Requisitos
 
