@@ -62,6 +62,15 @@ diretório `/src/`; essa busca por nomes não garante ausência de outros avisos
 Identidade de binários continua distinta de fonte correspondente e cumprimento
 dos termos de licença.
 
+Como ponto de partida para essa conferência, as tags oficiais
+[`releases/gcc-13.1.0`](https://github.com/gcc-mirror/gcc/tree/cc035c5d8672f87dc8c2756d9f8367903aa72d93)
+e [`mingw-w64 v11.0.0`](https://github.com/mingw-w64/mingw-w64/tree/f9500e2d85b9400c0982518663660a127e1dc61a)
+resolvem, respectivamente, aos commits `cc035c5d8672f87dc8c2756d9f8367903aa72d93`
+e `f9500e2d85b9400c0982518663660a127e1dc61a`. As versões são compatíveis com a
+descrição da release, mas não foi provado que esses commits e os respectivos
+patches produzam os objetos do pacote. São candidatos de investigação, não
+fontes correspondentes aprovadas.
+
 Os artefatos experimentais permanecem locais e fora de controle de versão.
 Antes de qualquer entrega, ainda é necessário revisar todas as fontes, versões,
 licenças e avisos, inclusive dos componentes estáticos GCC/MinGW e dependências
