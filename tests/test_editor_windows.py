@@ -9604,4 +9604,3 @@ class WritingRealEngineTests(GuiTestCase):
         self.assertTrue(editor.state.dirty)
         editor.undo_translation()
         self.assertEqual(editor.draft_text(), "Uma posiçao.")
-
