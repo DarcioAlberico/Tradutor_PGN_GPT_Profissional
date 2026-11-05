@@ -1,4 +1,6 @@
+import hashlib
 import os
+from pathlib import Path
 import tkinter as tk
 import weakref
 from tkinter import filedialog, messagebox
@@ -227,7 +229,7 @@ def row_label(entries, index, diagnostics=None):
 class ImportPreviewDialog:
     """Show the exact captured source rows before an append is authorized."""
 
-    def __init__(self, parent, preview, on_confirm, on_close):
+    def __init__(self, parent, preview, on_confirm, on_close, *, allow_empty=False):
         self.win = ctk.CTkToplevel(parent)
         self.win.title("Prévia da importação")
         self.win.geometry("840x520")
@@ -267,8 +269,8 @@ class ImportPreviewDialog:
 
         self.cancel_button = ctk.CTkButton(buttons, text="Cancelar", command=self.close)
         self.cancel_button.pack(side="left", padx=(0, 8))
-        self.confirm_button = ctk.CTkButton(buttons, text=f"Importar {new_count} nova(s)", command=confirm,
-                                           state="normal" if new_count else "disabled")
+        self.confirm_button = ctk.CTkButton(buttons, text=f"Importar {new_count} nova(s)" if new_count else "Continuar revisão", command=confirm,
+                                           state="normal" if new_count or allow_empty else "disabled")
         self.confirm_button.pack(side="left")
         self.win.protocol("WM_DELETE_WINDOW", self.close)
         self.win.bind("<Escape>", lambda _event: self.close())
@@ -1766,7 +1768,12 @@ class GlossaryEditor:
             self.import_preview_window.win.lift()
             return
         try:
+            mirror = self.catalog.mirror_path
+            is_mirror = bool(mirror and Path(path).resolve() == Path(mirror).resolve())
+            mirror_hash = hashlib.sha256(Path(path).read_bytes()).hexdigest() if is_mirror else None
             entries = read_glossary_import(path)
+            if mirror_hash and hashlib.sha256(Path(path).read_bytes()).hexdigest() != mirror_hash:
+                raise ValueError("O arquivo mudou durante a leitura; tente novamente.")
             preview = self.catalog.preview_import(entries)
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao ler importação:\n{exc}", parent=self.win)
@@ -1787,13 +1794,34 @@ class GlossaryEditor:
                 messagebox.showerror("Erro", f"Erro ao importar glossário:\n{exc}", parent=self.win)
                 return
             self.finish_mutation(result)
+            if mirror_hash and messagebox.askyesno(
+                "Concluir revisão do glossário",
+                "As entradas novas foram importadas. Deseja atualizar o arquivo legado "
+                "com o catálogo atual? Uma cópia do arquivo revisado será guardada "
+                "antes da atualização, inclusive entradas conflitantes ou inválidas.",
+                parent=self.win,
+            ):
+                try:
+                    resolution = self.catalog.accept_external_mirror(
+                        mirror_hash, result.snapshot.catalog_revision
+                    )
+                except (OSError, ValueError, GlossaryConflictError) as exc:
+                    messagebox.showwarning("Revisão do glossário", str(exc), parent=self.win)
+                    return
+                self.show_message(
+                    resolution.warning or f"Arquivo sincronizado; cópia: {resolution.backup_path}",
+                    WARNING_COLOR if resolution.warning else OK_COLOR,
+                )
+                return
             self.show_message(result.warning or f"Importadas {result.inserted_count} entrada(s) nova(s).",
                               WARNING_COLOR if result.warning else OK_COLOR)
 
         def closed():
             self.import_preview_window = None
 
-        self.import_preview_window = ImportPreviewDialog(self.win, preview, confirmed, closed)
+        self.import_preview_window = ImportPreviewDialog(
+            self.win, preview, confirmed, closed, allow_empty=is_mirror
+        )
 
     def restore_backup(self):
         if self.state.dirty and not self.confirm_discard_changes():

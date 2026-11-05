@@ -363,6 +363,12 @@ nova e substituir o arquivo; carrega-lo custa ~1,1 s, uma vez por uso do botao.
 
 ## Glossario
 
+Se aparecer aviso de arquivo legado divergente, abra **Glossario > Importar
+CSV**, escolha `Substituicoes.txt`, revise a previa e confirme as novas entradas.
+Em seguida, confirme a sincronizacao para preservar uma copia `.revisao-*.bak`
+do arquivo externo e publicar o catalogo atualizado. Entradas conflitantes ou
+invalidas continuam na copia de seguranca para revisao manual.
+
 `glossario-v2.db` e a fonte autoritativa do glossario. `Substituicoes.txt` e
 um espelho legivel, exportado apos cada transacao confirmada, e um formato de
 importacao explicita. O antigo `glossario.db` pertence ao fluxo legado; nunca
@@ -741,9 +747,11 @@ Custa dinheiro — da ordem de US$ 25 por livro de 7.500 comentarios com o
    uma execucao para descobrir.
 2. Para o Claude e preciso o SDK: `uv sync --extra llm`. ChatGPT e DeepSeek
    nao precisam de nada.
-3. Com pelo menos uma chave gravada, **Iniciar tradução** (e **Reprocessar
-   falhas**) pergunta qual motor usar — Google ou um dos modelos —, com o da
-   execucao anterior pre-selecionado. Sem chave nenhuma, nao pergunta.
+3. **Iniciar traducao** e **Reprocessar falhas** perguntam qual motor usar.
+   Estao disponiveis Google direto, Google via `deep-translator` e os modelos
+   com chave configurada; a escolha anterior fica pre-selecionada. Os dois
+   modos Google usam lotes, intervalos adaptativos e interrupcao apos falhas.
+   Limites de requisicao ainda podem ocorrer e nao ha garantia contra bloqueios.
 4. Com um modelo, o programa carrega o cache, conta o que vai mesmo para a
    API e mostra a **estimativa** — comentarios, tokens e dolares, pela tabela
    de precos datada de `tradutor_pgn/llm_costs.py` — antes da primeira

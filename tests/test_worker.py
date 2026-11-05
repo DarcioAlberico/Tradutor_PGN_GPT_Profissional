@@ -3503,3 +3503,26 @@ class WorkerAnchorGateTests(WorkerFallbackHarness, unittest.TestCase):
         ), app.logs)
         self.assertTrue(any("[FALHA]" in l and "nomes" in l for l in app.logs))
         self.assertTrue(any("Comentarios que falharam: 1" in l for l in app.logs))
+
+class DeepTranslatorWorkerTests(WorkerFallbackHarness, unittest.TestCase):
+    def test_deep_translator_uses_existing_batch_and_identifies_run(self):
+        calls = []
+        class FakeDeep:
+            def __init__(self, source, target):
+                self.source, self.target = source, target
+            def translate(self, text, log_message, cancel_flag, pacer):
+                calls.append(text)
+                return ' ||| '.join(f'<{part}>' for part in text.split(' ||| '))
+        with unittest.mock.patch.object(translation_worker, 'DeepTranslatorAdapter', FakeDeep):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp)
+                app, _ = self.run_worker(path, lambda *_a, **_k: self.fail('GTX used'), provider='deep-translator')
+                stored = self.stored(path / 'cache.db')
+                conn = initialize_database(str(path / 'cache.db'))
+                try:
+                    runs = list_translation_runs(conn.cursor())
+                finally:
+                    conn.close()
+        self.assertEqual(stored, {c: f'<{c}>' for c in self.COMMENTS})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(runs[0]['provider'], 'google-deep-translator')

@@ -47,7 +47,7 @@ from .llm_prompt import (
     validar_lote,
 )
 from .pgn_utils import BATCH_SEPARATOR
-from .settings import LLM_DEFAULTS, TRANSLATION_PROVIDER_GOOGLE, TRANSLATION_PROVIDER_IDS
+from .settings import LLM_DEFAULTS, TRANSLATION_PROVIDER_DEEP, TRANSLATION_PROVIDER_GOOGLE, TRANSLATION_PROVIDER_IDS
 from .translation_api import RETRYABLE_STATUS, CancelFlag, LogMessage, retry_delay_seconds
 
 GOOGLE_PROVIDER = TRANSLATION_PROVIDER_GOOGLE
@@ -119,7 +119,7 @@ PROVIDERS: dict[str, ProviderSpec] = {
 PROVIDER_ORDER = tuple(PROVIDERS)
 # O arquivo de configuracoes valida o motor gravado sem importar este modulo;
 # as duas listas tem de dizer o mesmo.
-assert (GOOGLE_PROVIDER, *PROVIDER_ORDER) == TRANSLATION_PROVIDER_IDS
+assert (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP, *PROVIDER_ORDER) == TRANSLATION_PROVIDER_IDS
 
 
 def model_setting_key(provider_id: str) -> str:

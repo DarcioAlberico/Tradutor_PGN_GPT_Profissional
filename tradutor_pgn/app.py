@@ -130,7 +130,12 @@ class PGNTranslatorApp:
         try:
             glossary_initialization = initialize_catalog_glossary()
             if glossary_initialization.warning:
-                report_glossary_error(glossary_initialization.warning)
+                warning = glossary_initialization.warning
+                if "divergente" in warning:
+                    warning = ("O arquivo Substituicoes.txt contém alterações externas que foram "
+                               "preservadas. Abra o Glossário, selecione Importar CSV e escolha "
+                               "Substituicoes.txt para revisar as entradas e concluir a sincronização.")
+                report_glossary_error(warning)
         except Exception as exc:
             report_glossary_error(f"Erro ao inicializar o catálogo do glossário: {exc}")
 

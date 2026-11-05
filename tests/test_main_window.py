@@ -86,6 +86,7 @@ class MainWindowTestCase(GuiTestCase):
         # quem desenvolve pode ter `ANTHROPIC_API_KEY` no ambiente — a suite
         # pararia num `wait_window`. Quem quer o dialogo o pede (ProviderDialogTests).
         self.patch(app_actions, "configured_providers", lambda: [])
+        self.patch(app_actions, "ask_translation_provider", lambda *_args: "google")
 
         self.app = app_module.PGNTranslatorApp(self.root)
         self.root.withdraw()
@@ -2782,7 +2783,7 @@ class ProviderDialogTests(MainWindowTestCase):
 
     def test_it_lists_google_and_every_provider_and_disables_the_keyless(self):
         d = self.dialogo(["deepseek"])
-        self.assertEqual(set(d.radios), {"google", *llm_providers.PROVIDER_ORDER})
+        self.assertEqual(set(d.radios), {"google", "deep-translator", *llm_providers.PROVIDER_ORDER})
         self.assertEqual(d.radios["deepseek"].cget("state"), "normal")
         self.assertEqual(d.radios["anthropic"].cget("state"), "disabled")
         self.assertEqual(d.radios["google"].cget("state"), "normal")
@@ -2810,13 +2811,13 @@ class ProviderDialogTests(MainWindowTestCase):
         chamadas, pronto = self.worker_falso()
         self.app.source_path.set(self.escreve_pgn("a.pgn"))
         perguntas = []
-        self.patch(app_actions, "ask_translation_provider", lambda *a: perguntas.append(a) or "openai")
+        self.patch(app_actions, "ask_translation_provider", lambda *a: perguntas.append(a) or ("openai" if a[1] else "deep-translator"))
 
-        # Sem chave: sem pergunta, Google.
+        # Sem chave: tambem e possivel escolher entre os dois motores Google.
         self.app.start_translation()
         self.assertTrue(pronto.wait(5))
-        self.assertEqual(perguntas, [])
-        self.assertEqual(chamadas[-1]["provider"], "google")
+        self.assertEqual(len(perguntas), 1)
+        self.assertEqual(chamadas[-1]["provider"], "deep-translator")
         self.app.is_processing = False  # o worker falso nao faz o `finally`
         self.app._reset_buttons()
         self.pump()
@@ -2826,8 +2827,8 @@ class ProviderDialogTests(MainWindowTestCase):
         pronto.clear()
         self.app.start_translation()
         self.assertTrue(pronto.wait(5))
-        self.assertEqual(len(perguntas), 1)
-        self.assertEqual(perguntas[0][1], ["openai"])
+        self.assertEqual(len(perguntas), 2)
+        self.assertEqual(perguntas[1][1], ["openai"])
         self.assertEqual(chamadas[-1]["provider"], "openai")
         self.assertEqual(self.app.translation_provider, "openai")
         self.assertEqual(
