@@ -982,7 +982,8 @@ def _collapse_decimal_cache_keys(conn: sqlite3.Connection) -> int:
     return changed
 
 
-def _migrate_database(conn: sqlite3.Connection, from_version: int = 0) -> sqlite3.Connection:
+def _migrate_database(conn: sqlite3.Connection, from_version: int = 0, *,
+                      empty_reset: bool = False) -> sqlite3.Connection:
     cursor = conn.cursor()
 
     # Num banco novo isto ja cria o schema final; num que existe e um no-op, e
@@ -1157,11 +1158,15 @@ def _migrate_database(conn: sqlite3.Connection, from_version: int = 0) -> sqlite
 
     # Depois do FTS de proposito: a atualizacao das chaves passa pelos gatilhos,
     # e sem eles os termos antigos ficariam no indice para sempre.
-    if from_version < 5:
+    if from_version < 5 and not empty_reset:
         _collapse_decimal_cache_keys(conn)
 
-    conn.commit()
-    backfill_quality_warnings(conn)
+    # Reset recreates the current, empty schema inside its own transaction.
+    # No legacy column upgrades or data backfills run on that path; committing
+    # here would make a later reset failure impossible to roll back.
+    if not empty_reset:
+        conn.commit()
+        backfill_quality_warnings(conn)
     return conn
 
 
@@ -3195,36 +3200,35 @@ def clear_all_translations(conn: sqlite3.Connection) -> int:
     continua com os 115 MB que o usuario acabou de mandar apagar, e "zerar o
     banco" que nao libera um byte parece nao ter funcionado.
 
-    Nao ha cancelamento no meio, e por isso quem chama pergunta antes: depois do
-    `DROP TABLE` nao existe estado anterior para voltar. O que existe e o backup,
-    criado pela ferramenta antes de chamar isto.
+    Nao ha cancelamento no meio, e por isso quem chama pergunta antes. As tabelas
+    sao recriadas numa transacao unica: uma falha restaura o estado anterior;
+    depois do commit, voltar depende do backup criado pela ferramenta.
 
     As **ocorrencias** vao junto (garantia Z3). Elas apontam para linhas de
     `comments` por id, e o `AUTOINCREMENT` reinicia com a tabela: uma ocorrencia
     sobrevivente passaria a apontar para a PRIMEIRA traducao que fosse gravada
     depois — o comentario errado, no arquivo certo, sem erro nenhum na tela.
     """
+    if conn.in_transaction:
+        raise ValueError("translation reset requires its own transaction")
     cursor = conn.cursor()
+    conn.execute("BEGIN IMMEDIATE")
     try:
-        total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
-    except sqlite3.Error:  # pragma: no cover - banco sem a tabela ainda
-        total = 0
-
-    # Os gatilhos referenciam `comments`; precisam sair antes dela.
-    for trigger in ("comments_fts_insert", "comments_fts_delete", "comments_fts_update"):
-        cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-    cursor.execute("DROP TABLE IF EXISTS comments")
-    cursor.execute("DROP TABLE IF EXISTS comment_history")
-    cursor.execute(f"DROP TABLE IF EXISTS {OCCURRENCES_TABLE}")
-    # As execucoes tambem (Z5 estende Z3): uma execucao registrada apontando
-    # para ids que o `AUTOINCREMENT` vai reusar seria "reverter" apagando as
-    # linhas erradas — o mesmo defeito das ocorrencias, pela outra tabela.
-    cursor.execute(f"DROP TABLE IF EXISTS {TRANSLATION_RUNS_TABLE}")
-    conn.commit()
-
-    _migrate_database(conn)
-    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-    conn.commit()
+        exists = cursor.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'comments'").fetchone()
+        total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0] if exists else 0
+        # Every table carrying comment identities must go before IDs restart.
+        # The bulk ledger also contains private before/after text (Z3).
+        for trigger in ("comments_fts_insert", "comments_fts_delete", "comments_fts_update"):
+            cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        for table in ("writing_bulk_rows", "comment_history", OCCURRENCES_TABLE,
+                      TRANSLATION_RUNS_TABLE, "comments"):
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
+        _migrate_database(conn, from_version=SCHEMA_VERSION, empty_reset=True)
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
     try:
         conn.execute("VACUUM")

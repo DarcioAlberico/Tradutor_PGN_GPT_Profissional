@@ -932,6 +932,7 @@ def restore_database(app, on_finish=None):
     def restaurado(result):
         if hasattr(app, "translation_cache"):
             app.translation_cache.clear()
+        _invalidate_writing_bulk_undo(app)
         messagebox.showinfo(
             "Restaurar Banco de Dados",
             (
@@ -968,6 +969,29 @@ def _count_translations(db_path):
             conn.close()
 
 
+def _invalidate_writing_bulk_undo(app):
+    # The same path can now contain entirely different comment identities.
+    # Native editor history and drafts remain available as local text edits.
+    stack = getattr(app, "writing_bulk_undo", None)
+    if stack is not None:
+        stack.clear()
+
+
+def _has_translation_reset_payload(db_path):
+    conn = None
+    try:
+        conn = initialize_database(db_path)
+        return any(conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+                   for table in ("comments", "writing_bulk_rows", "comment_history", "occurrences", "translation_runs"))
+    except sqlite3.Error:
+        # An unreadable ledger must go through the normal error/backup path,
+        # never be reported as an already empty database.
+        return True
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def reset_translations(app, on_finish=None):
     """Zera o banco de traducoes, apos backup e confirmacao digitada.
 
@@ -978,12 +1002,15 @@ def reset_translations(app, on_finish=None):
     desistiu, e a retencao (garantia S8) cuida dela.
 
     Sem cancelamento no meio (`allow_cancel=False`), pela mesma razao da
-    restauracao: depois do `DROP TABLE` nao ha estado anterior para voltar, e um
-    botao que nao pode ser honrado e pior do que nenhum botao. A hora de desistir
+    restauracao: depois do commit so o backup permite voltar, e um botao que
+    nao pode ser honrado e pior do que nenhum botao. A hora de desistir
     e o dialogo.
     """
     total = _count_translations(app.output_db)
-    if total == 0:
+    if total == 0 and not _has_translation_reset_payload(app.output_db):
+        _invalidate_writing_bulk_undo(app)
+        if hasattr(app, "translation_cache"):
+            app.translation_cache.clear()
         messagebox.showinfo("Zerar Traduções", "O banco de traduções já está vazio.")
         return
 
@@ -1028,6 +1055,7 @@ def reset_translations(app, on_finish=None):
         return apagadas
 
     def pronto(apagadas):
+        _invalidate_writing_bulk_undo(app)
         if hasattr(app, "translation_cache"):
             # O cache em memoria tem precedencia sobre o banco: deixado como
             # estava, a proxima traducao reaproveitaria exatamente o que o

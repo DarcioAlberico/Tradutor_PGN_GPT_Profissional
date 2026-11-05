@@ -10,6 +10,7 @@ import types
 import tempfile
 import unittest
 import unittest.mock
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -2143,6 +2144,74 @@ class ResetTranslationsTests(ResetToolsTestCase):
         db_tools.reset_translations(app)
 
         self.assertEqual(app.translation_cache, {})
+
+    def test_successful_reset_invalidates_bulk_undo_but_cancel_and_error_preserve_it(self):
+        for outcome in ("success", "cancel", "error"):
+            with self.subTest(outcome=outcome):
+                db_path = self.banco()
+                app = self.app_falso(db_path)
+                app.writing_bulk_undo = {(str(db_path), "book.pgn"): [{"before": "private draft"}]}
+                self.resposta = outcome != "cancel"
+                progress = SynchronousProgress()
+                progress.install(self, db_tools)
+                completed = []
+                failure = unittest.mock.patch.object(db_tools, "clear_all_translations", side_effect=sqlite3.OperationalError("denied")) if outcome == "error" else nullcontext()
+                with failure:
+                    db_tools.reset_translations(app, on_finish=completed.append)
+                self.assertEqual(bool(app.writing_bulk_undo), outcome != "success")
+                self.assertEqual(completed, [2] if outcome == "success" else [None])
+                if outcome == "error":
+                    self.assertEqual(self.dialogos[-1][0], "error")
+
+    def test_empty_reset_invalidates_stale_memory_and_cleans_orphan_bulk_payload(self):
+        for orphan in (False, True):
+            with self.subTest(orphan=orphan):
+                db_path = self.base / f"empty-{orphan}.db"
+                conn = initialize_database(str(db_path))
+                if orphan:
+                    conn.execute("INSERT INTO writing_bulk_rows VALUES ('old', 1, 'private', 'secret', 1, 'book', 0, '[]', 0)")
+                    conn.commit()
+                conn.close()
+                app = self.app_falso(db_path)
+                app.writing_bulk_undo = {("old", "book"): [{"before": "private"}]}
+                db_tools.reset_translations(app)
+                self.assertEqual(app.writing_bulk_undo, {})
+                conn = initialize_database(str(db_path))
+                try:
+                    self.assertEqual(conn.execute("SELECT count(*) FROM writing_bulk_rows").fetchone()[0], 0)
+                finally:
+                    conn.close()
+
+    def test_restore_invalidates_bulk_undo_only_after_success(self):
+        for outcome in ("success", "cancel", "invalid", "migration_error"):
+            with self.subTest(outcome=outcome):
+                db_path = self.banco()
+                backup = self.base / f"restore-{outcome}.db"
+                if outcome == "migration_error":
+                    source = sqlite3.connect(backup)
+                    source.execute("CREATE TABLE comments (id INTEGER)")
+                    source.close()
+                elif outcome in ("success", "cancel"):
+                    initialize_database(str(backup)).close()
+                else:
+                    backup.write_text("not sqlite", encoding="utf-8")
+                app = self.app_falso(db_path)
+                app.writing_bulk_undo = {("old", "book"): [{"before": "private"}]}
+                progress = SynchronousProgress()
+                progress.install(self, db_tools)
+                completed = []
+                self.dialogos.clear()
+                with (unittest.mock.patch.object(db_tools.filedialog, "askopenfilename", return_value=str(backup)),
+                      unittest.mock.patch.object(db_tools.messagebox, "askyesno", return_value=outcome != "cancel")):
+                    db_tools.restore_database(app, on_finish=completed.append)
+                self.assertEqual(bool(app.writing_bulk_undo), outcome != "success")
+                if outcome == "cancel":
+                    self.assertEqual(completed, [])
+                    self.assertEqual(self.dialogos, [])
+                else:
+                    self.assertEqual(completed[0] is not None, outcome == "success")
+                    self.assertEqual(self.dialogos[-1][0], "info" if outcome == "success" else "error")
+                self.assertEqual(self.linhas(db_path), 0 if outcome == "success" else 2)
 
     def test_the_cache_survives_a_no(self):
         db_path = self.banco()

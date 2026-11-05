@@ -8130,6 +8130,43 @@ if __name__ == "__main__":
 
 
 class WritingEditorTests(GuiTestCase):
+    def test_database_reset_invalidates_bulk_undo_in_two_open_editors_and_preserves_drafts(self):
+        self.check_database_replacement_preserves_drafts(restore=False)
+
+    def test_database_restore_invalidates_bulk_undo_in_two_open_editors_and_preserves_drafts(self):
+        self.check_database_replacement_preserves_drafts(restore=True)
+
+    def check_database_replacement_preserves_drafts(self, *, restore):
+        from helpers import SynchronousProgress
+        from tradutor_pgn import db_tools
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIsNotNone(self.editor._current_writing_bulk())
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.editor.set_translation_text("private draft one", mark_dirty=True, keep_undo=True)
+        other.set_translation_text("private draft two", mark_dirty=True, keep_undo=True)
+        tokens = self.editor._writing_history.undo_token, other._writing_history.undo_token
+        SynchronousProgress().install(self, db_tools)
+        source = self.base / "replacement.db"
+        initialize_database(str(source)).close()
+        with (unittest.mock.patch.object(db_tools, "ask_typed_confirmation", return_value=True),
+              unittest.mock.patch.object(db_tools.filedialog, "askopenfilename", return_value=str(source)),
+              unittest.mock.patch.object(db_tools.messagebox, "askyesno", return_value=True),
+              unittest.mock.patch.object(db_tools.messagebox, "showinfo")):
+            (db_tools.restore_database if restore else db_tools.reset_translations)(self.app)
+        self.assertIsNone(self.editor._current_writing_bulk())
+        self.assertIsNone(other._current_writing_bulk())
+        self.assertEqual(self.editor.draft_text(), "private draft one")
+        self.assertEqual(other.draft_text(), "private draft two")
+        self.assertTrue(self.editor.state.dirty)
+        self.assertTrue(other.state.dirty)
+        self.assertEqual((self.editor._writing_history.undo_token, other._writing_history.undo_token), tokens)
+        self.editor.undo_writing_bulk()
+        other.undo_writing_bulk()
+        with closing(initialize_database(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM comments").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM comment_history").fetchone()[0], 0)
+
     def setUp(self):
         gc.collect()  # Dispose old Tk fixtures on their owning thread.
         super().setUp()

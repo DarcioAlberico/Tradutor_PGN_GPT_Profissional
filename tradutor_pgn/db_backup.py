@@ -6,6 +6,8 @@ a orquestracao com dialogos continua em `db_tools`, que re-exporta isto.
 """
 
 import sqlite3
+import tempfile
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -175,24 +177,31 @@ def restore_database_from_backup(
 
     if progress_callback is not None:
         progress_callback(2, 3)
-    source_conn = sqlite3.connect(str(backup_path))
-    target_conn = sqlite3.connect(str(target_path))
-    try:
-        _copy_database(source_conn, target_conn)
-    finally:
-        target_conn.close()
-        source_conn.close()
+    # Migration/validation can fail even when the backup passes integrity_check.
+    # Prepare an isolated copy first, so errors preserve the current identities
+    # and any undo operations still held by open editors. The final SQLite
+    # backup remains transactional and compatible with existing WAL readers.
+    with tempfile.TemporaryDirectory(prefix=".restore-", dir=target_path.parent) as staging:
+        stage_path = str(Path(staging) / "restored.db")
+        with (closing(sqlite3.connect(str(backup_path))) as source_conn,
+              closing(sqlite3.connect(stage_path)) as stage_conn):
+            _copy_database(source_conn, stage_conn)
+
+        migrated_conn = initialize_database(stage_path)
+        try:
+            integrity = migrated_conn.execute("PRAGMA integrity_check").fetchone()[0]
+            if integrity != "ok":
+                raise ValueError(f"Banco restaurado invalido: integrity_check retornou {integrity}")
+            target_conn = sqlite3.connect(str(target_path))
+            try:
+                _copy_database(migrated_conn, target_conn)
+            finally:
+                target_conn.close()
+        finally:
+            migrated_conn.close()
 
     if progress_callback is not None:
         progress_callback(3, 3)
-
-    migrated_conn = initialize_database(str(target_path))
-    try:
-        integrity = migrated_conn.execute("PRAGMA integrity_check").fetchone()[0]
-        if integrity != "ok":
-            raise ValueError(f"Banco restaurado invalido: integrity_check retornou {integrity}")
-    finally:
-        migrated_conn.close()
 
     return {
         "restored_path": str(target_path),
