@@ -644,7 +644,7 @@ class BuildTranslatorTests(unittest.TestCase):
 
     def test_the_settings_know_the_same_providers(self):
         self.assertEqual(
-            settings.TRANSLATION_PROVIDER_IDS, (GOOGLE_PROVIDER, *llm_providers.PROVIDER_ORDER)
+            settings.TRANSLATION_PROVIDER_IDS, (GOOGLE_PROVIDER, settings.TRANSLATION_PROVIDER_DEEP, *llm_providers.PROVIDER_ORDER)
         )
         for pid in PROVIDERS:
             self.assertIn(llm_providers.model_setting_key(pid), settings.LLM_DEFAULTS)

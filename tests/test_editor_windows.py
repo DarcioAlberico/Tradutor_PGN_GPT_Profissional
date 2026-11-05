@@ -9500,3 +9500,32 @@ class WritingRealEngineTests(GuiTestCase):
         self.assertTrue(editor.state.dirty)
         editor.undo_translation()
         self.assertEqual(editor.draft_text(), "Uma posiçao.")
+
+class GlossaryMirrorReviewWindowTests(GlossaryFileRecoveryWindowTests):
+    def test_existing_only_external_mirror_can_be_reviewed_and_synchronized(self):
+        self.editor.catalog.initialize()
+        self.dialogs.askyesno_result = True
+        with open(self.glossary_path, 'a', encoding='utf-8') as external:
+            external.write('\n# external edit\n')
+        original = Path(self.glossary_path).read_bytes()
+        dialog = self.open_preview(self.glossary_path)
+        self.assertEqual(dialog.confirm_button.cget('state'), 'normal')
+        dialog.confirm_button.invoke()
+        self.pump()
+        backups = list(Path(self.base).glob('Substituicoes.txt.revisao-*.bak'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), original)
+        self.assertFalse(self.editor.catalog.initialize().mirror_pending)
+
+    def test_new_external_entries_are_imported_before_sync(self):
+        self.editor.catalog.initialize()
+        self.dialogs.askyesno_result = True
+        path = Path(self.glossary_path)
+        external = "substituicoes = [('rook', 'torre', 'suggestion', 0, 'pt'), ('pin', 'cravada')]\n"
+        path.write_text(external, encoding='utf-8')
+        dialog = self.open_preview(path)
+        dialog.confirm_button.invoke()
+        self.pump()
+        self.assertEqual([e.original_text for e in self.editor.catalog.list_entries().entries], ['rook', 'pin'])
+        self.assertEqual(list(Path(self.base).glob('Substituicoes.txt.revisao-*.bak'))[0].read_text(encoding='utf-8'), external)
+        self.assertFalse(self.editor.catalog.initialize().mirror_pending)

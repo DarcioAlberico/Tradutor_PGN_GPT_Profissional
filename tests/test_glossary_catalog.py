@@ -1206,3 +1206,23 @@ class GlossaryCatalogMigrationTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         stable_id = entries[0].stable_id
         self.assertEqual([entry.stable_id for entry in self.catalog().list_entries().entries], [stable_id])
+
+class GlossaryMirrorResolutionTests(GlossaryCatalogMirrorTests):
+    def test_confirmed_resolution_saves_external_copy_and_resynchronizes(self):
+        self.path.write_text("substituicoes = [('old', 'antigo')]\n", encoding='utf-8')
+        self.catalog.migrate_legacy(lambda: glossario._load_glossary_entry_details_from_file(str(self.path)))
+        external = b"substituicoes = [('external', 'externo')]\n"
+        self.path.write_bytes(external)
+        digest = hashlib.sha256(external).hexdigest()
+        result = self.catalog.accept_external_mirror(digest, self.catalog.list_entries().catalog_revision)
+        self.assertFalse(result.mirror_pending)
+        self.assertEqual(Path(result.backup_path).read_bytes(), external)
+        self.assertEqual(self.catalog.initialize().mirror_pending, False)
+
+    def test_resolution_rejects_file_changed_after_preview(self):
+        self.path.write_text("substituicoes = [('old', 'antigo')]\n", encoding='utf-8')
+        self.catalog.migrate_legacy(lambda: glossario._load_glossary_entry_details_from_file(str(self.path)))
+        self.path.write_text("other", encoding='utf-8')
+        with self.assertRaises(ValueError):
+            self.catalog.accept_external_mirror('0' * 64, self.catalog.list_entries().catalog_revision)
+        self.assertEqual(self.path.read_text(encoding='utf-8'), 'other')

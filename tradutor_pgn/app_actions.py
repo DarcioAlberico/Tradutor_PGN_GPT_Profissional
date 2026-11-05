@@ -317,16 +317,12 @@ def start_translation(app):
 def choose_translation_provider(app):
     """Google ou um modelo de linguagem? `None` quando o usuario cancelou.
 
-    Sem chave configurada nao ha pergunta: o Google e o unico motor. Com
-    chave, o dialogo aparece SEMPRE (ROADMAP 28.7) — o motor da ultima
-    execucao vem pre-selecionado, e a escolha e lembrada em `main_window`.
+    O dialogo oferece ambos os motores Google e lembra a ultima escolha.
     Um provedor escolhido cujo SDK falta e recusado ANTES de a execucao
     comecar, com a instrucao de instalar: nunca trocar de motor em silencio
     (garantia M1).
     """
     configurados = configured_providers()
-    if not configurados:
-        return GOOGLE_PROVIDER
     settings = load_settings()
     lembrado = getattr(app, "translation_provider", GOOGLE_PROVIDER)
     escolhido = ask_translation_provider(

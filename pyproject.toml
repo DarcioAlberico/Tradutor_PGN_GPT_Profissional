@@ -7,6 +7,7 @@ requires-python = ">=3.10"  # o codigo roda em 3.13 (.python-version); 3.8 nunca
 dependencies = [
     "chardet>=5.2",
     "customtkinter>=5.2",
+    "deep-translator==1.11.4",
     "requests>=2.32",
     # Motor hunspell do corretor de prosa (ROADMAP 26). Estava so no
     # requirements.txt: `uv sync` abria o programa sem corretor (ROADMAP 28.1).

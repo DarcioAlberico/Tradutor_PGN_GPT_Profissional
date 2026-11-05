@@ -61,10 +61,12 @@ from itertools import chain
 
 from .app_config import TRANSLATION_REQUEST_DELAY_SECONDS  # noqa: F401 (compat)
 from .failed_runs import build_failed_run_record, save_failed_run
+from .deep_translation import DeepTranslatorAdapter
 from .llm_costs import describe_estimate, describe_estimate_line, describe_outcome, estimate_cost
 from .llm_providers import GOOGLE_PROVIDER, build_translator, model_setting_key
 from .pgn_positions import chess_available, compute_comment_fens
 from .settings import (
+    TRANSLATION_PROVIDER_DEEP,
     load_settings,
     read_board_settings,
     read_llm_settings,
@@ -348,7 +350,15 @@ def run_translation(
         # recusou antes (M1) —, mas a guarda fica: uma chave apagada entre o
         # dialogo e este ponto nao pode virar uma execucao no Google sem aviso.
         llm = None
-        if provider != GOOGLE_PROVIDER:
+        deep_translator = None
+        if provider == TRANSLATION_PROVIDER_DEEP:
+            try:
+                deep_translator = DeepTranslatorAdapter(source_language, target_language)
+            except Exception as exc:
+                app.log_message(f"[ERRO] deep-translator indisponivel ({type(exc).__name__}).")
+                aborted_by_api = True
+                return
+        elif provider != GOOGLE_PROVIDER:
             modelos = read_llm_settings(load_settings())
             try:
                 llm = build_translator(
@@ -366,13 +376,16 @@ def run_translation(
                 aborted_by_api = True
                 return
             app.log_message(llm.describe())
-        provider_name = llm.run_label if llm is not None else TRANSLATION_PROVIDER
+        provider_name = (llm.run_label if llm is not None else
+                         "google-deep-translator" if deep_translator is not None else TRANSLATION_PROVIDER)
 
         def traduzir(texto, contextos=None):
             """UMA porta para a API, seja qual for o motor. `translate_text` e
             resolvido na chamada, e nao no import, para os testes que o
             substituem continuarem valendo. `contextos` — o lance anterior e o
             seguinte de cada parte — so o modelo de linguagem recebe."""
+            if deep_translator is not None:
+                return deep_translator.translate(texto, app.log_message, app.cancel_flag, pacer)
             if llm is not None:
                 return llm.translate(
                     texto, target_language, app.log_message, app.cancel_flag,

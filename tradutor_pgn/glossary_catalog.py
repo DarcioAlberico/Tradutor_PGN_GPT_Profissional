@@ -85,6 +85,13 @@ class ExportResult:
 
 
 @dataclass(frozen=True)
+class MirrorResolutionResult:
+    backup_path: str
+    mirror_pending: bool
+    warning: str | None = None
+
+
+@dataclass(frozen=True)
 class ImportRow:
     line_number: int
     status: Literal["new", "duplicate", "conflict", "invalid"]
@@ -524,6 +531,36 @@ class GlossaryCatalog:
                     self._set_metadata(conn, "mirror_pending", "1")
                     self._set_metadata(conn, "mirror_error", warning)
                 return ExportResult(str(target), snapshot.catalog_revision, True, warning)
+
+    def accept_external_mirror(
+        self, expected_hash: str, expected_catalog_revision: int,
+    ) -> MirrorResolutionResult:
+        """After explicit review, back up exact external bytes and republish.
+
+        The digest ties consent to the reviewed bytes. An intervening edit is
+        never accepted; export_legacy repeats the check immediately before replace.
+        """
+        if self.mirror_path is None:
+            raise ValueError("Legacy mirror path is required.")
+        target = self._require_separate_file(self.mirror_path, allow_mirror=True)
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._require_catalog_revision(conn, expected_catalog_revision)
+            external = target.read_bytes()
+            if hashlib.sha256(external).hexdigest() != expected_hash:
+                raise ValueError("O arquivo mudou após a revisão; revise novamente.")
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=target.parent, prefix=f"{target.name}.revisao-",
+                suffix=".bak", delete=False,
+            ) as backup:
+                backup.write(external)
+                backup.flush()
+                os.fsync(backup.fileno())
+                backup_path = backup.name
+            self._set_metadata(conn, "legacy_mirror_hash", expected_hash)
+            self._set_metadata(conn, "mirror_pending", "1")
+        result = self.export_legacy()
+        return MirrorResolutionResult(backup_path, result.mirror_pending, result.warning)
 
     def retry_pending_mirror(self) -> ExportResult | None:
         if self.mirror_path is None:

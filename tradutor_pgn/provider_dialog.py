@@ -1,9 +1,7 @@
 """O dialogo do "Iniciar tradução": Google ou um modelo de linguagem? (ROADMAP 28.7)
 
-Aparece so quando ha pelo menos uma chave configurada — sem chave nenhuma o
-Google e o unico motor, e perguntar seria um clique a mais por nada. Com
-chave, a pergunta e feita SEMPRE, e o motor nunca troca em silencio (a licao
-de M1): o que a execucao anterior usou vem pre-selecionado, e so isso.
+Oferece os dois modos Google e, quando configurados, modelos de linguagem.
+O motor anterior vem pre-selecionado sem troca silenciosa.
 
 Um provedor sem chave aparece desligado, com "sem chave — Configurações" ao
 lado, em vez de sumir: a lista inteira e o que diz ao usuario que os outros
@@ -19,6 +17,7 @@ import customtkinter as ctk
 
 from .editor_common import MUTED_TEXT_COLOR
 from .llm_providers import GOOGLE_PROVIDER, PROVIDERS, model_setting_key
+from .settings import TRANSLATION_PROVIDER_DEEP
 from .window_utils import bring_window_to_front
 
 
@@ -36,7 +35,7 @@ class ProviderChoiceDialog:
         self.configured = set(configured)
         self.models = models
         self.result: str | None = None
-        if preselected not in self.configured and preselected != GOOGLE_PROVIDER:
+        if preselected not in self.configured and preselected not in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP):
             preselected = GOOGLE_PROVIDER
         self.choice_var = tk.StringVar(value=preselected)
         self.radios: dict[str, ctk.CTkRadioButton] = {}
@@ -52,7 +51,7 @@ class ProviderChoiceDialog:
 
         ctk.CTkLabel(
             self.win,
-            text="Usar um modelo de linguagem nesta tradução?",
+            text="Qual motor usar nesta tradução?",
             font=ctk.CTkFont(weight="bold"),
             anchor="w",
         ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 6))
@@ -67,6 +66,12 @@ class ProviderChoiceDialog:
             value=GOOGLE_PROVIDER,
         )
         self.radios[GOOGLE_PROVIDER].grid(row=linha, column=0, sticky="w", pady=3)
+        linha += 1
+        self.radios[TRANSLATION_PROVIDER_DEEP] = ctk.CTkRadioButton(
+            opcoes, text="Google via deep-translator (gratuito)",
+            variable=self.choice_var, value=TRANSLATION_PROVIDER_DEEP,
+        )
+        self.radios[TRANSLATION_PROVIDER_DEEP].grid(row=linha, column=0, sticky="w", pady=3)
         for spec in PROVIDERS.values():
             linha += 1
             modelo = self.models.get(model_setting_key(spec.id), spec.default_model)
@@ -112,7 +117,7 @@ class ProviderChoiceDialog:
 
     def confirm(self) -> None:
         escolhido = self.choice_var.get()
-        if escolhido != GOOGLE_PROVIDER and escolhido not in self.configured:
+        if escolhido not in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP) and escolhido not in self.configured:
             # Nao deveria acontecer (o radio esta desligado), mas a guarda e o
             # que impede um motor sem chave de sair daqui como escolha.
             escolhido = GOOGLE_PROVIDER
