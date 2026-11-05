@@ -1,0 +1,587 @@
+{
+  "corpus_sha256": "2d8055e72e0b351309d78bd41dd63ee21aa7e6d91168bc0aae646675f341afde",
+  "results": {
+    "original": {
+      "schema_version": 1,
+      "mode": "full",
+      "case_count": 18,
+      "overall": {
+        "expected": 11,
+        "presented": 10,
+        "true_positives": 10,
+        "false_positives": 0,
+        "misses": 1,
+        "precision": 1.0,
+        "recall": 0.9090909090909091
+      },
+      "by_category": {
+        "SPELLING": {
+          "expected": 4,
+          "presented": 4,
+          "true_positives": 4,
+          "false_positives": 0,
+          "misses": 0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "NOMINAL_AGREEMENT": {
+          "expected": 2,
+          "presented": 1,
+          "true_positives": 1,
+          "false_positives": 0,
+          "misses": 1,
+          "precision": 1.0,
+          "recall": 0.5
+        },
+        "VERBAL_AGREEMENT": {
+          "expected": 3,
+          "presented": 3,
+          "true_positives": 3,
+          "false_positives": 0,
+          "misses": 0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "GRAMMAR": {
+          "expected": 0,
+          "presented": 0,
+          "true_positives": 0,
+          "false_positives": 0,
+          "misses": 0,
+          "precision": null,
+          "recall": null
+        },
+        "PUNCTUATION": {
+          "expected": 1,
+          "presented": 1,
+          "true_positives": 1,
+          "false_positives": 0,
+          "misses": 0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "REPEATED_WORD": {
+          "expected": 1,
+          "presented": 1,
+          "true_positives": 1,
+          "false_positives": 0,
+          "misses": 0,
+          "precision": 1.0,
+          "recall": 1.0
+        }
+      },
+      "protected_violations": 0,
+      "failed_cases": 0,
+      "spelling_suggestions": {
+        "expected": 4,
+        "with_suggestions": 4,
+        "coverage": 1.0
+      },
+      "discarded_punctuation_only_agreement_alternatives": {
+        "VERBAL_AGREEMENT": 2
+      },
+      "gate": {
+        "precision_minimum": 0.95,
+        "recall_minimum": 0.8,
+        "spelling_suggestions_minimum": 0.95,
+        "ta004_literal": true,
+        "stable": true,
+        "grammar_enabled_default": false
+      },
+      "cases": [
+        {
+          "id": "TA-004",
+          "expected": 2,
+          "presented": 2,
+          "true_positive_rule_ids": [
+            "GENERAL_VERB_AGREEMENT_ERRORS",
+            "SPELLING_UNKNOWN_WORD"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "correct-chess",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "nominal-plural",
+          "expected": 1,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [
+            "NOMINAL_AGREEMENT"
+          ],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "nominal-gender",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "LIGACAO_ECG_V3"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "verbal-plural",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "GENERAL_VERB_AGREEMENT_ERRORS"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "verbal-singular",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "GENERAL_VERB_AGREEMENT_ERRORS"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "spelling-accent",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "SPELLING_UNKNOWN_WORD"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "spelling-hyphen",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "SPELLING_UNKNOWN_WORD"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "repeated-word",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "PORTUGUESE_WORD_REPEAT_RULE"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "punctuation-double-comma",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "DOUBLE_PUNCTUATION"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "notation-and-tags",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "source-names",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "glossary-multiword",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "unicode-emoji",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "SPELLING_UNKNOWN_WORD"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "unicode-decomposed",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "technical-addresses",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "ambiguous-fragment",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "ambiguous-ellipsis",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        }
+      ]
+    },
+    "neutral": {
+      "schema_version": 1,
+      "mode": "full",
+      "case_count": 18,
+      "overall": {
+        "expected": 11,
+        "presented": 10,
+        "true_positives": 10,
+        "false_positives": 0,
+        "misses": 1,
+        "precision": 1.0,
+        "recall": 0.9090909090909091
+      },
+      "by_category": {
+        "SPELLING": {
+          "expected": 4,
+          "presented": 4,
+          "true_positives": 4,
+          "false_positives": 0,
+          "misses": 0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "NOMINAL_AGREEMENT": {
+          "expected": 2,
+          "presented": 1,
+          "true_positives": 1,
+          "false_positives": 0,
+          "misses": 1,
+          "precision": 1.0,
+          "recall": 0.5
+        },
+        "VERBAL_AGREEMENT": {
+          "expected": 3,
+          "presented": 3,
+          "true_positives": 3,
+          "false_positives": 0,
+          "misses": 0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "GRAMMAR": {
+          "expected": 0,
+          "presented": 0,
+          "true_positives": 0,
+          "false_positives": 0,
+          "misses": 0,
+          "precision": null,
+          "recall": null
+        },
+        "PUNCTUATION": {
+          "expected": 1,
+          "presented": 1,
+          "true_positives": 1,
+          "false_positives": 0,
+          "misses": 0,
+          "precision": 1.0,
+          "recall": 1.0
+        },
+        "REPEATED_WORD": {
+          "expected": 1,
+          "presented": 1,
+          "true_positives": 1,
+          "false_positives": 0,
+          "misses": 0,
+          "precision": 1.0,
+          "recall": 1.0
+        }
+      },
+      "protected_violations": 0,
+      "failed_cases": 0,
+      "spelling_suggestions": {
+        "expected": 4,
+        "with_suggestions": 4,
+        "coverage": 1.0
+      },
+      "discarded_punctuation_only_agreement_alternatives": {
+        "VERBAL_AGREEMENT": 2
+      },
+      "gate": {
+        "precision_minimum": 0.95,
+        "recall_minimum": 0.8,
+        "spelling_suggestions_minimum": 0.95,
+        "ta004_literal": true,
+        "stable": true,
+        "grammar_enabled_default": false
+      },
+      "cases": [
+        {
+          "id": "TA-004",
+          "expected": 2,
+          "presented": 2,
+          "true_positive_rule_ids": [
+            "GENERAL_VERB_AGREEMENT_ERRORS",
+            "SPELLING_UNKNOWN_WORD"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "correct-chess",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "nominal-plural",
+          "expected": 1,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [
+            "NOMINAL_AGREEMENT"
+          ],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "nominal-gender",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "LIGACAO_ECG_V3"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "verbal-plural",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "GENERAL_VERB_AGREEMENT_ERRORS"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "verbal-singular",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "GENERAL_VERB_AGREEMENT_ERRORS"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "spelling-accent",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "SPELLING_UNKNOWN_WORD"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "spelling-hyphen",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "SPELLING_UNKNOWN_WORD"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "repeated-word",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "PORTUGUESE_WORD_REPEAT_RULE"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "punctuation-double-comma",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "DOUBLE_PUNCTUATION"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "notation-and-tags",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "source-names",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "glossary-multiword",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "unicode-emoji",
+          "expected": 1,
+          "presented": 1,
+          "true_positive_rule_ids": [
+            "SPELLING_UNKNOWN_WORD"
+          ],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "unicode-decomposed",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "technical-addresses",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "ambiguous-fragment",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        },
+        {
+          "id": "ambiguous-ellipsis",
+          "expected": 0,
+          "presented": 0,
+          "true_positive_rule_ids": [],
+          "false_positive_rule_ids": [],
+          "missed_categories": [],
+          "protected_violations": 0,
+          "failed": false
+        }
+      ]
+    }
+  }
+}

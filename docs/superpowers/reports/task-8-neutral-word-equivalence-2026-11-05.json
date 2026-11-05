@@ -1,0 +1,44 @@
+{
+  "pt-BR": {
+    "original": {
+      "count": 7735255,
+      "invalid": 0,
+      "duplicate": 0,
+      "word_sha256": "4ded5bfad28940d6ffd5edf036ef13d18875045cf8280f592bcdea71fe38c874"
+    },
+    "neutral": {
+      "count": 7735255,
+      "invalid": 0,
+      "duplicate": 0,
+      "word_sha256": "4ded5bfad28940d6ffd5edf036ef13d18875045cf8280f592bcdea71fe38c874"
+    }
+  },
+  "pt-PT-45": {
+    "original": {
+      "count": 1428315,
+      "invalid": 0,
+      "duplicate": 0,
+      "word_sha256": "baa22a37da4dcfcf8a110afa4f83d96444424e2e1c3e54225f4144427ac4f54a"
+    },
+    "neutral": {
+      "count": 1428315,
+      "invalid": 0,
+      "duplicate": 0,
+      "word_sha256": "baa22a37da4dcfcf8a110afa4f83d96444424e2e1c3e54225f4144427ac4f54a"
+    }
+  },
+  "pt-PT-90": {
+    "original": {
+      "count": 1431419,
+      "invalid": 0,
+      "duplicate": 0,
+      "word_sha256": "c964380e275fb467f3b393ee25edc7b675af649dae6fe5bcfb09c894a2efb6df"
+    },
+    "neutral": {
+      "count": 1431419,
+      "invalid": 0,
+      "duplicate": 0,
+      "word_sha256": "c964380e275fb467f3b393ee25edc7b675af649dae6fe5bcfb09c894a2efb6df"
+    }
+  }
+}
