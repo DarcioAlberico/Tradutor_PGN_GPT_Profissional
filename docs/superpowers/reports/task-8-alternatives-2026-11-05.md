@@ -35,11 +35,13 @@ fixar a revisão exata e conferir os objetos e avisos correspondentes.
 O `README.txt` do ambiente de compilação local identifica Strawberry Perl
 5.38.2.2-64bit. A [nota oficial dessa versão](https://strawberryperl.com/release-notes/5.38.2.2-64bit.html)
 descreve GCC 13.1.0 com configuração compatível com a observada localmente.
-Os SHA-256 observados de `g++.exe` e `libstdc++.a` são, respectivamente,
-`5184372df96eaf7e93428f2eb1451b5af8bde6eddbd44878295db51f520e5bc7` e
-`1e29d6fc6affeb3b0c67036ad82ba0f428f7a0e422ec4a4768ed8045a8ea3a0c`.
-Essa correspondência de versão e configuração não é uma comparação dos bytes
-com a distribuição oficial nem identifica as revisões das fontes e patches.
+O [ZIP portátil oficial 5.38.2.2-64bit](https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_53822_64bit/strawberry-perl-5.38.2.2-64bit-portable.zip)
+foi baixado e teve SHA-256 `ea451686065d6338d7e4d4a04c9af49f17951d15aa4c9ef2e19ab8cb56fa2373440`.
+Uma [comparação reproduzível](task-8-toolchain-identity-2026-11-05.json), com
+`task-8-compare-toolchain-2026-11-05.py`, encontrou os mesmos hashes nos nove
+membros verificados: o compilador e oito arquivos estáticos ou de importação
+observados no mapa de ligação. Isso identifica os bytes desses membros, mas
+não identifica as revisões de fontes, patches ou todos os avisos aplicáveis.
 
 Os artefatos experimentais permanecem locais e fora de controle de versão.
 Antes de qualquer entrega, ainda é necessário revisar todas as fontes, versões,
