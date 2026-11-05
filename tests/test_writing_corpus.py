@@ -192,9 +192,11 @@ def test_real_spylls_baseline_is_independent_of_personal_vocabulary():
         report = evaluate_corpus(corpus, assistant, mode="spelling")
     finally:
         assistant.shutdown()
-    assert report["overall"]["true_positives"] == 3
-    assert report["overall"]["false_positives"] == 1
-    assert report["overall"]["misses"] == 1
+    # The productive-prefix suggestion now resolves the fourth reviewed
+    # spelling occurrence without changing corpus expectations.
+    assert report["overall"]["true_positives"] == 4
+    assert report["overall"]["false_positives"] == 0
+    assert report["overall"]["misses"] == 0
     assert report["protected_violations"] == report["failed_cases"] == 0
 
 

@@ -321,10 +321,10 @@ def test_existing_hyphen_suggestion_is_preserved_without_inventing_correction(tm
     assert dictionary is not None
     request = WritingRequest("contra-jogo", 1, "pt")
     issues = adapter(tmp_path, dictionary).analyze(request, protect_text(request))
-    # The corpus's editorial reference is "contrajogo", absent from VERO.
-    # Preserve the shipped engine's real suggestion rather than inventing one.
+    # Prefix orthography provides an additional suggestion without changing
+    # the legacy dictionary's own ranking.
     assert [issue.original for issue in issues] == ["contra-jogo"]
-    assert issues[0].suggestions == ("contra jogo",)
+    assert issues[0].suggestions == ("contrajogo", "contra jogo")
     assert prose_spellcheck.suggestions("contra-jogo", dictionary) == ["contra jogo"]
 
 
@@ -783,3 +783,70 @@ def test_shutdown_during_spelling_does_not_start_grammar_after_close():
         worker.join(3)
     assert not worker.is_alive()
     assert grammar_calls == []
+
+@pytest.mark.parametrize('word,expected', [
+    ('contra-jogo', 'contrajogo'),
+    ('anti-furto', 'antifurto'),
+    ('micro-ondas', None),
+    ('contra-ataque', None),
+    ('anti-higienico', None),
+    ('anti-social', None),
+    ('vice-presidente', None),
+    ('contra-xyzabc', None),
+])
+def test_prefixed_word_suggestion_follows_orthographic_boundaries(word, expected):
+    class Dictionary:
+        def lookup(self, word):
+            return word in {'jogo', 'furto'}
+        def suggest(self, word):
+            return iter(())
+    values = list(prose_spellcheck.writing_suggestion_candidates(word, Dictionary()))
+    assert values == ([] if expected is None else [expected])
+
+
+def test_real_hyphen_suggestion_is_actionable_and_legacy_ranking_unchanged(tmp_path):
+    dictionary = prose_spellcheck.load_dictionary('pt')
+    request = WritingRequest('contra-jogo', 1, 'pt')
+    issues = adapter(tmp_path, dictionary).analyze(request, protect_text(request))
+    assert issues[0].suggestions[0] == 'contrajogo'
+    assert prose_spellcheck.suggestions('contra-jogo', dictionary) == ['contra jogo']
+
+
+def test_prefix_rule_preserves_accepted_or_case_sensitive_compounds():
+    class Dictionary:
+        def lookup(self, word):
+            return word in {'jogo', 'contra-jogo'}
+        def suggest(self, word):
+            return iter(())
+    dictionary = Dictionary()
+    assert list(prose_spellcheck.writing_suggestion_candidates('contra-jogo', dictionary)) == []
+    assert list(prose_spellcheck.writing_suggestion_candidates('contra-Jogo', dictionary)) == []
+
+
+def test_prefix_rule_respects_explicit_glossary_protection(tmp_path):
+    dictionary = prose_spellcheck.load_dictionary('pt')
+    request = WritingRequest('contra-jogo', 1, 'pt', glossary_terms=frozenset({'contra-jogo'}))
+    assert adapter(tmp_path, dictionary).analyze(request, protect_text(request)) == ()
+
+
+def test_prefix_suggestion_nfc_and_nfd_are_equivalent():
+    import unicodedata
+    dictionary = prose_spellcheck.load_dictionary('pt')
+    nfc = 'contra-pe\u00e7a'
+    nfd = unicodedata.normalize('NFD', nfc)
+    composed = next(iter(prose_spellcheck.writing_suggestion_candidates(nfc, dictionary)))
+    decomposed = next(iter(prose_spellcheck.writing_suggestion_candidates(nfd, dictionary)))
+    assert composed == decomposed == 'contrape\u00e7a'
+
+
+def test_nfd_prefix_suggestion_preserves_original_span_and_glossary_protection(tmp_path):
+    import unicodedata
+    dictionary = prose_spellcheck.load_dictionary('pt')
+    nfd = unicodedata.normalize('NFD', 'contra-pe\u00e7a')
+    text = f'A {nfd} ficou.'
+    request = WritingRequest(text, 1, 'pt')
+    issue, = adapter(tmp_path, dictionary).analyze(request, protect_text(request))
+    assert text[issue.start:issue.end] == issue.original == nfd
+    assert issue.suggestions[0] == 'contrape\u00e7a'
+    protected = WritingRequest(text, 2, 'pt', glossary_terms=frozenset({nfd}))
+    assert adapter(tmp_path, dictionary).analyze(protected, protect_text(protected)) == ()

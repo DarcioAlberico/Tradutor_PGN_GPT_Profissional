@@ -224,7 +224,9 @@ class SpyllsAdapter:
             replacements: dict[str, tuple[str, ...]] = {}
             for start, end, original in candidates:
                 if original not in replacements:
-                    replacements[original] = prose_spellcheck.spelling_suggestions(original, dictionary, suggestion_limit)
+                    replacements[original] = prose_spellcheck.spelling_suggestions(
+                        original, dictionary, suggestion_limit, writing_rules=True
+                    )
                 issues.append(WritingIssue(
                     issue_id="", rule_id="SPELLING_UNKNOWN_WORD", category="SPELLING",
                     start=start, end=end, original=original,

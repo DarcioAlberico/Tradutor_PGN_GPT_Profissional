@@ -33,6 +33,7 @@ ingles e esta no acervo.
 import os
 import re
 import threading
+import unicodedata
 from collections.abc import Iterable
 from typing import Protocol
 
@@ -292,15 +293,42 @@ def misspelled_spans(text, dictionary, known_words=()):
     return spelling_candidates(text, dictionary, known_words, tolerate_errors=True)
 
 
+_WRITING_PREFIXES = frozenset({
+    "anti", "auto", "contra", "extra", "infra", "intra",
+    "micro", "mini", "neo", "semi", "ultra",
+})
+
+
+def writing_suggestion_candidates(word: str, dictionary: SpellingDictionary) -> Iterable[str]:
+    """Prefix orthography, followed by the dictionary's original ranking.
+
+    Only suggest joining a lowercase productive prefix to a known lowercase
+    base beginning with a consonant other than h, r or s. The spelling
+    agreement requires different treatment for those letters and vowels.
+    A valid hyphenated dictionary word is never modified by this rule.
+    """
+    normalized = unicodedata.normalize("NFC", word)
+    parts = normalized.split("-")
+    if len(parts) == 2:
+        prefix, base = parts
+        if (prefix in _WRITING_PREFIXES and len(base) > 1
+                and base[0] in "bcdfgjklmnpqtvwxz" and base.isalpha()
+                and base.islower() and dictionary.lookup(base)
+                and not dictionary.lookup(normalized)):
+            yield prefix + base
+    yield from dictionary.suggest(word)
+
+
 def spelling_suggestions(
     word: str, dictionary: SpellingDictionary, limit: int = 5,
-    *, deduplicate: bool = True,
+    *, deduplicate: bool = True, writing_rules: bool = False,
 ) -> tuple[str, ...]:
     """Keep dictionary ranking, remove duplicates, and propagate provider errors."""
     if not word or limit <= 0:
         return ()
     result: list[str] = []
-    for suggestion in dictionary.suggest(word):
+    candidates = writing_suggestion_candidates(word, dictionary) if writing_rules else dictionary.suggest(word)
+    for suggestion in candidates:
         if not deduplicate or suggestion not in result:
             result.append(suggestion)
             if len(result) >= limit:
