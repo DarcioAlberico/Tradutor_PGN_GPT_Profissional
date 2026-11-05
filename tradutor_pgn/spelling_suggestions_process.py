@@ -56,7 +56,7 @@ def _receive(connection: MessageConnection) -> dict[str, object]:
 
 def _suggestion_worker(connection: MessageConnection) -> None:
     """Spawn entry point. No text, exception, or suggestion is logged/written."""
-    from .prose_spellcheck import load_dictionary, writing_suggestion_candidates
+    from .prose_spellcheck import load_dictionary
 
     try:
         dictionary = load_dictionary("pt")
@@ -72,7 +72,7 @@ def _suggestion_worker(connection: MessageConnection) -> None:
                     or not isinstance(request_id, str) or len(request_id) != 32):
                 return
             values: list[str] = []
-            iterator = iter(writing_suggestion_candidates(word, dictionary))
+            iterator = iter(dictionary.suggest(word))
             for value in iterator:
                 if not isinstance(value, str) or not 0 < len(value) <= MAX_SUGGESTION_LENGTH:
                     return

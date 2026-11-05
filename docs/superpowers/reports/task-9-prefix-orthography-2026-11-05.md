@@ -1,5 +1,12 @@
 ﻿# Sugestoes para prefixos e medicao do corretor — 2026-11-05
 
+**Protótipo rejeitado:** a suíte integrada revelou que a regra abaixo gera
+sugestões indevidas, por exemplo `contraquem` para `contra-quem`. Ela foi
+retirada; os números de 100%/90,91% registrados neste relatório descrevem
+apenas o protótipo rejeitado e não se aplicam à versão atual do produto.
+O corpus limitado não detectou esses falsos positivos; os testes de controle
+`tests/test_portuguese_prefix_suggestions.py` os identificaram.
+
 A regra de sugestao adicional aplica-se a prefixos produtivos selecionados,
 seguidos de hifen e uma palavra em minusculas reconhecida pelo dicionario,
 iniciada por consoante diferente de h, r e s. A palavra inteira nao pode ser

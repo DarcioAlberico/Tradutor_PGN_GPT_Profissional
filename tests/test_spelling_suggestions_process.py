@@ -260,12 +260,12 @@ def test_an_incomplete_ipc_receive_cannot_bypass_the_deadline(monkeypatch):
         close_service(worker)
 
 
-def test_real_spylls_sequences_match_writing_rules_for_accents_compounds_and_nfd():
+def test_real_spylls_sequences_match_legacy_for_accents_compounds_and_nfd():
     from tradutor_pgn.prose_spellcheck import load_dictionary, spelling_suggestions
     dictionary = load_dictionary("pt")
     assert dictionary is not None
     words = ("posiçao", "peao", "contra-jogo", "posic\u0327ao")
-    expected = [spelling_suggestions(unicodedata.normalize("NFC", word), dictionary, writing_rules=True) for word in words]
+    expected = [spelling_suggestions(unicodedata.normalize("NFC", word), dictionary) for word in words]
     worker = SpellingSuggestionService(suggestion_timeout=5)
     try:
         for word, ranked in zip(words, expected):
@@ -274,30 +274,5 @@ def test_real_spylls_sequences_match_writing_rules_for_accents_compounds_and_nfd
             wait_until(lambda: updates and updates[-1].state in {"complete", "timed_out", "unavailable"}, timeout=12)
             assert updates[-1].state == "complete"
             assert updates[-1].suggestions == ranked
-    finally:
-        close_service(worker)
-
-
-def test_real_worker_yields_orthographic_prefix_suggestion_progressively():
-    worker = SpellingSuggestionService(suggestion_timeout=5)
-    updates = []
-    try:
-        worker.submit('one', 'contra-jogo', updates.append)
-        wait_until(lambda: any(update.suggestions for update in updates), timeout=12)
-        assert updates[-1].suggestions[0] == 'contrajogo'
-    finally:
-        close_service(worker)
-
-
-def test_real_worker_suggests_nfd_prefix_in_the_same_form_as_nfc():
-    worker = SpellingSuggestionService(suggestion_timeout=5)
-    outputs = []
-    try:
-        for word in ('contra-pe\u00e7a', unicodedata.normalize('NFD', 'contra-pe\u00e7a')):
-            updates = []
-            worker.submit('one', word, updates.append)
-            wait_until(lambda: any(update.suggestions for update in updates), timeout=12)
-            outputs.append(updates[-1].suggestions[0])
-        assert outputs == ['contrape\u00e7a', 'contrape\u00e7a']
     finally:
         close_service(worker)

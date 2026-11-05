@@ -11,7 +11,9 @@ isso não garante a mesma ordem de sugestões. No corpus sintético inalterado d
 18 casos, os dois candidatos produziram 10 acertos, nenhum falso positivo e um
 erro não detectado, conforme a [comparação do corpus](task-8-neutral-corpus-comparison-2026-11-05.json).
 A [comparação dos conjuntos](task-8-neutral-word-equivalence-2026-11-05.json)
-registra as contagens e hashes. A amostra é pequena e não comprova equivalência geral.
+registra as contagens e hashes. A medição usou um protótipo ortográfico que foi
+posteriormente rejeitado por gerar sugestões incorretas; os números não são
+resultado da versão atual. A amostra é pequena e não comprova equivalência geral.
 
 Uma segunda experiência compilou para Windows um candidato Hunspell a partir
 da revisão `1180421f50f211984211e968eb6801ffd3390b8f`. O comando e seus
