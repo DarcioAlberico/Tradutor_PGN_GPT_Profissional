@@ -4,6 +4,7 @@ import sqlite3
 import threading
 import hashlib
 import logging
+import queue
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from contextlib import closing
@@ -2206,6 +2207,7 @@ class TranslationEditor:
         )
         db_path = self.app.output_db
         lang = self.lang
+        resultado = queue.SimpleQueue()
 
         def gravar():
             try:
@@ -2215,10 +2217,23 @@ class TranslationEditor:
                     )
                 )
             except OSError:
-                self.report_draft_saved(False)
+                resultado.put(False)
                 return
-            self.report_draft_saved(True)
+            except Exception:
+                logging.exception("Falha inesperada ao salvar rascunho")
+                resultado.put(False)
+                return
+            resultado.put(True)
 
+        def acompanhar():
+            try:
+                ok = resultado.get_nowait()
+            except queue.Empty:
+                self.win.after(20, acompanhar)
+                return
+            self.report_draft_saved(ok)
+
+        self.win.after(20, acompanhar)
         threading.Thread(target=gravar, daemon=True).start()
 
     def report_draft_saved(self, ok):

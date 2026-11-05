@@ -1373,6 +1373,22 @@ class TranslationEditorMethodCoverageTests(EditorWindowTestCase):
                 self.pump()
                 self.assertTrue(self.win.winfo_exists(), "a janela morreu")
 
+    def test_draft_completion_is_delivered_on_the_tk_thread(self):
+        self.editor.select_index(0)
+        self.editor.set_translation_text("rascunho de teste", mark_dirty=True)
+        owner = threading.get_ident()
+        delivered = []
+        with unittest.mock.patch.object(
+            self.editor, "report_draft_saved",
+            side_effect=lambda ok: delivered.append((threading.get_ident(), ok)),
+        ):
+            self.editor.persist_current_draft()
+            deadline = time.monotonic() + 5
+            while not delivered and time.monotonic() < deadline:
+                self.pump()
+                time.sleep(.01)
+        self.assertEqual(delivered, [(owner, True)])
+
     def test_the_draft_is_persisted_and_cleared(self):
         self.editor.select_index(0)
         self.editor.set_translation_text("um rascunho qualquer", mark_dirty=True)
