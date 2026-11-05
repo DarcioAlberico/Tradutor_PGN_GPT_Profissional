@@ -50,8 +50,17 @@ O ZIP `winlibs_gcc13.1r5_sans_make.zip` dessa página teve SHA-256
 os [mesmos nove membros coincidem](task-8-winlibs-identity-2026-11-05.json)
 com a instalação usada na compilação. A página descreve a origem como WinLibs
 GCC 13.1 release 5, mas a identidade desses bytes com uma variante exata da
-distribuição original WinLibs ainda não foi demonstrada. Identidade de binários
-continua distinta de fonte correspondente e cumprimento dos termos de licença.
+distribuição original WinLibs ainda não havia sido demonstrada.
+
+Em seguida, o [pacote WinLibs x86_64 POSIX MSVCRT release 5](https://github.com/brechtsanders/winlibs_mingw/releases/tag/13.1.0-16.0.5-11.0.0-msvcrt-r5)
+foi baixado; seu SHA-256 `2dfc45f33bef4e598219c7d31d598c24eca08ab80b6a54d9fbe0bb10471fd239`
+confere com o arquivo `.sha256` disponibilizado na mesma release. A
+[comparação](task-8-upstream-winlibs-identity-2026-11-05.json) encontrou
+identidade nos mesmos nove membros. O ZIP não continha arquivos com nomes
+`COPYING.RUNTIME`, `COPYING.MinGW-w64-runtime` ou `COPYING.winpthreads`, nem
+diretório `/src/`; essa busca por nomes não garante ausência de outros avisos.
+Identidade de binários continua distinta de fonte correspondente e cumprimento
+dos termos de licença.
 
 Os artefatos experimentais permanecem locais e fora de controle de versão.
 Antes de qualquer entrega, ainda é necessário revisar todas as fontes, versões,

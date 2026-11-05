@@ -1,0 +1,59 @@
+{
+  "archive_sha256": "2dfc45f33bef4e598219c7d31d598c24eca08ab80b6a54d9fbe0bb10471fd239",
+  "members": [
+    {
+      "member": "c/bin/g++.exe",
+      "archive_sha256": "5184372df96eaf7e93428f2eb1451b5af8bde6eddbd44878295db51f520e5bc7",
+      "local_sha256": "5184372df96eaf7e93428f2eb1451b5af8bde6eddbd44878295db51f520e5bc7",
+      "identical": true
+    },
+    {
+      "member": "c/lib/libstdc++.a",
+      "archive_sha256": "1e29d6fc6affeb3b0c67036ad82ba0f428f7a0e422ec4a4768ed8045a8ea3a0c",
+      "local_sha256": "1e29d6fc6affeb3b0c67036ad82ba0f428f7a0e422ec4a4768ed8045a8ea3a0c",
+      "identical": true
+    },
+    {
+      "member": "c/lib/gcc/x86_64-w64-mingw32/13.1.0/libgcc.a",
+      "archive_sha256": "c7d627bfa90d5784ab319cc54563c59520a61a294cc605ac0bf6700f87180171",
+      "local_sha256": "c7d627bfa90d5784ab319cc54563c59520a61a294cc605ac0bf6700f87180171",
+      "identical": true
+    },
+    {
+      "member": "c/lib/gcc/x86_64-w64-mingw32/13.1.0/libgcc_eh.a",
+      "archive_sha256": "d57ebc8b86d20ea9067dd758d5a810b073fc8b21549fa37f1c8ea5d29983d1fa",
+      "local_sha256": "d57ebc8b86d20ea9067dd758d5a810b073fc8b21549fa37f1c8ea5d29983d1fa",
+      "identical": true
+    },
+    {
+      "member": "c/x86_64-w64-mingw32/lib/libmingwex.a",
+      "archive_sha256": "73689aa1472928d57ceb569591f4d59caeb3023490c1a126ae2855e73f733dd2",
+      "local_sha256": "73689aa1472928d57ceb569591f4d59caeb3023490c1a126ae2855e73f733dd2",
+      "identical": true
+    },
+    {
+      "member": "c/x86_64-w64-mingw32/lib/libmingw32.a",
+      "archive_sha256": "ec30b21ef6f6eca936522215f761abf90bf436d7e8ea220fe818965a550c97d0",
+      "local_sha256": "ec30b21ef6f6eca936522215f761abf90bf436d7e8ea220fe818965a550c97d0",
+      "identical": true
+    },
+    {
+      "member": "c/x86_64-w64-mingw32/lib/libpthread.a",
+      "archive_sha256": "60fd61b02ecba36ec2e85b48eeb3b00b6eb0b082e7e4db68d0aa649e6b55d580",
+      "local_sha256": "60fd61b02ecba36ec2e85b48eeb3b00b6eb0b082e7e4db68d0aa649e6b55d580",
+      "identical": true
+    },
+    {
+      "member": "c/x86_64-w64-mingw32/lib/libmsvcrt.a",
+      "archive_sha256": "d890797362cd6d97b87da9fadd496275b794619c293b5c08e722ed3c94534601",
+      "local_sha256": "d890797362cd6d97b87da9fadd496275b794619c293b5c08e722ed3c94534601",
+      "identical": true
+    },
+    {
+      "member": "c/x86_64-w64-mingw32/lib/libkernel32.a",
+      "archive_sha256": "89c464cd7e057648e64b0f944a32a3c528900a54292192aa8f5850d8af881f59",
+      "local_sha256": "89c464cd7e057648e64b0f944a32a3c528900a54292192aa8f5850d8af881f59",
+      "identical": true
+    }
+  ]
+}

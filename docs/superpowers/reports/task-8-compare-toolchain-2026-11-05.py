@@ -36,13 +36,16 @@ def main():
     parser.add_argument("--toolchain-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--strip-leading-c", action="store_true")
+    parser.add_argument("--archive-prefix", default="")
     args = parser.parse_args()
     with args.archive.open("rb") as archive:
         archive_hash = digest(archive)
     rows = []
     with zipfile.ZipFile(args.archive) as archive:
         for member in MEMBERS:
-            archive_member = member.removeprefix("c/") if args.strip_leading_c else member
+            archive_member = args.archive_prefix + (
+                member.removeprefix("c/") if args.strip_leading_c else member
+            )
             with archive.open(archive_member) as source, (args.toolchain_dir / member).open("rb") as local:
                 expected = digest(source)
                 observed = digest(local)
