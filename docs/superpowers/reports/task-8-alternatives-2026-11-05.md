@@ -21,6 +21,12 @@ investigação. O DLL inicial teve SHA-256
 Carregamento e consultas de exemplo foram exercitados via JNA. Esses resultados
 não estabelecem equivalência ao binário anterior nem conformidade de distribuição.
 
+A documentação do [libstdc++ do GCC](https://gcc.gnu.org/onlinedocs/libstdc%2B%2B/manual/license.html)
+descreve GPLv3 com a exceção de runtime do GCC para o código da biblioteca.
+Essa declaração geral não identifica, por si só, os objetos específicos
+incorporados ao DLL experimental, suas fontes correspondentes ou os termos dos
+outros componentes estáticos. Essas associações ainda precisam de auditoria.
+
 Os artefatos experimentais permanecem locais e fora de controle de versão.
 Antes de qualquer entrega, ainda é necessário revisar todas as fontes, versões,
 licenças e avisos, inclusive dos componentes estáticos GCC/MinGW e dependências
