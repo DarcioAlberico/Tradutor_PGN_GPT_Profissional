@@ -27,6 +27,10 @@ descreve GPLv3 com a exceção de runtime do GCC para o código da biblioteca.
 Essa declaração geral não identifica, por si só, os objetos específicos
 incorporados ao DLL experimental, suas fontes correspondentes ou os termos dos
 outros componentes estáticos. Essas associações ainda precisam de auditoria.
+O [guia de licenciamento MinGW-w64](https://github.com/mingw-w64/mingw-w64/blob/master/COPYING.MinGW-w64/COPYING.MinGW-w64.txt)
+remete a avisos específicos do runtime, mas o documento da branch atual não
+identifica automaticamente a versão usada pelo compilador local. É necessário
+fixar a revisão exata e conferir os objetos e avisos correspondentes.
 
 Os artefatos experimentais permanecem locais e fora de controle de versão.
 Antes de qualquer entrega, ainda é necessário revisar todas as fontes, versões,
