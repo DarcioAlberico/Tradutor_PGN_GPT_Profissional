@@ -8130,6 +8130,15 @@ if __name__ == "__main__":
 
 
 class WritingEditorTests(GuiTestCase):
+    def test_progressive_fixture_retires_previous_editor_and_draft_timer(self):
+        old = self.editor
+        old.set_translation_text("rascunho", mark_dirty=True)
+        self.assertIsNotNone(old.state.draft_save_after)
+        self.progressive_ready()
+        self.assertIsNone(old.state.draft_save_after)
+        self.assertFalse(old.win.winfo_exists())
+        self.assertIsNone(self.editor.state.draft_save_after)
+
     def test_database_reset_invalidates_bulk_undo_in_two_open_editors_and_preserves_drafts(self):
         self.check_database_replacement_preserves_drafts(restore=False)
 
@@ -8229,14 +8238,18 @@ class WritingEditorTests(GuiTestCase):
     def progressive_ready(self):
         from test_writing_progressive import assistant
         from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
+        self.editor.cancel_draft_save()
         self.editor.shutdown_writing()
+        self.editor.win.destroy()
         number = getattr(self, "_progressive_count", 0) + 1
         self._progressive_count = number
         service, suggestions, vocabulary = assistant(self.base / f"progressive-{number}")
         self.app.writing_assistant = service
         self.addCleanup(service.shutdown)
         self.editor = edit_window.TranslationEditor(self.app, source_file=self.book)
-        self.editor.set_translation_text("errao errao!", mark_dirty=True, keep_undo=True)
+        self.editor.set_translation_text(
+            "errao errao!", mark_dirty=True, keep_undo=True, autosave_draft=False
+        )
         self.ready()
         self.wait_for(lambda: bool(suggestions.callbacks))
         suggestions.callbacks[-1](SuggestionSnapshot(("erro",), "partial"))
@@ -9591,3 +9604,4 @@ class WritingRealEngineTests(GuiTestCase):
         self.assertTrue(editor.state.dirty)
         editor.undo_translation()
         self.assertEqual(editor.draft_text(), "Uma posiçao.")
+
