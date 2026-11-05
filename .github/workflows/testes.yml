@@ -18,16 +18,26 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      self_contained_release:
+        description: Preparar release autocontido (exige auditoria aprovada)
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 jobs:
   suite:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, upstream ref verified 2026-10-29
 
       - name: uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
 
@@ -54,14 +64,49 @@ jobs:
         run: uv run python -m pytest tests/test_editor_windows.py tests/test_main_window.py -q -p no:cacheprovider
 
   build:
+    name: Release autocontido (manual)
+    # Ordinary verification is the suite above; it never publishes an
+    # incomplete executable. The product's release remains self-contained,
+    # and this explicit release path cannot bypass redistribution approval.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.self_contained_release }}
     runs-on: windows-latest
     timeout-minutes: 30
     needs: suite
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+
+      # Unit tests use tiny archives/fakes. Only this Windows job obtains Java
+      # and runs the real owned-loopback smoke; the JVM subprocess has PATH="".
+      - name: Fontes fixas (LanguageTool e Temurin)
+        run: uv run --locked python ferramentas/preparar_languagetool.py fetch
+
+      - name: jdeps, jlink e medidas do prototipo
+        run: uv run --locked python ferramentas/preparar_languagetool.py runtime
+
+      - name: Smoke real sem Java do sistema
+        run: uv run --locked python ferramentas/preparar_languagetool.py smoke
+
+      - name: Gate de recursos, checksums e licencas para entrega
+        run: uv run --locked python ferramentas/preparar_languagetool.py validate
+
+      - name: Evidencias do sidecar (inclusive quando o gate bloquear)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: LanguageTool-prototype-evidence
+          path: |
+            build/vendor/sbom.json
+            build/vendor/license-audit.json
+            build/vendor/measurements.json
+            build/vendor/modules.txt
+            build/languagetool-prototype-measurements.json
+            build/languagetool-prototype-evidence/
+            recursos/languagetool-lock.json
+          if-no-files-found: warn
+          retention-days: 14
 
       # O MESMO roteiro do build local (ROADMAP 29): ambiente so de execucao
       # (`--no-dev`) com o extra `llm`. Ate 2026-09-24 era `uv sync` + PyInstaller
@@ -75,7 +120,7 @@ jobs:
           if (-not (Test-Path "dist/PGN_Tradutor_Pro/PGN_Tradutor_Pro.exe")) { throw "sem exe" }
           if (-not (Test-Path "dist/PGN_Tradutor_Pro/_internal/tradutor_pgn/Substituicoes-inicial.txt")) { throw "sem glossario inicial" }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: PGN_Tradutor_Pro-dist
           path: dist/PGN_Tradutor_Pro

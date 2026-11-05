@@ -45,6 +45,35 @@
   #define DistDir "..\dist\PGN_Tradutor_Pro"
 #endif
 
+; Java reduzido e LanguageTool sao parte da arvore onedir abaixo, sem instalacao
+; de Java no computador de destino. gerar-entregas.py verifica os hashes e a
+; auditoria antes de chamar este compilador; estas guardas tambem recusam uma
+; compilacao direta sobre um dist sem os recursos essenciais.
+#if !FileExists(AddBackslash(DistDir) + "_internal\runtime\bin\java.exe")
+  #error Runtime Java reduzido ausente. Execute gerar-entregas.py.
+#endif
+#if !FileExists(AddBackslash(DistDir) + "_internal\languagetool\languagetool-server.jar")
+  #error LanguageTool ausente. Execute gerar-entregas.py.
+#endif
+#if !FileExists(AddBackslash(DistDir) + "_internal\LICENSES\LanguageTool-LGPL-2.1.txt") || !FileExists(AddBackslash(DistDir) + "_internal\LICENSES\Eclipse-Temurin-GPL2-Classpath.txt")
+  #error Licencas do sidecar ausentes.
+#endif
+#if !FileExists(AddBackslash(DistDir) + "_internal\vendor-manifest.json") || !FileExists(AddBackslash(DistDir) + "_internal\sbom.json") || !FileExists(AddBackslash(DistDir) + "_internal\license-audit.json")
+  #error Manifesto, SBOM ou auditoria ausentes.
+#endif
+
+; The direct compiler path must run the same validation, not trust a marker or
+; the existence of resources. The build environment is created by gerar-entregas.
+; SourcePath anchors the repository-owned validator and approval decision.
+#define ValidationPython AddBackslash(SourcePath) + "..\build\venv-exe\Scripts\python.exe"
+#if !FileExists(ValidationPython)
+  #error Candidato recusado: ambiente de validacao ausente. Execute gerar-entregas.py.
+#endif
+#define ValidationArgs '"' + AddBackslash(SourcePath) + '..\ferramentas\preparar_languagetool.py" validate-dist --vendor "' + DistDir + '"'
+#if Exec(ValidationPython, ValidationArgs, SourcePath, 1, 0) != 0
+  #error Candidato recusado: validacao de hashes, dados privados ou aprovacao de licencas falhou.
+#endif
+
 ; A VERSAO E LIDA DO PROPRIO EXECUTAVEL, e nao declarada aqui (ROADMAP 21.6). O
 ; `.spec` carimba nele o que `tradutor_pgn/__version__` diz, e este arquivo le de
 ; la — entao nao existe um segundo numero para esquecer de atualizar. Um

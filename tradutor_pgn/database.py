@@ -5,7 +5,10 @@ import os
 import re
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass
 from typing import Any
+import uuid
 
 from .review_quality import QUALITY_HEURISTICS_VERSION, evaluate_translation_quality
 from .word_count import WordCounts, add_word_counts, count_words, total_word_counts
@@ -71,7 +74,7 @@ RunRecord = dict[str, Any]
 # esta ligada. Nula nas linhas anteriores e sem backfill, pela mesma razao das
 # ocorrencias (O2): a posicao vem do PGN, e o PGN nao esta no banco. Um `ALTER
 # TABLE`; nada e reconstruido.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # Os estados que uma linha NAO verificada pode ter, alem de "pendente".
 #
@@ -139,6 +142,192 @@ def escape_like_pattern(text: str) -> str:
     for char in (LIKE_ESCAPE_CHAR, "%", "_"):
         text = text.replace(char, LIKE_ESCAPE_CHAR + char)
     return text
+
+
+class WritingConflictError(ValueError):
+    """The book changed since preview; no part of the operation was applied."""
+
+
+@dataclass(frozen=True)
+class WritingReplacementRow:
+    comment_id: int
+    revision: int
+    saved_text: str
+    text: str
+    source_text: str
+    spans: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class WritingReplacementPreview:
+    source_file: str
+    target_language: str
+    original: str
+    replacement: str
+    glossary_terms: frozenset[str]
+    snapshot: tuple[Row, ...]
+    occurrences: tuple[Row, ...]
+    rows: tuple[WritingReplacementRow, ...]
+
+    @property
+    def count(self) -> int:
+        return sum(len(row.spans) for row in self.rows)
+
+
+def _writing_book_snapshot(conn: sqlite3.Connection, source_file: str,
+                           target_language: str) -> tuple[tuple[Row, ...], tuple[Row, ...]]:
+    rows = tuple(conn.execute("""SELECT c.id, c.writing_revision,
+        COALESCE(c.translated_comment, ''), c.original_comment
+        FROM comments c WHERE c.target_language = ? AND EXISTS (
+        SELECT 1 FROM occurrences o WHERE o.comment_id = c.id AND o.source_file = ?)
+        ORDER BY c.id""", (target_language, source_file)))
+    occurrences = tuple(conn.execute("""SELECT o.comment_id, o.source_file,
+        o.game_index, o.comment_index, o.move_number FROM occurrences o
+        JOIN comments c ON c.id = o.comment_id WHERE c.target_language = ?
+        AND EXISTS (SELECT 1 FROM occurrences b WHERE b.comment_id = c.id AND b.source_file = ?)
+        ORDER BY o.comment_id, o.source_file, o.game_index, o.comment_index, o.move_number""",
+        (target_language, source_file)))
+    return rows, occurrences
+
+
+def preview_identical_replacements(
+    conn: sqlite3.Connection, source_file: str, target_language: str,
+    original: str, replacement: str, *, glossary_terms: frozenset[str] = frozenset(),
+    draft: tuple[int, int, str] | None = None,
+) -> WritingReplacementPreview:
+    """Preview all book rows; optionally include the current unsaved draft.
+
+    draft is (record ID, loaded revision, editor text). No write happens here.
+    Shared translations cannot be edited within a single-book operation.
+    """
+    from .editor_common import identical_writing_spans
+    from .writing_types import WritingRequest
+
+    if not source_file or not original:
+        raise ValueError("Selecione um livro e uma ocorrência para criar a prévia.")
+    source_file = os.path.abspath(source_file)
+    # One SQLite read snapshot for both queries, also when called from the
+    # already reserved write transaction during confirmation.
+    own_transaction = not conn.in_transaction
+    if own_transaction:
+        conn.execute("BEGIN")
+    try:
+        snapshot, occurrences = _writing_book_snapshot(conn, source_file, target_language)
+        rows = []
+        if draft is not None and not any(row[0] == draft[0] for row in snapshot):
+            raise WritingConflictError("A linha aberta não pertence mais ao livro.")
+        for comment_id, revision, saved_text, source_text in snapshot:
+            text = saved_text
+            if draft is not None and comment_id == draft[0]:
+                if revision != draft[1]:
+                    raise WritingConflictError("A tradução mudou. Recarregue antes de criar outra prévia.")
+                text = draft[2]
+            spans = identical_writing_spans(WritingRequest(
+                text, revision, target_language, source_text or "", glossary_terms,
+            ), original)
+            if spans and original != replacement:
+                if any(o[0] == comment_id and o[1] != source_file for o in occurrences):
+                    raise WritingConflictError("Há traduções compartilhadas com outro livro. O lote não pode alterar essas traduções; nada foi aplicado.")
+                rows.append(WritingReplacementRow(comment_id, revision, saved_text, text, source_text or "", spans))
+        return WritingReplacementPreview(source_file, target_language, original, replacement,
+                                          glossary_terms, snapshot, occurrences, tuple(rows))
+    finally:
+        if own_transaction:
+            conn.rollback()
+
+
+def apply_identical_replacements(
+    conn: sqlite3.Connection, preview: WritingReplacementPreview, *,
+    commit_guard: Callable[[], AbstractContextManager[None]] | None = None,
+) -> str:
+    """Revalidate and commit all or none, optionally guarding editorial state.
+
+    The worker reserves SQLite before acquiring the final revision guard.
+    The guard must fail without waiting and stay held through commit; no UI
+    or controller lock may be acquired while it is held.
+    """
+    from .editor_common import replace_writing_spans
+    from .writing_types import WritingRequest
+
+    if conn.in_transaction:
+        raise ValueError("writing operation requires its own transaction")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if _writing_book_snapshot(conn, preview.source_file, preview.target_language) != (preview.snapshot, preview.occurrences):
+            raise WritingConflictError("O livro mudou. Nada foi aplicado; crie uma nova prévia.")
+        expected = {row[0]: row for row in preview.snapshot}
+        updates = []
+        seen = set()
+        for row in preview.rows:
+            if (row.comment_id in seen or expected.get(row.comment_id) != (
+                    row.comment_id, row.revision, row.saved_text, row.source_text)
+                    or any(o[0] == row.comment_id and o[1] != preview.source_file for o in preview.occurrences)):
+                raise WritingConflictError("Prévia divergente; nada foi aplicado.")
+            seen.add(row.comment_id)
+            request = WritingRequest(row.text, row.revision, preview.target_language,
+                                     row.source_text, preview.glossary_terms)
+            updates.append((row, replace_writing_spans(request, row.spans, preview.original, preview.replacement)))
+        if not updates:
+            raise ValueError("Nenhuma ocorrência para aplicar.")
+        operation_id = uuid.uuid4().hex
+        cursor = conn.cursor()
+        for row, updated in updates:
+            _write_bulk_translation(cursor, row.comment_id, updated, "writing_bulk", operation_id)
+            revision = cursor.execute("SELECT writing_revision FROM comments WHERE id = ?", (row.comment_id,)).fetchone()[0]
+            occurrences = [o for o in preview.occurrences if o[0] == row.comment_id]
+            cursor.execute("INSERT INTO writing_bulk_rows (operation_id, comment_id, before_text, after_text, applied_revision, source_file, occurrences, previous_revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                           (operation_id, row.comment_id, row.saved_text, updated, revision,
+                            preview.source_file, json.dumps(occurrences), row.revision))
+        with commit_guard() if commit_guard is not None else nullcontext():
+            conn.commit()
+        return operation_id
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def undo_identical_replacements(conn: sqlite3.Connection, operation_id: str) -> None:
+    """Undo a book operation as one transaction, retaining subsequent edits."""
+    if conn.in_transaction:
+        raise ValueError("writing undo requires its own transaction")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        rows = conn.execute("SELECT comment_id, before_text, after_text, applied_revision, occurrences, previous_revision FROM writing_bulk_rows WHERE operation_id = ? AND undone = 0 ORDER BY comment_id", (operation_id,)).fetchall()
+        if not rows:
+            raise WritingConflictError("O lote não está mais disponível para desfazer.")
+        for comment_id, _before, after, revision, occurrences, _previous_revision in rows:
+            current = conn.execute("SELECT translated_comment, writing_revision FROM comments WHERE id = ?", (comment_id,)).fetchone()
+            current_occurrences = conn.execute("SELECT comment_id, source_file, game_index, comment_index, move_number FROM occurrences WHERE comment_id = ? ORDER BY comment_id, source_file, game_index, comment_index, move_number", (comment_id,)).fetchall()
+            if current != (after, revision) or json.dumps(current_occurrences) != occurrences:
+                raise WritingConflictError("O livro mudou após o lote. Nada foi desfeito.")
+        cursor = conn.cursor()
+        for comment_id, before, _after, _revision, occurrences, previous_revision in rows:
+            _write_bulk_translation(cursor, comment_id, before, "writing_bulk_undo", operation_id)
+            # Rebase only an immediately preceding operation that this undo
+            # restored exactly. Intervening manual edits still cause conflict.
+            restored_revision = cursor.execute("SELECT writing_revision FROM comments WHERE id = ?", (comment_id,)).fetchone()[0]
+            cursor.execute("""UPDATE writing_bulk_rows SET applied_revision = ?
+                WHERE comment_id = ? AND undone = 0 AND operation_id <> ?
+                AND applied_revision = ? AND after_text = ? AND occurrences = ?""",
+                (restored_revision, comment_id, operation_id, previous_revision, before, occurrences))
+        conn.execute("UPDATE writing_bulk_rows SET undone = 1 WHERE operation_id = ?", (operation_id,))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def _write_bulk_translation(cursor: sqlite3.Cursor, comment_id: int, text: str,
+                            action: str, operation_id: str) -> None:
+    changed = update_translation_by_id(cursor, comment_id, text, history_action=action)
+    if changed:
+        history_id = cursor.execute("SELECT MAX(id) FROM comment_history WHERE comment_id = ?", (comment_id,)).fetchone()[0]
+    else:
+        # Correcting a draft may return exactly to saved text. It is still a
+        # bulk action, but must never steal an unrelated previous history row.
+        verified = cursor.execute("SELECT verified FROM comments WHERE id = ?", (comment_id,)).fetchone()[0]
+        history_id = record_comment_history(cursor, comment_id, action, text, text, verified, verified)
+    cursor.execute("UPDATE comment_history SET bulk_operation_id = ? WHERE id = ?", (operation_id, history_id))
 
 
 def open_database(db_path: str) -> sqlite3.Connection:
@@ -793,7 +982,8 @@ def _collapse_decimal_cache_keys(conn: sqlite3.Connection) -> int:
     return changed
 
 
-def _migrate_database(conn: sqlite3.Connection, from_version: int = 0) -> sqlite3.Connection:
+def _migrate_database(conn: sqlite3.Connection, from_version: int = 0, *,
+                      empty_reset: bool = False) -> sqlite3.Connection:
     cursor = conn.cursor()
 
     # Num banco novo isto ja cria o schema final; num que existe e um no-op, e
@@ -877,6 +1067,23 @@ def _migrate_database(conn: sqlite3.Connection, from_version: int = 0) -> sqlite
         _add_source_language_column(conn)
         cursor = conn.cursor()
 
+    # Revision changes even for raw SQL and ABA edits, independent of the
+    # second-resolution updated_at timestamp. Install after legacy rebuilds.
+    if "writing_revision" not in {r[1] for r in cursor.execute("PRAGMA table_info(comments)")}:
+        cursor.execute("ALTER TABLE comments ADD COLUMN writing_revision INTEGER NOT NULL DEFAULT 0")
+    cursor.execute("""CREATE TRIGGER IF NOT EXISTS comments_writing_revision
+        AFTER UPDATE ON comments WHEN NEW.writing_revision = OLD.writing_revision
+        BEGIN UPDATE comments SET writing_revision = OLD.writing_revision + 1 WHERE id = NEW.id; END""")
+    if "bulk_operation_id" not in {r[1] for r in cursor.execute("PRAGMA table_info(comment_history)")}:
+        cursor.execute("ALTER TABLE comment_history ADD COLUMN bulk_operation_id TEXT")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS writing_bulk_rows (
+        operation_id TEXT NOT NULL, comment_id INTEGER NOT NULL,
+        before_text TEXT NOT NULL, after_text TEXT NOT NULL,
+        applied_revision INTEGER NOT NULL, source_file TEXT NOT NULL,
+        previous_revision INTEGER NOT NULL,
+        occurrences TEXT NOT NULL, undone INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(operation_id, comment_id))""")
+
     cursor.execute("""
         UPDATE comments
         SET verified = CASE WHEN verified = 1 THEN 1 ELSE 0 END
@@ -951,11 +1158,15 @@ def _migrate_database(conn: sqlite3.Connection, from_version: int = 0) -> sqlite
 
     # Depois do FTS de proposito: a atualizacao das chaves passa pelos gatilhos,
     # e sem eles os termos antigos ficariam no indice para sempre.
-    if from_version < 5:
+    if from_version < 5 and not empty_reset:
         _collapse_decimal_cache_keys(conn)
 
-    conn.commit()
-    backfill_quality_warnings(conn)
+    # Reset recreates the current, empty schema inside its own transaction.
+    # No legacy column upgrades or data backfills run on that path; committing
+    # here would make a later reset failure impossible to roll back.
+    if not empty_reset:
+        conn.commit()
+        backfill_quality_warnings(conn)
     return conn
 
 
@@ -2989,36 +3200,35 @@ def clear_all_translations(conn: sqlite3.Connection) -> int:
     continua com os 115 MB que o usuario acabou de mandar apagar, e "zerar o
     banco" que nao libera um byte parece nao ter funcionado.
 
-    Nao ha cancelamento no meio, e por isso quem chama pergunta antes: depois do
-    `DROP TABLE` nao existe estado anterior para voltar. O que existe e o backup,
-    criado pela ferramenta antes de chamar isto.
+    Nao ha cancelamento no meio, e por isso quem chama pergunta antes. As tabelas
+    sao recriadas numa transacao unica: uma falha restaura o estado anterior;
+    depois do commit, voltar depende do backup criado pela ferramenta.
 
     As **ocorrencias** vao junto (garantia Z3). Elas apontam para linhas de
     `comments` por id, e o `AUTOINCREMENT` reinicia com a tabela: uma ocorrencia
     sobrevivente passaria a apontar para a PRIMEIRA traducao que fosse gravada
     depois — o comentario errado, no arquivo certo, sem erro nenhum na tela.
     """
+    if conn.in_transaction:
+        raise ValueError("translation reset requires its own transaction")
     cursor = conn.cursor()
+    conn.execute("BEGIN IMMEDIATE")
     try:
-        total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
-    except sqlite3.Error:  # pragma: no cover - banco sem a tabela ainda
-        total = 0
-
-    # Os gatilhos referenciam `comments`; precisam sair antes dela.
-    for trigger in ("comments_fts_insert", "comments_fts_delete", "comments_fts_update"):
-        cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-    cursor.execute("DROP TABLE IF EXISTS comments")
-    cursor.execute("DROP TABLE IF EXISTS comment_history")
-    cursor.execute(f"DROP TABLE IF EXISTS {OCCURRENCES_TABLE}")
-    # As execucoes tambem (Z5 estende Z3): uma execucao registrada apontando
-    # para ids que o `AUTOINCREMENT` vai reusar seria "reverter" apagando as
-    # linhas erradas — o mesmo defeito das ocorrencias, pela outra tabela.
-    cursor.execute(f"DROP TABLE IF EXISTS {TRANSLATION_RUNS_TABLE}")
-    conn.commit()
-
-    _migrate_database(conn)
-    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-    conn.commit()
+        exists = cursor.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'comments'").fetchone()
+        total = cursor.execute("SELECT COUNT(*) FROM comments").fetchone()[0] if exists else 0
+        # Every table carrying comment identities must go before IDs restart.
+        # The bulk ledger also contains private before/after text (Z3).
+        for trigger in ("comments_fts_insert", "comments_fts_delete", "comments_fts_update"):
+            cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        for table in ("writing_bulk_rows", "comment_history", OCCURRENCES_TABLE,
+                      TRANSLATION_RUNS_TABLE, "comments"):
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
+        _migrate_database(conn, from_version=SCHEMA_VERSION, empty_reset=True)
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
     try:
         conn.execute("VACUUM")

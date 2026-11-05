@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "platform": "windows-x64",
+  "packages": {
+    "languagetool": {
+      "version": "6.6",
+      "url": "https://languagetool.org/download/LanguageTool-6.6.zip",
+      "sha256": "53600506b399bb5ffe1e4c8dec794fd378212f14aaf38ccef9b6f89314d11631",
+      "checksum_source": "https://forum.languagetool.org/t/ann-languagetool-6-6/11206",
+      "source": "https://github.com/languagetool-org/languagetool/tree/v6.6",
+      "license": "LGPL-2.1-or-later; dependencies and dictionaries have additional licenses",
+      "license_files": ["COPYING.txt", "third-party-licenses/README.txt", "README.md"],
+      "root": "LanguageTool-6.6",
+      "expected": [
+        "languagetool-server.jar",
+        "libs/languagetool-core.jar",
+        "libs/portuguese-pos-dict.jar",
+        "org/languagetool/language/BrazilianPortuguese.class",
+        "org/languagetool/resource/pt/disambiguation.xml",
+        "org/languagetool/rules/pt/grammar.xml",
+        "org/languagetool/rules/pt/pt-BR/grammar.xml",
+        "COPYING.txt",
+        "README.md",
+        "third-party-licenses/README.txt"
+      ]
+    },
+    "jdk": {
+      "version": "17.0.20.1+1",
+      "url": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip",
+      "sha256": "e53a79c3c3d86865bd7e787903884331068e71321714ffd44f145785affc7cb0",
+      "checksum_source": "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip.sha256.txt",
+      "source": "https://github.com/adoptium/jdk17u/tree/jdk-17.0.20.1%2B1",
+      "license": "GPL-2.0-only WITH Classpath-exception-2.0; preserve runtime/legal notices",
+      "license_files": ["legal/java.base/LICENSE", "legal/java.base/ADDITIONAL_LICENSE_INFO", "NOTICE"],
+      "root": "jdk-17.0.20.1+1",
+      "expected": ["bin/java.exe", "bin/jdeps.exe", "bin/jlink.exe", "jmods/java.base.jmod", "legal/java.base/LICENSE", "legal/java.base/ADDITIONAL_LICENSE_INFO", "NOTICE"]
+    }
+  }
+}

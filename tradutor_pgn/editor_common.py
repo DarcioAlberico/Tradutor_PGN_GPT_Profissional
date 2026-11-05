@@ -8,6 +8,57 @@ widget, entao tudo pode ser testado sem abrir uma janela.
 from datetime import datetime
 
 import re
+import unicodedata
+
+from .writing_protection import protect_text
+from .writing_types import WritingIssue, WritingRequest
+
+
+def identical_writing_spans(request: WritingRequest, original: str) -> tuple[tuple[int, int], ...]:
+    """Exact, whole-form occurrences outside protected chess/domain text."""
+    if not original:
+        raise ValueError("empty writing replacement")
+    protected = protect_text(request)
+
+    def word(char: str) -> bool:
+        return char.isalnum() or char in "_-’'" or unicodedata.category(char).startswith("M")
+
+    spans = []
+    for match in re.finditer(re.escape(original), request.text):
+        start, end = match.span()
+        if ((start and word(original[0]) and word(request.text[start - 1]))
+                or (end < len(request.text) and word(original[-1]) and word(request.text[end]))):
+            continue
+        if not any(r.start < end and start < r.end for r in protected.ranges):
+            spans.append((start, end))
+    return tuple(spans)
+
+
+def replace_writing_spans(request: WritingRequest, spans: tuple[tuple[int, int], ...],
+                          original: str, replacement: str) -> str:
+    """Validate the entire edit before constructing any replacement text."""
+    allowed = set(identical_writing_spans(request, original))
+    previous_end = -1
+    for start, end in spans:
+        if (start, end) not in allowed or start < previous_end:
+            raise ValueError("stale, overlapping or protected writing span")
+        previous_end = end
+    text = request.text
+    for start, end in reversed(spans):
+        text = text[:start] + replacement + text[end:]
+    return text
+
+
+def apply_writing_issue(request: WritingRequest, issue: WritingIssue, replacement: str) -> str:
+    issue.validate_for(request)
+    if issue.state != "active" or replacement not in issue.suggestions:
+        raise ValueError("inactive issue or unknown suggestion")
+    # Grammar can select punctuation or a phrase inside a larger word; it still
+    # must respect protection. Whole-form boundaries apply only to bulk edits.
+    protected = protect_text(request)
+    if any(r.start < issue.end and issue.start < r.end for r in protected.ranges):
+        raise ValueError("protected writing span")
+    return request.text[:issue.start] + replacement + request.text[issue.end:]
 
 
 # Cores das linhas das listas, iguais nas duas janelas.

@@ -9648,3 +9648,171 @@ Nao houve warnings nas execucoes pytest desta tarefa.
 `Substituicoes.txt` real permaneceu igual ao HEAD:
 `d54cf12ba5d51ad51afc7eba234908a53b6eaac6`. Dados, bancos, locks e backups
 ficaram fora do commit. Mudancas preexistentes do usuario foram preservadas.
+
+## Assistente pt-BR — Task 8: prototipo de empacotamento (2026-10-29)
+
+Incremento ainda **bloqueado para entrega**, por auditoria de redistribuicao e
+aceite literal TA-004 pendentes. O build agora prepara fontes fixas, verifica
+SHA-256 antes de extrair, gera Java reduzido com jdeps/jlink e recusa recursos,
+checksums ou auditoria incompletos antes de construir as entregas.
+
+O primeiro gate real reprovou: startup **10,450 s**, primeiro resultado
+**12,022 s**, pico de working set **606,8 MB**. A medicao foi preservada.
+Uma campanha fixa de 25 execucoes identificou repeticao de health checks de
+0,5 s durante a inicializacao do pipeline pt-BR. Health de 5 s, limitado ao
+tempo restante do deadline total, corrigiu essa repeticao sem alterar regras,
+JARs, heap, cache de texto ou intervalos protegidos.
+
+| Configuracao | n | Startup minimo / mediana / p95 (s) | Pico maximo (MB) |
+|---|---:|---:|---:|
+| JVM original, health 0,5 s | 5 | 9,106 / 9,808 / 10,700 | 664,3 |
+| SerialGC, health 0,5 s | 5 | 15,379 / 15,504 / 18,368 | 537,5 |
+| C1, health 0,5 s | 5 | 5 falhas de readiness | nao certificado |
+| JVM original, health 5 s | 5 | 3,948 / 4,006 / 4,835 | 683,5 |
+| C1, health 5 s | 5 | 4,039 / 4,082 / 4,209 | 584,8 |
+
+P95 usa nearest rank; com n=5 e o maximo da amostra, sem intervalo de confianca
+populacional. Cada rodada criou uma JVM; o cache de disco do Windows nao foi
+limpo. Os controles usaram teto diagnostico de 30 s para registrar configuracoes
+ruins; o gate de release continua em 10 s e 1.000.000.000 bytes. SerialGC e C1
+nao foram promovidos. Com health de 5 s, C1 piorou a analise warm mediana de
+0,434 s para 0,611 s. Runtime real apos o fix: startup **4,672 s**, primeiro
+resultado **6,420 s**, pico **604,4 MB**, sem Java no PATH do subprocesso.
+
+Downloads: LanguageTool **251.998.221 B**, Temurin **190.817.615 B**; hashes
+literais e fontes oficiais em `recursos/languagetool-lock.json`. Runtime jlink:
+**47.838.546 B**; LanguageTool: **405.072.337 B**. A soma de dados e 452.910.883 B;
+nao representa um aumento medido de dist/instalador. As entregas completas nao
+foram construidas enquanto o gate de licencas estiver bloqueado.
+
+Auditoria: 141 JARs, 110 arquivos de dicionario, 37 binarios nativos internos e
+92 notices do runtime; 42 JARs sem POM embutido identificados por SHA-256 contra
+Maven Central e 72 POMs ancestrais examinados. Declaracoes de dependencias
+sombreadas nao sao atribuidas ao JAR inteiro. Fontes correspondentes, termos
+especificos dos dicionarios e cobertura completa de notices continuam pendentes;
+`validate` bloqueia release. A evidencia esta em `LICENSES/LanguageTool-6.6-evidence.json`.
+
+Concordancia nominal e verbal e protecao de notacao foram preservadas em todos
+os controles funcionais. TA-004 recebe `As pretas tem` → `As pretas têm` e
+`posiçao` → `posição`; o gabarito exige o span `tem` → `têm`. Esse aceite literal
+permanece pendente, sem alterar o gabarito nesta tarefa.
+
+Dados completos, script de replay, validacoes e pendencias:
+`docs/superpowers/reports/task-8-report.md` e `languagetool-startup-measurements.json`
+na mesma pasta. Nenhum ZIP, JDK ou runtime binario foi versionado.
+
+Task 8, fix round 1: cinco Important corrigidos por RED/GREEN. Aprovacao de
+redistribuicao agora e uma decisao separada do repositorio, inicialmente
+bloqueada, com vinculo ao candidato e decisoes por componente/licenca/fonte/
+notices. Portatil inspeciona toda `_internal`, fontes exigem inventario exato,
+health tem deadline absoluto por recv e Inno direto executa a mesma validacao.
+CI ordinaria faz verificacao sem executavel; release autocontido exige opt-in
+manual e mantem todos os gates, sem criar entrega incompleta para passar CI.
+Gate focado: **162 passed, 19 subtests**; Ruff/mypy/diff-check verdes. Smoke
+real final: **4,470 s** de startup, **6,390 s** ate o primeiro resultado e pico
+**592,0 MB**. Licencas, TA-004 literal e validacao das entregas reais seguem
+pendentes; a Task 8 continua parcial. Detalhes no adendo do relatorio.
+
+## Assistente pt-BR — Task 9: qualidade e metricas locais (2026-10-30)
+
+Concordancia continua **experimental**, com `grammar_enabled=false` por padrao.
+O replay dos 18 casos revisados, com VERO/Spylls e LanguageTool 6.6 reais do
+`build/vendor`, passou TA-004 literal e nao apresentou nenhuma sugestao em
+intervalo protegido. O corpus permaneceu inalterado.
+
+| Baseline | Esperados | Apresentados | TP | FP | Misses | Precisao | Recall |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Ortografia | 4 | 4 | 3 | 1 | 1 | 75,00% | 75,00% |
+| Completo | 11 | 12 | 8 | 4 | 3 | 66,67% | 72,73% |
+
+Os gates de 95%/80% **nao foram atingidos**. Sugestoes ortograficas estao
+presentes em 4/4 typos; presenca nao implica que a correcao editorial esteja
+entre elas. O avaliador exige span/categoria exatos e pelo menos uma correcao
+do gabarito, com correspondencia um a um. Falhas e duplicatas nao inflam recall.
+Ha misses nominais e um erro de classificacao de categoria; todos os quatro FP
+foram triados por case ID e rule ID no relatorio, sem supressoes globais.
+
+A normalizacao remove contexto comum de todas as alternativas, preservando
+palavras Unicode e revalidando offsets e protecao antes e depois. Em regras de
+concordancia, duas alternativas que so alteravam pontuacao foram descartadas;
+alternativas que tambem mudam morfologia continuam disponiveis. O contador por
+categoria nao retem payload. Nao ha escolha arbitraria da primeira sugestao.
+
+Benchmarks warm, cache do assistente desligado, nearest rank, 18 amostras por
+tamanho: ortografia p95 de **2656,37 / 265,01 / 53,43 ms por linha** para
+comentarios com 1/10/50 linhas; modo completo p95 de **3041,09 / 3084,70 /
+3272,18 ms por comentario**. Nenhuma analise falhou; as metas de 20/500 ms nao
+foram atingidas. O modo completo mede o caminho inteiro, incluindo ortografia
+e sugestoes, e nao a JVM isolada. Sao medidas locais, sem inferencia populacional.
+
+`writing-metrics.db` e global na pasta de dados, independente do banco do livro:
+somente data, categoria, rule ID, acao e contagem, com schema versionado e
+incrementos SQLite atomicos. A UI envia metadados para uma fila limitada fora
+do Tk; overflow/falhas podem perder metricas, sem impedir correcao ou desfazer.
+Replays JSON/Markdown em `build/reports/` nao exportam texto, sugestoes ou offsets.
+
+Gate final focado: **49 passed** (48 novos e a regressao do log); Ruff e mypy
+verdes. Testes de Tk comprovam que um
+provider bloqueado permite heartbeats e entrega somente o resultado mais novo;
+LRU limitado, concorrencia entre threads/processos e falhas de armazenamento
+foram exercitados. O gate integrado da suite completa permanece a cargo da
+validacao final da branch. Evidencias e limitacoes em
+`docs/superpowers/reports/task-9-report.md`.
+
+O bloqueio de licencas/fontes/notices e smoke das entregas da Task 8 permanece.
+Passar TA-004 no fonte nao aprova redistribuicao nem certifica o instalado/portatil.
+
+## Assistente português — Task 10: integração e operação (2026-10-30)
+
+O README documenta painel/atalhos, aplicação explícita e lote por livro,
+vocabulário global, regras reversíveis, defaults, modos, recuperação e dados
+locais. Concordância continua **experimental e desligada por padrão**. Os
+resultados reais da Task 9 permanecem **66,67% de precisão / 72,73% de recall**,
+com latência acima das metas; os critérios de aceite não foram reduzidos.
+
+O teste de fallback que pressupunha vendor ausente foi reproduzido RED com
+runtime preparado (`full` em vez de `spelling_only`). Agora injeta no próprio
+teste um `resource_resolver` apontando para arquivos ausentes e percorre o
+lifecycle real, preservando o smoke real em execução separada. Nenhum adapter
+de produção mudou. Um roundtrip de settings antigos comprova defaults sem
+reescrita na leitura, criação explícita da seção e preservação de rascunhos e
+chaves desconhecidas após escrita legada por seção. Isso não promete que toda
+versão histórica desconhecida preserve campos: downgrade exige backup.
+
+Mypy passa a incluir os módulos tipados de escrita, proteção, vocabulário,
+processo/client, controller, métricas e ferramentas, além dos oito anteriores.
+O gate legal real permanece recusado por auditoria incompleta: **não houve
+build, instalação ou publicação**. Runtime/dados somam 452.910.883 B antes dos
+metadados; o tamanho das entregas reais continua sem medição. O smoke de fonte
+e a sentinela de privacidade não substituem validação instalada/portátil.
+
+`CONTEXT.md` e `REVISAO_GERAL.md`/`REVISAO_GERAL_SPEC.md` existem apenas como
+arquivos locais no checkout principal. Foram lidos e preservados; não se
+criaram versões substitutas no worktree. A atualização desses documentos exige
+integrar seu conteúdo local posteriormente, sem sobrescrever o material existente.
+
+Os gates iniciais ampliado/completo encontraram access violation nativo ao
+construir uma janela Tk/CustomTkinter. A bissecção no HEAD anterior reduziu a
+causa a fechar o diálogo transient de vocabulário antes de resolver seus idles
+nativos, seguido de nova janela. O fechamento agora resolve esses idles antes
+da destruição e destaca a referência antes de fazê-lo, tolerando reentrada e
+erro Tcl sem deixar a janela viva. RED observado em subprocesso; cinco testes
+direcionados passaram, preservando vocabulário/draft/dirty/banco. Nenhum harness
+ou teste antigo foi desativado. Os gates completos são repetidos após esse fix;
+as execuções desfavoráveis permanecem documentadas, sem se confundirem com PASS.
+
+A suíte completa depois desse reparo terminou sem crash nativo, mas com uma
+falha de teclado sintético já registrada na Task 7: o contexto/draft estavam
+preservados e o aviso “Aguarde” não aparecia. O caso falhou também no baseline;
+o contraste de foco mostrou que o modal recebia o foco e os handlers não eram
+chamados. O teste agora estabelece foco no alvo imediatamente antes de cada
+evento, preservando bindings, handlers e todas as asserções. Seis testes de
+busca/lifecycle passaram sem probe. A repetição integral passou com **2426
+testes, 12 skips documentados e 6761 subtestes**, exit 0 em 1040,81 s, sem crash
+nativo. O gate focado anterior terminou com 978 testes e 68 subtestes passando;
+Ruff global e mypy em 18 módulos passaram. O full com falha continua preservado.
+
+Resultados e limitações dos gates desta rodada ficam no
+[relatório da Task 10](docs/superpowers/reports/task-10-report.md), com cópia local
+em `.superpowers/sdd/2026-10-27-assistente-escrita-portugues/task-10-report.md`.
+O estado é de integração com ressalvas; Task 8 e release continuam bloqueados.

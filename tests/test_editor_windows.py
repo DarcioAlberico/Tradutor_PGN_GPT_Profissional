@@ -15,10 +15,12 @@ e selecionar (garantias R7 e S6).
 Precisam de um display. Onde nao houver, a classe inteira e pulada.
 """
 
+import gc
 import inspect
 import io
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -29,7 +31,7 @@ import customtkinter as ctk
 import types
 import unittest
 import unittest.mock
-from contextlib import redirect_stderr
+from contextlib import closing, contextmanager, redirect_stderr
 from pathlib import Path
 
 from gui_harness import DISPLAY, GuiTestCase, cancel_pending_after, destroy_test_root, needs_room
@@ -65,6 +67,7 @@ from tradutor_pgn.glossario import (
     save_glossary_entries,
 )
 from tradutor_pgn.review_quality import row_quality_flag, row_quality_warnings
+from tradutor_pgn.writing_types import AssistantStatus, WritingIssue, WritingResult
 
 
 def com_prioridade(entries, priority=0, scope=""):
@@ -80,6 +83,23 @@ def com_prioridade(entries, priority=0, scope=""):
     ]
 
 
+class EmptyWritingAssistant:
+    """Keep unrelated window fixtures independent of the real engine's I/O.
+
+    Real editor/provider integration runs in a fresh interpreter below; action
+    tests supply their own issues. The controller and Tk delivery remain real.
+    """
+
+    def analyze(self, request):
+        return WritingResult(request.text_version, (), "spelling_only")
+
+    def status(self):
+        return AssistantStatus("ready", "spelling_only")
+
+    def invalidate_cache(self):
+        pass
+
+
 class FakeApp:
     """O minimo que as duas janelas usam do app real."""
 
@@ -90,6 +110,7 @@ class FakeApp:
         self.glossary_substitutions = []
         self.glossary_change_callbacks = []
         self.logs = []
+        self.writing_assistant = EmptyWritingAssistant()
 
     def log_message(self, message):
         self.logs.append(message)
@@ -105,6 +126,7 @@ class EditorWindowTestCase(GuiTestCase):
         self.app = FakeApp(self.root, self.db_path)
         # A normal installation supplies this source before catalog migration.
         save_glossary_entries([], glossario._default_substitutions_path(), create_backup=False)
+
 
     # ---------------- helpers de widget ----------------
 
@@ -5184,7 +5206,9 @@ class LabelsAndWidthsFitTests(EditorWindowTestCase):
             edit_window.LIST_PANE_MIN
             + edit_window.SASH_WIDTH
             + edit_window.BOTTOM_PANE_MIN
-            + edit_window.MAIN_PANE_PADX,
+            + edit_window.MAIN_PANE_PADX
+            + edit_window.WRITING_RAIL_MIN
+            + edit_window.SASH_WIDTH,
         )
 
     def test_the_window_asks_the_manager_for_the_width_it_computed(self):
@@ -5207,6 +5231,7 @@ class LabelsAndWidthsFitTests(EditorWindowTestCase):
             ("baixo", self.editor.bottom_pane, edit_window.BOTTOM_PANE_MIN),
             ("editor", self.editor.text_frame, edit_window.EDITOR_PANE_MIN),
             ("sugestoes", self.editor.sugg_frame, edit_window.SUGGESTION_PANE_MIN),
+            ("revisão", self.editor.writing_panel, edit_window.WRITING_RAIL_MIN),
         ):
             self.assertGreaterEqual(
                 painel.winfo_width(), minimo,
@@ -8102,3 +8127,1376 @@ class ReviewStatusShortcutTests(EditorWindowTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WritingEditorTests(GuiTestCase):
+    def test_database_reset_invalidates_bulk_undo_in_two_open_editors_and_preserves_drafts(self):
+        self.check_database_replacement_preserves_drafts(restore=False)
+
+    def test_database_restore_invalidates_bulk_undo_in_two_open_editors_and_preserves_drafts(self):
+        self.check_database_replacement_preserves_drafts(restore=True)
+
+    def check_database_replacement_preserves_drafts(self, *, restore):
+        from helpers import SynchronousProgress
+        from tradutor_pgn import db_tools
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIsNotNone(self.editor._current_writing_bulk())
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.editor.set_translation_text("private draft one", mark_dirty=True, keep_undo=True)
+        other.set_translation_text("private draft two", mark_dirty=True, keep_undo=True)
+        tokens = self.editor._writing_history.undo_token, other._writing_history.undo_token
+        SynchronousProgress().install(self, db_tools)
+        source = self.base / "replacement.db"
+        initialize_database(str(source)).close()
+        with (unittest.mock.patch.object(db_tools, "ask_typed_confirmation", return_value=True),
+              unittest.mock.patch.object(db_tools.filedialog, "askopenfilename", return_value=str(source)),
+              unittest.mock.patch.object(db_tools.messagebox, "askyesno", return_value=True),
+              unittest.mock.patch.object(db_tools.messagebox, "showinfo")):
+            (db_tools.restore_database if restore else db_tools.reset_translations)(self.app)
+        self.assertIsNone(self.editor._current_writing_bulk())
+        self.assertIsNone(other._current_writing_bulk())
+        self.assertEqual(self.editor.draft_text(), "private draft one")
+        self.assertEqual(other.draft_text(), "private draft two")
+        self.assertTrue(self.editor.state.dirty)
+        self.assertTrue(other.state.dirty)
+        self.assertEqual((self.editor._writing_history.undo_token, other._writing_history.undo_token), tokens)
+        self.editor.undo_writing_bulk()
+        other.undo_writing_bulk()
+        with closing(initialize_database(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM comments").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM comment_history").fetchone()[0], 0)
+
+    def setUp(self):
+        gc.collect()  # Dispose old Tk fixtures on their owning thread.
+        super().setUp()
+        self.app = FakeApp(self.root, self.db_path)
+        save_glossary_entries([], glossario._default_substitutions_path(), create_backup=False)
+        self.book = str(self.base / "book.pgn")
+        conn = initialize_database(self.db_path)
+        for source, text in (("One", "errao errao"), ("Two", "errao")):
+            save_translation(conn.cursor(), source, text, "pt", source_language="en")
+        ids = resolve_comment_ids(conn.cursor(), "pt", ["One", "Two"], source_language="en")
+        record_occurrences(conn.cursor(), self.book, [(1, 1, 1, "One"), (2, 1, 2, "Two")], ids)
+        conn.commit()
+        conn.close()
+        self.release = threading.Event()
+        self.release.set()
+        self.started = threading.Event()
+        self.worker_threads = []
+        outer = self
+
+        class Service:
+            def analyze(self, request):
+                outer.worker_threads.append(threading.get_ident())
+                outer.started.set()
+                outer.release.wait(5)
+                issues = tuple(WritingIssue("", "SPELLING_UNKNOWN_WORD", "SPELLING", m.start(), m.end(),
+                                           "errao", "Grafia", "Confira.", ("erro", "errao errao"), "error", "test", request.text_version)
+                               for m in __import__("re").finditer("errao", request.text))
+                return WritingResult(request.text_version, issues, "spelling_only")
+
+            def status(self):
+                return AssistantStatus("ready", "spelling_only")
+
+            def invalidate_cache(self):
+                pass
+
+        self.app.writing_assistant = Service()
+        self.addCleanup(self.release.set)
+        self.editor = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(self.close_writing_editors)
+
+    def close_writing_editors(self):
+        self.release.set()
+        for editor in {self.editor, *self.app.writing_editors}:
+            editor.shutdown_writing()
+            editor._writing_executor.shutdown(wait=True, cancel_futures=True)
+            editor.writing_controller._executor.shutdown(wait=True, cancel_futures=True)
+
+    def wait_for(self, predicate):
+        deadline = time.monotonic() + 5
+        while not predicate() and time.monotonic() < deadline:
+            self.pump()
+            time.sleep(0.01)
+        self.assertTrue(predicate())
+
+    def ready(self):
+        self.wait_for(lambda: bool(self.editor.writing_panel.issues)
+                      and self.editor._valid_writing_issue(self.editor.writing_panel.issues[0]))
+        return self.editor.writing_panel.issues[0]
+
+    def progressive_ready(self):
+        from test_writing_progressive import assistant
+        from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
+        self.editor.shutdown_writing()
+        number = getattr(self, "_progressive_count", 0) + 1
+        self._progressive_count = number
+        service, suggestions, vocabulary = assistant(self.base / f"progressive-{number}")
+        self.app.writing_assistant = service
+        self.addCleanup(service.shutdown)
+        self.editor = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.editor.set_translation_text("errao errao!", mark_dirty=True, keep_undo=True)
+        self.ready()
+        self.wait_for(lambda: bool(suggestions.callbacks))
+        suggestions.callbacks[-1](SuggestionSnapshot(("erro",), "partial"))
+        self.wait_for(lambda: bool(self.editor.writing_panel.issues[0].suggestions))
+        return service, suggestions, vocabulary, self.editor.writing_panel.issues[0]
+
+    def test_external_vocabulary_revokes_displayed_prefix_in_two_editors_without_editing_drafts(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
+        service, suggestions, vocabulary, first = self.progressive_ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        other.set_translation_text("errao errao?", mark_dirty=True, keep_undo=True)
+        self.wait_for(lambda: bool(other.writing_panel.issues) and len(suggestions.callbacks) >= 2)
+        suggestions.callbacks[-1](SuggestionSnapshot(("erro",), "partial"))
+        self.wait_for(lambda: bool(other.writing_panel.issues[0].suggestions))
+        second = other.writing_panel.issues[0]
+        before = [(editor.draft_text(), editor.state.dirty, editor.writing_version,
+                   editor._writing_history.undo_token) for editor in (self.editor, other)]
+        PersonalDictionary(vocabulary.path).add("errao")
+        for editor, item in ((self.editor, first), (other, second)):
+            editor.apply_issue(item, "erro")
+        self.wait_for(lambda: not self.editor.writing_panel.issues and not other.writing_panel.issues)
+        after = [(editor.draft_text(), editor.state.dirty, editor.writing_version,
+                  editor._writing_history.undo_token) for editor in (self.editor, other)]
+        self.assertEqual(before, after)
+        self.assertEqual(service.analyze_initial(self.editor.writing_request()).issues, ())
+
+    def test_revision_change_between_replacement_calculation_and_mutation_preserves_draft(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        original = edit_window.apply_writing_issue
+        for revision in ("file", "cache", "rules", "glossary"):
+            with self.subTest(revision=revision):
+                service, _, vocabulary, item = self.progressive_ready()
+                before = (self.editor.draft_text(), self.editor.state.dirty,
+                          self.editor._writing_history.undo_token)
+                calculated = []
+                def calculate_then_change(request, issue, replacement):
+                    updated = original(request, issue, replacement)
+                    calculated.append(True)
+                    if revision == "file":
+                        PersonalDictionary(vocabulary.path).add("errao")
+                    elif revision == "cache":
+                        service.invalidate_cache()
+                    else:
+                        service.set_cache_revisions(**{revision: "updated"})
+                    return updated
+                with unittest.mock.patch.object(edit_window, "apply_writing_issue", calculate_then_change):
+                    self.editor.apply_issue(item, "erro")
+                self.assertEqual(calculated, [True])
+                self.assertEqual((self.editor.draft_text(), self.editor.state.dirty,
+                                  self.editor._writing_history.undo_token), before)
+
+    def test_nonblocking_vocabulary_lock_refuses_apply_and_keeps_tk_responsive(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        _, _, vocabulary, item = self.progressive_ready()
+        entered, release = threading.Event(), threading.Event()
+        def hold_writer():
+            with PersonalDictionary(vocabulary.path)._locked():
+                entered.set()
+                release.wait(4)
+        holder = threading.Thread(target=hold_writer)
+        holder.start()
+        self.assertTrue(entered.wait(3))
+        try:
+            before = self.editor.draft_text()
+            started = time.monotonic()
+            self.editor.apply_issue(item, "erro")
+            self.assertLess(time.monotonic() - started, .1)
+            beats = []
+            for index in range(10):
+                self.root.after(0, lambda value=index: beats.append(value))
+            self.pump()
+            self.assertEqual(beats, list(range(10)))
+            self.assertEqual(self.editor.draft_text(), before)
+        finally:
+            release.set()
+            holder.join(4)
+
+    def test_glossary_change_during_calculation_keeps_newly_protected_draft(self):
+        _, _, _, item = self.progressive_ready()
+        before = self.editor.draft_text()
+        terms = [self.editor.writing_glossary_terms()]
+        original = edit_window.apply_writing_issue
+        def calculate_then_protect(request, issue, replacement):
+            updated = original(request, issue, replacement)
+            terms[0] = terms[0] | {"errao"}
+            return updated
+        with unittest.mock.patch.object(self.editor, "writing_glossary_terms", lambda **kwargs: terms[0]):
+            with unittest.mock.patch.object(edit_window, "apply_writing_issue", calculate_then_protect):
+                self.editor.apply_issue(item, "erro")
+        self.assertEqual(self.editor.draft_text(), before)
+
+    def test_bulk_revision_change_at_confirmation_preserves_database_and_draft(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        _, _, vocabulary, item = self.progressive_ready()
+        before = self.editor.draft_text()
+        with initialize_database(self.db_path) as conn:
+            saved = conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall()
+        conn.close()
+        def confirm_then_change(*args, **kwargs):
+            PersonalDictionary(vocabulary.path).add("errao")
+            return True
+        with unittest.mock.patch.object(edit_window.messagebox, "askyesno", confirm_then_change):
+            self.editor.apply_all_identical(item, "erro")
+            self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), before)
+        with initialize_database(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(), saved)
+        conn.close()
+
+    def test_bulk_revision_change_after_sql_updates_rolls_back_every_row(self):
+        from tradutor_pgn import database
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        original = database._write_bulk_translation
+        for change in ("file", "cache", "rules", "glossary"):
+            with self.subTest(change=change):
+                service, _, vocabulary, item = self.progressive_ready()
+                before = (self.editor.draft_text(), self.editor.state.dirty,
+                          self.editor.writing_version, self.editor._writing_history.undo_token)
+                with initialize_database(self.db_path) as conn:
+                    saved = conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall()
+                conn.close()
+                def write_then_change(*args, **kwargs):
+                    original(*args, **kwargs)
+                    if change == "file":
+                        PersonalDictionary(vocabulary.path).add("errao")
+                    elif change == "cache":
+                        service.invalidate_cache()
+                    else:
+                        service.set_cache_revisions(**{change: "updated"})
+                with unittest.mock.patch.object(database, "_write_bulk_translation", write_then_change):
+                    self.editor.apply_all_identical(item, "erro")
+                    self.wait_for(lambda: not self.editor._writing_busy)
+                self.assertEqual((self.editor.draft_text(), self.editor.state.dirty,
+                                  self.editor.writing_version, self.editor._writing_history.undo_token), before)
+                with initialize_database(self.db_path) as conn:
+                    self.assertEqual(conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall(), saved)
+                    self.assertEqual(conn.execute("SELECT count(*) FROM writing_bulk_rows").fetchone()[0], 0)
+                    self.assertEqual(conn.execute("SELECT count(*) FROM comment_history").fetchone()[0], 0)
+                conn.close()
+
+    def test_bulk_busy_vocabulary_rolls_back_and_keeps_tk_responsive(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        _, _, vocabulary, item = self.progressive_ready()
+        before = (self.editor.draft_text(), self.editor.state.dirty,
+                  self.editor._writing_history.undo_token)
+        with initialize_database(self.db_path) as conn:
+            saved = conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall()
+        conn.close()
+        entered, release = threading.Event(), threading.Event()
+        def hold_writer():
+            with PersonalDictionary(vocabulary.path)._locked():
+                entered.set()
+                release.wait(5)
+        holder = threading.Thread(target=hold_writer)
+        holder.start()
+        self.assertTrue(entered.wait(3))
+        try:
+            beats = []
+            self.root.after(0, lambda: beats.append(True))
+            started = time.monotonic()
+            self.editor.apply_all_identical(item, "erro")
+            self.wait_for(lambda: not self.editor._writing_busy)
+            self.assertTrue(beats)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual((self.editor.draft_text(), self.editor.state.dirty,
+                              self.editor._writing_history.undo_token), before)
+            with initialize_database(self.db_path) as conn:
+                self.assertEqual(conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall(), saved)
+                self.assertEqual(conn.execute("SELECT count(*) FROM writing_bulk_rows").fetchone()[0], 0)
+            conn.close()
+        finally:
+            release.set()
+            holder.join(6)
+
+    def test_preference_sync_during_worker_commit_is_nonblocking_and_revokes_old_issues(self):
+        from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
+        service, suggestions, _, item = self.progressive_ready()
+        before = (self.editor.draft_text(), self.editor.state.dirty,
+                  self.editor._writing_history.undo_token)
+        callback = suggestions.callbacks[-1]
+        entered, release = threading.Event(), threading.Event()
+        def hold_commit():
+            with service.guard_revision(item.revision):
+                entered.set()
+                release.wait(2)
+        holder = threading.Thread(target=hold_commit)
+        holder.start()
+        self.assertTrue(entered.wait(3))
+        try:
+            beats = []
+            self.root.after(0, lambda: beats.append(True))
+            for enabled in (False, True, False, True):
+                settings.write_writing_settings({"spelling_enabled": enabled})
+                started = time.monotonic()
+                self.assertTrue(self.editor._sync_writing_preferences())
+                self.assertLess(time.monotonic() - started, .1)
+            callback(SuggestionSnapshot(("erro", "nova"), "partial"))
+            self.editor.apply_issue(item, "erro")
+            self.pump()
+            self.assertTrue(beats)
+            self.assertTrue(holder.is_alive())
+            self.assertFalse(self.editor._valid_writing_issue(item))
+            self.assertEqual(self.editor.writing_panel.issues, ())
+            self.assertEqual((self.editor.draft_text(), self.editor.state.dirty,
+                              self.editor._writing_history.undo_token), before)
+        finally:
+            release.set()
+            holder.join(3)
+        fresh = self.ready()
+        self.assertNotEqual(fresh.revision, item.revision)
+        self.editor.apply_issue(item, "erro")
+        self.assertEqual((self.editor.draft_text(), self.editor.state.dirty,
+                          self.editor._writing_history.undo_token), before)
+
+    def test_settings_button_opens_real_window_and_preferences_reach_both_editors(self):
+        from tradutor_pgn import settings_window
+        self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        self.editor.set_translation_text("errao rascunho", mark_dirty=True, keep_undo=True)
+        self.editor.writing_panel.action_buttons["settings"].invoke()
+        self.pump()
+        window = self.app.writing_settings_windows[-1]
+        self.assertIsInstance(window, settings_window.SettingsWindow)
+        self.addCleanup(lambda: window.win.winfo_exists() and window.win.destroy())
+        window.spelling_var.set(False)
+        self.assertTrue(window.save())
+        self.wait_for(lambda: not self.editor.writing_settings["spelling_enabled"]
+                      and not other.writing_settings["spelling_enabled"])
+        self.assertEqual(self.editor.draft_text(), "errao rascunho")
+        self.assertTrue(self.editor.state.dirty)
+        self.assertEqual(self.editor.writing_panel.issues, ())
+        self.assertIsNone(self.editor._writing_debounce)
+        window.spelling_var.set(True)
+        window.category_vars["SPELLING"].set(False)
+        self.assertTrue(window.save())
+        self.wait_for(lambda: "SPELLING" not in self.editor.writing_settings["visible_categories"])
+        self.assertEqual(self.editor.writing_panel.issues, ())
+        window.category_vars["SPELLING"].set(True)
+        self.assertTrue(window.save())
+        self.ready()
+
+    def test_disable_grammar_cancels_pending_new_analysis_and_preserves_other_controller(self):
+        self.ready()
+        settings.write_writing_settings({"grammar_enabled": True})
+        self.wait_for(lambda: self.editor.writing_settings["grammar_enabled"])
+        self.release.clear()
+        self.started.clear()
+        self.editor.set_translation_text("errao ativo", mark_dirty=True)
+        self.wait_for(self.started.is_set)
+        settings.write_writing_settings({"spelling_enabled": False, "grammar_enabled": False})
+        self.wait_for(lambda: not self.editor.writing_settings["grammar_enabled"])
+        self.release.set()
+        self.pump()
+        self.assertEqual(self.editor.writing_panel.issues, ())
+        self.assertIsNone(self.editor._writing_debounce)
+        self.assertEqual(self.editor.draft_text(), "errao ativo")
+
+    def test_real_vocabulary_and_rule_settings_reanalyze_both_editors_without_editing_drafts(self):
+        from tradutor_pgn import settings_window
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant, SpyllsAdapter
+        class Dictionary:
+            def lookup(self, word):
+                return False
+            def suggest(self, word):
+                return ["erro"]
+        self.editor.shutdown_writing()
+        self.app.writing_assistant = PortugueseWritingAssistant(spelling_adapter=SpyllsAdapter(dictionary_loader=lambda _language: Dictionary()))
+        self.editor = edit_window.TranslationEditor(self.app, source_file=self.book)
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        self.ready()
+        self.wait_for(lambda: bool(other.writing_panel.issues))
+        self.editor.set_translation_text("errao errao errao", mark_dirty=True, keep_undo=True)
+        self.ready()
+        window = settings_window.open_settings_window(self.app)
+        self.addCleanup(lambda: window.win.winfo_exists() and window.win.destroy())
+        window.word_entry_var.set("errao")
+        window.add_vocabulary_word()
+        self.wait_for(lambda: window._writing_future is None)
+        self.wait_for(lambda: not self.editor.writing_panel.issues and not other.writing_panel.issues)
+        self.assertEqual(self.editor.draft_text(), "errao errao errao")
+        self.assertTrue(self.editor.state.dirty)
+        window.word_list.selection_set(0)
+        with unittest.mock.patch.object(settings_window.messagebox, "askyesno", return_value=True):
+            window.remove_vocabulary_word()
+        self.wait_for(lambda: window._writing_future is None)
+        self.ready()
+        self.wait_for(lambda: bool(other.writing_panel.issues))
+        self.editor.disable_rule(self.editor.writing_panel.issues[0])
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.wait_for(lambda: not self.editor.writing_panel.issues and not other.writing_panel.issues)
+        window.poll_writing_settings()
+        window.rule_list.selection_set(0)
+        window.reactivate_rule()
+        self.wait_for(lambda: window._writing_future is None)
+        self.ready()
+        self.wait_for(lambda: bool(other.writing_panel.issues))
+        self.assertEqual(self.editor.draft_text(), "errao errao errao")
+
+    def test_vocabulary_commit_after_editor_close_notifies_remaining_windows(self):
+        self.ready()
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        item = self.editor.writing_panel.issues[0]
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        original = PersonalDictionary.add
+        def slow_add(vocabulary, word):
+            started.set()
+            release.wait(5)
+            return original(vocabulary, word)
+        with unittest.mock.patch.object(PersonalDictionary, "add", slow_add):
+            self.editor.add_personal_word(item)
+            self.assertTrue(started.wait(2))
+            future = self.editor._writing_job[0]
+            self.editor.shutdown_writing()
+            revision = settings.writing_settings_revision()
+            release.set()
+            future.result(timeout=5)
+            self.assertGreater(settings.writing_settings_revision(), revision)
+
+    def assert_pending_vocabulary_survives_dialog_idle_interruption(self, *, reentrant):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        item = self.ready()
+        draft = self.editor.draft_text()
+        dirty = self.editor.state.dirty
+        with sqlite3.connect(self.db_path) as conn:
+            before = conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall()
+        conn.close()
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        original = PersonalDictionary.add
+
+        def slow_add(vocabulary, word):
+            started.set()
+            release.wait(5)
+            return original(vocabulary, word)
+
+        with unittest.mock.patch.object(PersonalDictionary, "add", slow_add):
+            self.editor.add_personal_word(item)
+            self.assertTrue(started.wait(2))
+            future = self.editor._writing_job[0]
+            dialog = self.editor._writing_dialog
+            # Settle the real native window before injecting an idle failure;
+            # otherwise the fault injection itself leaves a Tk native job.
+            dialog.update_idletasks()
+
+            def interrupted_idle():
+                if reentrant:
+                    self.editor._close_writing_dialog()
+                else:
+                    raise tk.TclError("injected idle failure")
+
+            with unittest.mock.patch.object(dialog, "update_idletasks", interrupted_idle):
+                self.editor.shutdown_writing()
+            self.assertIsNone(self.editor._writing_dialog)
+            self.assertFalse(dialog.winfo_exists())
+            release.set()
+            future.result(timeout=5)
+        self.assertIn(item.original, PersonalDictionary().list_words())
+        self.assertEqual(self.editor.draft_text(), draft)
+        self.assertEqual(self.editor.state.dirty, dirty)
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(), before)
+        conn.close()
+
+    def test_dialog_idle_error_still_destroys_window_and_preserves_vocabulary_commit(self):
+        self.assert_pending_vocabulary_survives_dialog_idle_interruption(reentrant=False)
+
+    def test_dialog_idle_reentrant_close_preserves_window_cleanup_and_vocabulary_commit(self):
+        self.assert_pending_vocabulary_survives_dialog_idle_interruption(reentrant=True)
+
+    def test_disabled_preferences_block_a_debounce_that_fires_before_the_event_poll(self):
+        self.ready()
+        self.editor.set_translation_text("errao pendente", mark_dirty=True)
+        pending = self.editor._writing_debounce
+        self.editor.win.after_cancel(pending)
+        self.editor._writing_debounce = None
+        settings.write_writing_settings({"spelling_enabled": False, "grammar_enabled": False})
+        self.editor._submit_writing()
+        self.assertIsNone(self.editor._writing_request)
+        self.assertFalse(self.editor.writing_settings["spelling_enabled"])
+        self.assertEqual(self.editor.writing_panel.issues, ())
+
+    def test_independent_category_edits_merge_live_without_losing_editor_draft(self):
+        from tradutor_pgn import settings_window
+        self.ready()
+        self.editor.set_translation_text("errao rascunho", mark_dirty=True, keep_undo=True)
+        first, second = (settings_window.open_settings_window(self.app) for _ in range(2))
+        for window in (first, second):
+            self.addCleanup(lambda win=window.win: win.winfo_exists() and win.destroy())
+        first.category_vars["SPELLING"].set(False)
+        second.category_vars["PUNCTUATION"].set(False)
+        self.assertTrue(first.save())
+        second.poll_writing_settings()
+        self.assertTrue(second.save())
+        self.wait_for(lambda: "SPELLING" not in self.editor.writing_settings["visible_categories"]
+                      and "PUNCTUATION" not in self.editor.writing_settings["visible_categories"])
+        self.assertEqual(self.editor.draft_text(), "errao rascunho")
+        self.assertTrue(self.editor.state.dirty)
+        self.assertEqual(self.editor.writing_panel.issues, ())
+        first.poll_writing_settings()
+        first.category_vars["SPELLING"].set(True)
+        self.assertTrue(first.save())
+        self.ready()
+        self.assertNotIn("PUNCTUATION", self.editor.writing_settings["visible_categories"])
+
+    @contextmanager
+    def committed_bulk_waiting_for_delivery(self, *, pending_text="manual durante espera"):
+        original = edit_window.apply_identical_replacements
+        committed, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def slow(conn, preview):
+            operation = original(conn, preview)
+            committed.set()
+            release.wait(10)
+            return operation
+        with unittest.mock.patch.object(edit_window, "apply_identical_replacements", slow):
+            self.editor.apply_all_identical(self.ready(), "erro")
+            self.wait_for(committed.is_set)
+            if pending_text is not None:
+                self.editor.set_translation_text(pending_text, mark_dirty=True, keep_undo=True)
+            self.editor.state.selected_ids = {self.editor.current["id"]}
+            snapshot = dict(current=dict(self.editor.current), rows=list(self.editor.state.rows),
+                            view=self.editor.current_view(), history=list(self.editor.state.history_stack),
+                            selected=set(self.editor.state.selected_ids), page=self.editor.state.page_index,
+                            release=release)
+            try:
+                yield snapshot
+            finally:
+                release.set()
+                self.wait_for(lambda: not self.editor._writing_busy)
+
+    def assert_committed_bulk_survives_idle_action(self, action, *, during_reconciliation=False):
+        calls = []
+        with self.committed_bulk_waiting_for_delivery(pending_text=None) as snapshot:
+            future = self.editor._writing_job[0]
+            snapshot["release"].set()
+            future.result(timeout=5)
+            self.editor.win.after_cancel(self.editor._writing_poll)
+            self.editor._writing_poll = None
+
+            def idle_action():
+                calls.append(self.editor._writing_busy)
+                action()
+
+            original = self.editor._writing_committed
+
+            def reconcile(*args, **kwargs):
+                if during_reconciliation:
+                    self.editor.win.after_idle(idle_action)
+                    self.editor.win.update_idletasks()
+                return original(*args, **kwargs)
+
+            if not during_reconciliation:
+                self.editor.win.after_idle(idle_action)
+            with unittest.mock.patch.object(self.editor, "_writing_committed", reconcile):
+                self.editor.poll_writing()
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                                 [("erro erro",), ("erro",)])
+            self.assertEqual(calls, [True])
+            self.assertTrue(self.editor.win.winfo_exists())
+            self.assertEqual(self.editor.draft_text(), "erro erro")
+            self.assertEqual(self.editor.current["saved_trans"], "erro erro")
+            self.assertFalse(self.editor.state.dirty)
+            pending = self.editor.win.tk.splitlist(self.editor.win.tk.call("after", "info"))
+            polls = [ident for ident in pending
+                     if "poll_writing" in str(self.editor.win.tk.call("after", "info", ident))]
+            self.assertEqual(polls, [self.editor._writing_poll])
+        self.assertFalse(self.editor._writing_busy)
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("errao errao",), ("errao",)])
+
+    def test_delivery_idle_save_cannot_overwrite_the_committed_bulk(self):
+        self.assert_committed_bulk_survives_idle_action(self.editor.save_shortcut)
+
+    def test_delivery_idle_close_cannot_overwrite_the_committed_bulk(self):
+        self.assert_committed_bulk_survives_idle_action(self.editor.close_editor)
+
+    def test_delivery_stays_blocked_until_bulk_widget_reconciliation(self):
+        self.assert_committed_bulk_survives_idle_action(self.editor.save_shortcut, during_reconciliation=True)
+
+    def test_delivery_idle_close_is_blocked_during_widget_reconciliation(self):
+        self.assert_committed_bulk_survives_idle_action(self.editor.close_editor, during_reconciliation=True)
+
+    def test_delivery_reentrant_idle_poll_cannot_consume_or_unlock_the_bulk_twice(self):
+        self.assert_committed_bulk_survives_idle_action(self.editor.poll_writing)
+
+    def test_delivery_idle_cannot_start_a_competing_vocabulary_job(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        issue = self.ready()
+        self.assert_committed_bulk_survives_idle_action(lambda: self.editor.add_personal_word(issue))
+        self.assertFalse(PersonalDictionary().contains(issue.original))
+        self.editor.add_personal_word(self.ready())
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertTrue(PersonalDictionary().contains(issue.original))
+
+    def test_delivery_worker_error_keeps_idle_commands_blocked_and_allows_a_new_bulk(self):
+        issue = self.ready()
+        with unittest.mock.patch.object(edit_window, "preview_identical_replacements", side_effect=ValueError("preview failure")):
+            self.editor.apply_all_identical(issue, "erro")
+            with self.assertRaises(ValueError):
+                self.editor._writing_job[0].result(timeout=5)
+            self.editor.win.after_cancel(self.editor._writing_poll)
+            self.editor._writing_poll = None
+            self.editor.win.after_idle(self.editor.save_shortcut)
+            self.editor.win.after_idle(self.editor.close_editor)
+            self.editor.win.after_idle(self.editor.poll_writing)
+            self.editor.poll_writing()
+        self.assertFalse(self.editor._writing_busy)
+        self.assertFalse(self.editor._writing_delivering)
+        self.assertIsNone(self.editor._writing_dialog)
+        self.assertTrue(self.editor.win.winfo_exists())
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+        self.assertEqual(self.dialogs.titles("warning"), ["Revisão linguística"])
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "erro erro")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("erro erro",), ("erro",)])
+
+    def assert_pending_context_unchanged(self, snapshot):
+        self.assertEqual(self.editor.current, snapshot["current"])
+        self.assertEqual(self.editor.draft_text(), "manual durante espera")
+        self.assertTrue(self.editor.state.dirty)
+        self.assertEqual(self.editor.state.rows, snapshot["rows"])
+        self.assertEqual(self.editor.current_view(), snapshot["view"])
+        self.assertEqual(self.editor.state.history_stack, snapshot["history"])
+        self.assertEqual(self.editor.state.selected_ids, snapshot["selected"])
+        self.assertEqual(self.editor.state.page_index, snapshot["page"])
+
+    def test_busy_search_return_keeps_manual_draft_and_can_persist_it_after_delivery(self):
+        self.ready()
+        self.editor.focus_search()
+        self.pump()
+        with self.committed_bulk_waiting_for_delivery() as snapshot:
+            # The modal owns native focus. Target these synthetic key events
+            # explicitly so they exercise the guards rather than get dropped.
+            self.editor.win.focus_force()
+            self.editor.win.event_generate("<Control-l>")
+            self.editor.search_text.set("nao-existe-nenhuma-linha")
+            self.editor.search_entry._entry.focus_force()
+            self.editor.search_entry._entry.event_generate("<Return>")
+            self.pump()
+            self.assert_pending_context_unchanged(snapshot)
+            self.assertIn("Aguarde", self.editor.msg_label.cget("text"))
+        self.assertEqual(self.editor.current["id"], snapshot["current"]["id"])
+        self.assertEqual(self.editor.current["saved_trans"], "erro erro")
+        self.assertEqual(self.editor.draft_text(), "manual durante espera")
+        self.assertTrue(self.editor.state.dirty)
+        self.editor.persist_current_draft()
+        self.wait_for(lambda: any(draft["text"] == "manual durante espera"
+                                  for draft in settings.load_settings().get("editor_drafts", {}).values()))
+        recovered = settings.get_editor_draft(settings.load_settings(), self.db_path, "pt",
+                                             snapshot["current"]["id"], "erro erro")
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered["text"], "manual durante espera")
+        self.assertEqual(recovered["base_translation"], "erro erro")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("erro erro",), ("erro",)])
+
+    def test_busy_filter_callbacks_restore_controls_before_changing_context(self):
+        with self.committed_bulk_waiting_for_delivery() as snapshot:
+            choices = ((self.editor.status_segment, "Verificadas", self.editor.toggle_filter, "status"),
+                       (self.editor.source_menu, "Espanhol", self.editor.change_language_filter, "source"),
+                       (self.editor.target_menu, edit_window.LANGUAGE_NAMES["en"], self.editor.change_language_filter, "target"),
+                       (self.editor.file_menu, edit_window.FILE_FILTER_ALL, self.editor.change_file_filter, "file"),
+                       (self.editor.search_mode_segment, edit_window.SEARCH_MODE_LABEL_SUBSTRING, self.editor.apply_search, "mode"))
+            for control, value, action, field in choices:
+                control.set(value)  # CTk updates the value before invoking its command.
+                action()
+                self.assert_pending_context_unchanged(snapshot)
+                expected = snapshot["view"][field]
+                if field == "target":
+                    expected = edit_window.LANGUAGE_NAMES[expected]
+                self.assertEqual(control.get(), expected)
+        self.assertEqual(self.editor.draft_text(), "manual durante espera")
+
+    def test_busy_clear_search_keeps_pending_input_and_active_view(self):
+        self.editor.search_text.set("One")
+        self.editor.apply_search()
+        with self.committed_bulk_waiting_for_delivery() as snapshot:
+            self.editor.search_text.set("pending query")
+            self.editor.clear_search()
+            self.assert_pending_context_unchanged(snapshot)
+            self.assertEqual(self.editor.search_text.get(), "pending query")
+            self.assertEqual(self.editor.state.active_search, "One")
+
+    def test_busy_page_back_id_and_qa_commands_preserve_navigation_state(self):
+        with unittest.mock.patch.object(edit_window, "PAGE_SIZE", 1):
+            self.editor.reload_rows()
+            self.editor.select_index(0)
+            target_id = self.editor.current["id"] + 1
+            earlier = dict(self.editor.current_view(), id=target_id)
+            self.editor.state.history_stack.append(earlier)
+            self.editor.go_page_text.set("2")
+            self.editor.go_id_text.set(str(target_id))
+            with self.committed_bulk_waiting_for_delivery() as snapshot:
+                for action in (lambda: self.editor.change_page(1), self.editor.go_to_page,
+                               self.editor.go_to_id, self.editor.go_back,
+                               self.editor.go_to_next_quality_warning,
+                               lambda: self.editor.win.event_generate("<Control-Next>"),
+                               lambda: self.editor.win.event_generate("<Alt-BackSpace>")):
+                    action()
+                    self.pump()
+                    self.assert_pending_context_unchanged(snapshot)
+                self.assertIs(self.editor.jump_to_id(target_id), False)
+                self.assertIs(self.editor.restore_view(earlier), False)
+                self.assert_pending_context_unchanged(snapshot)
+
+    def test_busy_editor_actions_do_not_write_or_claim_success_after_skipped_save(self):
+        with self.committed_bulk_waiting_for_delivery() as snapshot:
+            dialogs_before = list(self.dialogs.calls)
+            for action in (self.editor.mark_and_next, self.editor.mark_pending,
+                           self.editor.verify_selected_rows,
+                           lambda: self.editor.set_review_status(edit_window.REVIEW_STATUS_REJECTED),
+                           lambda: self.editor.set_review_status_and_next(edit_window.REVIEW_STATUS_DOUBT),
+                           self.editor.export_selected_rows, self.editor.export_quality_report,
+                           self.editor.open_history_window, self.editor.open_repeated_edits_window,
+                           self.editor.apply_automatic_rules_for_current_language,
+                           self.editor.discard_unreviewed_in_file,
+                           self.editor.save_shortcut, self.editor.verify_shortcut,
+                           self.editor.mark_and_next_shortcut):
+                action()
+                self.assert_pending_context_unchanged(snapshot)
+                self.assertIn("Aguarde", self.editor.msg_label.cget("text"))
+                self.assertEqual(self.dialogs.calls, dialogs_before)
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                self.assertEqual(conn.execute("SELECT verified, review_status FROM comments ORDER BY id").fetchall(),
+                                 [(0, ""), (0, "")])
+
+    def test_busy_low_level_view_commands_cannot_clear_or_reload_the_draft(self):
+        with self.committed_bulk_waiting_for_delivery() as snapshot:
+            for action in (self.editor.clear_current, self.editor.reload_rows, self.editor.load_first_page):
+                action()
+                self.assert_pending_context_unchanged(snapshot)
+
+    def test_current_issue_dirty_undo_and_stale_refusal(self):
+        item = self.ready()
+        self.editor.focus_writing_issue(item)
+        self.assertEqual(self.editor.trans_text.get(tk.SEL_FIRST, tk.SEL_LAST), "errao")
+        self.editor.apply_issue(item, "erro")
+        self.assertEqual(self.editor.draft_text(), "erro errao")
+        self.assertTrue(self.editor.state.dirty)
+        self.editor.undo_translation()
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+        self.editor.set_translation_text("manual", mark_dirty=True, keep_undo=True)
+        self.editor.apply_issue(item, "erro")
+        self.assertEqual(self.editor.draft_text(), "manual")
+        self.assertTrue(all(ident != threading.get_ident() for ident in self.worker_threads))
+
+    def test_pending_result_after_edit_navigation_and_close_never_tags(self):
+        self.release.clear()
+        self.wait_for(self.started.is_set)
+        version = self.editor.writing_version
+        self.editor.set_translation_text("manual", mark_dirty=True, keep_undo=True)
+        self.assertGreater(self.editor.writing_version, version)
+        self.editor.select_index(1)
+        self.editor.set_translation_text("segunda", mark_dirty=True, keep_undo=True)
+        self.release.set()
+        self.wait_for(lambda: not self.editor.writing_panel.issues)
+        self.assertFalse(self.editor.trans_text.tag_ranges("writing_spelling"))
+        self.editor.win.destroy()
+        self.assertTrue(self.editor._writing_closed)
+        self.editor.poll_writing()
+
+    def test_book_apply_confirmation_cancel_then_atomic_undo_keeps_draft_and_selection(self):
+        self.ready()
+        self.editor.set_translation_text("errao errao extra", mark_dirty=True, keep_undo=True)
+        item = self.ready()
+        self.editor.state.selected_ids = {self.editor.current["id"]}
+        self.dialogs.askyesno_result = False
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao extra")
+        self.assertTrue(self.editor.state.dirty)
+        self.assertTrue(any("3 ocorrência" in call[2] for call in self.dialogs.calls if call[0] == "askyesno"), self.dialogs.calls)
+        self.dialogs.askyesno_result = True
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "erro erro extra")
+        self.assertEqual(self.editor.state.selected_ids, {self.editor.current["id"]})
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao extra")
+        self.assertTrue(self.editor.state.dirty)
+        conn = initialize_database(self.db_path)
+        self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(), [("errao errao",), ("errao",)])
+        conn.close()
+
+    def test_ignore_once_session_personal_and_rule_never_create_glossary(self):
+        item = self.ready()
+        self.editor.ignore_once(item)
+        self.assertEqual(len(self.editor.writing_panel.issues), 1)
+        self.editor.ignore_session(self.editor.writing_panel.issues[0])
+        self.wait_for(lambda: not self.editor.writing_panel.issues)
+        self.assertIn("errao", self.app.writing_session_words)
+        self.app.writing_session_words.clear()
+        self.editor.highlight_spelling()
+        item = self.ready()
+        self.editor.add_personal_word(item)
+        self.wait_for(lambda: not self.editor._writing_busy)
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        self.assertTrue(PersonalDictionary().contains("errao"))
+        self.editor.disable_rule(item)
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIn(item.rule_id, settings.read_writing_settings(settings.load_settings())["disabled_rule_ids"])
+        self.assertEqual(self.app.glossary_substitutions, [])
+
+    def test_f7_prioritizes_issues_then_uses_qa(self):
+        first = self.ready()
+        self.editor.next_quality_warning_shortcut()
+        self.assertNotEqual(self.editor.writing_panel.active_issue.issue_id, first.issue_id)
+        self.editor.previous_writing_shortcut()
+        self.assertEqual(self.editor.writing_panel.active_issue.issue_id, first.issue_id)
+        self.editor.set_translation_text("manual", mark_dirty=True)
+        with unittest.mock.patch.object(self.editor, "go_to_next_quality_warning") as qa:
+            self.editor.next_quality_warning_shortcut()
+            qa.assert_called_once()
+
+    def test_bulk_undo_preserves_earlier_native_undo(self):
+        self.ready()
+        self.editor.set_translation_text("errao errao extra", mark_dirty=True, keep_undo=True)
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao extra")
+        self.editor.undo_translation()
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+
+    def test_slow_bulk_blocks_alt_navigation_and_undo_without_crossing_rows(self):
+        item = self.ready()
+        original_apply = edit_window.apply_identical_replacements
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        first_id = self.editor.current["id"]
+        def slow_apply(conn, preview):
+            entered.set()
+            release.wait(5)
+            return original_apply(conn, preview)
+        with unittest.mock.patch.object(edit_window, "apply_identical_replacements", slow_apply):
+            self.editor.apply_all_identical(item, "erro")
+            self.wait_for(entered.is_set)
+            self.editor.win.event_generate("<Alt-Right>")
+            self.pump()
+            self.editor.next_shortcut()
+            self.editor.select_index(1)
+            self.editor.undo_translation()
+            self.editor.redo_translation()
+            self.assertEqual(self.editor.current["id"], first_id)
+            release.set()
+            self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "erro erro")
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+        self.editor.next_shortcut()
+        self.assertNotEqual(self.editor.current["id"], first_id)
+        self.assertEqual(self.editor.draft_text(), "errao")
+        self.assertEqual(self.editor.current["saved_trans"], "errao")
+
+    def test_bulk_undo_follows_actions_when_later_edits_return_to_batch_text(self):
+        self.ready()
+        self.editor.set_translation_text("errao errao draft", mark_dirty=True, keep_undo=True)
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.set_translation_text("later", mark_dirty=True, keep_undo=True)
+        self.editor.set_translation_text("erro erro draft", mark_dirty=True, keep_undo=True)
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "later")
+        self.assertIsNotNone(self.editor._current_writing_bulk())
+        self.editor.redo_translation()
+        self.assertEqual(self.editor.draft_text(), "erro erro draft")
+        self.editor.undo_translation()
+        self.editor.undo_translation()
+        self.assertEqual(self.editor.draft_text(), "erro erro draft")
+        self.assertIsNotNone(self.editor._current_writing_bulk())
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao draft")
+        self.assertIsNone(self.editor._current_writing_bulk())
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("errao errao",), ("errao",)])
+
+    def test_bulk_undo_cannot_skip_later_native_paste_delete_or_redo(self):
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        text = self.editor.trans_text
+        text.edit_separator()
+        text.insert("end-1c", " pasted")
+        text.edit_separator()
+        text.delete("end-8c", "end-1c")
+        self.pump()
+        self.assertEqual(self.editor.draft_text(), "erro erro")
+        self.editor.undo_writing_bulk()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIsNotNone(self.editor._current_writing_bulk())
+        self.editor.undo_translation()
+        self.assertEqual(self.editor.draft_text(), "erro erro pasted")
+        self.editor.redo_translation()
+        self.assertEqual(self.editor.draft_text(), "erro erro")
+        self.editor.undo_translation()
+        self.editor.undo_translation()
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIsNone(self.editor._current_writing_bulk())
+        self.editor.redo_translation()
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+
+    def test_two_bulk_actions_undo_in_order_and_conflict_keeps_native_history(self):
+        self.editor.apply_all_identical(self.ready(), "errao errao")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        last = self.editor._current_writing_bulk()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            update_translation_by_id(conn.cursor(), last["record_id"], "concurrent", history_action="edit")
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIs(self.editor._current_writing_bulk(), last)
+        self.assertEqual(self.editor.draft_text(), "erro erro erro erro")
+
+    def test_two_bulk_actions_restore_each_draft_before_earlier_native_edit(self):
+        self.ready()
+        self.editor.set_translation_text("errao draft", mark_dirty=True, keep_undo=True)
+        self.editor.apply_all_identical(self.ready(), "errao errao")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao draft")
+        self.editor.undo_translation()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao draft")
+        self.editor.undo_translation()
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+
+    def test_late_apply_and_undo_keep_changes_made_while_worker_finishes(self):
+        for action_name, expected_saved in (("apply_identical_replacements", "erro erro"),
+                                             ("undo_identical_replacements", "errao errao")):
+            with self.subTest(action=action_name):
+                original = getattr(edit_window, action_name)
+                entered, release = threading.Event(), threading.Event()
+                self.addCleanup(release.set)
+                def slow(conn, operation):
+                    result = original(conn, operation)
+                    entered.set()
+                    release.wait(5)
+                    return result
+                with unittest.mock.patch.object(edit_window, action_name, slow):
+                    if action_name.startswith("apply"):
+                        self.editor.apply_all_identical(self.ready(), "erro")
+                    else:
+                        self.editor.undo_writing_bulk()
+                    self.wait_for(entered.is_set)
+                    self.editor.set_translation_text("manual during " + action_name,
+                                                     mark_dirty=True, keep_undo=True)
+                    release.set()
+                    self.wait_for(lambda: not self.editor._writing_busy)
+                self.assertEqual(self.editor.draft_text(), "manual during " + action_name)
+                self.assertEqual(self.editor.current["saved_trans"], expected_saved)
+                self.assertTrue(self.editor.state.dirty)
+                if action_name.startswith("apply"):
+                    self.editor.undo_translation()
+                    self.assertEqual(self.editor.draft_text(), "errao errao")
+                    self.editor.set_translation_text("erro erro")
+
+    def test_closed_editor_discards_late_bulk_delivery(self):
+        original = edit_window.apply_identical_replacements
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def slow(conn, operation):
+            result = original(conn, operation)
+            entered.set()
+            release.wait(5)
+            return result
+        with unittest.mock.patch.object(edit_window, "apply_identical_replacements", slow):
+            self.editor.apply_all_identical(self.ready(), "erro")
+            self.wait_for(entered.is_set)
+            future = self.editor._writing_job[0]
+            self.editor.win.destroy()
+            release.set()
+            self.wait_for(future.done)
+            self.editor.poll_writing()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("erro erro",), ("erro",)])
+
+    def test_other_window_dirty_draft_aborts_bulk_without_saving_either(self):
+        item = self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        other.select_index(1)
+        other.set_translation_text("revisão manual", mark_dirty=True, keep_undo=True)
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(other.draft_text(), "revisão manual")
+        self.assertTrue(other.state.dirty)
+        conn = initialize_database(self.db_path)
+        self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(), [("errao errao",), ("errao",)])
+        conn.close()
+
+    def test_unicode_spans_protected_text_and_main_thread_rendering(self):
+        self.ready()
+        self.editor.set_translation_text("😀 errao [%cal errao]", mark_dirty=True, keep_undo=True)
+        item = self.ready()
+        self.assertEqual(len(self.editor.writing_panel.issues), 1)
+        self.editor.focus_writing_issue(item)
+        self.assertEqual(self.editor.trans_text.get(tk.SEL_FIRST, tk.SEL_LAST), "errao")
+        self.editor.apply_issue(item, "erro")
+        self.assertEqual(self.editor.draft_text(), "😀 erro [%cal errao]")
+        protected = WritingIssue("", "SPELLING_UNKNOWN_WORD", "SPELLING", 13, 18,
+                                 "errao", "Grafia", "Confira.", ("erro",), "error", "test", self.editor.writing_version)
+        self.editor.apply_issue(protected, "erro")
+        self.assertEqual(self.editor.draft_text(), "😀 erro [%cal errao]")
+
+    def test_sidecar_starting_and_stale_response_cannot_repaint(self):
+        self.ready()
+        self.release.clear()
+        self.started.clear()
+        self.editor.writing_settings["grammar_enabled"] = True
+        self.editor.set_translation_text("errao novo", mark_dirty=True, keep_undo=True)
+        self.app.writing_assistant.status = lambda: AssistantStatus("starting", "spelling_only", "Concordância iniciando")
+        self.wait_for(self.started.is_set)
+        self.wait_for(lambda: "Concordância iniciando" in self.editor.writing_panel.diagnostic_label.cget("text"))
+        self.editor.set_translation_text("novo texto", mark_dirty=True, keep_undo=True)
+        self.release.set()
+        self.wait_for(lambda: self.editor._writing_result is not None)
+        self.assertEqual(self.editor.writing_panel.issues, ())
+        self.assertEqual(self.editor.trans_text.tag_ranges("writing_spelling"), ())
+
+    def test_main_close_shutdowns_shared_service_in_worker(self):
+        from tradutor_pgn import app_actions, writing_controller
+        closed = threading.Event()
+        threads = []
+        class Shared:
+            def shutdown(self):
+                threads.append(threading.get_ident())
+                closed.set()
+        self.app.is_processing = False
+        with unittest.mock.patch.object(writing_controller, "_shared_assistant", Shared()):
+            self.assertTrue(app_actions.close_main_window(self.app))
+            self.assertTrue(closed.wait(2))
+        self.assertTrue(all(ident != threading.get_ident() for ident in threads))
+
+    def test_main_close_waits_for_pending_book_operation(self):
+        from tradutor_pgn import app_actions
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.editor._run_writing_job(lambda: release.wait(5), lambda _result: None)
+        self.app.is_processing = False
+        self.assertFalse(app_actions.close_main_window(self.app))
+        self.assertTrue(self.root.winfo_exists())
+        release.set()
+        self.wait_for(lambda: not self.editor._writing_busy)
+
+    def test_bulk_preserves_unsaved_reviewer_note_and_dirty_indicator(self):
+        item = self.ready()
+        self.editor.reviewer_note_text.set("Conferir com autor")
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.reviewer_note_text.get(), "Conferir com autor")
+        self.assertTrue(self.editor.state.dirty)
+
+    def test_manual_panel_collapse_reclaims_editor_width(self):
+        self.editor.writing_panel.set_available_width(1800)
+        self.editor.writing_panel.toggle_collapsed()
+        self.assertEqual(int(self.editor.main_pane.panecget(self.editor.writing_panel, "width")), 42)
+        self.editor.writing_panel.toggle_collapsed()
+        self.assertEqual(int(self.editor.main_pane.panecget(self.editor.writing_panel, "width")), 300)
+
+    def test_narrow_editor_manual_panel_is_whole_without_shrinking_text(self):
+        self.ready()
+        self.editor.win.state("normal")
+        self.editor.win.geometry("1360x768+0+0")
+        self.pump()
+        panel = self.editor.writing_panel
+        self.assertTrue(panel.collapsed)
+        panel.toggle_button.invoke()
+        self.pump()
+        self.assertFalse(panel.collapsed)
+        self.assertGreaterEqual(panel.winfo_width(), 300)
+        self.assertLessEqual(panel.winfo_rootx() + panel.winfo_width(),
+                             self.editor.win.winfo_rootx() + self.editor.win.winfo_width())
+        self.assertGreaterEqual(self.editor.text_frame.winfo_width(), edit_window.EDITOR_PANE_MIN)
+        panel.action_buttons["undo_bulk"].focus_set()
+        self.pump()
+        button = panel.action_buttons["undo_bulk"]
+        self.assertLessEqual(button.winfo_rooty() + button.winfo_height(),
+                             panel.winfo_rooty() + panel.winfo_height())
+
+    def test_direct_native_undo_redo_cannot_bypass_book_transaction(self):
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.trans_text.edit_undo()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("errao errao",), ("errao",)])
+        self.editor.trans_text.edit_redo()
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+
+    def test_book_undo_after_row_navigation_does_not_use_old_native_history(self):
+        self.editor.apply_all_identical(self.ready(), "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.editor.next_shortcut()
+        self.editor.previous_shortcut()
+        self.editor.undo_writing_bulk()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "errao errao")
+        self.assertIsNone(self.editor._current_writing_bulk())
+
+    def test_minimum_height_review_actions_scroll_into_view_with_keyboard_focus(self):
+        self.ready()
+        self.editor.win.state("normal")
+        self.editor.win.maxsize(2200, 1600)
+        self.editor.win.geometry("1600x680+0+0")
+        self.wait_for(lambda: self.editor.win.winfo_width() == 1600)
+        panel = self.editor.writing_panel
+        self.assertFalse(panel.collapsed)
+        for name in ("apply", "apply_all", "ignore_once", "ignore_session",
+                     "add_personal", "disable_rule", "undo_bulk"):
+            with self.subTest(action=name):
+                button = panel.action_buttons[name]
+                button.focus_set()
+                self.pump()
+                self.assertGreaterEqual(button.winfo_rooty(), panel.body._parent_canvas.winfo_rooty())
+                self.assertLessEqual(button.winfo_rooty() + button.winfo_height(),
+                                     panel.winfo_rooty() + panel.winfo_height())
+
+    def test_glossary_change_invalidates_analysis_using_current_row_scope(self):
+        self.ready()
+        before = self.editor.writing_version
+        save_glossary_entries([("errao", "termo", "suggestion", 0, "en>pt")],
+                              path=glossario._default_substitutions_path(), create_backup=False)
+        self.editor.reload_glossary(show_feedback=False)
+        self.assertGreater(self.editor.writing_version, before)
+        self.wait_for(lambda: self.editor._writing_result is not None)
+        self.assertEqual(self.editor.writing_panel.issues, ())
+
+    def test_actions_log_metadata_without_the_comment(self):
+        item = self.ready()
+        with self.assertLogs("tradutor_pgn.edit_window", level="INFO") as captured:
+            self.editor.apply_issue(item, "erro")
+        message = " ".join(captured.output)
+        self.assertIn("SPELLING_UNKNOWN_WORD", message)
+        self.assertIn("aplicada", message)
+        self.assertNotIn("errao", message)
+
+    def test_book_operation_preserves_current_draft_when_only_other_rows_match(self):
+        from dataclasses import replace
+
+        self.ready()
+        self.editor.set_translation_text("erraos rascunho", mark_dirty=True, keep_undo=True)
+        # Grammar may target a substring, while book replacements require a
+        # whole form. Only the second database row belongs to this operation.
+        service = self.app.writing_assistant
+        original = service.analyze
+        def grammar(request):
+            result = original(request)
+            return replace(result, mode="full", issues=tuple(
+                replace(issue, category="GRAMMAR", issue_id="") for issue in result.issues))
+        with unittest.mock.patch.object(service, "analyze", grammar):
+            self.editor._writing_signature = None
+            self.editor.highlight_spelling()
+            item = self.ready()
+            self.assertEqual(item.category, "GRAMMAR")
+            self.editor.apply_all_identical(item, "erro")
+            self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "erraos rascunho")
+        self.assertTrue(self.editor.state.dirty)
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("errao errao",), ("erro",)])
+        conn.close()
+        self.editor.undo_writing_bulk()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(self.editor.draft_text(), "erraos rascunho")
+        self.assertTrue(self.editor.state.dirty)
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
+                             [("errao errao",), ("errao",)])
+        conn.close()
+
+
+class TextUndoHistoryTests(GuiTestCase):
+    def setUp(self):
+        super().setUp()
+        from tradutor_pgn.editor_undo import TextUndoHistory
+        self.text = tk.Text(self.root, undo=True)
+        self.history = TextUndoHistory(self.text)
+
+    def test_native_typing_delete_and_redo_keep_distinct_group_identities(self):
+        text, history = self.text, self.history
+        text.insert("1.0", "a")
+        first = history.undo_token
+        text.insert("end-1c", "b")
+        self.assertIs(history.undo_token, first)
+        text.delete("end-2c")
+        second = history.undo_token
+        self.assertIsNot(second, first)
+        text.edit_undo()
+        self.assertEqual(text.get("1.0", "end-1c"), "ab")
+        self.assertIs(history.undo_token, first)
+        text.edit_undo()
+        self.assertEqual(text.get("1.0", "end-1c"), "")
+        self.assertIsNone(history.undo_token)
+        text.edit_redo()
+        self.assertIs(history.undo_token, first)
+        text.edit_redo()
+        self.assertEqual(text.get("1.0", "end-1c"), "a")
+        self.assertIs(history.undo_token, second)
+
+    def test_whole_text_paste_replace_noops_and_reset_follow_native_boundaries(self):
+        text, history = self.text, self.history
+        text.configure(autoseparators=False)
+        text.edit_separator()
+        text.insert("1.0", "pasted", (), " text", ("bold",))
+        text.delete("1.0", "1.1")
+        text.edit_separator()
+        text.configure(autoseparators=True)
+        pasted = history.undo_token
+        text.replace("1.0", "1.1", "A")
+        self.assertIsNot(history.undo_token, pasted)
+        text.edit_undo()
+        self.assertEqual(text.get("1.0", "end-1c"), "asted text")
+        self.assertIs(history.undo_token, pasted)
+        text.insert("1.0", "")
+        text.delete("1.0", "1.0")
+        text.configure(state="disabled")
+        text.insert("1.0", "ignored")
+        text.configure(state="normal")
+        self.assertIs(history.undo_token, pasted)
+        text.edit_undo()
+        self.assertEqual(text.get("1.0", "end-1c"), "")
+        text.edit_redo()
+        self.assertEqual(text.get("1.0", "end-1c"), "asted text")
+        text.edit_undo()
+        text.insert("1.0", "branch")
+        self.assertIsNone(history.redo_token)
+        text.edit_reset()
+        self.assertIsNone(history.undo_token)
+        self.assertIsNone(history.redo_token)
+        with self.assertRaises(tk.TclError):
+            text.edit_undo()
+
+    def test_noop_ranges_and_terminal_newline_do_not_hide_the_next_undo(self):
+        text, history = self.text, self.history
+        text.insert("1.0", "batch")
+        batch = history.undo_token
+        text.edit_separator()
+        text.delete("end-1c", "end")
+        text.tk.call(text._w, "delete", "1.0", "1.0", "1.2", "1.2")
+        text.replace("1.0", "1.0", "")
+        self.assertIs(history.undo_token, batch)
+        text.edit_undo()
+        self.assertEqual(text.get("1.0", "end-1c"), "")
+        self.assertIsNone(history.undo_token)
+
+
+class WritingFixtureIsolationTests(GuiTestCase):
+    def test_closing_pending_vocabulary_dialog_allows_next_native_window(self):
+        # Keep native crashes observable as a test failure, with the original
+        # commit-after-close and next-window tests unchanged in a fresh process.
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest",
+             f"{__file__}::WritingEditorTests::test_vocabulary_commit_after_editor_close_notifies_remaining_windows",
+             f"{__file__}::{type(self).__name__}::test_legacy_window_uses_injected_service_without_starting_real_engine",
+             "-q"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_legacy_window_uses_injected_service_without_starting_real_engine(self):
+        app = FakeApp(self.root, self.db_path)
+        save_glossary_entries([], glossario._default_substitutions_path(), create_backup=False)
+        with initialize_database(self.db_path) as conn:
+            save_translation(conn.cursor(), "One", "errao", "pt", source_language="en")
+        conn.close()
+        with unittest.mock.patch.object(edit_window, "get_shared_writing_assistant",
+                                        side_effect=AssertionError("real engine started in legacy fixture")):
+            editor = edit_window.TranslationEditor(app)
+            self.addCleanup(editor.shutdown_writing)
+            deadline = time.monotonic() + 5
+            while editor._writing_result is None and time.monotonic() < deadline:
+                self.pump()
+                time.sleep(0.01)
+        self.assertIsNotNone(editor._writing_result)
+        self.assertEqual(editor.writing_panel.issues, ())
+        self.assertEqual(editor.draft_text(), "errao")
+
+
+class WritingRealEngineTests(GuiTestCase):
+    def test_editor_and_real_spylls_in_fresh_interpreter(self):
+        # A fresh interpreter exercises the real provider without hundreds of
+        # destroyed Tk interpreters from unrelated window tests.
+        flag = "PGN_TEST_REAL_WRITING_CHILD"
+        if os.environ.get(flag) != "1":
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", f"{__file__}::{type(self).__name__}::{self._testMethodName}", "-q", "--tb=short"],
+                env={**os.environ, flag: "1"}, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=45,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
+        from tradutor_pgn import writing_controller
+
+        app = FakeApp(self.root, self.db_path)
+        if hasattr(app, "writing_assistant"):
+            del app.writing_assistant
+        save_glossary_entries([], glossario._default_substitutions_path(), create_backup=False)
+        with initialize_database(self.db_path) as conn:
+            save_translation(conn.cursor(), "A position.", "Uma posiçao.", "pt", source_language="en")
+        conn.close()
+        editor = edit_window.TranslationEditor(app)
+        self.addCleanup(writing_controller.shutdown_shared_writing_assistant)
+        self.addCleanup(editor.shutdown_writing)
+        deadline = time.monotonic() + 20
+        while editor._writing_result is None and time.monotonic() < deadline:
+            self.pump()
+            time.sleep(0.01)
+        self.assertIsNotNone(editor._writing_result)
+        issues = editor.writing_panel.issues
+        item = next((issue for issue in issues if issue.original == "posiçao"), None)
+        self.assertIsNotNone(item, (issues, editor._writing_result))
+        self.assertIn(item.suggestions_state, {"pending", "loading"})
+        self.assertEqual(editor.draft_text(), "Uma posiçao.")
+        # Detection is a result of its own. Keep pumping real Tk while the
+        # isolated worker loads and publishes its first ranked alternative.
+        beats = []
+        active = [True]
+        def heartbeat():
+            if active[0]:
+                beats.append(time.monotonic())
+                self.root.after(10, heartbeat)
+        heartbeat()
+        deadline = time.monotonic() + 20
+        while not item.suggestions and time.monotonic() < deadline:
+            self.pump()
+            time.sleep(.002)
+            item = next(issue for issue in editor.writing_panel.issues if issue.original == "posiçao")
+        active[0] = False
+        self.assertGreater(len(beats), 2)
+        self.assertLess(max(b - a for a, b in zip(beats, beats[1:])), .2)
+        self.assertIn("posição", item.suggestions)
+        self.assertTrue(editor.trans_text.tag_ranges("writing_spelling"))
+        editor.apply_issue(item, "posição")
+        self.assertEqual(editor.draft_text(), "Uma posição.")
+        self.assertTrue(editor.state.dirty)
+        editor.undo_translation()
+        self.assertEqual(editor.draft_text(), "Uma posiçao.")

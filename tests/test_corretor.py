@@ -93,6 +93,26 @@ class ProseSpellcheckTests(unittest.TestCase):
             ["posiçao", "dificil"],
         )
 
+    def test_legacy_lookup_error_keeps_other_typos_and_never_raises(self):
+        class BrokenDictionary:
+            def lookup(self, word):
+                if word == "falha":
+                    raise RuntimeError("dictionary lookup failure")
+                return False
+
+        self.assertEqual(
+            prose_spellcheck.misspelled_spans("falha posiçao", BrokenDictionary()),
+            [(6, 13, "posiçao")],
+        )
+
+    def test_legacy_suggestion_error_still_returns_empty(self):
+        class BrokenDictionary:
+            def suggest(self, word):
+                yield "parcial"
+                raise RuntimeError("dictionary suggestion failure")
+
+        self.assertEqual(prose_spellcheck.suggestions("posiçao", BrokenDictionary()), [])
+
     def test_the_offsets_point_at_the_word_and_not_at_the_line(self):
         """A janela pinta por deslocamento; errar o intervalo sublinha o vizinho."""
         texto = "As pretas ficam com uma posiçao boa."

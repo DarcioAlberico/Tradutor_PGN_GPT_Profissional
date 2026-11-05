@@ -3,6 +3,7 @@
 Parte da divisao de `test_core.py` (ROADMAP 28.11); ver `tests/helpers.py`."""
 
 from difflib import SequenceMatcher
+from contextlib import contextmanager
 import os
 import sqlite3
 import tempfile
@@ -11,9 +12,11 @@ import time
 import unittest
 import unittest.mock
 from pathlib import Path
+from dataclasses import replace
 
 from tradutor_pgn import (
     database,
+    db_backup,
 )
 from tradutor_pgn.database import (
     FTS_TABLE,
@@ -89,6 +92,285 @@ def setUpModule():
 
 def tearDownModule():
     teardown_module_sandbox()
+
+
+class WritingBulkTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = str(Path(self.temp.name) / "book.db")
+        self.conn = initialize_database(self.path)
+        self.addCleanup(self.conn.close)
+        self.book = str(Path(self.temp.name) / "one.pgn")
+        for original, text in (("One", "errao errao"), ("Two", "errao [%cal errao]"),
+                               ("Other", "errao")):
+            save_translation(self.conn.cursor(), original, text, "pt", source_language="en")
+        self.ids = resolve_comment_ids(self.conn.cursor(), "pt", ["One", "Two", "Other"], source_language="en")
+        record_occurrences(self.conn.cursor(), self.book, [(1, 1, 1, "One"), (2, 1, 2, "Two")], self.ids)
+        record_occurrences(self.conn.cursor(), str(Path(self.temp.name) / "two.pgn"), [(1, 1, 1, "Other")], self.ids)
+        self.conn.commit()
+
+    def preview(self, original="errao", replacement="erro", **kwargs):
+        return database.preview_identical_replacements(self.conn, self.book, "pt", original, replacement, **kwargs)
+
+    def texts(self):
+        return self.conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall()
+
+    def test_book_count_history_and_transactional_undo(self):
+        preview = self.preview()
+        self.assertEqual(preview.count, 3)
+        operation = database.apply_identical_replacements(self.conn, preview)
+        self.assertEqual(self.texts(), [("erro erro",), ("erro [%cal errao]",), ("errao",)])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM comment_history WHERE bulk_operation_id = ?", (operation,)).fetchone()[0], 2)
+        database.undo_identical_replacements(self.conn, operation)
+        self.assertEqual(self.texts(), [("errao errao",), ("errao [%cal errao]",), ("errao",)])
+
+    def test_reset_erases_bulk_payload_even_when_comments_are_already_empty(self):
+        for empty in (False, True):
+            with self.subTest(empty=empty):
+                if empty:
+                    self.conn.execute("DELETE FROM comments")
+                    self.conn.commit()
+                else:
+                    database.apply_identical_replacements(self.conn, self.preview())
+                clear_all_translations(self.conn)
+                self.assertEqual(self.conn.execute("SELECT count(*) FROM writing_bulk_rows").fetchone()[0], 0)
+                self.assertEqual(self.conn.execute("SELECT count(*) FROM comment_history").fetchone()[0], 0)
+                if not empty:
+                    self.conn.execute("INSERT INTO writing_bulk_rows VALUES ('orphan', 1, 'private before', 'private after', 1, ?, 0, '[]', 0)", (self.book,))
+                    self.conn.commit()
+
+    def test_old_bulk_cannot_undo_a_new_comment_with_recycled_identity(self):
+        # One row recreates the same id, file, position, text and revision.
+        clear_all_translations(self.conn)
+        save_translation(self.conn.cursor(), "Old private comment", "errao", "pt", source_language="en")
+        old_ids = resolve_comment_ids(self.conn.cursor(), "pt", ["Old private comment"], source_language="en")
+        record_occurrences(self.conn.cursor(), self.book, [(1, 1, 1, "Old private comment")], old_ids)
+        self.conn.commit()
+        operation = database.apply_identical_replacements(self.conn, self.preview())
+        clear_all_translations(self.conn)
+        save_translation(self.conn.cursor(), "A different private comment", "erro", "pt", source_language="en")
+        recycled = resolve_comment_ids(self.conn.cursor(), "pt", ["A different private comment"], source_language="en")
+        self.assertEqual(recycled["A different private comment"], old_ids["Old private comment"])
+        record_occurrences(self.conn.cursor(), self.book, [(1, 1, 1, "A different private comment")], recycled)
+        # A normal reviewer note reaches revision 1, matching the old bulk.
+        self.conn.execute("UPDATE comments SET reviewer_note = 'new note'")
+        self.conn.commit()
+        before = self.conn.execute("SELECT * FROM comments").fetchall()
+        with self.assertRaises(database.WritingConflictError):
+            database.undo_identical_replacements(self.conn, operation)
+        self.assertEqual(self.conn.execute("SELECT * FROM comments").fetchall(), before)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM comment_history").fetchone()[0], 0)
+
+    def test_failed_reset_rolls_back_comments_history_and_bulk_payload(self):
+        database.apply_identical_replacements(self.conn, self.preview())
+        before = {table: self.conn.execute(f"SELECT * FROM {table}").fetchall()
+                  for table in ("comments", "comment_history", "writing_bulk_rows", "occurrences")}
+        for phase in ("recreation", "version", "commit"):
+            with self.subTest(phase=phase):
+                def refuse_phase(action, table, value, _db, _trigger):
+                    deny = ((phase == "recreation" and action == sqlite3.SQLITE_CREATE_TABLE and table == "comments")
+                            or (phase == "version" and action == sqlite3.SQLITE_PRAGMA and table == "user_version" and value is not None)
+                            or (phase == "commit" and action == sqlite3.SQLITE_TRANSACTION and table == "COMMIT"))
+                    return sqlite3.SQLITE_DENY if deny else sqlite3.SQLITE_OK
+                self.conn.set_authorizer(refuse_phase)
+                try:
+                    with self.assertRaises(sqlite3.DatabaseError):
+                        clear_all_translations(self.conn)
+                finally:
+                    self.conn.set_authorizer(None)
+                self.assertFalse(self.conn.in_transaction)
+                for table, rows in before.items():
+                    self.assertEqual(self.conn.execute(f"SELECT * FROM {table}").fetchall(), rows)
+
+    def test_locked_reset_preserves_rows_and_the_pending_bulk_undo(self):
+        operation = database.apply_identical_replacements(self.conn, self.preview())
+        self.conn.execute("PRAGMA busy_timeout = 1")
+        other = sqlite3.connect(self.path)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            with self.assertRaises(sqlite3.OperationalError):
+                clear_all_translations(self.conn)
+        finally:
+            other.rollback()
+            other.close()
+        self.assertFalse(self.conn.in_transaction)
+        database.undo_identical_replacements(self.conn, operation)
+        self.assertEqual(self.texts()[0], ("errao errao",))
+
+    def test_reset_refuses_to_commit_a_callers_pending_edit(self):
+        self.conn.execute("UPDATE comments SET reviewer_note = 'pending'")
+        with self.assertRaises(ValueError):
+            clear_all_translations(self.conn)
+        self.assertTrue(self.conn.in_transaction)
+        self.conn.rollback()
+        self.assertEqual(self.conn.execute("SELECT reviewer_note FROM comments WHERE id = 1").fetchone(), (None,))
+
+    def test_reset_remigrates_without_resurrecting_bulk_payload(self):
+        database.apply_identical_replacements(self.conn, self.preview())
+        clear_all_translations(self.conn)
+        self.conn.execute("PRAGMA user_version = 11")
+        self.conn.commit()
+        migrated = initialize_database(self.path)
+        try:
+            self.assertEqual(migrated.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+            self.assertEqual(migrated.execute("SELECT count(*) FROM writing_bulk_rows").fetchone()[0], 0)
+            self.assertEqual(migrated.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        finally:
+            migrated.close()
+
+    def test_restore_migration_failure_preserves_current_database_and_bulk_undo(self):
+        operation = database.apply_identical_replacements(self.conn, self.preview())
+        before = self.texts()
+        backup = Path(self.temp.name) / "invalid-schema.db"
+        source = sqlite3.connect(backup)
+        source.execute("CREATE TABLE comments (id INTEGER)")
+        source.execute("INSERT INTO comments VALUES (99)")
+        source.commit()
+        source.close()
+        with self.assertRaises(sqlite3.DatabaseError):
+            restore_database_from_backup(self.path, str(backup))
+        self.assertEqual(self.texts(), before)
+        database.undo_identical_replacements(self.conn, operation)
+        self.assertEqual(self.texts()[0], ("errao errao",))
+        self.assertEqual(list(Path(self.temp.name).glob(".restore-*")), [])
+        source = sqlite3.connect(backup)
+        try:
+            self.assertEqual(source.execute("SELECT * FROM comments").fetchall(), [(99,)])
+        finally:
+            source.close()
+
+    def test_restore_keeps_existing_read_snapshot_and_cleans_staging_files(self):
+        source_path = Path(self.temp.name) / "source.db"
+        source = initialize_database(str(source_path))
+        save_translation(source.cursor(), "new original", "new text", "pt", source_language="en")
+        source.commit()
+        source.close()
+        self.conn.execute("BEGIN")
+        before = self.texts()
+        restore_database_from_backup(self.path, str(source_path))
+        self.assertEqual(self.texts(), before)
+        self.conn.rollback()
+        self.assertEqual(self.texts(), [("new text",)])
+        self.assertEqual(list(Path(self.temp.name).glob(".restore-*")), [])
+
+    def test_restore_final_write_failure_preserves_rows_undo_and_cleans_staging(self):
+        operation = database.apply_identical_replacements(self.conn, self.preview())
+        before = self.texts()
+        source_path = Path(self.temp.name) / "source.db"
+        initialize_database(str(source_path)).close()
+        copy_database = db_backup._copy_database
+        def refuse_final_write(source, target, *args, **kwargs):
+            if os.path.samefile(target.execute("PRAGMA database_list").fetchone()[2], self.path):
+                readonly = sqlite3.connect(Path(self.path).as_uri() + "?mode=ro", uri=True)
+                try:
+                    return copy_database(source, readonly, *args, **kwargs)
+                finally:
+                    readonly.close()
+            return copy_database(source, target, *args, **kwargs)
+        with unittest.mock.patch.object(db_backup, "_copy_database", side_effect=refuse_final_write):
+            with self.assertRaises(sqlite3.OperationalError):
+                restore_database_from_backup(self.path, str(source_path))
+        self.assertEqual(self.texts(), before)
+        database.undo_identical_replacements(self.conn, operation)
+        self.assertEqual(self.texts()[0], ("errao errao",))
+        self.assertEqual(list(Path(self.temp.name).glob(".restore-*")), [])
+
+    def test_concurrent_aba_edit_aborts_all_rows(self):
+        preview = self.preview()
+        with sqlite3.connect(self.path) as other:
+            other.execute("UPDATE comments SET translated_comment = 'changed' WHERE id = ?", (self.ids["Two"],))
+            other.execute("UPDATE comments SET translated_comment = 'errao [%cal errao]' WHERE id = ?", (self.ids["Two"],))
+        other.close()
+        with self.assertRaises(database.WritingConflictError):
+            database.apply_identical_replacements(self.conn, preview)
+        self.assertEqual(self.texts()[0], ("errao errao",))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM comment_history").fetchone()[0], 0)
+
+    def test_shared_comment_added_after_preview_aborts(self):
+        preview = self.preview()
+        record_occurrences(self.conn.cursor(), str(Path(self.temp.name) / "shared.pgn"), [(1, 1, 1, "One")], self.ids)
+        self.conn.commit()
+        with self.assertRaises(database.WritingConflictError):
+            database.apply_identical_replacements(self.conn, preview)
+        with self.assertRaises(database.WritingConflictError):
+            self.preview()
+
+    def test_undo_conflict_preserves_entire_operation(self):
+        operation = database.apply_identical_replacements(self.conn, self.preview())
+        update_translation_by_id(self.conn.cursor(), self.ids["Two"], "manual")
+        self.conn.commit()
+        with self.assertRaises(database.WritingConflictError):
+            database.undo_identical_replacements(self.conn, operation)
+        self.assertEqual(self.texts(), [("erro erro",), ("manual",), ("errao",)])
+
+    def test_failure_on_later_write_rolls_back_history_and_text(self):
+        preview = self.preview()
+        self.conn.execute("CREATE TRIGGER reject_second BEFORE UPDATE ON comments WHEN OLD.original_comment = 'Two' BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+        self.conn.commit()
+        with self.assertRaises(sqlite3.IntegrityError):
+            database.apply_identical_replacements(self.conn, preview)
+        self.assertEqual(self.texts()[0], ("errao errao",))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM comment_history").fetchone()[0], 0)
+
+    def test_commit_guard_failure_rolls_back_rows_revisions_and_history(self):
+        preview = self.preview()
+        before = self.conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall()
+        @contextmanager
+        def refuse_commit():
+            self.assertTrue(self.conn.in_transaction)
+            self.assertEqual(self.texts()[:2], [("erro erro",), ("erro [%cal errao]",)])
+            self.assertEqual(self.conn.execute("SELECT count(*) FROM writing_bulk_rows").fetchone()[0], 2)
+            raise database.WritingConflictError("Revision changed before commit")
+            yield
+        with self.assertRaises(database.WritingConflictError):
+            database.apply_identical_replacements(self.conn, preview, commit_guard=refuse_commit)
+        self.assertFalse(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute("SELECT translated_comment, writing_revision FROM comments ORDER BY id").fetchall(), before)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM writing_bulk_rows").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM comment_history").fetchone()[0], 0)
+
+    def test_commit_guard_is_held_until_commit_and_legacy_undo_remains_available(self):
+        entered = []
+        @contextmanager
+        def guard_commit():
+            self.assertTrue(self.conn.in_transaction)
+            entered.append(True)
+            yield
+            self.assertFalse(self.conn.in_transaction)
+        operation = database.apply_identical_replacements(self.conn, self.preview(), commit_guard=guard_commit)
+        self.assertEqual(entered, [True])
+        database.undo_identical_replacements(self.conn, operation)
+        self.assertEqual(self.texts(), [("errao errao",), ("errao [%cal errao]",), ("errao",)])
+
+    def test_protection_boundaries_and_overlap_revalidation(self):
+        update_translation_by_id(self.conn.cursor(), self.ids["One"], "Nf3 errao erraos")
+        self.conn.commit()
+        self.assertEqual(self.preview("Nf3", "Nf4").count, 0)
+        self.assertEqual(self.preview(glossary_terms=frozenset({"errao"})).count, 0)
+        preview = self.preview()
+        self.assertEqual(preview.count, 2)
+        row = preview.rows[0]
+        corrupted = replace(preview, rows=(replace(row, spans=((4, 9), (4, 9))), *preview.rows[1:]))
+        with self.assertRaises((ValueError, database.WritingConflictError)):
+            database.apply_identical_replacements(self.conn, corrupted)
+        self.assertEqual(self.texts()[0], ("Nf3 errao erraos",))
+
+    def test_sequential_book_operations_undo_in_reverse_order(self):
+        first = database.apply_identical_replacements(self.conn, self.preview())
+        second = database.apply_identical_replacements(self.conn, self.preview("erro", "erros"))
+        database.undo_identical_replacements(self.conn, second)
+        database.undo_identical_replacements(self.conn, first)
+        self.assertEqual(self.texts(), [("errao errao",), ("errao [%cal errao]",), ("errao",)])
+
+    def test_draft_repair_equal_to_saved_text_does_not_relabel_previous_history(self):
+        update_translation_by_id(self.conn.cursor(), self.ids["One"], "erro erro")
+        self.conn.commit()
+        history_id = self.conn.execute("SELECT MAX(id) FROM comment_history").fetchone()[0]
+        revision = self.conn.execute("SELECT writing_revision FROM comments WHERE id = ?", (self.ids["One"],)).fetchone()[0]
+        operation = database.apply_identical_replacements(self.conn, self.preview(draft=(self.ids["One"], revision, "errao errao")))
+        self.assertIsNone(self.conn.execute("SELECT bulk_operation_id FROM comment_history WHERE id = ?", (history_id,)).fetchone()[0])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM comment_history WHERE bulk_operation_id = ?", (operation,)).fetchone()[0], 2)
 
 
 class CoveringIndexTests(unittest.TestCase):

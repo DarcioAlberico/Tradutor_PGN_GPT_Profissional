@@ -33,6 +33,17 @@ ingles e esta no acervo.
 import os
 import re
 import threading
+from collections.abc import Iterable
+from typing import Protocol
+
+
+class SpellingDictionary(Protocol):
+    """Only the local dictionary operations shared by old and new callers."""
+
+    def lookup(self, word: str) -> bool: ...
+
+    def suggest(self, word: str) -> Iterable[str]: ...
+
 
 # Diretorio dos dicionarios: ao lado do MODULO, como o `spelling_ssp`, e pela
 # mesma razao (ver `pgn_spellcheck.DEFAULT_SPELLING_PATH`). E dado de programa,
@@ -61,7 +72,7 @@ NOTATION_RE = re.compile(
     r")$"
 )
 
-_dictionaries = {}
+_dictionaries: dict[str, SpellingDictionary | None] = {}
 # Um cadeado para o REGISTRO (rapido, so protege os dicionarios) e um por IDIOMA
 # (segurado durante a carga inteira). Os dois existem porque um so nao serve: um
 # cadeado unico segurado durante a carga faria o idioma B esperar o A sem
@@ -74,9 +85,9 @@ _dictionaries = {}
 # a 1,3 GB com varias copias de 4,6 MB sendo montadas em paralelo, e a suite
 # passou de 407 s para nao terminar. Ver ROADMAP 26.4.
 _registry_lock = threading.Lock()
-_language_locks = {}
+_language_locks: dict[str, threading.Lock] = {}
 # Idiomas cuja carga esta em andamento. Protegido por `_registry_lock`.
-_loading = set()
+_loading: set[str] = set()
 
 
 def dictionary_files(target_language):
@@ -238,6 +249,37 @@ def _is_notation(word):
     return any(c.isdigit() for c in word) or bool(NOTATION_RE.match(word))
 
 
+def spelling_candidates(
+    text: str, dictionary: SpellingDictionary | None, known_words: Iterable[str] = (),
+    *, tolerate_errors: bool = False,
+    tokens: Iterable[tuple[int, int, str]] | None = None,
+) -> list[tuple[int, int, str]]:
+    """Shared historical spelling filter; providers can observe engine failures."""
+    if dictionary is None or not text:
+        return []
+
+    conhecidas = set(known_words)
+    marcas = []
+    cache = {}
+    if tokens is None:
+        tokens = ((m.start(), m.end(), m.group()) for m in TOKEN_RE.finditer(text))
+    for start, end, palavra in tokens:
+        if palavra.lower() in conhecidas or _is_notation(palavra):
+            continue
+        if palavra not in cache:
+            try:
+                cache[palavra] = bool(
+                    dictionary.lookup(palavra) or dictionary.lookup(palavra.lower())
+                )
+            except Exception:
+                if not tolerate_errors:
+                    raise
+                cache[palavra] = True
+        if not cache[palavra]:
+            marcas.append((start, end, palavra))
+    return marcas
+
+
 def misspelled_spans(text, dictionary, known_words=()):
     """`[(inicio, fim, palavra)]` do que o dicionario nao conhece.
 
@@ -247,26 +289,23 @@ def misspelled_spans(text, dictionary, known_words=()):
     Sem dicionario devolve vazio: quem quer distinguir "sem erro" de "sem
     dicionario" pergunta a `has_dictionary`, e nao ao tamanho desta lista.
     """
-    if dictionary is None or not text:
-        return []
+    return spelling_candidates(text, dictionary, known_words, tolerate_errors=True)
 
-    conhecidas = set(known_words)
-    marcas = []
-    cache = {}
-    for m in TOKEN_RE.finditer(text):
-        palavra = m.group()
-        if palavra.lower() in conhecidas or _is_notation(palavra):
-            continue
-        if palavra not in cache:
-            try:
-                cache[palavra] = bool(
-                    dictionary.lookup(palavra) or dictionary.lookup(palavra.lower())
-                )
-            except Exception:
-                cache[palavra] = True
-        if not cache[palavra]:
-            marcas.append((m.start(), m.end(), palavra))
-    return marcas
+
+def spelling_suggestions(
+    word: str, dictionary: SpellingDictionary, limit: int = 5,
+    *, deduplicate: bool = True,
+) -> tuple[str, ...]:
+    """Keep dictionary ranking, remove duplicates, and propagate provider errors."""
+    if not word or limit <= 0:
+        return ()
+    result: list[str] = []
+    for suggestion in dictionary.suggest(word):
+        if not deduplicate or suggestion not in result:
+            result.append(suggestion)
+            if len(result) >= limit:
+                break
+    return tuple(result)
 
 
 def suggestions(word, dictionary, limit=5):
@@ -274,11 +313,8 @@ def suggestions(word, dictionary, limit=5):
     if dictionary is None or not word:
         return []
     try:
-        saida = []
-        for sugestao in dictionary.suggest(word):
-            saida.append(sugestao)
-            if len(saida) >= limit:
-                break
-        return saida
+        # Preserve legacy duplicate/ranking behavior and its historical
+        # one-item result for non-positive limits; new providers deduplicate.
+        return list(spelling_suggestions(word, dictionary, max(1, limit), deduplicate=False))
     except Exception:
         return []

@@ -25,6 +25,9 @@ logs/
 # resultado dela, nao — sao 47 MB de binarios reconstruiveis com um comando, e
 # especificos da plataforma que rodou o build.
 build/
+# LanguageTool/Temurin ZIPs, .part downloads, JDK, jlink runtime and measured
+# prototype artifacts stay under build/. Only the recipes/lock/licenses ship
+# as source control entries; no vendor binary is committed.
 dist/
 
 # Artefato da medicao de cobertura (coverage.py), gerado sob demanda.
@@ -42,3 +45,6 @@ piloto/
 
 # Configuracao do PyCharm: e de quem usa, nao do projeto.
 .idea/
+
+# Worktrees isolados usados por planos de implementação agentic.
+.worktrees/

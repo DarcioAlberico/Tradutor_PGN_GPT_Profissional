@@ -7,6 +7,88 @@ O comportamento esperado do sistema e as garantias que os testes protegem estao
 em [SPEC.md](SPEC.md). O [ROADMAP.md](ROADMAP.md) registra as melhorias, feitas e
 pendentes, com o motivo de cada decisao e as medicoes que a sustentam.
 
+## Revisão linguística em português (experimental)
+
+No editor, o painel **Revisão linguística** lista as ocorrências na ordem do
+texto, mostra explicação e até cinco sugestões. Clique numa ocorrência para
+revelar o trecho; use **F7** para avançar e **Shift+F7** para voltar. Sem ocorrência
+linguística ativa, F7 mantém a navegação dos avisos QA. O cabeçalho recolhe o
+painel, que também se recolhe em telas estreitas.
+
+**Aplicar** altera a ocorrência selecionada; **Ctrl+Z** desfaz. A tradução é
+salva pelo fluxo normal do editor. **Aplicar todas iguais neste livro** exige
+prévia/confirmação, alcança as traduções do livro aberto e cria uma operação
+agrupada de desfazer. Não cria regra de glossário. SAN, tags PGN, nomes da
+origem e termos do glossário são protegidos; resultados de texto antigo são
+descartados. Nenhuma sugestão é aplicada automaticamente.
+
+Em **Configurações**, ortografia vem ligada e **Verificar concordância
+(experimental, local)** vem desligada, inclusive ao abrir configurações antigas.
+Você pode escolher categorias, testar a revisão local, listar/remover palavras
+do vocabulário pessoal e reativar regras. **Ignorar uma vez** vale para aquela
+ocorrência/versão; **Ignorar na sessão** dura até fechar o programa. Adicionar ao
+vocabulário pessoal vale para todos os livros. Desativar uma regra persiste seu
+ID e pode ser revertido nas configurações.
+
+| Modo | Significado e recuperação |
+|---|---|
+| Completo | Ortografia e gramática locais disponíveis; sugestões continuam experimentais. |
+| Iniciando / Reiniciando | Aguarde o motor local; ortografia continua utilizável. |
+| Somente ortografia | Concordância desligada ou indisponível. Confira a preferência e o diagnóstico. Após falha há no máximo um reinício; nova falha mantém fallback na sessão. |
+| Indisponível | Não há análise utilizável; confira idioma pt-BR, dicionário local e permissão de leitura. Salvar e editar continuam disponíveis. |
+
+Não interprete fallback como ausência de erros. Feche normalmente o programa
+para encerrar o processo Java que ele iniciou; após corrigir recursos ausentes,
+reabra e use **Testar revisão local**. Não é necessário instalar Java do sistema:
+o candidato usa o runtime reduzido preparado em `build/vendor` no desenvolvimento
+e recursos internos no executável. Não há download automático durante o uso.
+Se os recursos opcionais faltarem, a abertura e as configurações permanecem
+disponíveis e a revisão informa a capacidade restante.
+
+### Dados, privacidade e diagnóstico
+
+O assistente de escrita funciona offline: Spylls/VERO local e LanguageTool 6.6
+via HTTP somente em `127.0.0.1`, em porta dinâmica cujo listener é verificado
+como pertencente ao filho. Não existe fallback remoto, telemetria ou envio de
+comentários para LanguageTool na internet. Os motores de **tradução** continuam
+seguindo as configurações de API escolhidas para tradução.
+
+Na [pasta de dados](#onde-ficam-os-seus-dados), ficam
+`pgn_tradutor_pro_settings.json`, `vocabulario-pessoal.json` (e seu lock estável)
+e `writing-metrics.db`. O vocabulário contém as palavras adicionadas explicitamente;
+o banco de métricas contém somente contagens por dia/categoria/ID de regra/ação,
+sem texto, sugestões ou livro. As métricas são locais e best-effort. Não exclua
+o lock enquanto houver instâncias abertas. Antes de atualizar ou voltar versão,
+feche o app e faça cópia da pasta de dados, incluindo rascunhos, glossário e
+bancos. Leituras antigas recebem defaults sem regravar o arquivo; gravações
+mesclam seções e preservam chaves desconhecidas. Uma versão antiga que sobrescreva
+o JSON inteiro não oferece essa garantia; preserve o backup para downgrade.
+
+Logs da revisão registram apenas metadados validados, nunca comentário ou
+sugestões. O temporário do sidecar contém configurações e é removido no fechamento;
+stdout/stderr Java são descartados. Para reportar problema, informe modo,
+diagnóstico fixo, versão do app/motor, IDs de regras e medidas agregadas. Não
+anexe banco, rascunho, vocabulário ou texto privado. Para desenvolvedores, o comando
+abaixo usa apenas frases sintéticas, testa o motor real sem Java no PATH e
+registra medidas em `build/vendor/measurements.json`:
+
+```powershell
+uv run python ferramentas/preparar_languagetool.py smoke
+uv run python ferramentas/preparar_languagetool.py validate
+```
+
+`validate` atualmente recusa o candidato: a auditoria de redistribuição de
+licenças/fontes/notices está pendente. Não edite a aprovação para contornar o gate.
+O runtime medido tem **47.838.546 B** e os recursos LanguageTool **405.072.337 B**
+(soma **452.910.883 B**, antes dos metadados). O tamanho real do novo instalador
+e portátil ainda não foi medido, pois sua geração está bloqueada.
+
+O corpus real da Task 9 obteve **66,67% de precisão** e **72,73% de recall**,
+abaixo das metas de 95%/80%. O p95 completo warm foi **3041–3272 ms/comentário**,
+acima de 500 ms; ortografia também excedeu 20 ms/linha. TA-004 literal passou,
+com zero violações protegidas, mas isso não aprova estabilidade ou distribuição.
+Veja [evidências e limitações](docs/superpowers/reports/task-9-report.md).
+
 ## Requisitos
 
 Python 3.13 (fixado em `.python-version`; o `uv` cria o ambiente na versao certa
@@ -37,10 +119,10 @@ Verifique sintaxe dos modulos principais:
 uv run python -m compileall .\PGN_Tradutor_Pro.py .\tradutor_pgn
 ```
 
-Execute os testes automatizados:
+Execute a suíte completa (inclui os contratos pytest do assistente):
 
 ```powershell
-uv run python -m unittest discover -s .\tests
+uv run python -m pytest -q
 ```
 
 Parte da suite abre as janelas de verdade e clica nos widgets (o editor de
@@ -65,11 +147,13 @@ uv run python -m pytest tests\test_glossario.py -q
 O que os modulos dividem entre si (os `Fake*`, o harness do worker, os PGN de
 amostra, o sandbox por modulo) esta em `tests/helpers.py`. Ha um CI em
 `.github/workflows/testes.yml` (Windows, porque os testes de janela precisam de
-uma sessao de desktop) que roda tudo e publica o `dist/` do PyInstaller como
-artefato. O lint e o `ruff` com as regras escritas no `pyproject.toml` (o
+uma sessao de desktop) que roda os testes ordinários em push/PR. A preparação
+autocontida exige workflow manual e aprovação de redistribuição; atualmente
+está bloqueada. O lint e o `ruff` com as regras escritas no `pyproject.toml` (o
 conjunto padrao dele muda entre versoes); `uv run mypy` confere os modulos ja
-anotados inteiros (`translation_api.py`, `database.py`, `word_count.py`) e
-exige tipos em toda funcao nova deles.
+anotados inteiros (incluindo `translation_api.py`, `database.py`, `word_count.py`) e
+exige tipos em toda funcao nova deles e nos módulos tipados de escrita,
+proteção, vocabulário, lifecycle, controller, métricas e ferramentas de avaliação.
 
 > Se `uv run` reclamar de um Python inexistente (`No Python at ...`), o `.venv`
 > ficou apontando para uma instalacao removida. Apague a pasta `.venv` e rode
@@ -79,6 +163,10 @@ exige tipos em toda funcao nova deles.
 
 Gera o `.exe` para Windows que roda em maquinas sem Python — e, com ele, o
 instalador e o zip portatil — num comando so:
+
+**Estado deste candidato:** release bloqueado pela auditoria de licenças,
+fontes e notices do sidecar. Os comandos abaixo descrevem o fluxo após aprovação;
+o validador recusa executável/ZIP/instalador enquanto o gate estiver bloqueado.
 
 ```powershell
 python .\instalador\gerar-entregas.py
@@ -94,9 +182,13 @@ qualquer — ele leva tudo o que o interpretador tiver e a analise alcancar, e o
 `--so-exe` ele para depois do executavel. A receita do PyInstaller esta em
 [PGN_Tradutor_Pro.spec](PGN_Tradutor_Pro.spec), com o motivo de cada decisao.
 
-Sai em `dist\PGN_Tradutor_Pro\` (~79 MB), e **a pasta esta completa** — nao copie
+Sai em `dist\PGN_Tradutor_Pro\`, e **a pasta esta completa** — nao copie
 nada para dentro dela. O glossario, o dicionario de grafias, a semente e a lista
 de termos suspeitos ja vao embutidos em `_internal\`.
+
+O valor histórico de ~79 MB antecede o sidecar e não estima esta entrega.
+Runtime reduzido, JARs/dados, licenças, SBOM e manifesto são obrigatórios no
+candidato autocontido; recursos ausentes ou auditoria incompleta barram o build.
 
 > Ate a versao anterior estas instrucoes mandavam copiar o `Substituicoes.txt`
 > para dentro de `dist\`. Era uma armadilha: um instalador construido sobre

@@ -2,6 +2,9 @@ import csv
 import os
 import sqlite3
 import threading
+import hashlib
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from contextlib import closing
 from datetime import datetime
@@ -14,6 +17,10 @@ import customtkinter as ctk
 from .app_config import LANGUAGE_NAMES, LANGUAGES, UNKNOWN_SOURCE_LABEL, language_label
 from .board_widget import BoardCanvas
 from .database import (
+    WritingConflictError,
+    preview_identical_replacements,
+    apply_identical_replacements,
+    undo_identical_replacements,
     ORDER_BY_ID,
     ORDER_BY_OCCURRENCE,
     REVIEW_STATUS_DOUBT,
@@ -60,13 +67,17 @@ from .glossario import (
     glossary_default_scope,
     load_automatic_substitutions,
     load_interactive_substitutions,
+    load_glossary_entry_details,
     versioned_rules,
+    scope_matches,
+    scope_languages,
 )
 from .app_paths import glossary_catalog_path
 from .glossary_catalog import (
     GlossaryCatalog, GlossaryConflictError, GlossaryDuplicateError, GlossaryEntryDraft,
 )
 from .editor_common import (
+    apply_writing_issue,
     DESTRUCTIVE_COLOR,
     DESTRUCTIVE_HOVER_COLOR,
     ERROR_TEXT_COLOR,
@@ -110,6 +121,10 @@ from .review_quality import (
     row_quality_warnings,
 )
 from .settings import (
+    read_writing_settings,
+    change_disabled_writing_rules,
+    notify_writing_settings_changed,
+    writing_settings_revision,
     clear_editor_draft,
     get_editor_draft,
     load_settings,
@@ -117,6 +132,13 @@ from .settings import (
     update_settings,
 )
 from .window_utils import bring_window_to_front, restore_or_maximize
+from .personal_dictionary import PersonalDictionary
+from .writing_controller import WritingController, get_shared_writing_assistant
+from .writing_panel import WritingPanel
+from .editor_undo import TextUndoHistory
+from .writing_types import AssistantStatus, WritingRequest
+from .writing_metrics import is_valid_writing_action, record_writing_action
+from .writing_protection import protect_text
 
 
 # `ROW_COLOR` vem de `editor_common`, como o resto da paleta (22.9). Uma
@@ -157,7 +179,8 @@ SIMILAR_PANEL_LIMIT = 5
 # da lista ate esmagar as sugestoes, mesmo com a janela larga.
 BOTTOM_PANE_MIN = EDITOR_PANE_MIN + SASH_WIDTH + SUGGESTION_PANE_MIN
 MAIN_PANE_PADX = 20
-MIN_WIDTH = LIST_PANE_MIN + SASH_WIDTH + BOTTOM_PANE_MIN + MAIN_PANE_PADX
+WRITING_RAIL_MIN = 42
+MIN_WIDTH = LIST_PANE_MIN + SASH_WIDTH + BOTTOM_PANE_MIN + MAIN_PANE_PADX + SASH_WIDTH + WRITING_RAIL_MIN
 MIN_HEIGHT = 680
 
 # Largura PEDIDA pelo painel da lista na primeira abertura, quando ainda nao ha
@@ -278,7 +301,8 @@ KEYBOARD_SHORTCUTS = (
             ("Ctrl+PageUp", "<Control-Prior>", "Página anterior da lista"),
             ("Ctrl+PageDown", "<Control-Next>", "Próxima página da lista"),
             ("Alt+Backspace", "<Alt-BackSpace>", "Voltar ao ponto anterior"),
-            ("F7", "<F7>", "Próximo aviso de qualidade (pula as verificadas, salvo no filtro Verificadas)"),
+            ("F7", "<F7>", "Próxima ocorrência linguística; sem ocorrência ativa, próximo aviso QA"),
+            ("Shift+F7", "<Shift-F7>", "Ocorrência linguística anterior"),
         ),
     ),
     (
@@ -660,6 +684,7 @@ class TranslationEditor:
         self.build_editor_pane()
         self.build_suggestion_pane()
         self.build_status_bar()
+        self.build_writing_panel()
         self.connect_events()
         # Depois de `build_list_pane`, que cria os seletores de origem e destino:
         # o recorte do glossario depende dos dois (garantia S11).
@@ -722,6 +747,7 @@ class TranslationEditor:
         # dois fundos ja disputando a mesma caixa. A cor tem contraste sobre o
         # fundo do texto nos dois temas (5,0:1 no escuro, 5,9:1 no claro).
         self.spell_error_fg = "#fca5a5" if escuro else "#b91c1c"
+        self.grammar_error_fg = "#93c5fd" if escuro else "#1d4ed8"
 
     def apply_theme_colors(self, _mode=None):
         """Reaplica as cores do Tk puro. Chamada pelo rastreador de tema do CTk.
@@ -769,6 +795,8 @@ class TranslationEditor:
             texto.tag_configure(
                 "spell_error", foreground=self.spell_error_fg, underline=True
             )
+            texto.tag_configure("writing_spelling", foreground=self.spell_error_fg, underline=True)
+            texto.tag_configure("writing_grammar", foreground=self.grammar_error_fg, underline=True)
             self.paint_focus_border(texto, texto is self.focused_text)
 
         # A borda "neutra" do campo de nota e `text_border`, entao ela tambem
@@ -1972,6 +2000,7 @@ class TranslationEditor:
         self.win.bind("<Alt-Right>", self.next_shortcut)
         self.win.bind("<F3>", self.find_next_in_translation)
         self.win.bind("<F7>", self.next_quality_warning_shortcut)
+        self.win.bind("<Shift-F7>", self.previous_writing_shortcut)
         # `Alt+1..9` e `Ctrl+M` (ROADMAP 28.9, itens 1 e 3). O `Text` do Tk
         # liga `<Alt-KeyPress>` e `<Control-KeyPress>` a nada, entao os dois
         # chegam a janela sem inserir caractere — conferido em `text.tcl`.
@@ -1988,7 +2017,7 @@ class TranslationEditor:
         self.btn_shortcuts.configure(command=self.open_shortcuts_window)
         self.win.bind(
             "<Destroy>",
-            lambda event: self.unregister_glossary_callback() if event.widget is self.win else None,
+            lambda event: (self.unregister_glossary_callback(), self.shutdown_writing()) if event.widget is self.win else None,
         )
         self.win.protocol("WM_DELETE_WINDOW", self.close_editor)
 
@@ -2008,6 +2037,8 @@ class TranslationEditor:
 
     def load_first_page(self):
         """Carrega a primeira pagina e seleciona o primeiro item."""
+        if self._writing_action_blocked():
+            return
         self.reload_rows()
         if self.state.rows:
             self.select_index(0)
@@ -2862,33 +2893,618 @@ class TranslationEditor:
             )
         return self._prose_glossary_vocabulary
 
+    def build_writing_panel(self):
+        self.writing_assistant = getattr(self.app, "writing_assistant", None) or get_shared_writing_assistant()
+        self.writing_controller = WritingController(self.writing_assistant)
+        self.writing_version = 0
+        self._writing_history = TextUndoHistory(self.trans_text)
+        self._writing_history.allow_action = self._allow_writing_native_action
+        self._writing_undone_tokens = set()
+        self._writing_window_token = object()
+        self._writing_closed = False
+        self._writing_busy = False
+        self._writing_delivering = False
+        self._writing_internal_undo_token = None
+        self._writing_signature = None
+        self._writing_request = None
+        self._writing_result = None
+        self._writing_debounce = None
+        self._writing_poll = None
+        self._writing_ignored_once = set()
+        self._writing_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="writing-editor")
+        self._writing_job = None
+        self._writing_dialog = None
+        self.writing_settings = read_writing_settings(self.settings)
+        self._writing_settings_revision = writing_settings_revision()
+        for name, default in (("writing_session_words", set()), ("writing_session_rules", set()),
+                              ("writing_editors", []), ("writing_bulk_undo", {})):
+            if not hasattr(self.app, name):
+                setattr(self.app, name, default)
+        self.app.writing_editors.append(self)
+        self.writing_panel = WritingPanel(
+            self.main_pane, on_select=self.focus_writing_issue, on_apply=self.apply_issue,
+            on_apply_all=self.apply_all_identical, on_ignore_once=self.ignore_once,
+            on_ignore_session=self.ignore_session, on_add_personal=self.add_personal_word,
+            on_disable_rule=self.disable_rule, on_undo_bulk=self.undo_writing_bulk,
+            on_settings=self.open_writing_settings,
+            on_retry_suggestions=lambda issue: self.writing_controller.request_suggestions(issue, retry=True),
+        )
+        self.main_pane.add(self.writing_panel, minsize=WRITING_RAIL_MIN, width=300, stretch="never")
+        self.writing_panel.on_collapse = self._layout_writing_panel
+        self.win.bind("<Configure>", self._writing_resize, add="+")
+        self.trans_text.bind("<ButtonRelease-1>", self._writing_click, add="+")
+        self.trans_text.bind("<<Undo>>", lambda _event: (self.undo_translation(), "break")[1])
+        self.trans_text.bind("<<Redo>>", lambda _event: (self.redo_translation(), "break")[1])
+        self.trans_text.tag_configure("writing_spelling", foreground=self.spell_error_fg, underline=True)
+        self.trans_text.tag_configure("writing_grammar", foreground=self.grammar_error_fg, underline=True)
+        self._writing_poll = self.win.after(60, self.poll_writing)
+
+    def open_writing_settings(self):
+        from .settings_window import open_settings_window
+        return open_settings_window(self.app)
+
+    def _writing_resize(self, event):
+        if event.widget is self.win and not self._writing_closed:
+            self.writing_panel.set_available_width(event.width)
+
+    def _layout_writing_panel(self, collapsed):
+        panel = self.writing_panel
+        attached = str(panel) in {str(pane) for pane in self.main_pane.panes()}
+        # A narrow window cannot fit three full-width panes. Open the review
+        # as a drawer over the right side, preserving the text pane's minimum.
+        if not collapsed and panel.available_width < 1550:
+            if attached:
+                self.main_pane.forget(panel)
+            panel.place(relx=1, rely=0, relheight=1, anchor="ne")
+            panel.lift()
+        else:
+            panel.place_forget()
+            width = 42 if collapsed else 300
+            if not attached:
+                self.main_pane.add(panel, minsize=WRITING_RAIL_MIN, width=width, stretch="never")
+            else:
+                self.main_pane.paneconfigure(panel, width=width)
+
+    def _allow_writing_native_action(self, action, token):
+        if self._writing_closed:
+            return False
+        if action == "undo" and token is not None and token is self._writing_internal_undo_token:
+            self._writing_internal_undo_token = None
+            return True
+        if self._writing_busy:
+            return False
+        if action == "undo":
+            bulk = self._current_writing_bulk()
+            if (bulk and token is not None and token is bulk["native_token"]
+                    and bulk["window"] is self._writing_window_token):
+                self.undo_writing_bulk()
+                return False
+        elif token in self._writing_undone_tokens:
+            self.show_message("Para reaplicar o lote, crie uma nova prévia no livro.")
+            return False
+        return True
+
+    def writing_glossary_terms(self, *, whole_book=False):
+        terms = {str(term) for entry in (*self.glossary, *self.automatic_glossary)
+                 for term in entry[:2] if term}
+        snapshot = getattr(self, "suggestion_catalog_snapshot", None)
+        source, target = self.current_row_languages()
+        if snapshot is not None:
+            entries = ((e.original_text, e.replacement_text, e.scope) for e in snapshot.entries)
+        else:
+            entries = ((entry[0], entry[1], entry[4]) for entry in getattr(self, "_writing_legacy_terms", ()))
+        for original, replacement, scope in entries:
+            applicable = (scope_languages(scope)[1] in {"", target}
+                          if whole_book else scope_matches(scope, source, target))
+            if applicable:
+                terms.update(term for term in (original, replacement) if term)
+        return frozenset(terms)
+
+    def writing_request(self):
+        return WritingRequest(
+            self.draft_text(), self.writing_version, self.current_row_languages()[1] or self.lang,
+            self.current["orig"], self.writing_glossary_terms(),
+            frozenset(self.app.writing_session_words),
+            frozenset(self.writing_settings["disabled_rule_ids"]) | frozenset(self.app.writing_session_rules),
+            self.writing_settings["grammar_enabled"],
+        )
+
     def highlight_spelling(self):
-        """Sublinha o que o dicionario do idioma de destino nao conhece.
-
-        O filtro do ruido e o texto de ORIGEM da propria linha: o nome do
-        jogador, do torneio e da cidade chegaram a traducao vindos de la, e
-        compara-los com ele tira 3.347 marcas das 3.442 sem lista nova para
-        manter (ROADMAP 26).
-        """
-        self.trans_text.tag_remove("spell_error", "1.0", tk.END)
-        if not self.current["id"]:
+        """Invalidate immediately; schedule providers without touching Tk in workers."""
+        if not hasattr(self, "writing_controller") or self._writing_closed:
             return
-
-        dicionario = self.prose_dictionary()
-        if dicionario is None:
+        request = self.writing_request()
+        signature = (self.current["id"], request.text, request.target_language, request.source_text,
+                     request.glossary_terms, request.session_ignored_words, request.disabled_rule_ids,
+                     request.grammar_enabled, self.writing_settings["spelling_enabled"],
+                     tuple(self.writing_settings["visible_categories"]))
+        if signature == self._writing_signature:
             return
+        self._writing_signature = signature
+        self.writing_version += 1
+        self.writing_controller.cancel_context()
+        self._writing_request = None
+        self._writing_result = None
+        self._writing_ignored_once.clear()
+        if self._writing_debounce is not None:
+            self.win.after_cancel(self._writing_debounce)
+            self._writing_debounce = None
+        for tag in ("spell_error", "writing_spelling", "writing_grammar"):
+            self.trans_text.tag_remove(tag, "1.0", tk.END)
+        enabled = self.writing_settings["spelling_enabled"] or self.writing_settings["grammar_enabled"]
+        self.writing_panel.set_snapshot((), AssistantStatus(
+            "starting" if enabled else "stopped", "spelling_only" if enabled else "unavailable",
+            "Carregando dicionário / analisando texto" if enabled else "Revisão linguística desativada",
+        ))
+        if self.current["id"] and enabled:
+            self._writing_debounce = self.win.after(280, self._submit_writing)
 
-        texto = self.trans_text.get("1.0", tk.END)
-        conhecidas = prose_spellcheck.source_vocabulary(self.current["orig"])
-        conhecidas |= self.glossary_vocabulary()
-        for inicio, fim, _palavra in prose_spellcheck.misspelled_spans(
-            texto, dicionario, conhecidas
-        ):
-            self.trans_text.tag_add(
-                "spell_error",
-                self.text_index_for_offset(inicio),
-                self.text_index_for_offset(fim),
-            )
+    def _submit_writing(self):
+        self._writing_debounce = None
+        if self._writing_closed:
+            return
+        # A debounce may fire before the periodic event consumer. Honor a
+        # committed disable before scheduling any new provider work.
+        if self._sync_writing_preferences():
+            return
+        if not (self.writing_settings["spelling_enabled"] or self.writing_settings["grammar_enabled"]):
+            return
+        self._writing_request = self.writing_request()
+        self.writing_controller.submit(self._writing_request, record_id=str(self.current["id"]))
+
+    def _sync_writing_preferences(self):
+        revision = writing_settings_revision()
+        if revision != self._writing_settings_revision:
+            self._writing_settings_revision = revision
+            self.writing_settings = read_writing_settings(load_settings())
+            self.writing_assistant.invalidate_cache()
+            self._writing_signature = None
+            self.highlight_spelling()
+            return True
+        return False
+
+    def poll_writing(self):
+        if self._writing_delivering:
+            return
+        self._writing_poll = None
+        if self._writing_closed:
+            return
+        self._sync_writing_preferences()
+        for event in self.writing_controller.poll():
+            request = self.writing_request()
+            if (event.context.record_id != str(self.current["id"])
+                    or event.context.target_language != request.target_language
+                    or event.text_version != self.writing_version
+                    or event.text_digest != hashlib.sha256(request.text.encode("utf-8")).hexdigest()
+                    or request != self._writing_request):
+                continue
+            if event.kind == "status":
+                self.writing_panel.set_snapshot(self.writing_panel.issues, event.status)
+            elif event.kind == "result":
+                self._writing_result = event.result
+                self._render_writing_result()
+            elif event.kind == "invalidated":
+                self._writing_result = None
+                self.writing_panel.set_snapshot((), AssistantStatus("starting", "spelling_only", event.diagnostic))
+                for tag in ("spell_error", "writing_spelling", "writing_grammar"):
+                    self.trans_text.tag_remove(tag, "1.0", tk.END)
+            else:
+                self.writing_panel.set_snapshot((), AssistantStatus("failed", "unavailable", event.diagnostic))
+        job = self._writing_job
+        try:
+            if job and job[0].done():
+                self._writing_job = None
+                self._writing_delivering = True
+                next_job = None
+                try:
+                    # Idle callbacks must see busy until the committed result
+                    # has reconciled the widget, saved text and undo history.
+                    self._close_writing_dialog()
+                    try:
+                        result = job[0].result()
+                    except Exception as error:
+                        message = str(error) if isinstance(error, (WritingConflictError, ValueError)) else "Não foi possível concluir a operação. Nada foi alterado."
+                        if not self._writing_closed:
+                            messagebox.showwarning("Revisão linguística", message, parent=self.win)
+                    else:
+                        next_job = job[1](result)
+                finally:
+                    self._writing_delivering = False
+                    self._writing_busy = False
+                if next_job is not None:
+                    self._run_writing_job(*next_job)
+        finally:
+            if not self._writing_closed and self._writing_poll is None:
+                self._writing_poll = self.win.after(60, self.poll_writing)
+
+    def _render_writing_result(self):
+        if self._writing_result is None:
+            return
+        result = self._writing_result
+        protected = protect_text(self.writing_request())
+        issues = tuple(issue for issue in result.issues
+                       if issue.state == "active" and issue.issue_id not in self._writing_ignored_once
+                       and not any(r.start < issue.end and issue.start < r.end for r in protected.ranges)
+                       and issue.category in self.writing_settings["visible_categories"]
+                       and (issue.category != "SPELLING" or self.writing_settings["spelling_enabled"])
+                       and issue.rule_id not in self.app.writing_session_rules
+                       and (issue.category != "SPELLING" or issue.original.casefold() not in
+                            {word.casefold() for word in self.app.writing_session_words}))
+        self.writing_panel.set_snapshot(issues, AssistantStatus(
+            "failed" if result.mode == "unavailable" else "ready", result.mode, result.diagnostic))
+        selected = self.writing_panel.active_issue
+        if selected is not None and selected.suggestions_state == "pending":
+            self.writing_controller.request_suggestions(selected)
+        for tag in ("spell_error", "writing_spelling", "writing_grammar"):
+            self.trans_text.tag_remove(tag, "1.0", tk.END)
+        for issue in issues:
+            tag = "writing_spelling" if issue.category == "SPELLING" else "writing_grammar"
+            self.trans_text.tag_add(tag, self.writing_index(issue.start), self.writing_index(issue.end))
+            if issue.category == "SPELLING":
+                self.trans_text.tag_add("spell_error", self.writing_index(issue.start), self.writing_index(issue.end))
+
+    def writing_index(self, offset):
+        # Text's +Nc arithmetic counts code points even on Tcl builds whose
+        # string length and line.column indices count UTF-16 units.
+        return self.text_index_for_offset(offset)
+
+    def _writing_click(self, event):
+        index = self.trans_text.index(f"@{event.x},{event.y}")
+        for number, issue in enumerate(self.writing_panel.issues):
+            if (self.trans_text.compare(index, ">=", self.writing_index(issue.start))
+                    and self.trans_text.compare(index, "<", self.writing_index(issue.end))):
+                self.writing_panel.select(number)
+                break
+
+    def focus_writing_issue(self, issue):
+        if not self._valid_writing_issue(issue):
+            return
+        self.writing_controller.request_suggestions(issue)
+        start, end = self.writing_index(issue.start), self.writing_index(issue.end)
+        self.trans_text.tag_remove(tk.SEL, "1.0", tk.END)
+        self.trans_text.tag_add(tk.SEL, start, end)
+        self.trans_text.mark_set(tk.INSERT, end)
+        self.trans_text.see(start)
+        self.trans_text.focus_set()
+
+    def _valid_writing_issue(self, issue):
+        if self._sync_writing_preferences():
+            return False
+        if self._writing_closed or self._writing_request != self.writing_request():
+            return False
+        try:
+            issue.validate_for(self.writing_request())
+        except ValueError:
+            return False
+        return issue in self.writing_panel.issues and self.writing_controller.is_current_issue(issue)
+
+    def apply_issue(self, issue, replacement):
+        if not self._valid_writing_issue(issue):
+            self.show_message("Ocorrência desatualizada; aguarde uma nova análise.")
+            return
+        try:
+            request = self.writing_request()
+            updated = apply_writing_issue(request, issue, replacement)
+            with self.writing_controller.guard_issue(issue):
+                if request != self.writing_request() or not self._valid_writing_issue(issue):
+                    raise ValueError("writing context changed")
+                self.current["auto_only"] = False
+                self.set_translation_text(updated, mark_dirty=True, focus_editor=True, keep_undo=True)
+        except ValueError:
+            self.show_message("Trecho protegido ou desatualizado; nenhuma alteração.")
+            return
+        self.trans_text.mark_set(tk.INSERT, self.writing_index(issue.start + len(replacement)))
+        self._record_writing_action(issue, "aplicada")
+
+    def _record_writing_action(self, issue, action):
+        try:
+            if not is_valid_writing_action(category=issue.category, rule_id=issue.rule_id, action=action):
+                return
+            logging.getLogger(__name__).info("writing category=%s rule=%s action=%s",
+                                             issue.category, issue.rule_id, action)
+            record_writing_action(category=issue.category, rule_id=issue.rule_id, action=action)
+        except Exception:
+            # Metrics are optional and cannot change an editorial operation.
+            pass
+
+    def ignore_once(self, issue):
+        if self._valid_writing_issue(issue):
+            self._writing_ignored_once.add(issue.issue_id)
+            self._render_writing_result()
+            self._record_writing_action(issue, "ignorada_uma_vez")
+
+    def ignore_session(self, issue):
+        if not self._valid_writing_issue(issue):
+            return
+        if issue.category == "SPELLING":
+            self.app.writing_session_words.add(issue.original)
+        else:
+            self.app.writing_session_rules.add(issue.rule_id)
+        self.refresh_writing_editors()
+        self._record_writing_action(issue, "ignorada_sessao")
+
+    def refresh_writing_editors(self):
+        notify_writing_settings_changed()
+        self.writing_assistant.invalidate_cache()
+        for editor in tuple(self.app.writing_editors):
+            if not editor._writing_closed:
+                editor.writing_settings = read_writing_settings(load_settings())
+                editor._writing_signature = None
+                editor.highlight_spelling()
+
+    def _run_writing_job(self, work, success):
+        if self._writing_closed or self._writing_busy:
+            return
+        self._writing_busy = True
+        dialog = ctk.CTkToplevel(self.win)
+        dialog.title("Revisão linguística")
+        dialog.geometry("420x100")
+        dialog.transient(self.win)
+        ctk.CTkLabel(dialog, text="Conferindo o livro. Aguarde…").pack(padx=20, pady=24)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+        dialog.grab_set()
+        self._writing_dialog = dialog
+        self._writing_job = (self._writing_executor.submit(work), success)
+
+    def _writing_action_blocked(self):
+        """Reject commands before they change the view or assume a save succeeded."""
+        if not getattr(self, "_writing_busy", False):
+            return False
+        # CTk selectors change before their command runs. Restore the controls
+        # to the applied view without reloading it or touching pending input.
+        view = self.state.applied_view
+        for control, field in ((self.status_segment, "status"), (self.source_menu, "source"),
+                               (self.file_menu, "file"), (self.search_mode_segment, "mode")):
+            if field in view:
+                control.set(view[field])
+        if "target" in view:
+            self.target_menu.set(LANGUAGE_NAMES.get(view["target"], self.target_menu.get()))
+        self.show_message("Aguarde a operação de revisão terminar.")
+        return True
+
+    def _close_writing_dialog(self):
+        dialog, self._writing_dialog = self._writing_dialog, None
+        if dialog is not None:
+            try:
+                dialog.grab_release()
+                # On Windows Tk 8.6.15, destroying a just-created transient
+                # before its geometry idle runs can leave UpdateGeometryInfo
+                # pointing at a dead window. Drain while the window is alive;
+                # detach first so an idle callback can safely reenter close.
+                dialog.update_idletasks()
+            except tk.TclError:
+                pass
+            try:
+                dialog.destroy()
+            except tk.TclError:
+                pass
+
+    def add_personal_word(self, issue):
+        if self._valid_writing_issue(issue):
+            vocabulary = PersonalDictionary()
+            def added(_value):
+                self.refresh_writing_editors()
+                self._record_writing_action(issue, "vocabulario")
+            def work():
+                changed = vocabulary.add(issue.original)
+                if changed:
+                    # Publication belongs to the commit, even if this editor
+                    # closes before Tk can deliver its completion callback.
+                    notify_writing_settings_changed()
+                return changed
+            self._run_writing_job(work, added)
+
+    def disable_rule(self, issue):
+        rule_id = issue.rule_id
+        def work():
+            return change_disabled_writing_rules(disable=[rule_id])
+        def disabled(_value):
+            self.refresh_writing_editors()
+            self._record_writing_action(issue, "regra_desativada")
+        self._run_writing_job(work, disabled)
+
+    def apply_all_identical(self, issue, replacement):
+        if not self._valid_writing_issue(issue):
+            self.show_message("Ocorrência desatualizada; crie uma nova prévia.")
+            return
+        try:
+            apply_writing_issue(self.writing_request(), issue, replacement)
+        except ValueError:
+            return
+        source_file = self.selected_source_file()
+        if not source_file:
+            self.show_message("Selecione um livro no filtro Arquivo para aplicar todas iguais.")
+            return
+        request = self.writing_request()
+        book_terms = self.writing_glossary_terms(whole_book=True)
+        record_id = self.current["id"]
+        saved_before = self.current["saved_trans"]
+        revision = self.current.get("writing_revision", 0)
+        db_path = self.app.output_db
+        def work():
+            with closing(initialize_database(db_path)) as conn:
+                return preview_identical_replacements(
+                    conn, source_file, request.target_language, issue.original, replacement,
+                    glossary_terms=book_terms, draft=(record_id, revision, request.text))
+        def confirm(preview):
+            if self._writing_closed:
+                return
+            if not preview.count:
+                self.show_message("Nenhuma ocorrência idêntica fora dos trechos protegidos.")
+                return
+            if not messagebox.askyesno("Aplicar todas iguais neste livro",
+                    f"Substituir {preview.count} ocorrência(s) em {len(preview.rows)} tradução(ões) de {os.path.basename(source_file)}?\n\n"
+                    "O rascunho da linha aberta será incluído. O lote poderá ser desfeito em uma única ação.", parent=self.win):
+                return
+            if self._writing_closed:
+                return
+            if (not self._valid_writing_issue(issue)
+                    or self.current["id"] != record_id or self.writing_request() != request
+                    or self.selected_source_file() != source_file
+                    or self.writing_glossary_terms(whole_book=True) != book_terms):
+                self.show_message("O contexto mudou; crie uma nova prévia.")
+                return
+            ids = {row.comment_id for row in preview.rows}
+            if self._other_writing_drafts(ids):
+                self.show_message("Há edições abertas em outra janela. Salve-as antes de criar outra prévia.")
+                return
+            def apply():
+                with closing(initialize_database(db_path)) as conn:
+                    guard = getattr(self.writing_assistant, "guard_revision", None)
+                    if callable(guard):
+                        operation = apply_identical_replacements(
+                            conn, preview, commit_guard=lambda: guard(issue.revision))
+                    else:
+                        operation = apply_identical_replacements(conn, preview)
+                    text = conn.execute("SELECT translated_comment FROM comments WHERE id = ?", (record_id,)).fetchone()[0]
+                    revision = conn.execute("SELECT writing_revision FROM comments WHERE id = ?", (record_id,)).fetchone()[0]
+                return operation, text, revision
+            def applied(result):
+                operation, text, revision = result
+                entry = dict(operation=operation, record_id=record_id, before=request.text,
+                             after=text, saved_before=saved_before, ids=ids,
+                             window=self._writing_window_token, native_token=None)
+                key = (os.path.abspath(db_path), source_file)
+                self.app.writing_bulk_undo.setdefault(key, []).append(entry)
+                if self._writing_closed:
+                    return
+                context_matches = (self.current["id"] == record_id
+                                   and self.writing_request() == request
+                                   and self.selected_source_file() == source_file
+                                   and os.path.abspath(self.app.output_db) == os.path.abspath(db_path))
+                if record_id in ids and self.current["id"] == record_id:
+                    self._writing_committed(text, revision, keep_undo=context_matches,
+                                            preserve_widget=not context_matches)
+                    if context_matches:
+                        entry["native_token"] = self._writing_history.undo_token
+                else:
+                    self._reload_writing_rows()
+                self._refresh_other_writing_rows(ids)
+                self._record_writing_action(issue, "aplicada_lote")
+                self.show_message(f"{preview.count} ocorrência(s) aplicadas. Ctrl+Z desfaz o lote.")
+            # The poller starts the continuation after this delivery releases
+            # its barrier; idle callbacks cannot start a competing operation.
+            return apply, applied
+        self._run_writing_job(work, confirm)
+
+    def _other_writing_drafts(self, ids):
+        return any(editor is not self and not editor._writing_closed
+                   and os.path.abspath(editor.app.output_db) == os.path.abspath(self.app.output_db)
+                   and editor.current["id"] in ids and editor.state.dirty
+                   for editor in self.app.writing_editors)
+
+    def _refresh_other_writing_rows(self, ids):
+        for editor in tuple(self.app.writing_editors):
+            if (editor is not self and not editor._writing_closed
+                    and editor.current["id"] in ids and not editor.state.dirty):
+                editor.load_item()
+
+    def _writing_committed(self, text, revision, *, keep_undo=False, preserve_widget=False):
+        self.current["trans"] = self.current["saved_trans"] = text
+        self.current["writing_revision"] = revision
+        self.current["auto_only"] = False
+        self.clear_current_draft()
+        if preserve_widget:
+            self.set_dirty(self.draft_text() != text)
+            self.refresh_suggestions()
+            self.update_quality_warnings()
+            self.refresh_find_matches()
+        else:
+            self.set_translation_text(text, keep_undo=keep_undo)
+        if self.reviewer_note_text.get().strip() != (self.current.get("reviewer_note") or "").strip():
+            self.set_dirty(True, autosave_draft=False)
+        self._reload_writing_rows()
+
+    def _reload_writing_rows(self):
+        row_id = self.current["id"]
+        self._reload_rows()
+        index = row_index_for_id(self.state.rows, row_id, fallback=None)
+        self.update_row_selection(index)
+        self.update_selection_label()
+
+    def _current_writing_bulk(self):
+        if not hasattr(self.app, "writing_bulk_undo"):
+            return None
+        key = (os.path.abspath(self.app.output_db), self.selected_source_file())
+        stack = self.app.writing_bulk_undo.get(key, [])
+        return stack[-1] if stack else None
+
+    def undo_writing_bulk(self):
+        if self._writing_closed or self._writing_busy:
+            return
+        entry = self._current_writing_bulk()
+        if not entry:
+            self.show_message("Nenhum lote deste livro para desfazer.")
+            return
+        same_row = self.current["id"] == entry["record_id"]
+        native = (same_row and entry["window"] is self._writing_window_token
+                  and entry["native_token"] is not None
+                  and entry["native_token"] in self._writing_history.undo + self._writing_history.redo)
+        if native and self._writing_history.undo_token is not entry["native_token"]:
+            self.show_message("Há edições posteriores abertas. Desfaça-as primeiro.")
+            return
+        if self._other_writing_drafts(entry["ids"]) or (self.current["id"] in entry["ids"]
+                and self.state.dirty and (not same_row or self.draft_text() != entry["after"])):
+            self.show_message("Há edições posteriores abertas. Desfaça ou salve-as primeiro.")
+            return
+        db_path = self.app.output_db
+        row_id = self.current["id"]
+        request = self.writing_request()
+        key = (os.path.abspath(db_path), self.selected_source_file())
+        def work():
+            with closing(initialize_database(db_path)) as conn:
+                undo_identical_replacements(conn, entry["operation"])
+                return conn.execute("SELECT translated_comment, writing_revision FROM comments WHERE id = ?", (row_id,)).fetchone()
+        def undone(result):
+            self.app.writing_bulk_undo[key].pop()
+            if self._writing_closed:
+                return
+            if entry["native_token"] is not None:
+                self._writing_undone_tokens.add(entry["native_token"])
+            if result and row_id in entry["ids"] and self.current["id"] == row_id:
+                text, revision = result
+                context_matches = (self.writing_request() == request
+                                   and self.selected_source_file() == key[1]
+                                   and os.path.abspath(self.app.output_db) == os.path.abspath(db_path))
+                use_native = (native and context_matches
+                              and self._writing_history.undo_token is entry["native_token"])
+                if use_native:
+                    self.state.loading = True
+                    self._writing_internal_undo_token = entry["native_token"]
+                    try:
+                        self.trans_text.edit_undo()
+                        self.trans_text.edit_modified(False)
+                    except tk.TclError:
+                        use_native = False
+                    finally:
+                        self._writing_internal_undo_token = None
+                        self.state.loading = False
+                self._writing_committed(text, revision, preserve_widget=use_native or not context_matches)
+                if same_row and not use_native and context_matches and entry["before"] != text:
+                    self.set_translation_text(entry["before"], mark_dirty=True)
+            else:
+                self._reload_writing_rows()
+            self._refresh_other_writing_rows(entry["ids"])
+            self.show_message("Lote desfeito integralmente.")
+        self._run_writing_job(work, undone)
+
+    def shutdown_writing(self):
+        if self._writing_closed:
+            return
+        self._writing_closed = True
+        for name in ("_writing_debounce", "_writing_poll"):
+            after_id = getattr(self, name)
+            if after_id is not None:
+                try:
+                    self.win.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+                setattr(self, name, None)
+        self._close_writing_dialog()
+        self.writing_controller.shutdown()
+        self._writing_executor.shutdown(wait=False, cancel_futures=True)
+        if self in self.app.writing_editors:
+            self.app.writing_editors.remove(self)
 
     def highlight_glossary_hits(self):
         self.trans_text.tag_remove("glossary_hit", "1.0", tk.END)
@@ -2904,6 +3520,8 @@ class TranslationEditor:
                 )
 
     def clear_current(self):
+        if self._writing_action_blocked():
+            return
         self.orig_text.configure(state="normal")
         self.orig_text.delete("1.0", tk.END)
         self.orig_text.configure(state="disabled")
@@ -3066,6 +3684,8 @@ class TranslationEditor:
         qualquer coisa acontecer: ele e o "de onde", e tudo o que vem depois e o
         "para onde".
         """
+        if self._writing_action_blocked():
+            return
         if not self.current["id"]:
             return
         retrato = self.current_view()
@@ -3112,6 +3732,8 @@ class TranslationEditor:
         antes do `jump_to_id` porque o arquivo escolhido decide a ORDEM da lista,
         e a ordem decide a posicao do id (garantia R10).
         """
+        if self._writing_action_blocked():
+            return False
         self.search_text.set(retrato["search"])
         self.state.active_search = retrato["search"]
         self.search_mode_segment.set(retrato["mode"])
@@ -3148,6 +3770,8 @@ class TranslationEditor:
         Por isso o ponto de partida e guardado e reposto: "Nada para voltar" passa
         a querer dizer que nada mudou.
         """
+        if self._writing_action_blocked():
+            return False
         self.save_changes()
         partida = self.current_view()
         tentou = False
@@ -3200,6 +3824,8 @@ class TranslationEditor:
         lista e refeita quando o PAR muda, que e quando ela pode de fato ter outro
         conteudo.
         """
+        if self._writing_action_blocked():
+            return
         self.remember_position()
         if self.current["id"]:
             self.save_changes()
@@ -3223,6 +3849,8 @@ class TranslationEditor:
         dizer nada no novo: o filtro pode ter 3 linhas, e `clamp_page` deixaria o
         usuario numa lista vazia sem explicar por que.
         """
+        if self._writing_action_blocked():
+            return
         self.remember_position()
         if self.current["id"]:
             self.save_changes()
@@ -3368,6 +3996,8 @@ class TranslationEditor:
         depois de gravar, de filtrar e de buscar, e roubar o foco do campo de
         busca no meio de uma busca seria trocar um incomodo por outro pior.
         """
+        if self._writing_action_blocked():
+            return
         self.select_index(index, save_previous=True)
         try:
             self.trans_text.focus_set()
@@ -3471,6 +4101,11 @@ class TranslationEditor:
         self.btn_batch_clear.configure(state=estado)
 
     def reload_rows(self):
+        if self._writing_action_blocked():
+            return
+        self._reload_rows()
+
+    def _reload_rows(self):
         filtros = self.list_filters()
         consulta = self.list_query_args()
         with closing(initialize_database(self.app.output_db)) as conn:
@@ -3564,6 +4199,8 @@ class TranslationEditor:
         self.update_selection_label()
 
     def select_index(self, index, save_previous=False):
+        if self._writing_action_blocked():
+            return
         if not self.state.rows:
             return
 
@@ -3589,6 +4226,8 @@ class TranslationEditor:
         self.load_item()
 
     def load_item(self):
+        if self._writing_action_blocked():
+            return
         index = self.get_index()
         if index is None or not (0 <= index < len(self.state.rows)):
             return
@@ -3597,6 +4236,7 @@ class TranslationEditor:
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
             row = fetch_translation_by_id(cur, comment_id)
+            revision_row = cur.execute("SELECT writing_revision FROM comments WHERE id = ?", (comment_id,)).fetchone()
             # Na MESMA conexao da linha: sao duas consultas indexadas por id, e
             # abrir o banco de novo custaria mais do que as duas juntas.
             ocorrencias, total_ocorrencias = fetch_comment_occurrences(
@@ -3627,6 +4267,7 @@ class TranslationEditor:
 
         orig, trans = row[0], row[1]
         self.current["id"] = comment_id
+        self.current["writing_revision"] = revision_row[0] if revision_row else 0
         self.current["orig"] = orig or ""
         self.current["trans"] = trans or ""
         self.current["saved_trans"] = self.current["trans"]
@@ -3772,6 +4413,8 @@ class TranslationEditor:
         return propagated
 
     def save_changes(self, silent=True, mark_verified=False):
+        if self._writing_action_blocked():
+            return
         if not self.current["id"]:
             return
 
@@ -3823,6 +4466,7 @@ class TranslationEditor:
                     cur, self.current["id"]
                 )
             updated_row = fetch_translation_by_id(cur, self.current["id"])
+            self.current["writing_revision"] = cur.execute("SELECT writing_revision FROM comments WHERE id = ?", (self.current["id"],)).fetchone()[0]
             conn.commit()
 
         # A pergunta vem com a conexao JA fechada e a transacao comitada
@@ -3941,6 +4585,8 @@ class TranslationEditor:
         O id e a posicao sao capturados ANTES da gravacao: depois dela, a posicao
         lida pode ja ser a de quem ainda nao foi visto. Ver `index_after_save`.
         """
+        if self._writing_action_blocked():
+            return
         current_id = self.current["id"]
         index = self.get_index()
         self.save_changes()
@@ -3968,6 +4614,8 @@ class TranslationEditor:
             self.show_message("Fim da lista")
 
     def change_page(self, delta):
+        if self._writing_action_blocked():
+            return
         self.save_changes()
         new_page = self.state.page_index + delta
         if 0 <= new_page < self.page_count():
@@ -3977,6 +4625,8 @@ class TranslationEditor:
                 self.select_index(0)
 
     def go_to_page(self):
+        if self._writing_action_blocked():
+            return
         self.save_changes()
         try:
             target_page = int(self.go_page_text.get().strip())
@@ -4003,6 +4653,8 @@ class TranslationEditor:
         Duas implementacoes de "posicionar num id" divergiriam no dia em que uma
         das duas ganhasse um filtro novo — que e a historia da garantia R10.
         """
+        if self._writing_action_blocked():
+            return False
         if not target_id:
             return False
 
@@ -4027,6 +4679,8 @@ class TranslationEditor:
         return True
 
     def go_to_id(self):
+        if self._writing_action_blocked():
+            return
         self.save_changes()
         try:
             target_id = int(self.go_id_text.get().strip())
@@ -4118,6 +4772,8 @@ class TranslationEditor:
         return None
 
     def go_to_next_quality_warning(self):
+        if self._writing_action_blocked():
+            return
         # Capturados antes da gravacao, como em `navigate`: e aqui que pular uma
         # linha mais doi, porque a fila de avisos existe justamente para nao
         # deixar nenhuma para tras (garantia F15, ROADMAP 22.5).
@@ -4180,6 +4836,8 @@ class TranslationEditor:
         self.show_message("Aviso QA: " + warnings[0])
 
     def export_quality_report(self):
+        if self._writing_action_blocked():
+            return
         self.save_changes()
         with closing(initialize_database(self.app.output_db)) as conn:
             cur = conn.cursor()
@@ -4215,6 +4873,8 @@ class TranslationEditor:
         )
 
     def mark_and_next(self):
+        if self._writing_action_blocked():
+            return
         if not self.current["id"]:
             return
 
@@ -4263,6 +4923,8 @@ class TranslationEditor:
             self.show_message("Marcada como verificada")
 
     def mark_pending(self):
+        if self._writing_action_blocked():
+            return
         if not self.current["id"]:
             return
 
@@ -4307,6 +4969,8 @@ class TranslationEditor:
         um clique em "Verificar" com 100 linhas marcadas abrir 100 dialogos, ou —
         pior — nenhum.
         """
+        if self._writing_action_blocked():
+            return
         if not self.state.selected_ids:
             return
         self.save_changes()
@@ -4385,6 +5049,8 @@ class TranslationEditor:
 
     def export_selected_rows(self):
         """Exporta so as linhas selecionadas para CSV (ROADMAP 19, item 9)."""
+        if self._writing_action_blocked():
+            return
         if not self.state.selected_ids:
             return
         self.save_changes()
@@ -4422,6 +5088,8 @@ class TranslationEditor:
         e anotar por que e justamente o gesto de quem estava mexendo no texto e
         desistiu, e o recarregamento que vem depois descartava o que ele digitou.
         """
+        if self._writing_action_blocked():
+            return 0
         if not self.current["id"]:
             return 0
 
@@ -4482,6 +5150,8 @@ class TranslationEditor:
         linha que virou rejeitada num filtro que nao a mostra), quem ocupou o
         lugar dela JA e a proxima — a regra de F15 —, e andar seria pular uma.
         """
+        if self._writing_action_blocked():
+            return 0
         comment_id = self.current["id"]
         if not comment_id:
             return 0
@@ -4593,6 +5263,8 @@ class TranslationEditor:
         return janela
 
     def open_history_window(self):
+        if self._writing_action_blocked():
+            return
         if not self.current["id"]:
             self.show_message("Selecione uma traducao")
             return
@@ -4610,6 +5282,8 @@ class TranslationEditor:
         modeless e fala de uma obra; trocar o filtro por baixo dela nao pode
         mudar o assunto dela.
         """
+        if self._writing_action_blocked():
+            return
         arquivo = self.selected_source_file()
         if not arquivo:
             self.show_message("Escolha um arquivo no filtro \"Arquivo\"")
@@ -4630,6 +5304,8 @@ class TranslationEditor:
         porque as linhas que ela mostrava podem nao existir mais, e o menu de
         arquivos tambem, porque o arquivo pode ter ficado sem ocorrencia nenhuma.
         """
+        if self._writing_action_blocked():
+            return
         arquivo = self.selected_source_file()
         if not arquivo:
             self.show_message("Escolha um arquivo no filtro \"Arquivo\"")
@@ -4666,6 +5342,15 @@ class TranslationEditor:
         )
 
     def undo_translation(self):
+        if self._writing_closed or self._writing_busy:
+            return
+        bulk = self._current_writing_bulk()
+        if (bulk and self.current["id"] == bulk["record_id"]
+                and bulk["window"] is self._writing_window_token
+                and bulk["native_token"] is not None
+                and self._writing_history.undo_token is bulk["native_token"]):
+            self.undo_writing_bulk()
+            return
         try:
             self.trans_text.edit_undo()
         except tk.TclError:
@@ -4677,6 +5362,11 @@ class TranslationEditor:
         self.refresh_find_matches()
 
     def redo_translation(self):
+        if self._writing_closed or self._writing_busy:
+            return
+        if self._writing_history.redo_token in self._writing_undone_tokens:
+            self.show_message("Para reaplicar o lote, crie uma nova prévia no livro.")
+            return
         try:
             self.trans_text.edit_redo()
         except tk.TclError:
@@ -4723,6 +5413,8 @@ class TranslationEditor:
         nao estava no widget, nem no banco, nem no rascunho (garantia F12,
         ROADMAP 22.1).
         """
+        if self._writing_action_blocked():
+            return
         self.remember_position()
         self.save_changes()
         self.state.page_index = 0
@@ -4734,6 +5426,8 @@ class TranslationEditor:
             self.clear_current()
 
     def apply_search(self):
+        if self._writing_action_blocked():
+            return
         # Antes de tudo: e este o salto que o item 3 existe para desfazer — usar a
         # busca como concordancia descartava a pagina em que se estava. Antes do
         # `save_changes` tambem, pelo motivo que `remember_position` explica.
@@ -4758,6 +5452,8 @@ class TranslationEditor:
         troca lista nenhuma, e gravar ali seria um efeito colateral de um botao
         que nao fez nada.
         """
+        if self._writing_action_blocked():
+            return
         if not self.state.active_search and not self.search_text.get():
             return
         self.remember_position()
@@ -4772,6 +5468,8 @@ class TranslationEditor:
             self.clear_current()
 
     def apply_automatic_rules_for_current_language(self):
+        if self._writing_action_blocked():
+            return
         self.save_changes()
         previous_id = self.current["id"]
 
@@ -4924,6 +5622,7 @@ class TranslationEditor:
         text = self.trans_text.get("1.0", tk.END)
         self.current_suggestions = find_glossary_suggestions(text, self.glossary)
         self.highlight_glossary_hits()
+        self.highlight_spelling()
         self.highlight_selected_suggestion()
 
         if not self.current_suggestions:
@@ -5148,6 +5847,10 @@ class TranslationEditor:
         )
 
     def load_scoped_interactive_glossary(self):
+        origem, destino = self.scoped_languages()
+        rules = load_interactive_substitutions(source_language=origem, target_language=destino)
+        # The legacy adapter may import an external edit into the catalog.
+        # Capture the catalog after that import so protection sees the same rules.
         try:
             self.suggestion_catalog_snapshot = (
                 GlossaryCatalog(glossary_catalog_path()).list_entries()
@@ -5155,10 +5858,8 @@ class TranslationEditor:
             )
         except (OSError, sqlite3.Error):
             self.suggestion_catalog_snapshot = None
-        origem, destino = self.scoped_languages()
-        return load_interactive_substitutions(
-            source_language=origem, target_language=destino
-        )
+        self._writing_legacy_terms = load_glossary_entry_details() if self.suggestion_catalog_snapshot is None else ()
+        return rules
 
     def reload_glossary(self, show_feedback=True):
         self.glossary = self.load_scoped_interactive_glossary()
@@ -5315,6 +6016,8 @@ class TranslationEditor:
         no campo da lista, ele fazia a coisa mais destrutiva possivel — a busca da
         lista TROCA a pagina, e o revisor perdia o lugar em que estava.
         """
+        if self._writing_action_blocked():
+            return "break"
         self.search_entry.focus_set()
         self.search_entry.select_range(0, tk.END)
         return "break"
@@ -5384,10 +6087,20 @@ class TranslationEditor:
         return "break"
 
     def next_quality_warning_shortcut(self, _event=None):
-        self.go_to_next_quality_warning()
+        if self.writing_panel.active_issue:
+            self.writing_panel.navigate(1)
+        else:
+            self.go_to_next_quality_warning()
+        return "break"
+
+    def previous_writing_shortcut(self, _event=None):
+        self.writing_panel.navigate(-1)
         return "break"
 
     def close_editor(self):
+        if self._writing_busy:
+            self.show_message("Aguarde a operação de revisão terminar antes de fechar.")
+            return
         self.save_changes()
         self.save_editor_settings()
         self.unregister_glossary_callback()

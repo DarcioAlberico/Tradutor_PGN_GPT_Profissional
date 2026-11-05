@@ -27,8 +27,16 @@ de dados quando ainda nao ha nenhum la.
 """
 
 import os
+from pathlib import Path
 import re
+import runpy
 import shutil
+
+# Falha antes da analise se faltar recurso, checksum ou auditoria de licencas.
+# O JDK de build fica fora; somente a lista validada vai para _internal/.
+OFFLINE_DATAS = runpy.run_path("ferramentas/preparar_languagetool.py")["bundle_datas"](
+    Path("build/vendor").resolve()
+)
 
 # A versao sai do codigo, e nao daqui. Lida por regex e nao por `import` porque o
 # `.spec` roda no interpretador do PyInstaller, com o diretorio do projeto fora
@@ -72,6 +80,7 @@ from PyInstaller.utils.hooks import collect_all
 # O customtkinter carrega temas (`.json`) e assets em tempo de execucao, entao
 # nao basta trazer o modulo: sem os dados a janela abre sem estilo, ou nem abre.
 datas, binaries, hiddenimports = collect_all("customtkinter")
+datas += OFFLINE_DATAS
 
 # O dicionario do "Normalizar PGN" (~29 MB), embutido para o botao funcionar sem
 # preparo nenhum na maquina de destino.

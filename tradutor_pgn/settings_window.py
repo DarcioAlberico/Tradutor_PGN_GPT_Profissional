@@ -20,7 +20,9 @@ o BOM sozinho nunca resolveria. O texto da tela diz o que o BOM faz, e so.
 import queue
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import messagebox
+import unicodedata
 
 import customtkinter as ctk
 
@@ -30,6 +32,7 @@ from .editor_widgets import flash_message
 from .llm_providers import PROVIDERS, anthropic_sdk_available, check_credentials, model_setting_key
 from .pgn_positions import chess_available
 from .pgn_utils import PGN_EXPORT_LINE_WIDTH
+from .personal_dictionary import PersonalDictionary
 from .settings import (
     APPEARANCE_KEY,
     APPEARANCE_THEMES,
@@ -38,19 +41,32 @@ from .settings import (
     LLM_KEY,
     MIN_WRAP_COLUMNS,
     OUTPUT_KEY,
+    WRITING_KEY,
+    WRITING_RULE_NAMES,
+    change_disabled_writing_rules,
     load_settings,
     parse_wrap_columns,
     read_appearance_settings,
     read_board_settings,
     read_llm_settings,
     read_output_settings,
+    read_writing_settings,
+    notify_writing_settings_changed,
+    writing_settings_revision,
     write_settings_sections,
 )
+from .writing_controller import get_shared_writing_assistant
+from .writing_types import AssistantStatus, WritingRequest
 from .window_utils import bring_window_to_front
 
 # Rotulo -> valor gravado. A ordem e a do seletor.
 THEME_LABELS = {"Sistema": "system", "Claro": "light", "Escuro": "dark"}
 THEME_BY_VALUE = {valor: rotulo for rotulo, valor in THEME_LABELS.items()}
+CATEGORY_LABELS = {
+    "SPELLING": "Ortografia", "NOMINAL_AGREEMENT": "Concordância nominal",
+    "VERBAL_AGREEMENT": "Concordância verbal", "GRAMMAR": "Gramática",
+    "PUNCTUATION": "Pontuação", "REPEATED_WORD": "Palavras repetidas",
+}
 assert tuple(THEME_LABELS.values()) == APPEARANCE_THEMES
 
 
@@ -79,6 +95,18 @@ class SettingsWindow:
         self.appearance = read_appearance_settings(settings)
         self.board = read_board_settings(settings)
         self.llm = read_llm_settings(settings)
+        self.writing = read_writing_settings(settings)
+        self._writing_category_changes = {}
+        self._syncing_writing_categories = False
+        self._writing_revision = writing_settings_revision()
+        self._writing_closed = False
+        self._writing_after = None
+        self._writing_future = None
+        self._writing_success = None
+        self._writing_testing = False
+        self._writing_start_requested = False
+        self._writing_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="writing-settings")
+        self._writing_assistant = None
         # As chaves NAO sao lidas para a tela (K1): o campo nasce vazio, o
         # placeholder diz o estado, e so o que for digitado e gravado.
         self.clear_key_vars = {}
@@ -86,6 +114,11 @@ class SettingsWindow:
         self.model_vars = {}
 
         self.build()
+        if not hasattr(app, "writing_settings_windows"):
+            app.writing_settings_windows = []
+        app.writing_settings_windows.append(self)
+        self.win.bind("<Destroy>", self._destroy_writing_settings, add="+")
+        self.poll_writing_settings()
 
     # ------------------------------------------------------------- construcao
 
@@ -117,7 +150,256 @@ class SettingsWindow:
         self.build_board_section()
         self.build_llm_section()
         self.build_data_dir_section()
+        self.build_writing_section()
         self.build_actions()
+
+    def build_writing_section(self):
+        frame = self.section(5, "Revisão linguística")
+        self.spelling_var = tk.BooleanVar(master=self.win, value=self.writing["spelling_enabled"])
+        self.grammar_var = tk.BooleanVar(master=self.win, value=self.writing["grammar_enabled"])
+        for row, key, variable, label in (
+            (1, "spelling_enabled", self.spelling_var, "Verificar ortografia"),
+            (2, "grammar_enabled", self.grammar_var, "Verificar concordância (experimental, local)"),
+        ):
+            checkbox = ctk.CTkCheckBox(frame, text=label, variable=variable)
+            checkbox.grid(row=row, column=0, columnspan=2, sticky="w", padx=10, pady=4)
+            self.controls[(WRITING_KEY, key)] = checkbox
+        self.writing_status_label = ctk.CTkLabel(frame, text="Não iniciado", anchor="w", justify=tk.LEFT, wraplength=self.HINT_WRAP)
+        self.writing_status_label.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10)
+        self.btn_test_writing = ctk.CTkButton(frame, text="Testar revisão local", command=self.test_writing)
+        self.btn_test_writing.grid(row=4, column=0, columnspan=2, sticky="w", padx=10, pady=4)
+        self.hint(frame, 5, "As opções passam a valer ao salvar. O teste usa uma frase de exemplo local; nenhum comentário é enviado à internet.")
+        categories = ctk.CTkFrame(frame, fg_color="transparent")
+        categories.grid(row=6, column=0, columnspan=2, sticky="ew", padx=10)
+        self.category_vars = {}
+        for index, (category, label) in enumerate(CATEGORY_LABELS.items()):
+            variable = tk.BooleanVar(master=self.win, value=category in self.writing["visible_categories"])
+            self.category_vars[category] = variable
+            variable.trace_add("write", lambda *_args, key=category: self._category_changed(key))
+            ctk.CTkCheckBox(categories, text=label, variable=variable).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 12), pady=4)
+        self.controls[(WRITING_KEY, "visible_categories")] = categories
+        self.hint(frame, 7, "Categorias exibidas no painel e no texto. Ocultar não altera a tradução.")
+        ctk.CTkLabel(frame, text="Vocabulário pessoal (todos os livros)", anchor="w").grid(row=8, column=0, columnspan=2, sticky="w", padx=10)
+        self.word_search_var = tk.StringVar(master=self.win)
+        ctk.CTkLabel(frame, text="Pesquisar palavra:", anchor="w").grid(row=9, column=0, sticky="w", padx=10)
+        search = ctk.CTkEntry(frame, textvariable=self.word_search_var)
+        search.grid(row=9, column=1, sticky="ew", padx=10)
+        self.word_search_var.trace_add("write", lambda *_: self.refresh_vocabulary())
+        self.word_list = tk.Listbox(frame, height=5, exportselection=False)
+        self.word_list.grid(row=10, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        self.word_entry_var = tk.StringVar(master=self.win)
+        ctk.CTkEntry(frame, textvariable=self.word_entry_var).grid(row=11, column=0, sticky="ew", padx=10)
+        self.btn_add_word = ctk.CTkButton(frame, text="Adicionar palavra", command=self.add_vocabulary_word)
+        self.btn_add_word.grid(row=11, column=1, sticky="w", padx=10)
+        self.btn_remove_word = ctk.CTkButton(frame, text="Remover selecionada…", command=self.remove_vocabulary_word)
+        self.btn_remove_word.grid(row=12, column=0, columnspan=2, sticky="w", padx=10, pady=4)
+        ctk.CTkLabel(frame, text="Regras desativadas", anchor="w").grid(row=13, column=0, columnspan=2, sticky="w", padx=10)
+        self.rule_list = tk.Listbox(frame, height=4, exportselection=False)
+        self.rule_list.grid(row=14, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        self.controls[(WRITING_KEY, "disabled_rule_ids")] = self.rule_list
+        self.btn_reactivate_rule = ctk.CTkButton(frame, text="Reativar selecionada", command=self.reactivate_rule)
+        self.btn_reactivate_rule.grid(row=15, column=0, sticky="w", padx=10, pady=4)
+        self.btn_reactivate_all = ctk.CTkButton(frame, text="Reativar todas", command=self.reactivate_all_rules)
+        self.btn_reactivate_all.grid(row=15, column=1, sticky="w", padx=10, pady=4)
+        self.writing_message_label = ctk.CTkLabel(frame, text="", anchor="w", wraplength=self.HINT_WRAP)
+        self.writing_message_label.grid(row=16, column=0, columnspan=2, sticky="ew", padx=10, pady=4)
+        self.refresh_vocabulary()
+        self.refresh_disabled_rules()
+
+    def writing_values(self):
+        return {
+            "spelling_enabled": bool(self.spelling_var.get()),
+            "grammar_enabled": bool(self.grammar_var.get()),
+            "visible_categories": [key for key, variable in self.category_vars.items() if variable.get()],
+        }
+
+    def _category_changed(self, category):
+        if self._syncing_writing_categories:
+            return
+        enabled = bool(self.category_vars[category].get())
+        if enabled == (category in self.writing["visible_categories"]):
+            self._writing_category_changes.pop(category, None)
+        else:
+            self._writing_category_changes[category] = enabled
+
+    def _sync_category_controls(self, categories):
+        self._syncing_writing_categories = True
+        try:
+            for category, variable in self.category_vars.items():
+                if category not in self._writing_category_changes:
+                    variable.set(category in categories)
+        finally:
+            self._syncing_writing_categories = False
+
+    def refresh_vocabulary(self):
+        if self._writing_closed:
+            return
+        try:
+            words = PersonalDictionary().list_words()
+        except (OSError, ValueError):
+            self.writing_message_label.configure(text="Não foi possível ler o vocabulário pessoal.")
+            return
+        query = unicodedata.normalize("NFC", self.word_search_var.get()).casefold()
+        self.word_list.delete(0, tk.END)
+        for word in words:
+            if query in unicodedata.normalize("NFC", word).casefold():
+                self.word_list.insert(tk.END, word)
+
+    def refresh_disabled_rules(self):
+        self._disabled_rules = read_writing_settings(load_settings())["disabled_rule_ids"]
+        self.rule_list.delete(0, tk.END)
+        for rule in self._disabled_rules:
+            name = WRITING_RULE_NAMES.get(rule)
+            self.rule_list.insert(tk.END, f"{rule} — {name}" if name else rule)
+
+    def _start_writing_job(self, work, success):
+        if self._writing_closed or self._writing_future is not None:
+            return False
+        self._writing_success = success
+        self._writing_future = self._writing_executor.submit(work)
+        self._writing_job_controls("disabled")
+        return True
+
+    def _writing_job_controls(self, state):
+        for button in (self.btn_test_writing, self.btn_add_word, self.btn_remove_word,
+                       self.btn_reactivate_rule, self.btn_reactivate_all):
+            button.configure(state=state)
+
+    def add_vocabulary_word(self):
+        word = self.word_entry_var.get().strip()
+        if not word:
+            self.writing_message_label.configure(text="Digite uma palavra.")
+            return
+        def added(changed):
+            self.writing_message_label.configure(text="Palavra adicionada." if changed else "A palavra já existe no vocabulário.")
+            if changed:
+                self.word_entry_var.set("")
+        def work():
+            changed = PersonalDictionary().add(word)
+            if changed:
+                notify_writing_settings_changed()
+            return changed
+        self._start_writing_job(work, added)
+
+    def remove_vocabulary_word(self):
+        selected = self.word_list.curselection()
+        if not selected or self._writing_future is not None:
+            return
+        word = self.word_list.get(selected[0])
+        if not messagebox.askyesno("Vocabulário pessoal", f"Remover “{word}” do vocabulário de todos os livros?", parent=self.win):
+            return
+        def work():
+            changed = PersonalDictionary().remove(word)
+            if changed:
+                notify_writing_settings_changed()
+            return changed
+        self._start_writing_job(work, lambda _changed: self.writing_message_label.configure(text="Vocabulário atualizado."))
+
+    def reactivate_rule(self):
+        selected = self.rule_list.curselection()
+        if selected:
+            rule = self._disabled_rules[selected[0]]
+            self._start_writing_job(lambda: change_disabled_writing_rules(enable=[rule]), self._rules_reactivated)
+
+    def reactivate_all_rules(self):
+        self._start_writing_job(lambda: change_disabled_writing_rules(enable_all=True), self._rules_reactivated)
+
+    def _rules_reactivated(self, _value):
+        self.writing_message_label.configure(text="Regras reativadas.")
+
+    def _current_writing_assistant(self):
+        return (getattr(self.app, "writing_assistant", None)
+                or next((editor.writing_assistant for editor in getattr(self.app, "writing_editors", ())
+                         if not editor._writing_closed), None)
+                or self._writing_assistant)
+
+    def test_writing(self):
+        self._start_writing_test(grammar_enabled=bool(self.grammar_var.get()))
+
+    def _start_writing_test(self, *, grammar_enabled=False, automatic=False):
+        if self._writing_future is not None or self._writing_closed:
+            return
+        assistant = self._current_writing_assistant() or get_shared_writing_assistant()
+        self._writing_assistant = assistant
+        self.app.writing_assistant = assistant
+        def work():
+            # Automatic startup belongs to the committed preference, not the
+            # editable checkbox. Revalidate on the worker when it actually runs.
+            enabled = read_writing_settings(load_settings())["grammar_enabled"] if automatic else grammar_enabled
+            if automatic and not enabled:
+                return None
+            request = WritingRequest("As peças estão no tabuleiro.", 0, "pt", grammar_enabled=enabled)
+            return assistant.analyze(request)
+        def tested(result):
+            self._writing_testing = False
+            if result is not None:
+                self.writing_message_label.configure(text="Teste local concluído." if result.mode != "unavailable" else "Teste local indisponível.")
+        self._writing_testing = self._start_writing_job(work, tested)
+
+    def poll_writing_settings(self):
+        if self._writing_closed:
+            return
+        if self._writing_after is not None:
+            self.win.after_cancel(self._writing_after)
+            self._writing_after = None
+        revision = writing_settings_revision()
+        if revision != self._writing_revision:
+            current = read_writing_settings(load_settings())
+            # Keep unsaved choices; untouched controls follow other windows.
+            local = self.writing_values()
+            for key, variable in (("spelling_enabled", self.spelling_var), ("grammar_enabled", self.grammar_var)):
+                if local[key] == self.writing[key]:
+                    variable.set(current[key])
+            self._sync_category_controls(current["visible_categories"])
+            self.writing = current
+            self._writing_revision = revision
+            assistant = self._current_writing_assistant()
+            if assistant is not None:
+                assistant.invalidate_cache()
+            self.refresh_vocabulary()
+            self.refresh_disabled_rules()
+        future = self._writing_future
+        if future is not None and future.done():
+            self._writing_future = None
+            success, self._writing_success = self._writing_success, None
+            try:
+                result = future.result()
+            except Exception:
+                self._writing_testing = False
+                self.writing_message_label.configure(text="Não foi possível concluir a operação local. Tente novamente.")
+            else:
+                success(result)
+            self._writing_job_controls("normal")
+        if self._writing_start_requested and self._writing_future is None:
+            self._writing_start_requested = False
+            if read_writing_settings(load_settings())["grammar_enabled"]:
+                self._start_writing_test(automatic=True)
+        assistant = self._current_writing_assistant()
+        status = assistant.status() if assistant is not None else AssistantStatus("stopped", "unavailable")
+        diagnostic = status.diagnostic
+        if not (self.writing["spelling_enabled"] or self.writing["grammar_enabled"]):
+            label, diagnostic = "Não iniciado", "Revisão linguística desativada."
+        elif status.state in {"starting", "restarting"} or self._writing_testing:
+            label = "Iniciando"
+        elif status.state == "stopped":
+            label = "Não iniciado"
+        else:
+            label = {"full": "Completo", "spelling_only": "Somente ortografia", "unavailable": "Indisponível"}[status.mode]
+            if not self.writing["grammar_enabled"] and status.mode == "full":
+                label = "Somente ortografia"
+        self.writing_status_label.configure(text=f"{label}\n{diagnostic}".rstrip())
+        self._writing_after = self.win.after(100, self.poll_writing_settings)
+
+    def _destroy_writing_settings(self, event):
+        if event.widget is not self.win or self._writing_closed:
+            return
+        self._writing_closed = True
+        if self._writing_after is not None:
+            self.win.after_cancel(self._writing_after)
+            self._writing_after = None
+        self._writing_executor.shutdown(wait=False, cancel_futures=True)
+        if self in self.app.writing_settings_windows:
+            self.app.writing_settings_windows.remove(self)
 
     def section(self, row, title):
         frame = ctk.CTkFrame(self.body, corner_radius=8)
@@ -429,6 +711,8 @@ class SettingsWindow:
                 model_setting_key(pid): (var.get().strip() or PROVIDERS[pid].default_model)
                 for pid, var in self.model_vars.items()
             },
+            WRITING_KEY: {key: value for key, value in self.writing_values().items()
+                          if key != "visible_categories" and value != self.writing[key]},
         }, None
 
     def key_changes(self):
@@ -453,8 +737,10 @@ class SettingsWindow:
             )
             return False
         mudancas_de_chave = self.key_changes()
+        grammar_just_enabled = secoes[WRITING_KEY].get("grammar_enabled") is True
+        category_changes = dict(self._writing_category_changes)
         try:
-            write_settings_sections(secoes)
+            saved = write_settings_sections(secoes, writing_category_changes=category_changes)
             for pid, chave in mudancas_de_chave.items():
                 api_keys.save_api_key(pid, chave)
         except OSError:
@@ -477,6 +763,18 @@ class SettingsWindow:
             self.appearance["theme"] = tema
         self.output = dict(secoes[OUTPUT_KEY])
         self.llm = dict(secoes[LLM_KEY])
+        if category_changes:
+            self._writing_category_changes.clear()
+            categories = read_writing_settings(saved)["visible_categories"]
+            self.writing["visible_categories"] = categories
+            self._sync_category_controls(categories)
+        if secoes[WRITING_KEY] or category_changes:
+            # The event is published by the atomic settings update, only on
+            # success. Consume it here too, retaining any concurrent rule IDs.
+            self.poll_writing_settings()
+        if grammar_just_enabled:
+            self._writing_start_requested = True
+            self.poll_writing_settings()
         # A chave digitada sai do campo depois de gravada: o campo volta a
         # dizer o estado, e a chave nao fica na tela.
         for pid in mudancas_de_chave:

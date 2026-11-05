@@ -14,7 +14,10 @@ atributos soltos passaria por cima exatamente do que ha para verificar.
 Precisam de display. Onde nao houver, as classes sao puladas.
 """
 
+import gc
 import os
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -1988,6 +1991,7 @@ class SettingsWindowTests(MainWindowTestCase):
     """
 
     def setUp(self):
+        gc.collect()  # Dispose old Tk fixtures on their owning thread.
         super().setUp()
         # O tema e estado de CLASSE do CustomTkinter: um teste que o troque de
         # verdade deixaria a suite inteira escura. Volta ao que o lancador poe.
@@ -2021,6 +2025,413 @@ class SettingsWindowTests(MainWindowTestCase):
         self.assertEqual(len(novas), 1)
         self.assertEqual(novas[0].title(), "Configurações")
         novas[0].destroy()
+
+    def test_writing_preference_poll_during_worker_commit_is_nonblocking_and_invalidation_is_eventual(self):
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+        from tradutor_pgn.writing_types import WritingRequest
+        class Spelling:
+            calls = 0
+            def analyze(self, request, protected):
+                self.calls += 1
+                return ()
+        provider = Spelling()
+        service = PortugueseWritingAssistant(spelling_adapter=provider, grammar_adapter=provider)
+        self.app.writing_assistant = service
+        self.addCleanup(service.shutdown)
+        window = self.abre()
+        request = WritingRequest("palavra", 1, "pt")
+        revision = service.analyze(request).revision
+        entered, release = threading.Event(), threading.Event()
+        def hold_commit():
+            with service.guard_revision(revision):
+                entered.set()
+                release.wait(2)
+        holder = threading.Thread(target=hold_commit)
+        holder.start()
+        self.assertTrue(entered.wait(3))
+        try:
+            beats = []
+            self.root.after(0, lambda: beats.append(True))
+            for enabled in (False, True, False, True):
+                settings.write_writing_settings({"spelling_enabled": enabled})
+                started = time.monotonic()
+                window.poll_writing_settings()
+                self.assertLess(time.monotonic() - started, .1)
+                self.assertEqual(bool(window.spelling_var.get()), enabled)
+            self.pump()
+            self.assertTrue(beats)
+            self.assertTrue(holder.is_alive())
+        finally:
+            release.set()
+            holder.join(3)
+        self.assertNotEqual(service.analyze(request).revision, revision)
+        self.assertEqual(provider.calls, 2)
+
+    def test_writing_defaults_partial_save_and_live_other_settings_window(self):
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+        class Adapter:
+            def analyze(self, request, protected):
+                return ()
+        self.app.writing_assistant = PortugueseWritingAssistant(spelling_adapter=Adapter(), grammar_adapter=Adapter())
+        first, second = self.abre(), self.abre()
+        self.assertTrue(first.spelling_var.get())
+        self.assertFalse(first.grammar_var.get())
+        self.assertIn("Não iniciado", first.writing_status_label.cget("text"))
+        first.grammar_var.set(True)
+        self.assertTrue(first.save())
+        self.assertTrue(settings.read_writing_settings(self.arquivo())["grammar_enabled"])
+        second.poll_writing_settings()
+        self.assertTrue(second.grammar_var.get())
+        settings.change_disabled_writing_rules(disable={"RULE": "Nome da regra"})
+        second.wrap_var.set("80")
+        self.assertTrue(second.save())
+        self.assertEqual(settings.read_writing_settings(self.arquivo())["disabled_rule_ids"], ["RULE"])
+        self.assertEqual(settings.read_output_settings(self.arquivo())["wrap_columns"], 80)
+
+    def test_legacy_settings_open_without_optional_engines_and_preserve_draft(self):
+        from tradutor_pgn.languagetool_client import LanguageToolLocalAdapter
+        from tradutor_pgn.languagetool_process import LanguageToolProcess
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant, SpyllsAdapter
+
+        legacy = {
+            "editor_drafts": {"book": {"text": "rascunho intacto"}},
+            "future_section": {"keep": [1, 2]},
+        }
+        self.grava(**legacy)
+        missing = Path(self.base) / "absent-vendor"
+        assistant = PortugueseWritingAssistant(
+            spelling_adapter=SpyllsAdapter(
+                dictionary_loader=lambda _language: None,
+                personal_dictionary=PersonalDictionary(Path(self.base) / "words.json"),
+            ),
+            grammar_adapter=LanguageToolLocalAdapter(process=LanguageToolProcess(
+                resource_resolver=lambda relative: missing / relative,
+            )),
+        )
+        self.app.writing_assistant = assistant
+        self.addCleanup(assistant.shutdown)
+        window = self.abre()
+        self.assertTrue(window.spelling_var.get())
+        self.assertFalse(window.grammar_var.get())
+        window.test_writing()
+        self.wait_writing_job(window)
+        self.assertIn("Indisponível", window.writing_status_label.cget("text"))
+        self.assertTrue(window.save())
+        reopened = self.arquivo()
+        for key, value in legacy.items():
+            self.assertEqual(reopened[key], value)
+        self.assertFalse(settings.read_writing_settings(reopened)["grammar_enabled"])
+
+    def test_vocabulary_search_duplicate_confirmation_and_failed_write(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        vocabulary = PersonalDictionary()
+        vocabulary.add("Capablanca")
+        vocabulary.add("Zugzwang")
+        window = self.abre()
+        window.word_search_var.set("CAPA")
+        window.refresh_vocabulary()
+        self.assertEqual(window.word_list.get(0, tk.END), ("Capablanca",))
+        window.word_entry_var.set("capablanca")
+        window.add_vocabulary_word()
+        self.wait_writing_job(window)
+        self.assertIn("já existe", window.writing_message_label.cget("text"))
+        window.word_list.selection_set(0)
+        with unittest.mock.patch.object(settings_window.messagebox, "askyesno", return_value=False):
+            window.remove_vocabulary_word()
+        self.assertTrue(vocabulary.contains("Capablanca"))
+        with unittest.mock.patch.object(settings_window.messagebox, "askyesno", return_value=True):
+            window.remove_vocabulary_word()
+        self.wait_writing_job(window)
+        self.assertFalse(vocabulary.contains("Capablanca"))
+        self.assertTrue(vocabulary.contains("Zugzwang"))
+        window.word_entry_var.set("Tal")
+        with unittest.mock.patch.object(PersonalDictionary, "_publish", side_effect=PermissionError("busy")):
+            window.add_vocabulary_word()
+            self.wait_writing_job(window)
+        self.assertFalse(vocabulary.contains("Tal"))
+        self.assertIn("Não foi possível", window.writing_message_label.cget("text"))
+
+    def wait_writing_job(self, window):
+        deadline = time.monotonic() + 5
+        while window._writing_future is not None and time.monotonic() < deadline:
+            window.poll_writing_settings()
+            self.pump()
+            time.sleep(0.01)
+        self.assertIsNone(window._writing_future)
+
+    def test_reactivate_rules_individually_and_all_preserving_other_settings(self):
+        settings.change_disabled_writing_rules(disable=["SPELLING_UNKNOWN_WORD", "Z_UNKNOWN"])
+        window = self.abre()
+        self.assertIn("SPELLING_UNKNOWN_WORD — Palavra não reconhecida", window.rule_list.get(0, tk.END))
+        settings.change_disabled_writing_rules(disable={"C": "Outra regra"})
+        window.rule_list.selection_set(0)
+        window.reactivate_rule()
+        self.wait_writing_job(window)
+        self.assertEqual(settings.read_writing_settings(self.arquivo())["disabled_rule_ids"], ["C", "Z_UNKNOWN"])
+        window.reactivate_all_rules()
+        self.wait_writing_job(window)
+        self.assertEqual(settings.read_writing_settings(self.arquivo())["disabled_rule_ids"], [])
+
+    def test_writing_probe_finishes_after_close_without_touching_tk_or_shutting_service(self):
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+        from tradutor_pgn.writing_types import AssistantStatus
+        started, release = threading.Event(), threading.Event()
+        class Adapter:
+            def analyze(self, request, protected):
+                started.set()
+                release.wait(5)
+                return ()
+            def status(self):
+                return AssistantStatus("ready", "full")
+        self.addCleanup(release.set)
+        self.app.writing_assistant = PortugueseWritingAssistant(spelling_adapter=Adapter(), grammar_adapter=Adapter())
+        window = self.abre()
+        window.grammar_var.set(True)
+        window.test_writing()
+        self.assertTrue(started.wait(2))
+        future = window._writing_future
+        window.win.destroy()
+        release.set()
+        future.result(timeout=5)
+        window.poll_writing_settings()
+        self.assertEqual(self.app.writing_assistant.status().mode, "full")
+
+    def test_grammar_enable_starts_only_after_save_off_tk_and_shares_live_status(self):
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+        from tradutor_pgn.writing_types import AssistantStatus
+        grammar_threads = []
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        class Spelling:
+            def analyze(self, request, protected):
+                return ()
+        class Grammar:
+            def analyze(self, request, protected):
+                grammar_threads.append(threading.get_ident())
+                started.set()
+                release.wait(5)
+                return ()
+            def status(self):
+                return AssistantStatus("starting" if not release.is_set() else "ready", "spelling_only" if not release.is_set() else "full", "Aguarde motor local" if not release.is_set() else "")
+        self.app.writing_assistant = PortugueseWritingAssistant(spelling_adapter=Spelling(), grammar_adapter=Grammar())
+        first, second = self.abre(), self.abre()
+        first.grammar_var.set(True)
+        self.pump()
+        self.assertEqual(grammar_threads, [])
+        self.assertTrue(first.save())
+        self.assertTrue(started.wait(2))
+        self.assertNotIn(threading.get_ident(), grammar_threads)
+        second.poll_writing_settings()
+        self.assertIn("Iniciando", second.writing_status_label.cget("text"))
+        self.assertIn("Aguarde motor local", second.writing_status_label.cget("text"))
+        release.set()
+        self.wait_writing_job(first)
+        second.poll_writing_settings()
+        self.assertIn("Completo", second.writing_status_label.cget("text"))
+        first.grammar_var.set(False)
+        self.assertTrue(first.save())
+        second.poll_writing_settings()
+        self.assertIn("Somente ortografia", second.writing_status_label.cget("text"))
+        self.assertEqual(len(grammar_threads), 1)
+        self.assertEqual(self.app.writing_assistant.status().mode, "full")
+        first.spelling_var.set(False)
+        self.assertTrue(first.save())
+        second.poll_writing_settings()
+        self.assertIn("desativada", second.writing_status_label.cget("text"))
+        self.assertEqual(self.app.writing_assistant.status().mode, "full")
+
+    def test_failed_writing_settings_save_keeps_preferences_and_drafts_and_does_not_start(self):
+        window = self.abre()
+        window.grammar_var.set(True)
+        settings.update_settings(lambda data: data.update(editor_drafts={"live": {"text": "rascunho"}}))
+        before = Path(settings.default_settings_path()).read_bytes()
+        revision = settings.writing_settings_revision()
+        with unittest.mock.patch.object(settings.os, "replace", side_effect=PermissionError("busy")):
+            self.assertFalse(window.save())
+        self.assertEqual(Path(settings.default_settings_path()).read_bytes(), before)
+        self.assertEqual(settings.writing_settings_revision(), revision)
+        self.assertIsNone(window._writing_future)
+        self.assertTrue(window.grammar_var.get())
+
+    def test_other_window_events_preserve_unsaved_categories(self):
+        window = self.abre()
+        window.category_vars["PUNCTUATION"].set(False)
+        settings.change_disabled_writing_rules(disable=["UNTRUSTED_RULE"])
+        window.poll_writing_settings()
+        self.assertFalse(window.category_vars["PUNCTUATION"].get())
+        self.assertEqual(window.rule_list.get(0, tk.END), ("UNTRUSTED_RULE",))
+        self.assertTrue(window.save())
+        self.assertNotIn("PUNCTUATION", settings.read_writing_settings(self.arquivo())["visible_categories"])
+        self.assertEqual(self.arquivo()["writing_assistant"]["disabled_rule_ids"], ["UNTRUSTED_RULE"])
+
+    def test_probe_service_status_is_visible_in_another_settings_window(self):
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+        class Adapter:
+            def analyze(self, request, protected):
+                return ()
+        service = PortugueseWritingAssistant(spelling_adapter=Adapter(), grammar_adapter=Adapter())
+        self.patch(settings_window, "get_shared_writing_assistant", lambda: service)
+        first, second = self.abre(), self.abre()
+        first.test_writing()
+        self.wait_writing_job(first)
+        second.poll_writing_settings()
+        self.assertIn("Somente ortografia", second.writing_status_label.cget("text"))
+
+    def test_enabling_grammar_while_vocabulary_write_is_busy_starts_afterwards(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+        calls = []
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        class Spelling:
+            def analyze(self, request, protected):
+                return ()
+        class Grammar:
+            def analyze(self, request, protected):
+                calls.append(request.grammar_enabled)
+                return ()
+        self.app.writing_assistant = PortugueseWritingAssistant(spelling_adapter=Spelling(), grammar_adapter=Grammar())
+        original = PersonalDictionary.add
+        def slow_add(vocabulary, word):
+            started.set()
+            release.wait(5)
+            return original(vocabulary, word)
+        self.patch(PersonalDictionary, "add", slow_add)
+        window = self.abre()
+        window.word_entry_var.set("Capablanca")
+        window.add_vocabulary_word()
+        self.assertTrue(started.wait(2))
+        window.grammar_var.set(True)
+        self.assertTrue(window.save())
+        release.set()
+        self.wait_writing_job(window)
+        self.assertEqual(calls, [True])
+
+    def test_category_edits_from_two_windows_merge_before_and_after_event_delivery(self):
+        for poll_before_save in (False, True):
+            with self.subTest(poll_before_save=poll_before_save):
+                settings.write_writing_settings({"visible_categories": list(settings.WRITING_CATEGORIES)})
+                first, second = self.abre(), self.abre()
+                first.category_vars["SPELLING"].set(False)
+                second.category_vars["PUNCTUATION"].set(False)
+                self.assertTrue(first.save())
+                if poll_before_save:
+                    second.poll_writing_settings()
+                self.assertTrue(second.save())
+                first.poll_writing_settings()
+                second.poll_writing_settings()
+                categories = settings.read_writing_settings(self.arquivo())["visible_categories"]
+                self.assertNotIn("SPELLING", categories)
+                self.assertNotIn("PUNCTUATION", categories)
+                for window in (first, second):
+                    self.assertFalse(window.category_vars["SPELLING"].get())
+                    self.assertFalse(window.category_vars["PUNCTUATION"].get())
+                    window.win.destroy()
+
+    def test_same_category_unsaved_intent_survives_equal_then_conflicting_remote_edits(self):
+        first, second = self.abre(), self.abre()
+        first.category_vars["SPELLING"].set(False)
+        second.category_vars["SPELLING"].set(False)
+        self.assertTrue(first.save())
+        second.poll_writing_settings()
+        first.category_vars["SPELLING"].set(True)
+        self.assertTrue(first.save())
+        second.poll_writing_settings()
+        self.assertFalse(second.category_vars["SPELLING"].get())
+        self.assertTrue(second.save())
+        self.assertNotIn("SPELLING", settings.read_writing_settings(self.arquivo())["visible_categories"])
+        first.poll_writing_settings()
+        first.category_vars["SPELLING"].set(True)
+        self.assertTrue(first.save())
+        second.poll_writing_settings()
+        self.assertTrue(second.category_vars["SPELLING"].get())
+
+    def test_deferred_grammar_start_uses_saved_preference_and_later_saved_disable_wins(self):
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+        original = PersonalDictionary.add
+        for save_disable in (False, True):
+            with self.subTest(save_disable=save_disable):
+                settings.write_writing_settings({"grammar_enabled": False})
+                calls = []
+                started, release = threading.Event(), threading.Event()
+                self.addCleanup(release.set)
+                class Spelling:
+                    def analyze(self, request, protected):
+                        return ()
+                class Grammar:
+                    def analyze(self, request, protected):
+                        calls.append(request.grammar_enabled)
+                        return ()
+                self.app.writing_assistant = PortugueseWritingAssistant(spelling_adapter=Spelling(), grammar_adapter=Grammar())
+                def slow_add(vocabulary, word):
+                    started.set()
+                    release.wait(5)
+                    return original(vocabulary, word)
+                with unittest.mock.patch.object(PersonalDictionary, "add", slow_add):
+                    window = self.abre()
+                    window.word_entry_var.set(f"Capablanca{save_disable}")
+                    window.add_vocabulary_word()
+                    self.assertTrue(started.wait(2))
+                    window.grammar_var.set(True)
+                    self.assertTrue(window.save())
+                    window.grammar_var.set(False)
+                    if save_disable:
+                        self.assertTrue(window.save())
+                    release.set()
+                    self.wait_writing_job(window)
+                self.assertEqual(calls, [] if save_disable else [True])
+                self.assertFalse(window.grammar_var.get())
+                self.assertEqual(settings.read_writing_settings(self.arquivo())["grammar_enabled"], not save_disable)
+                window.win.destroy()
+
+    def test_automatic_grammar_revalidates_saved_disable_before_worker_execution(self):
+        from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+        calls = []
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        class Spelling:
+            def analyze(self, request, protected):
+                return ()
+        class Grammar:
+            def analyze(self, request, protected):
+                calls.append(request.grammar_enabled)
+                return ()
+        self.app.writing_assistant = PortugueseWritingAssistant(spelling_adapter=Spelling(), grammar_adapter=Grammar())
+        window = self.abre()
+        original_submit = window._writing_executor.submit
+        def delayed_submit(work):
+            def delayed():
+                started.set()
+                release.wait(5)
+                return work()
+            return original_submit(delayed)
+        self.patch(window._writing_executor, "submit", delayed_submit)
+        window.grammar_var.set(True)
+        self.assertTrue(window.save())
+        self.assertTrue(started.wait(2))
+        settings.write_writing_settings({"grammar_enabled": False})
+        release.set()
+        self.wait_writing_job(window)
+        self.assertEqual(calls, [])
+        self.assertFalse(settings.read_writing_settings(self.arquivo())["grammar_enabled"])
+
+    def test_failed_category_save_retains_pending_intent_and_can_retry_with_other_window_changes(self):
+        first, second = self.abre(), self.abre()
+        first.category_vars["SPELLING"].set(False)
+        second.category_vars["PUNCTUATION"].set(False)
+        self.assertTrue(second.save())
+        before = Path(settings.default_settings_path()).read_bytes()
+        with unittest.mock.patch.object(settings.os, "replace", side_effect=PermissionError("busy")):
+            self.assertFalse(first.save())
+        self.assertEqual(Path(settings.default_settings_path()).read_bytes(), before)
+        first.poll_writing_settings()
+        self.assertFalse(first.category_vars["SPELLING"].get())
+        self.assertFalse(first.category_vars["PUNCTUATION"].get())
+        self.assertTrue(first.save())
+        self.assertNotIn("SPELLING", settings.read_writing_settings(self.arquivo())["visible_categories"])
+        self.assertNotIn("PUNCTUATION", settings.read_writing_settings(self.arquivo())["visible_categories"])
 
     def test_every_user_option_has_a_control(self):
         """Garantia M4: as chaves de `USER_OPTION_SECTIONS` contra a tela."""
@@ -2210,6 +2621,54 @@ class SettingsWindowTests(MainWindowTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(gui_harness.DISPLAY, "sem display para o Tk")
+class SettingsFixtureIsolationTests(unittest.TestCase):
+    def test_previous_fixture_font_is_collected_on_owner_before_vocabulary_worker(self):
+        flag = "PGN_TEST_SETTINGS_GC_CHILD"
+        if os.environ.get(flag) != "1":
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest",
+                 f"{__file__}::{type(self).__name__}::{self._testMethodName}", "-q", "--tb=short"],
+                env={**os.environ, flag: "1"}, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
+        from tkinter.font import Font
+        from tradutor_pgn.personal_dictionary import PersonalDictionary
+        owner = threading.get_ident()
+        disposed = []
+        class ObservedFont(Font):
+            def __del__(self):
+                disposed.append(threading.get_ident())
+                # A failed assertion must not hang or crash the test process
+                # by invoking Tcl from the wrong thread.
+                if threading.get_ident() == owner:
+                    super().__del__()
+        enabled = gc.isenabled()
+        gc.disable()
+        self.addCleanup(lambda: gc.enable() if enabled else None)
+        root = tk.Tk()
+        root.withdraw()
+        font = ObservedFont(root=root, family="Arial")
+        font.cycle = font
+        root.destroy()
+        del font, root
+        next_fixture = SettingsWindowTests("test_the_button_opens_the_window")
+        self.addCleanup(next_fixture.doCleanups)
+        next_fixture.setUp()
+        completed = threading.Event()
+        def vocabulary_work():
+            gc.collect()
+            PersonalDictionary(next_fixture.base / "probe.json").add("Capablanca")
+            completed.set()
+        worker = threading.Thread(target=vocabulary_work, daemon=True)
+        worker.start()
+        worker.join(3)
+        self.assertTrue(completed.is_set())
+        self.assertEqual(disposed, [owner])
 
 
 class SettingsCredentialCheckTests(MainWindowTestCase):

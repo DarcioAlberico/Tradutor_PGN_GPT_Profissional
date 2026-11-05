@@ -2,9 +2,12 @@ import json
 import os
 import sys
 import threading
+from collections.abc import Mapping
 from datetime import datetime
+from typing import TypedDict, get_args
 
 from .app_paths import data_path
+from .writing_types import IssueCategory
 
 
 SETTINGS_FILENAME = "pgn_tradutor_pro_settings.json"
@@ -202,8 +205,11 @@ def update_settings(mutator, path=None):
         # A leitura estrita, e nao `load_settings`: aqui `{}` por engano vira
         # um arquivo novo por cima do velho (garantia M3).
         settings = _read_settings_for_update(path)
+        writing_before = json.dumps(settings.get("writing_assistant"), sort_keys=True)
         result = mutator(settings)
         save_settings(settings, path)
+        if writing_before != json.dumps(settings.get("writing_assistant"), sort_keys=True):
+            notify_writing_settings_changed()
     return result
 
 
@@ -435,14 +441,16 @@ def read_main_window_settings(settings, known_languages):
     return valores
 
 
-def write_settings_sections(sections, path=None):
+def write_settings_sections(sections, path=None, *, writing_category_changes=None):
     """Grava `{secao: {chave: valor}}` relendo o disco antes (garantia R4).
 
     As janelas de edicao guardam rascunhos no MESMO arquivo. Gravar o snapshot
     inteiro daqui apagaria o que elas escreveram desde que este processo abriu —
     que e exatamente o defeito que R4 existe para impedir. Varias secoes numa
     chamada so porque a tela de Configuracoes grava duas de uma vez, e duas
-    releituras seriam duas escritas para um clique.
+    releituras seriam duas escritas para um clique. Alteracoes de categorias
+    sao deltas por categoria, mesclados sob o lock com o estado atual: duas
+    janelas podem modificar categorias distintas sem perder a escolha alheia.
     """
     def mutator(settings):
         gravadas = {}
@@ -453,6 +461,19 @@ def write_settings_sections(sections, path=None):
                 settings[key] = guardado
             guardado.update(values)
             gravadas[key] = guardado
+        if writing_category_changes:
+            visible = set(read_writing_settings(settings)["visible_categories"])
+            for category, enabled in writing_category_changes.items():
+                if category in WRITING_CATEGORIES and isinstance(enabled, bool):
+                    if enabled:
+                        visible.add(category)
+                    else:
+                        visible.discard(category)
+            stored = settings.get(WRITING_KEY)
+            if not isinstance(stored, dict):
+                stored = settings[WRITING_KEY] = {}
+            stored["visible_categories"] = [category for category in WRITING_CATEGORIES if category in visible]
+            gravadas[WRITING_KEY] = stored
         return gravadas
 
     return update_settings(mutator, path)
@@ -462,6 +483,110 @@ def write_main_window_settings(values, path=None):
     """As escolhas da janela principal, pela mesma porta (R4)."""
     gravadas = write_settings_sections({MAIN_WINDOW_KEY: values}, path)
     return gravadas[MAIN_WINDOW_KEY] if gravadas else gravadas
+
+
+class WritingSettings(TypedDict):
+    spelling_enabled: bool
+    grammar_enabled: bool
+    visible_categories: list[IssueCategory]
+    disabled_rule_ids: list[str]
+
+
+WRITING_KEY = "writing_assistant"
+# Static names only: provider messages/descriptions may contain comment text.
+# Unknown/legacy IDs remain useful and are displayed without an invented name.
+WRITING_RULE_NAMES = {"SPELLING_UNKNOWN_WORD": "Palavra não reconhecida"}
+_WRITING_EVENT_LOCK = threading.Lock()
+_writing_revision = 0
+
+
+def writing_settings_revision() -> int:
+    """Thread-safe event cursor; UI consumers poll on their owning Tk thread."""
+    with _WRITING_EVENT_LOCK:
+        return _writing_revision
+
+
+def notify_writing_settings_changed() -> None:
+    """Publish successful vocabulary/settings edits without retaining widgets."""
+    global _writing_revision
+    with _WRITING_EVENT_LOCK:
+        _writing_revision += 1
+
+
+def change_disabled_writing_rules(*, disable=(), enable=(), enable_all=False, path=None):
+    """Mutate IDs under the same read/update lock as drafts and preferences.
+
+    Read-modify-write outside this lock would lose another window's rule edits.
+    Names come from a fixed local catalog; never store provider descriptions.
+    """
+    def mutate(data):
+        current = read_writing_settings(data)
+        rules = set() if enable_all else set(current["disabled_rule_ids"])
+        rules.difference_update(enable)
+        rules.update(rule.strip() for rule in disable if isinstance(rule, str) and rule.strip())
+        section = data.setdefault(WRITING_KEY, {})
+        if not isinstance(section, dict):
+            section = data[WRITING_KEY] = {}
+        section["disabled_rule_ids"] = sorted(rules)
+        return read_writing_settings(data)
+    return update_settings(mutate, path)
+
+
+WRITING_CATEGORIES: tuple[IssueCategory, ...] = get_args(IssueCategory)
+WRITING_DEFAULTS: WritingSettings = {
+    "spelling_enabled": True,
+    "grammar_enabled": False,
+    "visible_categories": list(WRITING_CATEGORIES),
+    "disabled_rule_ids": [],
+}
+
+
+def read_writing_settings(settings: object) -> WritingSettings:
+    """Return validated independent preferences, including for older files.
+
+    Categories follow the public category order; disabled IDs are sorted and
+    case-sensitive. An explicit empty list is a valid user choice.
+    """
+    values: WritingSettings = {
+        "spelling_enabled": WRITING_DEFAULTS["spelling_enabled"],
+        "grammar_enabled": WRITING_DEFAULTS["grammar_enabled"],
+        "visible_categories": list(WRITING_DEFAULTS["visible_categories"]),
+        "disabled_rule_ids": list(WRITING_DEFAULTS["disabled_rule_ids"]),
+    }
+    stored = settings.get(WRITING_KEY) if isinstance(settings, Mapping) else None
+    if not isinstance(stored, Mapping):
+        return values
+    spelling = stored.get("spelling_enabled")
+    if isinstance(spelling, bool):
+        values["spelling_enabled"] = spelling
+    grammar = stored.get("grammar_enabled")
+    if isinstance(grammar, bool):
+        values["grammar_enabled"] = grammar
+    categories = stored.get("visible_categories")
+    if isinstance(categories, list):
+        values["visible_categories"] = [
+            category for category in WRITING_CATEGORIES if category in categories
+        ]
+    rules = stored.get("disabled_rule_ids")
+    if isinstance(rules, list):
+        values["disabled_rule_ids"] = sorted({
+            rule.strip() for rule in rules if isinstance(rule, str) and rule.strip()
+        })
+    return values
+
+
+def write_writing_settings(
+    values: Mapping[str, object], path: str | os.PathLike[str] | None = None,
+) -> WritingSettings:
+    """Persist supplied preferences, retaining other keys and disk sections.
+
+    Only known supplied keys are updated, so a partial update cannot reset a
+    preference written by another window. Personal vocabulary has its own file.
+    """
+    validated = read_writing_settings({WRITING_KEY: values})
+    changes = {key: value for key, value in validated.items() if key in values}
+    saved = write_settings_sections({WRITING_KEY: changes}, path)
+    return read_writing_settings(saved)
 
 
 APPEARANCE_KEY = "appearance"
@@ -550,6 +675,7 @@ USER_OPTION_SECTIONS = {
     APPEARANCE_KEY: APPEARANCE_DEFAULTS,
     BOARD_KEY: BOARD_DEFAULTS,
     LLM_KEY: LLM_DEFAULTS,
+    WRITING_KEY: WRITING_DEFAULTS,
 }
 
 

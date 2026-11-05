@@ -71,6 +71,211 @@ class DefaultPathSafetyTests(unittest.TestCase):
         self.assertIn("glossario-sandbox-", str(caminho))
 
 
+class WritingSettingsTests(unittest.TestCase):
+    def test_old_settings_upgrade_and_legacy_write_preserve_user_data(self):
+        # A destructive migration or whole-file overwrite would lose these
+        # unrelated keys. Simulate an older version updating just its section.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            legacy = {
+                "editor_drafts": {"book": {"text": "rascunho preservado"}},
+                "output": {"utf8_bom": True},
+                "future_section": {"nested": [1, "valor", None]},
+            }
+            save_settings(legacy, path)
+            original = path.read_bytes()
+            defaults = settings.read_writing_settings(load_settings(path))
+            self.assertTrue(defaults["spelling_enabled"])
+            self.assertFalse(defaults["grammar_enabled"])
+            self.assertEqual(path.read_bytes(), original)
+            settings.write_writing_settings({}, path)
+            for key, value in legacy.items():
+                self.assertEqual(load_settings(path)[key], value)
+            update_settings(lambda data: data.update({"legacy_window": {"width": 900}}), path)
+            reopened = load_settings(path)
+            self.assertEqual(settings.read_writing_settings(reopened), defaults)
+            self.assertEqual(reopened["legacy_window"], {"width": 900})
+            for key, value in legacy.items():
+                self.assertEqual(reopened[key], value)
+
+    def test_category_patches_merge_under_lock_without_erasing_drafts_or_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            settings.save_settings({"editor_drafts": {"d": "vivo"}, "writing_assistant": {"disabled_rule_ids": ["RULE"]}}, path)
+            start = threading.Barrier(3)
+            failures = []
+            def change(category):
+                try:
+                    start.wait(timeout=5)
+                    settings.write_settings_sections({}, path, writing_category_changes={category: False})
+                except Exception as exc:
+                    failures.append(exc)
+            workers = [threading.Thread(target=change, args=(category,)) for category in ("SPELLING", "PUNCTUATION")]
+            for worker in workers:
+                worker.start()
+            start.wait(timeout=5)
+            for worker in workers:
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
+            disk = settings.load_settings(path)
+            self.assertEqual(disk["writing_assistant"]["visible_categories"], ["NOMINAL_AGREEMENT", "VERBAL_AGREEMENT", "GRAMMAR", "REPEATED_WORD"])
+            self.assertEqual(disk["writing_assistant"]["disabled_rule_ids"], ["RULE"])
+            self.assertEqual(disk["editor_drafts"], {"d": "vivo"})
+            before = path.read_bytes()
+            revision = settings.writing_settings_revision()
+            with unittest.mock.patch.object(settings.os, "replace", side_effect=PermissionError("busy")):
+                with self.assertRaises(PermissionError):
+                    settings.write_settings_sections({}, path, writing_category_changes={"SPELLING": True})
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(settings.writing_settings_revision(), revision)
+
+    def test_rule_mutations_merge_concurrent_updates_and_publish_only_after_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            settings.save_settings({"editor_drafts": {"d": "vivo"}}, path)
+            revision = settings.writing_settings_revision()
+            barrier = threading.Barrier(3)
+            errors = []
+            def disable(rule):
+                try:
+                    barrier.wait(timeout=5)
+                    settings.change_disabled_writing_rules(disable={rule: "Nome estático"}, path=path)
+                except Exception as exc:
+                    errors.append(exc)
+            workers = [threading.Thread(target=disable, args=(rule,)) for rule in ("A", "B")]
+            for worker in workers:
+                worker.start()
+            barrier.wait(timeout=5)
+            for worker in workers:
+                worker.join(timeout=5)
+            self.assertEqual(errors, [])
+            disk = settings.load_settings(path)
+            self.assertEqual(disk["writing_assistant"]["disabled_rule_ids"], ["A", "B"])
+            self.assertEqual(disk["editor_drafts"], {"d": "vivo"})
+            self.assertGreater(settings.writing_settings_revision(), revision)
+            settings.change_disabled_writing_rules(enable=["A"], path=path)
+            self.assertEqual(settings.read_writing_settings(settings.load_settings(path))["disabled_rule_ids"], ["B"])
+            before = path.read_bytes()
+            revision = settings.writing_settings_revision()
+            with unittest.mock.patch.object(settings.os, "replace", side_effect=PermissionError("busy")):
+                with self.assertRaises(PermissionError):
+                    settings.change_disabled_writing_rules(enable_all=True, path=path)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(settings.writing_settings_revision(), revision)
+
+    CATEGORIES = [
+        "SPELLING", "NOMINAL_AGREEMENT", "VERBAL_AGREEMENT", "GRAMMAR",
+        "PUNCTUATION", "REPEATED_WORD",
+    ]
+
+    def test_old_or_malformed_settings_use_safe_defaults(self):
+        expected = {
+            "spelling_enabled": True,
+            "grammar_enabled": False,
+            "visible_categories": self.CATEGORIES,
+            "disabled_rule_ids": [],
+        }
+        for stored in ({}, None, [], {"writing_assistant": None},
+                       {"writing_assistant": ["SPELLING"]},
+                       {"writing_assistant": {
+                           "spelling_enabled": 0, "grammar_enabled": "true",
+                           "visible_categories": "SPELLING", "disabled_rule_ids": {},
+                       }}):
+            with self.subTest(stored=stored):
+                self.assertEqual(settings.read_writing_settings(stored), expected)
+
+    def test_preferences_are_validated_and_canonical_without_mutating_source(self):
+        stored = {"writing_assistant": {
+            "spelling_enabled": False,
+            "grammar_enabled": True,
+            "visible_categories": ["REPEATED_WORD", "SPELLING", "UNKNOWN", "SPELLING", {}, 3],
+            "disabled_rule_ids": [" Z_RULE ", "A_RULE", "Z_RULE", "a_rule", "", " ", None, 3],
+            "unknown_future_option": True,
+        }}
+        before = json.loads(json.dumps(stored))
+        self.assertEqual(settings.read_writing_settings(stored), {
+            "spelling_enabled": False,
+            "grammar_enabled": True,
+            "visible_categories": ["SPELLING", "REPEATED_WORD"],
+            "disabled_rule_ids": ["A_RULE", "Z_RULE", "a_rule"],
+        })
+        self.assertEqual(stored, before)
+
+    def test_empty_lists_are_preserved_and_read_results_are_independent(self):
+        source = {"writing_assistant": {"visible_categories": [], "disabled_rule_ids": ["RULE"]}}
+        result = settings.read_writing_settings(source)
+        self.assertEqual(result["visible_categories"], [])
+        result["visible_categories"].append("SPELLING")
+        result["disabled_rule_ids"].clear()
+        self.assertEqual(settings.read_writing_settings(source)["disabled_rule_ids"], ["RULE"])
+        self.assertEqual(source["writing_assistant"]["visible_categories"], [])
+        defaults = settings.read_writing_settings({})
+        defaults["visible_categories"].clear()
+        defaults["disabled_rule_ids"].append("RULE")
+        self.assertEqual(settings.read_writing_settings({})["visible_categories"], self.CATEGORIES)
+        self.assertEqual(settings.read_writing_settings({})["disabled_rule_ids"], [])
+
+    def test_writes_validate_values_and_preserve_other_sections_and_omitted_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            save_settings({
+                "editor_drafts": {"draft": {"text": "rascunho"}},
+                "output": {"utf8_bom": True},
+                "writing_assistant": {"spelling_enabled": False, "future_option": 42},
+            }, path)
+            result = settings.write_writing_settings({
+                "grammar_enabled": True,
+                "visible_categories": ["GRAMMAR", "SPELLING", "GRAMMAR"],
+                "disabled_rule_ids": [" B ", "A", "A"],
+                "words": ["NEVER_STORE_PERSONAL_WORDS_HERE"],
+            }, path)
+            self.assertEqual(result, {
+                "spelling_enabled": False, "grammar_enabled": True,
+                "visible_categories": ["SPELLING", "GRAMMAR"],
+                "disabled_rule_ids": ["A", "B"],
+            })
+            disk = load_settings(path)
+            self.assertEqual(disk["editor_drafts"], {"draft": {"text": "rascunho"}})
+            self.assertEqual(disk["output"], {"utf8_bom": True})
+            self.assertEqual(disk["writing_assistant"], {**result, "future_option": 42})
+            self.assertNotIn("words", disk["writing_assistant"])
+            settings.write_writing_settings({"grammar_enabled": "false"}, path)
+            self.assertFalse(settings.read_writing_settings(load_settings(path))["grammar_enabled"])
+
+    def test_concurrent_writing_and_other_section_updates_do_not_erase_each_other(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            start = threading.Barrier(3)
+            failures = []
+
+            def change(values):
+                try:
+                    start.wait(timeout=5)
+                    settings.write_writing_settings(values, path)
+                except Exception as exc:
+                    failures.append(exc)
+
+            workers = [
+                threading.Thread(target=change, args=({"grammar_enabled": True},)),
+                threading.Thread(target=change, args=({"disabled_rule_ids": ["RULE"]},)),
+            ]
+            for worker in workers:
+                worker.start()
+            start.wait(timeout=5)
+            settings.write_settings_sections({"output": {"utf8_bom": True}}, path)
+            for worker in workers:
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
+            disk = load_settings(path)
+            self.assertTrue(disk["output"]["utf8_bom"])
+            self.assertEqual(settings.read_writing_settings(disk), {
+                "spelling_enabled": True, "grammar_enabled": True,
+                "visible_categories": self.CATEGORIES, "disabled_rule_ids": ["RULE"],
+            })
+
+
 class SettingsTests(unittest.TestCase):
     def test_safe_geometry_clamps_negative_saved_position(self):
         self.assertEqual(
@@ -530,7 +735,7 @@ class UserOptionSettingsTests(unittest.TestCase):
             settings.write_settings_sections({"output": {"utf8_bom": False}}, caminho)
             self.assertEqual(settings.load_settings(caminho)["output"], {"utf8_bom": False})
 
-    def test_user_option_sections_cover_output_appearance_board_and_llm_only(self):
+    def test_user_option_sections_cover_preferences_including_writing(self):
         # A lista que M4 enumera. `main_window` e `editor_drafts` sao estado
         # das janelas, nao escolha do usuario, e ficam de fora de proposito.
         # As CHAVES de API tambem ficam de fora: nao vivem no settings (K1).
@@ -541,6 +746,7 @@ class UserOptionSettingsTests(unittest.TestCase):
                 "appearance": settings.APPEARANCE_DEFAULTS,
                 "board": settings.BOARD_DEFAULTS,
                 "llm": settings.LLM_DEFAULTS,
+                "writing_assistant": settings.WRITING_DEFAULTS,
             },
         )
 
@@ -1155,6 +1361,17 @@ class DeliverableContentsTests(unittest.TestCase):
             roteiro.index('_rodar("portatil (zip)"'),
             roteiro.index('_rodar("instalador (Inno Setup)"'),
         )
+
+    def test_no_zip_is_started_when_offline_resources_are_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pasta = self._pasta_do_programa(tmp)
+            saida = Path(tmp) / "saida"
+            with unittest.mock.patch.object(self.empacotador, "DIST", str(pasta)), \
+                    unittest.mock.patch.object(self.empacotador, "SAIDA", str(saida)), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                codigo = self.empacotador.main()
+            self.assertEqual(codigo, 1)
+            self.assertFalse(saida.exists())
 
     def test_the_first_run_never_brings_a_key_file_from_beside_the_exe(self):
         """A migracao de uma instalacao antiga copia o que esta ao lado do
