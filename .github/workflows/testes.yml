@@ -9,9 +9,7 @@
 # apertado — por isso o `timeout-minutes` e por passo, para o log dizer QUAL
 # passo estourou.
 #
-# Nao bloqueante ate 2026-09-30 (`continue-on-error` no passo da suite): duas
-# semanas para o CI provar que fica verde sem flake antes de barrar merge.
-# Depois disso, apagar as duas linhas de `continue-on-error`.
+# Falhas de tipagem ou da suite de janelas impedem concluir a validacao.
 name: testes
 
 on:
@@ -50,8 +48,7 @@ jobs:
       - name: ruff
         run: uv run ruff check tradutor_pgn tests ferramentas
 
-      - name: mypy (so os modulos anotados; nao bloqueante)
-        continue-on-error: true
+      - name: mypy (so os modulos anotados)
         run: uv run mypy
 
       - name: Suite headless
@@ -60,7 +57,6 @@ jobs:
 
       - name: Suite de janelas
         timeout-minutes: 25
-        continue-on-error: true  # ate 2026-09-30, ver o cabecalho
         run: uv run python -m pytest tests/test_editor_windows.py tests/test_main_window.py -q -p no:cacheprovider
 
   build:
