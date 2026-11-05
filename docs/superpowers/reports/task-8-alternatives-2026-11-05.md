@@ -32,6 +32,15 @@ remete a avisos específicos do runtime, mas o documento da branch atual não
 identifica automaticamente a versão usada pelo compilador local. É necessário
 fixar a revisão exata e conferir os objetos e avisos correspondentes.
 
+O `README.txt` do ambiente de compilação local identifica Strawberry Perl
+5.38.2.2-64bit. A [nota oficial dessa versão](https://strawberryperl.com/release-notes/5.38.2.2-64bit.html)
+descreve GCC 13.1.0 com configuração compatível com a observada localmente.
+Os SHA-256 observados de `g++.exe` e `libstdc++.a` são, respectivamente,
+`5184372df96eaf7e93428f2eb1451b5af8bde6eddbd44878295db51f520e5bc7` e
+`1e29d6fc6affeb3b0c67036ad82ba0f428f7a0e422ec4a4768ed8045a8ea3a0c`.
+Essa correspondência de versão e configuração não é uma comparação dos bytes
+com a distribuição oficial nem identifica as revisões das fontes e patches.
+
 Os artefatos experimentais permanecem locais e fora de controle de versão.
 Antes de qualquer entrega, ainda é necessário revisar todas as fontes, versões,
 licenças e avisos, inclusive dos componentes estáticos GCC/MinGW e dependências
