@@ -43,6 +43,16 @@ membros verificados: o compilador e oito arquivos estáticos ou de importação
 observados no mapa de ligação. Isso identifica os bytes desses membros, mas
 não identifica as revisões de fontes, patches ou todos os avisos aplicáveis.
 
+A [receita Strawberry da versão fixada](https://github.com/StrawberryPerl/Perl-Dist-Strawberry/blob/SP_53822_64bit/share/64bit-5.38.2.2.pp)
+aponta para o [pacote de ferramenta gcc13.1r5](https://github.com/StrawberryPerl/build-extlibs/releases/tag/dev_gcc13.1_20230606).
+O ZIP `winlibs_gcc13.1r5_sans_make.zip` dessa página teve SHA-256
+`e51e16e7cd70d4b644a44929ac8dfd1d2d13690e323e235aa6556f3c12774298`;
+os [mesmos nove membros coincidem](task-8-winlibs-identity-2026-11-05.json)
+com a instalação usada na compilação. A página descreve a origem como WinLibs
+GCC 13.1 release 5, mas a identidade desses bytes com uma variante exata da
+distribuição original WinLibs ainda não foi demonstrada. Identidade de binários
+continua distinta de fonte correspondente e cumprimento dos termos de licença.
+
 Os artefatos experimentais permanecem locais e fora de controle de versão.
 Antes de qualquer entrega, ainda é necessário revisar todas as fontes, versões,
 licenças e avisos, inclusive dos componentes estáticos GCC/MinGW e dependências
