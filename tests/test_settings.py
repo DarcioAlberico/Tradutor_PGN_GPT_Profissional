@@ -1505,3 +1505,11 @@ class FirstRunTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_ci_type_check_and_window_tests_are_blocking():
+    from pathlib import Path
+    workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/testes.yml').read_text(encoding='utf-8')
+    for step in ('mypy', 'Suite de janelas'):
+        section = workflow.split(f'      - name: {step}', 1)[1].split('\n      - name:', 1)[0]
+        assert 'continue-on-error: true' not in section

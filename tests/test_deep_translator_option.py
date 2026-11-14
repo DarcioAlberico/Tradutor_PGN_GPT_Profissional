@@ -31,6 +31,7 @@ def test_provider_choice_is_available_without_api_keys(monkeypatch):
     monkeypatch.setattr(app_actions, 'configured_providers', lambda: [])
     monkeypatch.setattr(app_actions, 'load_settings', lambda: {})
     monkeypatch.setattr(app_actions, 'ask_translation_provider', lambda *args: 'deep-translator')
+    monkeypatch.setattr(app_actions, 'confirm_unofficial_google', lambda *args: True)
     monkeypatch.setattr(app_actions, 'write_main_window_settings', lambda *args: None)
     app = SimpleNamespace(translation_provider='google')
     assert app_actions.choose_translation_provider(app) == 'deep-translator'

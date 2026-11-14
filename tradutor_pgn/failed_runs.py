@@ -32,6 +32,7 @@ def build_failed_run_record(
     failed_count,
     when=None,
     source_language="",
+    delivery_failed_count=0,
 ):
     """O registro a persistir, ou `None` quando nao ha o que reprocessar.
 
@@ -44,13 +45,16 @@ def build_failed_run_record(
     certo — o arquivo sairia dividido entre dois pares sem ninguem ter pedido.
     """
     arquivos = sorted({str(caminho) for caminho in (failed_files or []) if caminho})
-    if not arquivos or not failed_count:
+    failed_count = int(failed_count or 0)
+    delivery_failed_count = int(delivery_failed_count or 0)
+    if not arquivos or not (failed_count or delivery_failed_count):
         return None
     return {
         "target_language": target_language,
         "source_language": source_language or "",
         "files": arquivos,
-        "failed_count": int(failed_count),
+        "failed_count": failed_count,
+        "delivery_failed_count": delivery_failed_count,
         "when": when,
     }
 
@@ -85,6 +89,7 @@ def normalize_failed_run_record(record):
         "source_language": origem,
         "files": limpos,
         "failed_count": record.get("failed_count") or 0,
+        "delivery_failed_count": record.get("delivery_failed_count") or 0,
         "when": record.get("when"),
     }
 
@@ -105,9 +110,14 @@ def describe_failed_run(record, exists=os.path.exists):
         return ""
 
     presentes, ausentes = split_existing_files(record["files"], exists)
+    pendencias = []
+    if record["failed_count"]:
+        pendencias.append(f"{record['failed_count']} comentario(s) sem traduzir")
+    if record["delivery_failed_count"]:
+        pendencias.append(f"{record['delivery_failed_count']} falha(s) de entrega")
     linhas = [
-        f"Da ultima execucao ficaram {record['failed_count']} comentario(s) sem "
-        f"traduzir, em {len(record['files'])} arquivo(s).",
+        f"Da ultima execucao ficaram {' e '.join(pendencias)}, em "
+        f"{len(record['files'])} arquivo(s).",
         f"Idioma: {record['source_language'] or 'detectar'} -> "
         f"{record['target_language']}",
         "",

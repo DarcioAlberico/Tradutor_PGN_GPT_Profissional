@@ -5,10 +5,10 @@ description = "Aplicacao para traduzir comentarios PGN com cache SQLite e glossa
 readme = "README.md"
 requires-python = ">=3.10"  # o codigo roda em 3.13 (.python-version); 3.8 nunca foi testado
 dependencies = [
-    "chardet>=5.2",
+    "chardet>=5.2,<8",
     "customtkinter>=5.2",
     "deep-translator==1.11.4",
-    "requests>=2.32",
+    "requests>=2.33.1",
     # Motor hunspell do corretor de prosa (ROADMAP 26). Estava so no
     # requirements.txt: `uv sync` abria o programa sem corretor (ROADMAP 28.1).
     "spylls>=0.1.7",

@@ -53,6 +53,11 @@ PORTABLE_MARKER = "portatil.txt"
 # juntos, e ainda da para olhar a pasta e ver o que e seu e o que e do programa.
 PORTABLE_DATA_FOLDER = "dados"
 
+# Saidas que pertencem ao usuario ficam junto dos demais dados do aplicativo.
+# No modo fonte isso e o diretorio do programa; numa instalacao, e a pasta
+# gravavel do usuario (Program Files pode ser somente leitura).
+TRANSLATIONS_FOLDER = "Minhas Traduções"
+
 
 def running_frozen():
     """O programa esta rodando empacotado (PyInstaller)?
@@ -138,6 +143,14 @@ def data_path(*partes):
 def glossary_catalog_path():
     """Catalogo autoritativo, isolado do cache legado `glossario.db`."""
     return data_path("glossario-v2.db")
+
+
+def translations_dir(create=False):
+    """Pasta permanente dos PGNs traduzidos; opcionalmente garante que exista."""
+    caminho = data_path(TRANSLATIONS_FOLDER)
+    if create:
+        os.makedirs(caminho, exist_ok=True)
+    return caminho
 
 
 def ensure_data_dir():

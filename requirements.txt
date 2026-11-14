@@ -1,6 +1,6 @@
-requests>=2.32
+requests>=2.33.1
 deep-translator==1.11.4
-chardet>=5.2
+chardet>=5.2,<8
 customtkinter>=5.2
 # Motor hunspell do corretor de prosa (ROADMAP 26). Python puro (MIT): nao pede
 # compilador na maquina de quem instala e nao muda a forma do build do

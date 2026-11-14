@@ -88,7 +88,7 @@ class ApiKeysTests(unittest.TestCase):
         # Lixo no arquivo: nada quebra, nada e chave.
         Path(self.path).write_text("{nao e json", encoding="utf-8")
         self.assertIsNone(api_keys.load_api_key("openai", path=self.path))
-        self.assertEqual(api_keys.stored_key_state("openai", self.path), "ausente")
+        self.assertEqual(api_keys.stored_key_state("openai", self.path), "ilegivel")
 
     def test_the_mask_shows_only_the_tail(self):
         self.assertEqual(api_keys.mask_api_key(CHAVE), "****abcd")
@@ -193,6 +193,17 @@ class ChatCompletionsTranslatorTests(unittest.TestCase):
         t._client = FakeSession(respostas)
         self.logs = []
         return t
+
+    def test_structured_batch_preserves_literal_separator_in_both_directions(self):
+        t = self.tradutor([resposta_ok([
+            {"id": 1, "traducao": "um ||| dois"},
+            {"id": 2, "traducao": "tres"},
+        ])])
+        self.assertEqual(t.translate_batch(["one ||| two", "three"], "pt"),
+                         ["um ||| dois", "tres"])
+        corpo = t._client.chamadas[0][1]["json"]
+        itens = json.loads(corpo["messages"][1]["content"].split("\n\n")[1])["itens"]
+        self.assertEqual([item["texto"] for item in itens], ["one ||| two", "three"])
 
     def test_a_batch_goes_as_numbered_json_and_comes_back_in_id_order(self):
         # A resposta vem embaralhada; o texto sai na ordem dos ids.

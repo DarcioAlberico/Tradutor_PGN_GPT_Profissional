@@ -1,0 +1,57 @@
+{
+  "timestamp_utc": "2026-11-14T20:13:49.978393+00:00",
+  "environment": {
+    "python": "3.13.2",
+    "platform": "Windows-10-10.0.19045-SP0",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 23 Model 113 Stepping 0, AuthenticAMD",
+    "logical_cpus": 12
+  },
+  "method": "banco sintético; p95 nearest-rank; pico Python medido em execução separada",
+  "results": [
+    {
+      "rows": 1000000,
+      "samples": 5,
+      "subset_requested": 100,
+      "search_mode": "substring",
+      "measurements": {
+        "full_cache": {
+          "durations_seconds": [
+            1.325900299998466,
+            1.288947900000494,
+            1.2568419000017457,
+            1.2504743000026792,
+            1.259072000044398
+          ],
+          "median_seconds": 1.259072000044398,
+          "p95_seconds": 1.325900299998466,
+          "peak_python_bytes": 281474260
+        },
+        "subset_cache": {
+          "durations_seconds": [
+            0.0031775000388734043,
+            0.00026489997981116176,
+            0.00023449998116120696,
+            0.0002308000111952424,
+            0.00022829999215900898
+          ],
+          "median_seconds": 0.00023449998116120696,
+          "p95_seconds": 0.0031775000388734043,
+          "peak_python_bytes": 24976
+        },
+        "search": {
+          "durations_seconds": [
+            0.39574579999316484,
+            0.39979049999965355,
+            0.3975910999579355,
+            0.39948900003219023,
+            0.3963420999934897
+          ],
+          "median_seconds": 0.3975910999579355,
+          "p95_seconds": 0.39979049999965355,
+          "peak_python_bytes": 1506
+        }
+      }
+    }
+  ]
+}

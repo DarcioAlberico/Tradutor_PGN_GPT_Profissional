@@ -1,0 +1,3 @@
+﻿# RG-031 — manifesto dos pacotes novos
+
+Criar manifesto JSON versionado no mesmo diretório temporário dos dois PGNs e publicá-lo junto ao pacote por renomeação atômica. Registrar apenas nomes relativos, hashes SHA-256 dos arquivos já finalizados, UTC, versão do programa, idiomas e motor/modelo escolhido para a execução; o motor não prova a origem de traduções reaproveitadas do cache. A ausência de metadados opcionais deve ser representada por null. Erro de escrita/hash ou cancelamento antes da publicação não deixa pacote parcial. Não alterar pacotes antigos nem inventar progresso de revisão. Cobrir hashes, ausência de caminhos absolutos, metadados do worker, falhas e cancelamento; validar na cópia integrada e atualizar roadmap.

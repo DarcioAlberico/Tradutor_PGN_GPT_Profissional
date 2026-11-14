@@ -39,6 +39,7 @@ from .glossario import (
     create_glossary_backup,
     filter_glossary_entries_by_type,
     glossary_entry_pair,
+    glossary_entry_priority,
     glossary_entry_scope,
     load_automatic_substitutions,
     load_glossary_entry_details,
@@ -527,7 +528,8 @@ def format_promotion_preview(entry, preview, max_items=10):
             f"pendente(s) de {preview['scanned']} analisadas."
         )
     partes = [
-        f"Promover {orig!r} -> {new!r} a autom\u00e1tica?",
+        f"Salvar regra autom\u00e1tica {orig!r} -> {new!r}?",
+        f"Escopo: {glossary_entry_scope(entry) or 'todos'}; prioridade: {glossary_entry_priority(entry)}.",
         "",
         efeito,
     ]
@@ -540,6 +542,8 @@ def format_promotion_preview(entry, preview, max_items=10):
             "Uma regra autom\u00e1tica \u00e9 aplicada a toda tradu\u00e7\u00e3o nova "
             "sem confirma\u00e7\u00e3o. As linhas verificadas n\u00e3o entram nesta "
             "contagem nem em \"Aplicar Automaticas\".",
+            "A simulação usa esta regra isoladamente; não considera regras concorrentes "
+            "nem prevê o efeito da prioridade sobre elas.",
         ]
     )
     return "\n".join(partes)

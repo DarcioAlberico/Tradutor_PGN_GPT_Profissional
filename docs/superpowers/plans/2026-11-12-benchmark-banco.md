@@ -1,0 +1,3 @@
+﻿# RG-040 — benchmark do banco de traduções
+
+Criar benchmark com bancos SQLite temporários sintéticos pela inicialização real do projeto, com 10 mil, 100 mil e 1 milhão de linhas configuráveis. Medir separadamente cache completo, cache de até 100 comentários e busca paginada por trecho, validando os resultados. Relatar amostras, mediana, p95 nearest-rank, pico de alocações Python em execução separada e ambiente; tamanho físico antes do fechamento completo não é proxy de espaço final. Não tocar no banco real, não definir gate de CI sem baseline estável. Cobrir gerador, consultas, argumentos e integridade com testes; medir localmente 10 mil e 100 mil, deixando 1 milhão sob demanda.

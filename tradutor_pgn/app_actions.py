@@ -1,6 +1,7 @@
 from datetime import datetime
 import os
 import queue
+import sqlite3
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -41,7 +42,13 @@ from .llm_providers import (
     configured_providers,
 )
 from .provider_dialog import ask_translation_provider
-from .settings import load_settings, read_llm_settings, write_main_window_settings
+from .provider_consent import ConsentStore
+from .settings import (
+    TRANSLATION_PROVIDER_DEEP,
+    load_settings,
+    read_llm_settings,
+    write_main_window_settings,
+)
 from .settings_window import open_settings_window as open_settings_editor
 from .translation_worker import run_translation
 
@@ -229,6 +236,47 @@ def select_directory(app):
         app.source_path.set(dir_path)
 
 
+def open_translations_folder(app):
+    """Cria e abre a pasta permanente onde ficam os pacotes traduzidos."""
+    try:
+        pasta = app_paths.translations_dir(create=True)
+        open_path_in_explorer(pasta)
+    except OSError as exc:
+        messagebox.showerror(
+            "Abrir Traduzidos",
+            f"Não foi possível abrir a pasta de traduções:\n{exc}",
+        )
+        return None
+    return pasta
+
+
+def open_translation_library(app):
+    from .translation_library_window import TranslationLibraryWindow
+    from .translation_library_links import bundle_review_progress, resolve_bundle_review
+
+    return TranslationLibraryWindow(
+        app.root, app_paths.translations_dir(), open_path_in_explorer,
+        review_resolver=lambda path: resolve_bundle_review(app.output_db, path),
+        on_review=lambda link: open_library_review(app, link),
+        progress_resolver=lambda path: bundle_review_progress(app.output_db, path),
+    )
+
+
+def open_library_review(app, link):
+    editor = open_translation_editor(
+        app, source_file=link.source_file, source_language=link.source_language,
+        target_language=link.target_language, status_filter="Pendentes")
+    if (editor.lang != link.target_language or editor.selected_source_file() != link.source_file or
+            editor.selected_source_language() != link.source_language):
+        editor.close_editor()
+        messagebox.showerror(
+            "Revisão indisponível",
+            "O arquivo ou idioma deixou de estar disponível no banco. Atualize a biblioteca e tente novamente.",
+        )
+        return None
+    return editor
+
+
 def log_message(app, message: str):
     """A porta do log: pelo `logging` (ROADMAP 28.11), que leva a mensagem a
     fila do widget e ao arquivo da execucao do `app` instalado — este."""
@@ -314,6 +362,43 @@ def start_translation(app):
     ).start()
 
 
+UNOFFICIAL_GOOGLE_CONSENT_VERSION = 1
+
+
+def confirm_unofficial_google(app, provider):
+    """Pede consentimento por motor e grava a versão aceita antes do envio."""
+    store = ConsentStore(app_paths.data_path("provider-consent.db"))
+    try:
+        if store.accepted(provider, UNOFFICIAL_GOOGLE_CONSENT_VERSION):
+            return True
+    except (OSError, sqlite3.Error, ValueError):
+        messagebox.showerror(
+            "Serviço Google não oficial",
+            "Não foi possível consultar sua escolha. A tradução não foi iniciada.",
+        )
+        return False
+    label = "Google via deep-translator" if provider == TRANSLATION_PROVIDER_DEEP else "Google gtx"
+    if not messagebox.askyesno(
+        "Serviço Google não oficial",
+        f"O motor {label} usa um serviço Google não oficial, sem garantia de disponibilidade.\n\n"
+        "Os comentários a traduzir e os idiomas escolhidos serão enviados ao Google. "
+        "O serviço pode limitar ou bloquear temporariamente o acesso.\n\n"
+        "Você aceita usar este motor para a tradução?",
+        parent=app.root if hasattr(app, "root") else None,
+    ):
+        return False
+
+    try:
+        store.accept(provider, UNOFFICIAL_GOOGLE_CONSENT_VERSION)
+    except (OSError, sqlite3.Error, ValueError):
+        messagebox.showerror(
+            "Serviço Google não oficial",
+            "Não foi possível salvar sua escolha. A tradução não foi iniciada.",
+        )
+        return False
+    return True
+
+
 def choose_translation_provider(app):
     """Google ou um modelo de linguagem? `None` quando o usuario cancelou.
 
@@ -330,6 +415,8 @@ def choose_translation_provider(app):
     )
     if escolhido is None:
         return None
+    if escolhido not in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP) and escolhido not in configurados:
+        return None
     spec = PROVIDERS.get(escolhido)
     if spec is not None and spec.kind == "anthropic" and not anthropic_sdk_available():
         messagebox.showerror(
@@ -339,6 +426,9 @@ def choose_translation_provider(app):
             f"A tradução não foi iniciada.",
         )
         return None
+    if escolhido in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP):
+        if not confirm_unofficial_google(app, escolhido):
+            return None
     if escolhido != lembrado:
         app.translation_provider = escolhido
         try:
@@ -501,6 +591,13 @@ def close_main_window(app):
     pergunta — e o worker precisa de tempo para fechar o arquivo que esta
     escrevendo.
     """
+    if getattr(app, "_data_verification_active", False):
+        messagebox.showinfo(
+            "Verificar meus dados",
+            "Aguarde a verificação terminar e limpar as cópias temporárias antes de fechar.",
+            parent=app.root,
+        )
+        return False
     if any(editor._writing_busy for editor in getattr(app, "writing_editors", ())):
         messagebox.showinfo("Revisão linguística", "Aguarde a operação do livro terminar antes de fechar.", parent=app.root)
         return False
@@ -633,9 +730,9 @@ def revert_last_run(app):
 def open_last_run_folder(app):
     """Abre no Explorer a pasta do PGN gerado (ou do de origem, se nada saiu).
 
-    O PGN traduzido nasce ao lado do original (`translated_output_path`), entao
-    as duas pastas sao quase sempre a mesma; a do gerado vem primeiro porque e
-    ele que o usuario vai abrir no ChessBase.
+    O PGN traduzido nasce no seu pacote dentro de "Minhas Traducoes"; a pasta
+    dele vem primeiro porque e o arquivo que o usuario vai abrir no ChessBase.
+    Se nada foi gerado, ainda e util abrir a pasta do original.
     """
     ultima = getattr(app, "last_run", None)
     if not ultima or not ultima.get("files"):
@@ -693,6 +790,73 @@ def backup_database(app):
     # banco logico). Recusar aqui seria negar a copia justamente a quem quer
     # guardar o estado de uma execucao longa.
     backup_database_file(app)
+
+
+def _verify_data(path):
+    from .data_verification import verify_data
+    return verify_data(path)
+
+
+def _format_data_verification(result):
+    labels = {"ok": "íntegro", "missing": "não encontrado",
+              "invalid": "inválido ou incompatível", "inaccessible": "não acessível"}
+    def status(key):
+        return labels.get(result[key], "resultado desconhecido")
+
+    backups = result["backups"]
+    lines = [
+        f"Banco de traduções: {status('database')}",
+        f"Glossário: {status('glossary')}",
+        f"Configurações: {status('settings')}",
+        f"Backups de traduções e glossário: {backups['valid']} íntegros, "
+        f"{backups['invalid']} inválidos ou incompatíveis, {backups['inaccessible']} inacessíveis",
+        f"Arquivos PGN encontrados: {result['translations']}",
+        "",
+        "A verificação de integridade não garante restauração completa ou compatibilidade.",
+    ]
+    if backups.get("candidates"):
+        lines.extend(["", "Candidatos para restauração (confira em cópia separada):",
+                      *backups["candidates"]])
+    if result["warnings"]:
+        lines.extend(["", *result["warnings"]])
+    return "\n".join(lines)
+
+
+def verify_user_data(app):
+    """Confere os dados fora do Tk e entrega somente um resumo à interface."""
+    if getattr(app, "_data_verification_active", False):
+        messagebox.showinfo("Verificar meus dados", "A verificação já está em andamento.")
+        return
+    app._data_verification_active = True
+    app.verify_data_button.configure(text="Verificando...", state="disabled")
+    results = queue.SimpleQueue()
+    data_dir = app_paths.data_dir()
+
+    def work():
+        try:
+            results.put((True, _verify_data(data_dir)))
+        except Exception:
+            # Exceções podem conter caminhos ou conteúdo privado do acervo.
+            results.put((False, None))
+
+    def poll():
+        try:
+            ok, result = results.get_nowait()
+        except queue.Empty:
+            app.root.after(50, poll)
+            return
+        app._data_verification_active = False
+        app.verify_data_button.configure(text="Verificar meus dados", state="normal")
+        if ok:
+            messagebox.showinfo("Verificar meus dados", _format_data_verification(result))
+        else:
+            messagebox.showerror("Verificar meus dados", "Não foi possível concluir a verificação.")
+
+    app.root.after(50, poll)
+    try:
+        threading.Thread(target=work, daemon=True).start()
+    except RuntimeError:
+        results.put((False, None))
 
 
 def restore_database(app):

@@ -1,0 +1,101 @@
+{
+  "timestamp_utc": "2026-11-12T23:00:39.384448+00:00",
+  "environment": {
+    "python": "3.13.2",
+    "platform": "Windows-10-10.0.19045-SP0",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 23 Model 113 Stepping 0, AuthenticAMD",
+    "logical_cpus": 12
+  },
+  "method": "banco sint\u00e9tico; p95 nearest-rank; pico Python medido em execu\u00e7\u00e3o separada",
+  "results": [
+    {
+      "rows": 10000,
+      "samples": 5,
+      "subset_requested": 100,
+      "search_mode": "substring",
+      "measurements": {
+        "full_cache": {
+          "durations_seconds": [
+            0.014141199993900955,
+            0.00869040000543464,
+            0.008230200008256361,
+            0.008748199994442984,
+            0.011355900001944974
+          ],
+          "median_seconds": 0.008748199994442984,
+          "p95_seconds": 0.014141199993900955,
+          "peak_python_bytes": 2554660
+        },
+        "subset_cache": {
+          "durations_seconds": [
+            0.0011420000082580373,
+            0.00028160000510979444,
+            0.0002657000004546717,
+            0.000265800001216121,
+            0.0002589000068837777
+          ],
+          "median_seconds": 0.000265800001216121,
+          "p95_seconds": 0.0011420000082580373,
+          "peak_python_bytes": 24976
+        },
+        "search": {
+          "durations_seconds": [
+            0.0051149999926565215,
+            0.004135800001677126,
+            0.004125799998291768,
+            0.003951500009861775,
+            0.0039041000127326697
+          ],
+          "median_seconds": 0.004125799998291768,
+          "p95_seconds": 0.0051149999926565215,
+          "peak_python_bytes": 1506
+        }
+      }
+    },
+    {
+      "rows": 100000,
+      "samples": 5,
+      "subset_requested": 100,
+      "search_mode": "substring",
+      "measurements": {
+        "full_cache": {
+          "durations_seconds": [
+            0.16922609999892302,
+            0.170702599993092,
+            0.16237350000301376,
+            0.1328469000000041,
+            0.15055150000262074
+          ],
+          "median_seconds": 0.16237350000301376,
+          "p95_seconds": 0.170702599993092,
+          "peak_python_bytes": 29156340
+        },
+        "subset_cache": {
+          "durations_seconds": [
+            0.00170310000248719,
+            0.00024190000840462744,
+            0.00022479999461211264,
+            0.00021919999562669545,
+            0.0002162000018870458
+          ],
+          "median_seconds": 0.00022479999461211264,
+          "p95_seconds": 0.00170310000248719,
+          "peak_python_bytes": 24976
+        },
+        "search": {
+          "durations_seconds": [
+            0.041705900002853014,
+            0.0424092000030214,
+            0.04444070000317879,
+            0.04554620000999421,
+            0.042810900005861185
+          ],
+          "median_seconds": 0.042810900005861185,
+          "p95_seconds": 0.04554620000999421,
+          "peak_python_bytes": 1506
+        }
+      }
+    }
+  ]
+}

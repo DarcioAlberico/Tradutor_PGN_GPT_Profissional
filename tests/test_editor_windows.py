@@ -1373,6 +1373,37 @@ class TranslationEditorMethodCoverageTests(EditorWindowTestCase):
                 self.pump()
                 self.assertTrue(self.win.winfo_exists(), "a janela morreu")
 
+    def test_draft_completion_is_delivered_on_the_tk_thread(self):
+        self.editor.select_index(0)
+        self.editor.set_translation_text("rascunho de teste", mark_dirty=True)
+        owner = threading.get_ident()
+        delivered = []
+        with unittest.mock.patch.object(
+            self.editor, "report_draft_saved",
+            side_effect=lambda ok: delivered.append((threading.get_ident(), ok)),
+        ):
+            self.editor.persist_current_draft()
+            deadline = time.monotonic() + 5
+            while not delivered and time.monotonic() < deadline:
+                self.pump()
+                time.sleep(.01)
+        self.assertEqual(delivered, [(owner, True)])
+
+    def test_draft_write_failure_is_delivered_on_the_tk_thread(self):
+        self.editor.select_index(0)
+        self.editor.set_translation_text("rascunho de teste", mark_dirty=True)
+        owner = threading.get_ident()
+        delivered = []
+        with unittest.mock.patch.object(edit_window, "update_settings", side_effect=OSError), \
+             unittest.mock.patch.object(self.editor, "report_draft_saved",
+                 side_effect=lambda ok: delivered.append((threading.get_ident(), ok))):
+            self.editor.persist_current_draft()
+            deadline = time.monotonic() + 5
+            while not delivered and time.monotonic() < deadline:
+                self.pump()
+                time.sleep(.01)
+        self.assertEqual(delivered, [(owner, False)])
+
     def test_the_draft_is_persisted_and_cleared(self):
         self.editor.select_index(0)
         self.editor.set_translation_text("um rascunho qualquer", mark_dirty=True)
@@ -6348,6 +6379,19 @@ class GlossaryPreviewUsesTheRealPipelineTests(EditorWindowTestCase):
     def previa(self):
         return self.editor.preview_text.get("1.0", tk.END).strip()
 
+    def test_preview_details_explain_a_blocked_rule(self):
+        self.abrir([("rook", "torre", "suggestion"), ("white rook", "torre branca", "suggestion")])
+        self.editor.test_text_var.set("white rook")
+        self.editor.apply_all_to_preview()
+        def run(_parent, _title, work, on_success=None, **_kwargs):
+            on_success(work(types.SimpleNamespace(cancelado=lambda: False)))
+        with unittest.mock.patch.object(glossary_editor, "run_with_progress", side_effect=run), \
+             unittest.mock.patch.object(glossary_editor.messagebox, "showinfo") as dialog:
+            self.click(self.editor.btn_preview_details)
+        report = dialog.call_args.args[1]
+        self.assertIn("rook", report)
+        self.assertIn("especificidade", report)
+
     def test_the_square_placeholder_is_expanded(self):
         """Uma linha com `@casa@` e 64 regras na aplicacao e casava NADA na previa."""
         self.abrir([("@casa@-torre", "torre de @casa@", "sugestão")])
@@ -6424,6 +6468,139 @@ class GlossaryPreviewUsesTheRealPipelineTests(EditorWindowTestCase):
         self.pump()
 
         self.assertEqual(self.previa(), "bishop takes bishop")
+
+    def test_cleanup_preview_uses_cleanup_phase_and_normalizes_whitespace(self):
+        self.abrir([("remover", "", "limpeza")])
+        self.editor.select_entry(0)
+        self.editor.test_text_var.set("um   remover  dois")
+        self.editor.refresh_preview()
+        self.assertEqual(self.previa(), "um dois")
+
+    def test_preview_updates_when_scope_and_test_text_change(self):
+        self.app.source_language = tk.StringVar(value="en")
+        self.abrir([("bishop", "bispo", "sugestão")])
+        self.editor.select_entry(0)
+        self.editor.test_text_var.set("bishop")
+        self.pump()
+        self.assertEqual(self.previa(), "bispo")
+        self.editor.scope_text.set("en>it")
+        self.pump()
+        self.assertEqual(self.previa(), "bishop")
+        self.assertTrue(self.editor.state.dirty)
+
+    def test_type_control_explains_each_phase(self):
+        self.abrir([("bishop", "bispo", "sugestão")])
+        text = self.editor.type_menu.tooltip.text.lower()
+        self.assertIn("limpeza", text)
+        self.assertIn("sugestão", text)
+        self.assertIn("automática", text)
+        self.editor.set_rule_type("cleanup")
+        self.pump()
+        self.assertIn("antes", self.editor.type_help_label.cget("text").lower())
+        self.editor.set_rule_type("automatic")
+        self.pump()
+        self.assertIn("depois", self.editor.type_help_label.cget("text").lower())
+
+    def test_priority_shortcuts_keep_advanced_field_available(self):
+        self.abrir([("bishop", "bispo", "sugestão")])
+        self.editor.select_entry(0)
+        self.editor.priority_text.set("27")
+        self.assertEqual(self.editor.current_priority(), 27)
+        self.editor.priority_preset_buttons["Alta (+1)"].invoke()
+        self.assertEqual(self.editor.current_priority(), 1)
+        self.editor.priority_preset_buttons["Baixa (-1)"].invoke()
+        self.assertEqual(self.editor.current_priority(), -1)
+        self.assertTrue(self.editor.state.dirty)
+
+    def test_scope_shortcuts_use_declared_languages_and_do_not_guess(self):
+        self.app.source_language = tk.StringVar(value="en")
+        self.app.target_language.set("pt")
+        self.abrir([("bishop", "bispo", "sugestão")])
+        self.editor.select_entry(0)
+        self.editor.scope_preset_buttons["Par atual"].invoke()
+        self.assertEqual(self.editor.current_scope(), "en>pt")
+        self.editor.scope_preset_buttons["Destino atual"].invoke()
+        self.assertEqual(self.editor.current_scope(), "pt")
+        self.app.source_language.set("")
+        self.editor.scope_preset_buttons["Par atual"].invoke()
+        self.assertEqual(self.editor.current_scope(), "pt")
+        self.editor.scope_preset_buttons["Todos"].invoke()
+        self.assertEqual(self.editor.scope_text.get(), "*")
+
+    def test_scope_selectors_sync_both_directions_without_erasing_custom_values(self):
+        self.abrir([("bishop", "bispo", "sugestão")])
+        self.editor.select_entry(0)
+        self.editor.scope_source_var.set("Inglês")
+        self.editor.scope_target_var.set("Português")
+        self.editor.apply_scope_selectors()
+        self.assertEqual(self.editor.current_scope(), "en>pt")
+        self.assertTrue(self.editor.state.dirty)
+        self.editor.scope_text.set("it>fr")
+        self.assertEqual(self.editor.scope_source_var.get(), "Italiano")
+        self.assertEqual(self.editor.scope_target_var.get(), "Francês")
+        self.editor.scope_text.set("xx>pt")
+        self.assertEqual(self.editor.scope_source_var.get(), "Personalizado")
+        self.editor.scope_source_var.set("Inglês")
+        self.editor.apply_scope_selectors()
+        self.assertEqual(self.editor.scope_text.get(), "xx>pt")
+        self.assertIn("personalizado", self.editor.scope_help_label.cget("text").lower())
+
+    def test_preview_marks_changed_output_and_reports_scope_mismatch(self):
+        self.app.source_language = tk.StringVar(value="en")
+        self.abrir([("bishop", "bispo", "sugestão")])
+        self.editor.select_entry(0)
+        self.editor.test_text_var.set("bishop takes bishop")
+        self.pump()
+        self.assertTrue(self.editor.preview_text.tag_ranges("preview_change"))
+        self.assertIn("alterado", self.editor.preview_status_label.cget("text").lower())
+        self.editor.scope_text.set("en>it")
+        self.pump()
+        self.assertEqual(self.previa(), "bishop takes bishop")
+        self.assertIn("escopo", self.editor.preview_status_label.cget("text").lower())
+
+    def test_preview_can_be_copied_cleared_and_focused_by_shortcut(self):
+        self.abrir([("bishop", "bispo", "sugestão")])
+        self.editor.select_entry(0)
+        self.editor.test_text_var.set("bishop")
+        self.editor.copy_preview()
+        self.assertEqual(self.root.clipboard_get(), "bispo")
+        self.editor.clear_preview()
+        self.assertEqual(self.editor.test_text_var.get(), "")
+        self.assertTrue(self.win.bind("<Control-t>"))
+        self.assertTrue(self.win.bind("<Control-Shift-T>"))
+
+    def test_preview_handles_removal_and_non_bmp_text_without_incorrect_highlights(self):
+        self.abrir([("remover", "", "limpeza")])
+        self.editor.select_entry(0)
+        self.editor.test_text_var.set("😀 remover fim")
+        self.pump()
+        self.assertEqual(self.previa(), "😀 fim")
+        self.assertFalse(self.editor.preview_text.tag_ranges("preview_change"))
+        self.assertIn("alterado", self.editor.preview_status_label.cget("text").lower())
+
+    def test_invalid_priority_is_not_presented_as_valid_preview(self):
+        self.abrir([("bishop", "bispo", "sugestão")])
+        self.editor.select_entry(0)
+        self.editor.test_text_var.set("bishop")
+        self.editor.priority_text.set("inválida")
+        self.pump()
+        self.assertEqual(self.previa(), "bishop")
+        self.assertIn("prioridade inválida", self.editor.preview_status_label.cget("text").lower())
+
+    @needs_room
+    def test_shortcuts_and_preview_fit_minimum_window_size(self):
+        self.abrir([("bishop", "bispo", "sugestão")])
+        cancel_pending_after(self.win)
+        self.win.geometry(f"{glossary_editor.MIN_WIDTH}x{glossary_editor.MIN_HEIGHT}+3000+3000")
+        self.win.deiconify()
+        self.pump()
+        self.assertGreater(self.editor.preview_text.winfo_height(), 20)
+        for button in (*self.editor.priority_preset_buttons.values(), *self.editor.scope_preset_buttons.values(),
+                       self.editor.scope_source_menu, self.editor.scope_target_menu,
+                       self.editor.btn_clear_preview, self.editor.btn_copy_preview):
+            self.assertTrue(button.winfo_ismapped())
+            self.assertLessEqual(button.winfo_rootx() + button.winfo_width(),
+                                 self.win.winfo_rootx() + self.win.winfo_width())
 
 
 class GlossaryEditorParityTests(EditorWindowTestCase):
@@ -6657,6 +6834,61 @@ class GlossaryPromotionPreviewTests(EditorWindowTestCase):
     def entries_on_disk(self):
         return load_glossary_entry_details(self.glossary_path, deduplicate=False)
 
+    def test_type_filter_shows_only_automatic_rules_and_is_saved(self):
+        self.editor.type_filter_text.set("Automática")
+        self.editor.restart_at_first_page()
+        self.assertEqual(self.editor.state.filtered_indices, [1])
+        self.assertEqual(self.editor.settings["glossary_editor"]["type_filter"], "Automática")
+
+    def test_hidden_selection_is_identified_when_filter_changes(self):
+        self.click(self.row_for("rook"))
+        self.editor.type_filter_text.set("Automática")
+        self.editor.restart_at_first_page()
+        self.assertIn("fora do filtro", self.editor.list_count_label.cget("text"))
+        self.assertEqual(self.editor.current_pair(), ("rook", "torre"))
+        self.editor.select_entry(1)
+        self.assertNotIn("fora do filtro", self.editor.list_count_label.cget("text"))
+
+    def test_prefilled_entry_clears_type_filter(self):
+        self.editor.type_filter_text.set("Automática")
+        self.editor.scope_filter_text.set("Somente específicos")
+        self.editor.start_prefilled_entry("bishop", "bispo")
+        self.assertEqual(self.editor.type_filter_text.get(), "Todos os tipos")
+        self.assertEqual(self.editor.scope_filter_text.get(), "Todos os escopos")
+
+    def test_scope_filter_is_saved_and_can_be_cleared(self):
+        self.editor.scope_filter_text.set("Somente específicos")
+        self.editor.restart_at_first_page()
+        self.assertEqual(self.editor.state.filtered_indices, [])
+        self.assertEqual(self.editor.settings["glossary_editor"]["scope_filter"], "Somente específicos")
+        self.editor.clear_all_filters()
+        self.assertEqual(len(self.editor.state.filtered_indices), 2)
+
+    def test_pair_filter_resets_when_the_destination_is_removed(self):
+        self.editor.scope_filter_text.set("Compatíveis com o par atual")
+        self.editor.restart_at_first_page()
+        self.app.target_language.set("")
+        self.assertEqual(self.editor.scope_filter_text.get(), "Todos os escopos")
+
+    def test_compare_pending_button_uses_database_without_saving_draft(self):
+        conn = initialize_database(self.app.output_db)
+        save_translation(conn.cursor(), "p", "pawn", "pt", "en")
+        conn.commit()
+        conn.close()
+        self.app.source_language = tk.StringVar(value="en")
+        self.click(self.row_for("pawn"))
+        self.set_text(self.texts()[1], "peão")
+        def run(_parent, _title, work, on_success=None, **_kwargs):
+            task = types.SimpleNamespace(cancelado=lambda: False, report=lambda *_args: None)
+            on_success(work(task))
+        with unittest.mock.patch.object(glossary_editor, "run_with_progress", side_effect=run), \
+             unittest.mock.patch.object(glossary_editor.messagebox, "showinfo") as dialog:
+            self.click(self.editor.btn_compare_pending)
+        self.assertIn("1 de 1", dialog.call_args.args[1])
+        self.assertIn("peao", dialog.call_args.args[1])
+        self.assertIn("peão", dialog.call_args.args[1])
+        self.assertIn(("pawn", "peao", "automatic", 0, ""), self.entries_on_disk())
+
     def tipos_em_disco(self):
         return {(orig, new): tipo for orig, new, tipo, _p, _s in self.entries_on_disk()}
 
@@ -6691,8 +6923,7 @@ class GlossaryPromotionPreviewTests(EditorWindowTestCase):
         self.assertTrue(inst.state.dirty, "recusar a promocao nao pode 'salvar' o formulario")
         self.assertIn("nada foi gravado", inst.msg_label.cget("text"))
 
-    def test_resaving_an_unchanged_automatic_rule_does_not_measure(self):
-        """Nao ha impacto NOVO a mostrar: a regra ja e automatica e ja diz isto."""
+    def test_changing_automatic_priority_measures_before_saving(self):
         self.click(self.row_for("pawn"))
         inst = self.editor
         inst.priority_text.set("5")
@@ -6701,8 +6932,19 @@ class GlossaryPromotionPreviewTests(EditorWindowTestCase):
 
         self.click(self.button("Salvar"))
 
-        self.assertEqual(self.previas, [])
+        self.assertEqual(self.previas, [("pawn", "peao", "automatic", 5, "")])
         self.assertIn(("pawn", "peao", "automatic", 5, ""), self.entries_on_disk())
+
+    def test_declining_automatic_scope_change_preserves_the_existing_rule(self):
+        self.resposta = False
+        self.click(self.row_for("pawn"))
+        self.editor.scope_text.set("en>pt")
+        self.editor.mark_dirty()
+        self.pump()
+        self.click(self.button("Salvar"))
+        self.assertEqual(self.previas, [("pawn", "peao", "automatic", 0, "en>pt")])
+        self.assertIn(("pawn", "peao", "automatic", 0, ""), self.entries_on_disk())
+        self.assertTrue(self.editor.state.dirty)
 
     def test_changing_the_text_of_an_automatic_rule_measures_again(self):
         self.click(self.row_for("pawn"))
@@ -6783,6 +7025,20 @@ class EditorOpenedOnARunTests(EditorWindowTestCase):
         self.assertEqual(editor.selected_source_file(), self.arquivo)
         self.assertEqual(editor.status_segment.get(), "Pendentes")
         self.assertEqual(editor.lang, "pt")
+
+    def test_opening_with_explicit_source_language_filters_first_page(self):
+        editor = edit_window.open_translation_editor(
+            self.app, source_file=self.arquivo, target_language="pt", source_language="en", status_filter="Pendentes"
+        )
+        self.pump()
+        self.assertEqual(editor.selected_source_language(), "en")
+        self.assertEqual(editor.selected_source_file(), self.arquivo)
+        self.assertEqual([row[1] for row in editor.state.rows], ["C tres"])
+
+    def test_opening_with_unknown_source_filters_only_unknown(self):
+        editor = edit_window.open_translation_editor(self.app, target_language="pt", source_language="")
+        self.pump()
+        self.assertEqual(editor.selected_source_language(), "")
 
     def test_the_run_target_wins_over_the_radio_of_the_main_window(self):
         """O usuario pode ter mudado o radio depois; a revisao e do que foi gravado."""
@@ -7203,7 +7459,78 @@ class RepeatedEditsWindowTests(EditorWindowTestCase):
             janela.refresh()
         self.assertIsNone(janela.snapshot)
         self.assertEqual(janela.btn_create.cget("state"), "disabled")
+        self.assertEqual(janela.btn_suggest.cget("state"), "disabled")
+        self.assertEqual(janela.btn_ignore.cget("state"), "disabled")
         self.assertTrue(self.dialogs.messages("error"))
+
+    def test_create_suggestion_does_not_modify_existing_translations(self):
+        janela = self.abrir()
+        conn = initialize_database(self.db_path)
+        before = conn.execute("SELECT id, translated_comment FROM comments ORDER BY id").fetchall()
+        conn.close()
+        self.click(janela.btn_suggest)
+        entries = janela.catalog.list_entries().entries
+        self.assertTrue(any(e.original_text == "troca" and e.replacement_text == "qualidade"
+                            and e.rule_type == "suggestion" and e.scope == "pt" for e in entries))
+        conn = initialize_database(self.db_path)
+        after = conn.execute("SELECT id, translated_comment FROM comments ORDER BY id").fetchall()
+        conn.close()
+        self.assertEqual(before, after)
+
+    def test_filtering_candidates_preserves_data_and_restores_the_list(self):
+        janela = self.abrir()
+        self.assertTrue(janela.items)
+        before = list(janela.items)
+        janela.search_var.set("termo inexistente")
+        self.pump()
+        self.assertEqual(janela.items, [])
+        self.assertEqual(janela.btn_suggest.cget("state"), "disabled")
+        janela.search_var.set("")
+        self.pump()
+        self.assertEqual(janela.items, before)
+
+    def test_ignored_candidate_can_be_restored_without_changing_glossary(self):
+        janela = self.abrir()
+        before = [(e.stable_id, e.revision) for e in janela.catalog.list_entries().entries]
+        self.click(janela.btn_ignore)
+        self.assertEqual(janela.items, [])
+        janela.show_ignored_var.set(True)
+        janela.apply_candidate_filter()
+        self.assertTrue(janela.items[0]["ignored"])
+        self.assertEqual(janela.btn_suggest.cget("state"), "disabled")
+        self.click(janela.btn_ignore)
+        self.assertFalse(janela.items[0]["ignored"])
+        self.assertEqual([(e.stable_id, e.revision) for e in janela.catalog.list_entries().entries], before)
+
+    @needs_room
+    def test_curation_buttons_fit_at_minimum_width(self):
+        janela = self.abrir()
+        janela.win.geometry("760x400+3000+3000")
+        self.pump()
+        for button in (janela.btn_create, janela.btn_suggest, janela.btn_ignore, janela.btn_example):
+            self.assertGreater(button.winfo_width(), 1)
+            self.assertLessEqual(button.winfo_x() + button.winfo_width(), button.master.winfo_width())
+
+    def test_curation_paging_keeps_later_candidates_accessible(self):
+        janela = self.abrir()
+        template = janela.items[0]
+        janela.all_items = [dict(template, old=f"troca {i:03}") for i in range(85)]
+        janela.reset_candidate_filter()
+        self.assertEqual(len(janela.items), 40)
+        self.click(janela.btn_next)
+        self.assertEqual(janela.items[0]["old"], "troca 040")
+        self.click(janela.btn_next)
+        self.assertEqual(len(janela.items), 5)
+        self.assertEqual(janela.items[-1]["old"], "troca 084")
+
+    def test_restore_ignored_list_brings_back_hidden_candidates(self):
+        janela = self.abrir()
+        self.click(janela.btn_ignore)
+        self.assertEqual(janela.items, [])
+        self.assertEqual(janela.btn_restore_ignored.cget("state"), "normal")
+        self.click(janela.btn_restore_ignored)
+        self.assertTrue(janela.items)
+        self.assertFalse(janela.items[0]["ignored"])
 
     # ------------------------------------------------------------- o botao
 
@@ -8130,6 +8457,15 @@ if __name__ == "__main__":
 
 
 class WritingEditorTests(GuiTestCase):
+    def test_progressive_fixture_retires_previous_editor_and_draft_timer(self):
+        old = self.editor
+        old.set_translation_text("rascunho", mark_dirty=True)
+        self.assertIsNotNone(old.state.draft_save_after)
+        self.progressive_ready()
+        self.assertIsNone(old.state.draft_save_after)
+        self.assertFalse(old.win.winfo_exists())
+        self.assertIsNone(self.editor.state.draft_save_after)
+
     def test_database_reset_invalidates_bulk_undo_in_two_open_editors_and_preserves_drafts(self):
         self.check_database_replacement_preserves_drafts(restore=False)
 
@@ -8229,14 +8565,18 @@ class WritingEditorTests(GuiTestCase):
     def progressive_ready(self):
         from test_writing_progressive import assistant
         from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
+        self.editor.cancel_draft_save()
         self.editor.shutdown_writing()
+        self.editor.win.destroy()
         number = getattr(self, "_progressive_count", 0) + 1
         self._progressive_count = number
         service, suggestions, vocabulary = assistant(self.base / f"progressive-{number}")
         self.app.writing_assistant = service
         self.addCleanup(service.shutdown)
         self.editor = edit_window.TranslationEditor(self.app, source_file=self.book)
-        self.editor.set_translation_text("errao errao!", mark_dirty=True, keep_undo=True)
+        self.editor.set_translation_text(
+            "errao errao!", mark_dirty=True, keep_undo=True, autosave_draft=False
+        )
         self.ready()
         self.wait_for(lambda: bool(suggestions.callbacks))
         suggestions.callbacks[-1](SuggestionSnapshot(("erro",), "partial"))
@@ -9332,6 +9672,97 @@ class WritingEditorTests(GuiTestCase):
             self.assertEqual(conn.execute("SELECT translated_comment FROM comments ORDER BY id").fetchall(),
                              [("errao errao",), ("errao",)])
         conn.close()
+
+
+    def test_ignoring_selected_issue_resumes_previous_partial_suggestions(self):
+        from tradutor_pgn.spelling_suggestions_process import SuggestionSnapshot
+        _, suggestions, _, first = self.progressive_ready()
+        self.assertEqual(len(self.editor.writing_panel.issues), 2)
+        self.editor.writing_panel.select(1)
+        self.wait_for(lambda: len(suggestions.callbacks) >= 2)
+        suggestions.callbacks[-1](SuggestionSnapshot(("erro",), "partial"))
+        self.wait_for(lambda: self.editor.writing_panel.active_issue.suggestions_state == "partial")
+        self.editor.ignore_once(self.editor.writing_panel.active_issue)
+        self.assertEqual(self.editor.writing_panel.active_issue.issue_id, first.issue_id)
+        self.wait_for(lambda: len(suggestions.callbacks) >= 3)
+
+
+    def test_bulk_refreshes_other_window_rows_and_preserves_selection(self):
+        item = self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        selected_id = other.current["id"]
+        self.dialogs.askyesno_result = True
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(other.current["id"], selected_id)
+        self.assertEqual([row[2] for row in other.state.rows], ["erro erro", "erro"])
+        self.assertEqual(other.draft_text(), "erro erro")
+        gc.collect()
+        self.editor.undo_writing_bulk()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual([row[2] for row in other.state.rows], ["errao errao", "errao"])
+        self.assertEqual(other.draft_text(), "errao errao")
+
+
+    def test_bulk_refresh_keeps_other_unrelated_dirty_draft(self):
+        with closing(initialize_database(self.db_path)) as conn:
+            save_translation(conn.cursor(), "Three", "correto", "pt", source_language="en")
+            ids = resolve_comment_ids(conn.cursor(), "pt", ["One", "Two", "Three"], source_language="en")
+            record_occurrences(conn.cursor(), self.book, [(1, 1, 1, "One"), (2, 1, 2, "Two"), (3, 1, 3, "Three")], ids)
+            conn.commit()
+        item = self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        other.select_index(2)
+        other.set_translation_text("rascunho manual", mark_dirty=True, keep_undo=True)
+        token = other._writing_history.undo_token
+        self.dialogs.askyesno_result = True
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(other.draft_text(), "rascunho manual")
+        self.assertTrue(other.state.dirty)
+        self.assertIs(other._writing_history.undo_token, token)
+        self.assertEqual([row[2] for row in other.state.rows], ["erro erro", "erro", "correto"])
+
+
+    def test_bulk_refresh_waits_for_other_window_operation(self):
+        item = self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        other._run_writing_job(lambda: release.wait(5), lambda _result: None)
+        self.dialogs.askyesno_result = True
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertTrue(other._writing_busy)
+        release.set()
+        self.wait_for(lambda: not other._writing_busy)
+        self.assertEqual([row[2] for row in other.state.rows], ["erro erro", "erro"])
+        self.assertEqual(other.draft_text(), "erro erro")
+
+
+    def test_external_bulk_undo_refreshes_current_after_filter_removes_it(self):
+        item = self.ready()
+        other = edit_window.TranslationEditor(self.app, source_file=self.book)
+        self.addCleanup(other.shutdown_writing)
+        other.search_text.set("errao")
+        other.apply_search()
+        self.assertEqual(other.draft_text(), "errao errao")
+        self.dialogs.askyesno_result = True
+        self.editor.apply_all_identical(item, "erro")
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertIsNone(other.state.selected_index)
+        self.assertEqual(other.draft_text(), "erro erro")
+        gc.collect()
+        self.editor.undo_writing_bulk()
+        self.wait_for(lambda: not self.editor._writing_busy)
+        self.assertEqual(other.draft_text(), "errao errao")
+        self.assertEqual(other.current["saved_trans"], "errao errao")
+        with closing(initialize_database(self.db_path)) as conn:
+            revision = conn.execute("SELECT writing_revision FROM comments WHERE id=?", (other.current["id"],)).fetchone()[0]
+        self.assertEqual(other.current["writing_revision"], revision)
 
 
 class TextUndoHistoryTests(GuiTestCase):

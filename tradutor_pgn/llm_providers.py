@@ -257,17 +257,32 @@ class LLMTranslator:
         delas (ROADMAP 28.7): e o contexto que o piloto tinha e que o worker
         agora manda; sem ele os campos vao vazios, como o prompt admite.
         """
-        if self.fatal_error is not None:
+        partes = text.split(BATCH_SEPARATOR) if BATCH_SEPARATOR in text else [text]
+        traduzidas = self.translate_batch(partes, target_language, log_message, cancel_flag, contexts)
+        if traduzidas is None:
+            return None
+        return BATCH_SEPARATOR.join(traduzidas)
+
+    def translate_batch(
+        self,
+        parts: Sequence[str],
+        target_language: str,
+        log_message: LogMessage | None = None,
+        cancel_flag: CancelFlag | None = None,
+        contexts: Sequence[tuple[str, str]] | None = None,
+    ) -> list[str] | None:
+        """Traduz comentarios individualizados, preservando separadores literais."""
+        if not parts or self.fatal_error is not None:
             return None
         if cancel_flag is not None and cancel_flag.is_set():
             return None
-        partes = text.split(BATCH_SEPARATOR) if BATCH_SEPARATOR in text else [text]
+        partes = list(parts)
         contextos = list(contexts or [])
         if len(contextos) != len(partes):
             contextos = [("", "")] * len(partes)
         if len(partes) == 1 and partes[0] in self._divided:
             # Ja saiu certo de uma das metades do ultimo lote dividido.
-            return self._divided[partes[0]]
+            return [self._divided[partes[0]]]
         if len(partes) > 1:
             self._divided = {}
         traduzidas = self._translate_parts(partes, contextos, log_message, cancel_flag)
@@ -275,7 +290,7 @@ class LLMTranslator:
             return None
         # O que faltou volta vazio: o worker ve o vazio como parte deslocada e
         # reenvia o comentario sozinho — o mesmo caminho do lote desalinhado.
-        return BATCH_SEPARATOR.join(t or "" for t in traduzidas)
+        return [t or "" for t in traduzidas]
 
     def _translate_parts(
         self,

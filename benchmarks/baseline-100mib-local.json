@@ -1,0 +1,29 @@
+{
+  "timestamp_utc": "2026-11-14T20:11:32.005287+00:00",
+  "environment": {
+    "python": "3.13.2",
+    "platform": "Windows-10-10.0.19045-SP0",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 23 Model 113 Stepping 0, AuthenticAMD",
+    "logical_cpus": 12
+  },
+  "method": "p95 nearest-rank; pico Python medido em execução separada com tracemalloc",
+  "results": [
+    {
+      "target_bytes": 104857600,
+      "size_bytes": 104857704,
+      "comments": 624153,
+      "samples": 5,
+      "durations_seconds": [
+        2.4548181999707595,
+        2.3849742999882437,
+        2.416650800034404,
+        2.377662699960638,
+        2.410285899997689
+      ],
+      "median_seconds": 2.410285899997689,
+      "p95_seconds": 2.4548181999707595,
+      "peak_python_bytes": 441496976
+    }
+  ]
+}

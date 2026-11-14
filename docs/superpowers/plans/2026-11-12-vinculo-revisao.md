@@ -1,0 +1,3 @@
+﻿# RG-031 — vínculo seguro com revisão
+
+Para novos pacotes, incluir identificador aleatório no manifesto e registrar no banco local uma ligação desse identificador ao caminho de origem e par de idiomas, sem colocar caminhos absolutos no manifesto. Falha no registro não invalida pacote publicado e deve ser informada. A biblioteca só oferece revisão quando o identificador existe no banco, o manifesto ainda corresponde ao par e o arquivo tem ocorrências registradas; não presumir ligação para pacotes antigos nem associar por nome. Abrir editor com arquivo, origem e destino corretos. Testar vínculos ambíguos, banco diferente, ausência de ocorrências, falhas de registro e início da revisão. Preservar todos os dados e versões anteriores.

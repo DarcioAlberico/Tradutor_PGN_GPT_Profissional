@@ -8,6 +8,14 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from .app_paths import glossary_catalog_path
+from .app_config import LANGUAGES
+from .background_task import TaskCanceled, run_with_progress
+from .glossary_ui_helpers import describe_scope, normalize_search_text, scope_from_codes, scope_to_codes
+from .glossary_engine import (
+    SimulationCanceled, SimulationItem, explain_substitutions, format_explanation, format_simulation_examples,
+    simulate_database_rule_change, simulate_rule_change,
+)
+from .editor_text import diff_spans
 from .glossary_catalog import (
     CatalogSnapshot, GlossaryCatalog, GlossaryConflictError, GlossaryDuplicateError,
     GlossaryEntryChanges, GlossaryEntryDraft, canonical_identity, validate_entry_draft,
@@ -27,11 +35,14 @@ from .glossario import (
     _default_substitutions_path,
     glossary_entry_scope,
     normalize_glossary_scope,
+    scope_matches,
     create_glossary_backup,
     describe_glossary_conflict,
     export_glossary_csv,
     glossary_conflicts,
     apply_all_substitutions,
+    clean_comment_for_translation,
+    filter_glossary_entries_by_type,
     interactive_rules_from_entries,
     glossary_entry_pair,
     glossary_entry_priority,
@@ -88,6 +99,8 @@ RULE_TYPE_LABELS = {
     GLOSSARY_RULE_AUTOMATIC: "Automática",
 }
 RULE_TYPE_BY_LABEL = {label: value for value, label in RULE_TYPE_LABELS.items()}
+SCOPE_FILTERS = {"Todos os escopos": None, "Somente globais": "global",
+                 "Somente específicos": "specific", "Compatíveis com o par atual": "compatible"}
 
 
 def rule_type_label(rule_type):
@@ -158,14 +171,30 @@ def glossary_entry_warnings(entries, index, diagnostics=None):
     )
 
 
-def glossary_filter_indices(entries, search_text="", filter_name="Todas", diagnostics=None):
-    query = (search_text or "").strip().lower()
+def glossary_filter_indices(entries, search_text="", filter_name="Todas", diagnostics=None, *, rule_type=None,
+                            scope_filter=None, source_language=None, target_language=None):
+    if scope_filter not in (None, "global", "specific", "compatible"):
+        raise ValueError("Filtro de escopo inválido")
+    if scope_filter == "compatible" and not target_language:
+        raise ValueError("O idioma de destino é necessário")
+    terms = normalize_search_text(search_text or "").split()
     result = []
 
     for index, entry in enumerate(entries):
+        if rule_type is not None and glossary_entry_type(entry) != rule_type:
+            continue
+        scope = glossary_entry_scope(entry)
+        if scope_filter == "global" and scope:
+            continue
+        if scope_filter == "specific" and not scope:
+            continue
+        if scope_filter == "compatible" and not scope_matches(scope, source_language, target_language):
+            continue
         orig, new = glossary_entry_pair(entry)
         label = rule_type_label(glossary_entry_type(entry))
-        if query and query not in orig.lower() and query not in new.lower() and query not in label.lower():
+        fields = (tuple(normalize_search_text(value) for value in
+                        (orig, new, label, scope)) if terms else ())
+        if terms and not all(any(term in value for value in fields) for term in terms):
             continue
 
         warnings = glossary_entry_warnings(entries, index, diagnostics)
@@ -188,6 +217,10 @@ def sort_glossary_indices(entries, indices, sort_name="Ordem do arquivo"):
         return sorted(indices, key=lambda index: (glossary_entry_pair(entries[index])[1].casefold(), index))
     if sort_name == "Maior original":
         return sorted(indices, key=lambda index: (-len(glossary_entry_pair(entries[index])[0]), index))
+    if sort_name == "Maior prioridade":
+        return sorted(indices, key=lambda index: (-glossary_entry_priority(entries[index]), index))
+    if sort_name == "Menor prioridade":
+        return sorted(indices, key=lambda index: (glossary_entry_priority(entries[index]), index))
     return list(indices)
 
 
@@ -409,6 +442,8 @@ class GlossaryEditor:
         restore_or_maximize(self.win, self.app.root, saved_geometry)
 
         self.state = GlossaryEditorState()
+        self.preview_explanation = None
+        self.preview_explanation_context = None
         self.import_preview_window = None
         self.catalog = GlossaryCatalog(glossary_catalog_path(), _default_substitutions_path())
         self.row_buttons = []
@@ -421,6 +456,14 @@ class GlossaryEditor:
         }
 
         self.search_text = tk.StringVar(master=self.win, value="")
+        saved_type_filter = self.editor_settings.get("type_filter", "Todos os tipos")
+        self.type_filter_text = tk.StringVar(master=self.win, value=(
+            saved_type_filter if saved_type_filter in {"Todos os tipos", *RULE_TYPE_BY_LABEL} else "Todos os tipos"
+        ))
+        saved_scope_filter = self.editor_settings.get("scope_filter", "Todos os escopos")
+        self.scope_filter_text = tk.StringVar(master=self.win, value=(
+            saved_scope_filter if saved_scope_filter in SCOPE_FILTERS else "Todos os escopos"
+        ))
         self.test_text_var = tk.StringVar(master=self.win, value="")
         self.sort_text = tk.StringVar(
             master=self.win,
@@ -504,13 +547,18 @@ class GlossaryEditor:
         self.search_entry = ctk.CTkEntry(
             search_bar,
             textvariable=self.search_text,
-            placeholder_text="Buscar original ou substituição",
+            placeholder_text="Buscar texto, tipo ou escopo",
         )
         self.search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        attach_tooltip(self.search_entry, "Busque sem acentos; combine palavras do original, tradução, tipo e escopo.")
         self.btn_search = ctk.CTkButton(search_bar, text="Buscar", width=82)
         self.btn_search.grid(row=0, column=1, padx=(0, 6))
         self.btn_clear_search = ctk.CTkButton(search_bar, text="Limpar", width=74)
         self.btn_clear_search.grid(row=0, column=2)
+        self.btn_clear_filters = ctk.CTkButton(search_bar, text="Limpar filtros", width=105,
+                                               command=self.clear_all_filters)
+        self.btn_clear_filters.grid(row=0, column=3, padx=(6, 0))
+        attach_tooltip(self.btn_clear_filters, "Limpa busca, diagnóstico, tipo e escopo sem descartar a edição.")
 
         self.filter_segment = ctk.CTkSegmentedButton(
             list_frame,
@@ -544,9 +592,18 @@ class GlossaryEditor:
         self.sort_menu = ctk.CTkOptionMenu(
             sort_bar,
             variable=self.sort_text,
-            values=["Ordem do arquivo", "Original A-Z", "Substituição A-Z", "Maior original"],
+            values=["Ordem do arquivo", "Original A-Z", "Substituição A-Z", "Maior original",
+                    "Maior prioridade", "Menor prioridade"],
         )
         self.sort_menu.grid(row=0, column=1, sticky="ew")
+        self.type_filter_menu = ctk.CTkOptionMenu(
+            sort_bar, variable=self.type_filter_text,
+            values=["Todos os tipos", *RULE_TYPE_BY_LABEL], width=130,
+        )
+        self.type_filter_menu.grid(row=0, column=2, sticky="e", padx=(6, 0))
+        self.scope_filter_menu = ctk.CTkOptionMenu(sort_bar, variable=self.scope_filter_text,
+                                                  values=list(SCOPE_FILTERS))
+        self.scope_filter_menu.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(6, 0))
 
         self.counts_label = ctk.CTkLabel(list_frame, text="", anchor="w")
         self.counts_label.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 6))
@@ -605,6 +662,12 @@ class GlossaryEditor:
             width=160,
         )
         self.type_menu.grid(row=0, column=1, sticky="w")
+        attach_tooltip(
+            self.type_menu,
+            "Limpeza: altera o original antes de traduzir.\n"
+            "Sugestão: oferece uma opção ao revisor ou modelo.\n"
+            "Automática: aplica a substituição depois da tradução.",
+        )
 
         # Campo de texto, e nao um seletor de valores: a prioridade e um inteiro
         # qualquer no arquivo, e um `Substituicoes.txt` editado a mao pode trazer
@@ -621,12 +684,19 @@ class GlossaryEditor:
             justify="center",
         )
         self.priority_entry.grid(row=0, column=3, sticky="w")
-        ctk.CTkLabel(
-            type_bar,
-            text="(maior vence; 0 deixa o comprimento decidir)",
-            text_color=MUTED_TEXT_COLOR,
-            anchor="w",
-        ).grid(row=0, column=4, sticky="w", padx=(8, 0))
+        attach_tooltip(self.priority_entry, "Maior prioridade vence; com 0, o comprimento decide.")
+        presets = ctk.CTkFrame(type_bar, fg_color="transparent")
+        presets.grid(row=0, column=4, sticky="w", padx=(8, 0))
+        self.priority_preset_buttons = {}
+        for label, value, caption in (("Baixa (-1)", -1, "Baixa"), ("Normal (0)", 0, "Normal"), ("Alta (+1)", 1, "Alta")):
+            button = ctk.CTkButton(presets, text=caption, width=60, height=24,
+                                   command=lambda priority=value: self.set_priority(priority))
+            button.pack(side=tk.LEFT, padx=(0, 6))
+            attach_tooltip(button, f"{label}: define a prioridade; valores maiores ainda podem prevalecer.")
+            self.priority_preset_buttons[label] = button
+        self.type_help_label = ctk.CTkLabel(type_bar, text="", text_color=MUTED_TEXT_COLOR, anchor="w")
+        self.type_help_label.grid(row=1, column=0, columnspan=5, sticky="w", pady=(2, 0))
+        self.refresh_type_help()
 
         # Campo de texto pelo mesmo motivo da prioridade: o escopo aceita um
         # codigo de idioma, um par (`en>pt`) ou `*`, e um arquivo editado a mao
@@ -646,14 +716,31 @@ class GlossaryEditor:
         )
         self.scope_entry.grid(row=0, column=1, sticky="w")
         padrao = self.file_default_scope or "todos"
-        ctk.CTkLabel(
-            scope_bar,
-            text=(
-                f"(destino, ou 'en>pt'; '*' = todos; padrão do arquivo: {padrao})"
-            ),
-            text_color=MUTED_TEXT_COLOR,
-            anchor="w",
-        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        attach_tooltip(self.scope_entry, f"Destino ou par 'en>pt'; '*' = todos; padrão do arquivo: {padrao}.")
+        scope_presets = ctk.CTkFrame(scope_bar, fg_color="transparent")
+        scope_presets.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.scope_preset_buttons = {}
+        for label, value in (("Todos", "all"), ("Destino atual", "target"), ("Par atual", "pair")):
+            button = ctk.CTkButton(scope_presets, text=label, width=105, height=24,
+                                   command=lambda selection=value: self.apply_scope_preset(selection))
+            button.pack(side=tk.LEFT, padx=(0, 6))
+            self.scope_preset_buttons[label] = button
+        selectors = ctk.CTkFrame(scope_bar, fg_color="transparent")
+        selectors.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        labels = ["Todos", "Personalizado"] + [name for name, _ in LANGUAGES]
+        self.scope_source_var = tk.StringVar(master=self.win, value="Todos")
+        self.scope_target_var = tk.StringVar(master=self.win, value="Todos")
+        ctk.CTkLabel(selectors, text="Origem:").pack(side=tk.LEFT, padx=(0, 4))
+        self.scope_source_menu = ctk.CTkOptionMenu(selectors, variable=self.scope_source_var, values=labels, width=115,
+                                                  command=lambda _value: self.apply_scope_selectors())
+        self.scope_source_menu.pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkLabel(selectors, text="Destino:").pack(side=tk.LEFT, padx=(0, 4))
+        self.scope_target_menu = ctk.CTkOptionMenu(selectors, variable=self.scope_target_var, values=labels, width=115,
+                                                  command=lambda _value: self.apply_scope_selectors())
+        self.scope_target_menu.pack(side=tk.LEFT, padx=(0, 8))
+        self.scope_help_label = ctk.CTkLabel(selectors, text=describe_scope(self.scope_text.get()),
+                                             text_color=MUTED_TEXT_COLOR, anchor="w")
+        self.scope_help_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self.validation_label = ctk.CTkLabel(
             detail_frame,
@@ -701,21 +788,43 @@ class GlossaryEditor:
         test_header.grid(row=8, column=0, sticky="ew", padx=10, pady=(0, 2))
         test_header.columnconfigure(1, weight=1)
         ctk.CTkLabel(test_header, text="Teste rápido:").grid(row=0, column=0, sticky="w")
+        self.preview_status_label = ctk.CTkLabel(test_header, text="", text_color=MUTED_TEXT_COLOR, anchor="w")
+        self.preview_status_label.grid(row=0, column=1, sticky="ew", padx=(8, 4))
         self.btn_apply_preview = ctk.CTkButton(test_header, text="Aplicar selecionada", width=140)
         self.btn_apply_preview.grid(row=0, column=2, sticky="e")
         self.btn_apply_all_preview = ctk.CTkButton(test_header, text="Aplicar todas", width=110)
         self.btn_apply_all_preview.grid(row=0, column=3, sticky="e", padx=(6, 0))
+        self.btn_preview_details = ctk.CTkButton(test_header, text="Ver regras", width=95,
+                                                  state="disabled", command=self.show_preview_explanation)
+        self.btn_preview_details.grid(row=0, column=4, sticky="e", padx=(6, 0))
 
+        test_row = ctk.CTkFrame(detail_frame, fg_color="transparent")
+        test_row.grid(row=9, column=0, sticky="ew", padx=10, pady=(0, 6))
+        test_row.columnconfigure(0, weight=1)
         self.test_input = ctk.CTkEntry(
-            detail_frame,
+            test_row,
             textvariable=self.test_text_var,
             placeholder_text="Digite ou cole uma frase para testar a substituição selecionada",
         )
-        self.test_input.grid(row=9, column=0, sticky="ew", padx=10, pady=(0, 6))
+        self.test_input.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.btn_clear_preview = ctk.CTkButton(test_row, text="Limpar", width=70, command=self.clear_preview)
+        self.btn_clear_preview.grid(row=0, column=1, padx=(0, 6))
+        self.btn_copy_preview = ctk.CTkButton(test_row, text="Copiar resultado", width=115, command=self.copy_preview)
+        self.btn_copy_preview.grid(row=0, column=2)
+        self.btn_compare_draft = ctk.CTkButton(test_row, text="Comparar edição", width=130,
+                                               command=self.compare_draft_preview)
+        self.btn_compare_draft.grid(row=0, column=3, padx=(6, 0))
+        attach_tooltip(self.test_input, "Ctrl+T: focar teste rápido; Ctrl+Shift+T: limpar o texto.")
 
         self.preview_text = ctk.CTkTextbox(detail_frame, height=90, wrap=tk.WORD)
         self.preview_text.grid(row=10, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self.preview_text.configure(state="disabled")
+        self.btn_compare_pending = ctk.CTkButton(
+            detail_frame, text="Comparar pendentes", width=160,
+            command=lambda: self.compare_draft_preview(database=True),
+        )
+        self.btn_compare_pending.grid(row=11, column=0, sticky="e", padx=10, pady=(0, 8))
+        attach_tooltip(self.btn_compare_pending, "Compara o catálogo e a edição nas traduções pendentes, sem gravar.")
 
     def build_footer(self):
         """Rodape: mensagens, indicador de alteracoes e a barra de acoes."""
@@ -756,6 +865,13 @@ class GlossaryEditor:
             self.buttons[text] = button
 
     def connect_events(self):
+        self._language_traces = []
+        for name in ("source_language", "target_language"):
+            variable = getattr(self.app, name, None)
+            if hasattr(variable, "trace_add"):
+                token = variable.trace_add("write", self.refresh_pair_filter)
+                self._language_traces.append((variable, token))
+        self.win.bind("<Destroy>", self.remove_language_traces, add="+")
         """Liga os comandos, os atalhos e o fechamento da janela."""
         self.buttons["Nova entrada"].configure(command=self.new_entry)
         self.buttons["Salvar"].configure(command=self.save_current)
@@ -774,13 +890,16 @@ class GlossaryEditor:
         self.btn_keep_conflict.configure(command=self.keep_this_rule, state="disabled")
         self.btn_promote_conflict.configure(command=self.promote_this_rule)
         self.priority_text.trace_add("write", lambda *_a: self.mark_dirty())
+        self.scope_text.trace_add("write", self._scope_changed)
+        self.rule_type_text.trace_add("write", self._type_changed)
+        self.test_text_var.trace_add("write", lambda *_a: self.refresh_preview())
         self.btn_apply_preview.configure(command=self.refresh_preview)
         self.btn_apply_all_preview.configure(command=self.apply_all_to_preview)
         self.sort_menu.configure(command=self.restart_at_first_page)
+        self.type_filter_menu.configure(command=self.restart_at_first_page)
+        self.scope_filter_menu.configure(command=self.restart_at_first_page)
         self.filter_segment.configure(command=self.restart_at_first_page)
-        self.type_menu.configure(command=lambda _value: self.mark_dirty())
         self.search_entry.bind("<Return>", lambda _event: self.apply_search())
-        self.test_input.bind("<KeyRelease>", lambda _event: self.refresh_preview())
         self.orig_text.bind(
             "<<Modified>>",
             lambda event: (self.orig_text.edit_modified(False), self.mark_dirty())[1],
@@ -793,6 +912,8 @@ class GlossaryEditor:
         self.win.bind("<Control-S>", lambda _event: (self.save_current(), "break")[1])
         self.win.bind("<Control-n>", lambda _event: (self.new_entry(), "break")[1])
         self.win.bind("<Control-N>", lambda _event: (self.new_entry(), "break")[1])
+        self.win.bind("<Control-t>", lambda _event: self.focus_preview())
+        self.win.bind("<Control-Shift-T>", lambda _event: self.clear_preview_shortcut())
         # A paridade minima com o editor de traducoes (ROADMAP 22.12). Este
         # editor ligava dois atalhos contra os treze do outro, e os que faltavam
         # sao os do fluxo de quem varre uma lista: achar, andar e virar pagina.
@@ -844,6 +965,8 @@ class GlossaryEditor:
             {
                 "filter": self.filter_segment.get(),
                 "sort": self.sort_text.get(),
+                "type_filter": self.type_filter_text.get(),
+                "scope_filter": self.scope_filter_text.get(),
                 "font_size": self.font_size,
             },
             window=self.win,
@@ -884,6 +1007,18 @@ class GlossaryEditor:
     def set_rule_type(self, rule_type):
         self.rule_type_text.set(rule_type_label(glossary_entry_type((None, None, rule_type))))
 
+    def refresh_type_help(self):
+        examples = {
+            GLOSSARY_RULE_CLEANUP: "Limpeza: antes de traduzir; por exemplo, remover um marcador.",
+            GLOSSARY_RULE_SUGGESTION: "Sugestão: oferece uma opção ao revisor ou modelo.",
+            GLOSSARY_RULE_AUTOMATIC: "Automática: substitui depois de traduzir; por exemplo, rook → torre.",
+        }
+        self.type_help_label.configure(text=examples[self.current_rule_type()])
+
+    def _type_changed(self, *_args):
+        self.refresh_type_help()
+        self.mark_dirty()
+
     def current_priority(self):
         """A prioridade digitada, ou `None` se o texto nao for um inteiro.
 
@@ -901,6 +1036,42 @@ class GlossaryEditor:
 
     def set_priority(self, priority):
         self.priority_text.set(str(normalize_glossary_priority(priority)))
+
+    def apply_scope_preset(self, selection):
+        source, target = self.preview_languages()
+        if selection == "all":
+            self.scope_text.set("*")
+        elif selection == "target" and target:
+            self.scope_text.set(target)
+        elif selection == "pair" and source and target:
+            self.scope_text.set(f"{source}>{target}")
+        else:
+            self.show_message("Declare os idiomas necessários na janela principal.", WARNING_COLOR)
+
+    def _scope_changed(self, *_args):
+        codes = scope_to_codes(self.scope_text.get())
+        names = {code: name for name, code in LANGUAGES}
+        if codes is None:
+            self.scope_source_var.set("Personalizado")
+            self.scope_target_var.set("Personalizado")
+        else:
+            self.scope_source_var.set(names.get(codes[0], "Todos"))
+            self.scope_target_var.set(names.get(codes[1], "Todos"))
+        self.scope_help_label.configure(text=describe_scope(self.scope_text.get()))
+        self.mark_dirty()
+
+    def apply_scope_selectors(self):
+        source = self.scope_source_var.get()
+        target = self.scope_target_var.get()
+        if "Personalizado" in (source, target):
+            self.show_message("Ajuste o escopo avançado ou escolha Todos antes de usar os seletores.", WARNING_COLOR)
+            self._scope_changed()
+            return
+        codes = {name: code for name, code in LANGUAGES}
+        if source not in ("Todos", *codes) or target not in ("Todos", *codes):
+            self._scope_changed()
+            return
+        self.scope_text.set(scope_from_codes(codes.get(source, ""), codes.get(target, "")))
 
     def current_scope(self):
         """O escopo digitado, ja canonico.
@@ -970,6 +1141,7 @@ class GlossaryEditor:
     def mark_dirty(self, _event=None):
         if not self.state.loading:
             self.set_dirty(self.form_changed())
+            self.refresh_preview()
 
     def preview_languages(self):
         """O par com que a previa avalia o escopo (garantia S11).
@@ -1009,10 +1181,13 @@ class GlossaryEditor:
         primeira — num paragrafo com tres "bishop" ela mostrava um resultado que
         nunca aconteceria.
         """
+        self.preview_explanation = None
+        self.preview_explanation_context = None
+        self.btn_preview_details.configure(state="disabled")
         orig, new = self.current_pair()
         sample = self.test_text_var.get()
         if not orig:
-            self.set_preview_text(sample)
+            self.set_preview_text(sample, "Informe uma regra" if sample else "Digite um texto")
             return
 
         entrada = (
@@ -1022,23 +1197,135 @@ class GlossaryEditor:
             self.current_priority() or 0,
             self.current_scope(),
         )
-        regras = self.preview_rules([entrada])
+        regras = filter_glossary_entries_by_type([entrada], self.current_rule_type(), *self.preview_languages())
+        source, target = self.preview_languages()
+        if not scope_matches(self.current_scope(), source, target):
+            self.set_preview_text(sample, "Fora do escopo atual")
+            return
+        if self.current_priority() is None:
+            self.set_preview_text(sample, "Prioridade inválida")
+            return
         self.set_preview_text(
-            apply_all_substitutions(sample, regras) if regras else sample
+            (clean_comment_for_translation(sample, regras) if self.current_rule_type() == GLOSSARY_RULE_CLEANUP
+             else apply_all_substitutions(sample, regras)) if regras else sample
         )
 
     def apply_all_to_preview(self):
-        self.set_preview_text(
-            apply_all_substitutions(
-                self.test_text_var.get(), self.preview_rules(self.state.entries)
-            )
-        )
+        context = (self.test_text_var.get(), list(self.preview_rules(self.state.entries)))
+        explanation = explain_substitutions(*context)
+        self.preview_explanation = explanation
+        self.preview_explanation_context = context
+        self.btn_preview_details.configure(state="normal" if explanation.matches else "disabled")
+        count = len(explanation.matches)
+        rules = {(m.pattern, m.configured_replacement, m.priority) for m in explanation.matches}
+        self.set_preview_text(explanation.text, f"{count} ocorrência(s), {len(rules)} regra(s)")
 
-    def set_preview_text(self, value):
+    def show_preview_explanation(self):
+        context = self.preview_explanation_context
+        if context is None:
+            return
+
+        def work(task):
+            try:
+                return explain_substitutions(*context, include_suppressed=True, should_cancel=task.cancelado)
+            except SimulationCanceled as exc:
+                raise TaskCanceled() from exc
+
+        def done(explanation):
+            if self.preview_explanation_context is context:
+                messagebox.showinfo("Regras aplicadas", format_explanation(explanation), parent=self.win)
+
+        run_with_progress(self.win, "Analisar regras", work, on_success=done,
+                          on_error=lambda error: messagebox.showerror(
+                              "Analisar regras", f"Não foi possível analisar: {error}", parent=self.win),
+                          message="Analisando regras concorrentes…")
+
+    def compare_draft_preview(self, *, database=False):
+        """Compara a entrada aberta com o catálogo usando apenas o texto de teste."""
+        orig, replacement = self.current_pair()
+        priority = self.current_priority()
+        source, target = self.preview_languages()
+        sample = self.test_text_var.get()
+        if not orig or priority is None or (not database and not sample) or not target:
+            message = ("Informe regra, prioridade e idioma de destino." if database else
+                       "Informe regra, prioridade, texto de teste e idioma de destino.")
+            self.show_message(message, WARNING_COLOR)
+            return
+        before = list(self.state.entries)
+        after = list(before)
+        entry = (orig, replacement, self.current_rule_type(), priority, self.current_scope())
+        index = self.state.selected_index
+        if index is None:
+            after.append(entry)
+        else:
+            after[index] = entry
+        def work(task):
+            try:
+                if database:
+                    return simulate_database_rule_change(
+                        self.app.output_db, before, after, target_language=target,
+                        source_language=source, should_cancel=task.cancelado,
+                        progress_callback=task.report,
+                    )
+                return simulate_rule_change([SimulationItem(sample, source, target)], before, after,
+                                            should_cancel=task.cancelado)
+            except SimulationCanceled as exc:
+                raise TaskCanceled() from exc
+
+        def done(result):
+            if database:
+                text = (f"{result.changed} de {result.scanned} traduções pendentes teriam resultado diferente "
+                        f"no destino {target}"
+                        + (f" e origem {source}." if source else "; todas as origens foram consideradas."))
+                if result.examples:
+                    text += "\n\n" + format_simulation_examples(result)
+            elif result.examples:
+                text = format_simulation_examples(result)
+            else:
+                text = "A edição não altera o resultado automático deste texto no par escolhido."
+            text += "\n\nComparação somente das regras automáticas do catálogo; não inclui regras de semente ou limpeza."
+            if database:
+                text += " As regras são reaplicadas aos textos já armazenados; traduções futuras podem ser diferentes."
+            messagebox.showinfo("Comparar edição", text, parent=self.win)
+
+        run_with_progress(self.win, "Comparar edição", work, on_success=done,
+                          on_error=lambda error: messagebox.showerror(
+                              "Comparar edição", f"Não foi possível comparar: {error}", parent=self.win),
+                          message="Comparando regras automáticas…")
+
+    def set_preview_text(self, value, status=None):
         self.preview_text.configure(state="normal")
         self.preview_text.delete("1.0", tk.END)
         self.preview_text.insert("1.0", value)
+        sample = self.test_text_var.get()
+        if sample != value and max(len(sample), len(value)) <= 2000 and all(ord(c) <= 0xFFFF for c in sample + value):
+            _before, after = diff_spans(sample, value)
+            dark = ctk.get_appearance_mode() == "Dark"
+            self.preview_text.tag_config("preview_change", background="#14532d" if dark else "#bbf7d0",
+                                         foreground="#ffffff" if dark else "#111827")
+            for start, end in after:
+                self.preview_text.tag_add("preview_change", f"1.0+{start}c", f"1.0+{end}c")
         self.preview_text.configure(state="disabled")
+        self.preview_status_label.configure(text=status or ("Texto alterado" if sample != value else "Sem alteração"))
+
+    def clear_preview(self):
+        self.test_text_var.set("")
+
+    def clear_preview_shortcut(self):
+        self.clear_preview()
+        return "break"
+
+    def focus_preview(self):
+        self.test_input.focus_set()
+        return "break"
+
+    def copy_preview(self):
+        try:
+            self.win.clipboard_clear()
+            self.win.clipboard_append(self.preview_text.get("1.0", "end-1c"))
+            self.show_message("Resultado copiado.")
+        except tk.TclError:
+            self.show_message("Não foi possível copiar o resultado.", ERROR_COLOR)
 
     def refresh_validation(self):
         orig, new = self.current_pair()
@@ -1129,17 +1416,26 @@ class GlossaryEditor:
         ):
             return
 
-        try:
-            result = self.catalog.update(*identity, GlossaryEntryChanges(priority=nova))
-        except GlossaryConflictError as exc:
-            self.report_revision_conflict(exc)
-            return
-        except Exception as exc:
-            messagebox.showerror("Erro", f"Erro ao gravar glossário:\n{exc}", parent=self.win)
-            return
+        def gravar():
+            try:
+                result = self.catalog.update(*identity, GlossaryEntryChanges(priority=nova))
+            except GlossaryConflictError as exc:
+                self.report_revision_conflict(exc)
+                return
+            except Exception as exc:
+                messagebox.showerror("Erro", f"Erro ao gravar glossário:\n{exc}", parent=self.win)
+                return
 
-        self.show_message(f"Regra priorizada (prioridade {nova})")
-        self.finish_mutation(result, identity[0])
+            self.show_message(f"Regra priorizada (prioridade {nova})")
+            self.finish_mutation(result, identity[0])
+
+        entrada = promovidas[index]
+        if glossary_entry_type(entrada) == GLOSSARY_RULE_AUTOMATIC:
+            orig, new = glossary_entry_pair(entrada)
+            self.measure_promotion_then(orig, new, GLOSSARY_RULE_AUTOMATIC, nova,
+                                        glossary_entry_scope(entrada), gravar)
+        else:
+            gravar()
 
     def load_rows_from_file(self):
         try:
@@ -1178,11 +1474,19 @@ class GlossaryEditor:
         return self.state.validation_lookup
 
     def apply_filter(self):
+        source, target = self.preview_languages()
+        scope_filter = SCOPE_FILTERS[self.scope_filter_text.get()]
+        if scope_filter == "compatible" and not target:
+            self.scope_filter_text.set("Todos os escopos")
+            scope_filter = None
+            self.show_message("Escolha um idioma de destino na janela principal para filtrar pelo par.", WARNING_COLOR)
         self.state.filtered_indices = glossary_filter_indices(
             self.state.entries,
             self.search_text.get(),
             self.filter_segment.get(),
             self.state.diagnostics,
+            rule_type=RULE_TYPE_BY_LABEL.get(self.type_filter_text.get()),
+            scope_filter=scope_filter, source_language=source, target_language=target,
         )
         self.state.filtered_indices = sort_glossary_indices(
             self.state.entries, self.state.filtered_indices, self.sort_text.get()
@@ -1255,6 +1559,20 @@ class GlossaryEditor:
         self.state.page_index = 0
         self.apply_filter()
 
+    def refresh_pair_filter(self, *_args):
+        if self.scope_filter_text.get() == "Compatíveis com o par atual":
+            self.restart_at_first_page()
+
+    def remove_language_traces(self, event):
+        if event.widget is not self.win:
+            return
+        for variable, token in self._language_traces:
+            try:
+                variable.trace_remove("write", token)
+            except tk.TclError:
+                pass
+        self._language_traces.clear()
+
     def refresh_counts(self):
         counts = glossary_counts(self.state.entries, self.state.diagnostics)
         self.counts_label.configure(
@@ -1265,9 +1583,15 @@ class GlossaryEditor:
                 f"Avisos: {counts['invalid']}"
             )
         )
-        self.list_count_label.configure(text=f"{len(self.state.filtered_indices)} exibidas")
+        self.update_filter_selection_label()
         self.update_page_controls()
         self.update_delete_shown_duplicates_button()
+
+    def update_filter_selection_label(self):
+        label = f"{len(self.state.filtered_indices)} exibidas"
+        if self.state.selected_index is not None and self.state.selected_index not in self.state.filtered_indices:
+            label += " · seleção fora do filtro"
+        self.list_count_label.configure(text=label)
 
     def shown_duplicate_extras(self):
         if self.filter_segment.get() != "Duplicadas":
@@ -1353,6 +1677,7 @@ class GlossaryEditor:
         self.state.loading = False
         self.set_dirty(False)
         self.update_row_selection(index)
+        self.update_filter_selection_label()
         self.refresh_conflict()
         self.orig_text.focus_set()
 
@@ -1378,6 +1703,8 @@ class GlossaryEditor:
         self.state.page_index = 0
         self.search_text.set("")
         self.filter_segment.set("Todas")
+        self.type_filter_text.set("Todos os tipos")
+        self.scope_filter_text.set("Todos os escopos")
         self.state.loading = True
         self.set_text(self.orig_text, (original or "").strip())
         self.set_text(self.new_text, (replacement or "").strip())
@@ -1557,7 +1884,7 @@ class GlossaryEditor:
 
         self.confirm_promotion_then(orig, new, rule_type, priority, scope, gravar)
 
-    def promotes_to_automatic(self, orig, new, rule_type):
+    def promotes_to_automatic(self, orig, new, rule_type, priority, scope):
         """Gravar este formulario cria um comportamento automatico NOVO?
 
         Sim quando o tipo e `automatic` e a linha de base nao era esta mesma
@@ -1571,7 +1898,8 @@ class GlossaryEditor:
         base = self.form_baseline
         return not (
             base["type"] == GLOSSARY_RULE_AUTOMATIC
-            and (base["orig"], base["new"]) == (orig, new)
+            and (base["orig"], base["new"], base["priority"], base["scope"])
+            == (orig, new, normalize_glossary_priority(priority), normalize_glossary_scope(scope))
         )
 
     def confirm_promotion_then(self, orig, new, rule_type, priority, scope, gravar):
@@ -1583,7 +1911,7 @@ class GlossaryEditor:
         `return` — e enquanto ela roda o formulario continua sujo, que e o
         estado verdadeiro: nada foi gravado ainda.
         """
-        if not self.promotes_to_automatic(orig, new, rule_type):
+        if not self.promotes_to_automatic(orig, new, rule_type, priority, scope):
             gravar()
             return
         self.measure_promotion_then(orig, new, rule_type, priority, scope, gravar)
@@ -1875,6 +2203,14 @@ class GlossaryEditor:
         self.apply_filter()
         if self.state.selected_id is None and self.state.filtered_indices:
             self.select_entry(self.state.filtered_indices[0])
+
+    def clear_all_filters(self):
+        self.search_text.set("")
+        self.filter_segment.set("Todas")
+        self.type_filter_text.set("Todos os tipos")
+        self.scope_filter_text.set("Todos os escopos")
+        self.state.page_index = 0
+        self.apply_filter()
 
     def close_editor(self):
         if self.state.dirty and not self.confirm_discard_changes():

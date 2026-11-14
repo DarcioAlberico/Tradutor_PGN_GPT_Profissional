@@ -1,5 +1,9 @@
 # Roadmap — PGN Tradutor Pro
 
+> Este documento permanece como diario tecnico e historico das decisoes. O
+> plano consolidado e priorizado mais recente esta em
+> [Revisão Geral](REVISAO_GERAL.md).
+
 Registro das melhorias do programa. Cada item traz o motivo, o impacto medido
 (quando ha medicao) e como a correcao foi verificada — inclusive quando a
 verificacao mostrou que a analise estava errada, caso em que o erro fica no

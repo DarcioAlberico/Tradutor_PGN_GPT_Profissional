@@ -1,7 +1,10 @@
 import json
+import errno
 import os
 import sys
 import threading
+import time
+from contextlib import contextmanager
 from collections.abc import Mapping
 from datetime import datetime
 from typing import TypedDict, get_args
@@ -42,11 +45,26 @@ def load_settings(path=None):
     try:
         with open(path, "r", encoding="utf-8-sig") as file:
             data = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError, OSError, UnicodeDecodeError, RecursionError):
         return {}
 
     if not isinstance(data, dict):
         return {}
+    return data
+
+
+def read_settings_strict(path=None):
+    """Lê configurações sem recuperar, renomear ou ignorar corrupção."""
+    path = default_settings_path() if path is None else path
+    try:
+        with open(path, "r", encoding="utf-8-sig") as file:
+            data = json.load(file)
+    except FileNotFoundError:
+        return {}
+    except RecursionError as exc:
+        raise ValueError("Configurações excessivamente aninhadas") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Configurações não são um objeto JSON")
     return data
 
 
@@ -124,7 +142,7 @@ def _read_settings_for_update(path):
 
     try:
         data = json.loads(raw.decode("utf-8-sig"))
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError):
         data = None
 
     if isinstance(data, dict):
@@ -132,6 +150,10 @@ def _read_settings_for_update(path):
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     aside = f"{path}.corrompido-{stamp}"
+    suffix = 1
+    while os.path.lexists(aside):
+        aside = f"{path}.corrompido-{stamp}-{suffix}"
+        suffix += 1
     try:
         os.replace(path, aside)
     except OSError as exc:
@@ -176,10 +198,72 @@ def save_settings(settings, path=None):
 # a primeira escreveu desaparece — exatamente a perda que a garantia R4 existe para
 # impedir, agora por corrida em vez de por snapshot velho.
 #
-# O lock protege este processo, que e onde a corrida existe: `save_settings` grava
-# num temporario e troca de nome, entao um segundo processo veria um arquivo
-# completo, nunca um pela metade.
+# O lock de thread protege esta instancia; o arquivo lateral estavel protege o
+# ciclo completo entre instancias, inclusive durante a troca atomica do JSON.
 _UPDATE_LOCK = threading.Lock()
+SETTINGS_LOCK_TIMEOUT_SECONDS = 10.0
+
+
+class SettingsLockCanceled(Exception):
+    """A espera por um bloqueio de arquivo foi cancelada."""
+
+
+@contextmanager
+def _settings_lock_handle(path, *, should_cancel=None):
+    """Bloqueia o mesmo arquivo lateral enquanto qualquer processo atualiza."""
+    target = os.path.normcase(os.path.abspath(os.fspath(path)))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    lock_path = target + ".lock"
+    if os.path.islink(lock_path):
+        raise OSError("Arquivo de bloqueio não pode ser um link simbólico.")
+    with open(lock_path, "a+b") as handle:
+        deadline = time.monotonic() + SETTINGS_LOCK_TIMEOUT_SECONDS
+        while True:
+            if should_cancel is not None and should_cancel():
+                raise SettingsLockCanceled()
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) and getattr(exc, "winerror", None) not in (33, 36):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Configurações em uso por outro processo.") from exc
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                # Fechar o handle libera o bloqueio; preserve o resultado da
+                # gravação ou a exceção original se a liberação explícita falhar.
+                pass
+
+
+@contextmanager
+def _settings_process_lock(path):
+    acquired = False
+    try:
+        with _settings_lock_handle(path):
+            acquired = True
+            yield
+    except OSError:
+        if not acquired:
+            _warn("Não foi possível bloquear as configurações; a gravação foi descartada.")
+        raise
 
 
 def update_settings(mutator, path=None):
@@ -201,7 +285,7 @@ def update_settings(mutator, path=None):
     if path is None:
         path = default_settings_path()
 
-    with _UPDATE_LOCK:
+    with _UPDATE_LOCK, _settings_process_lock(path):
         # A leitura estrita, e nao `load_settings`: aqui `{}` por engano vira
         # um arquivo novo por cima do velho (garantia M3).
         settings = _read_settings_for_update(path)

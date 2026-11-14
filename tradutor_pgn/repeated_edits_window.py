@@ -20,6 +20,7 @@ from tkinter import messagebox
 import customtkinter as ctk
 
 from .database import fetch_file_edit_events, initialize_database
+from .curation_state import CandidateIgnored, available_candidate, candidate_key, ignored_keys, restore_ignored, set_ignored
 from .db_tools import apply_automatic_rules_to_database, preview_automatic_rule_impact
 from .editor_common import (
     MUTED_TEXT_COLOR,
@@ -30,9 +31,10 @@ from .editor_common import (
     SELECTED_ROW_TEXT_COLOR,
     preview,
 )
-from .editor_widgets import render_row_buttons
+from .editor_widgets import attach_tooltip, render_row_buttons
 from .glossario import (
     GLOSSARY_RULE_AUTOMATIC,
+    GLOSSARY_RULE_SUGGESTION,
     GLOSSARY_SCOPE_SEPARATOR,
     initialize_catalog_glossary,
     _default_substitutions_path,
@@ -42,8 +44,18 @@ from .glossario import (
 )
 from .app_paths import glossary_catalog_path
 from .glossary_catalog import GlossaryCatalog, GlossaryConflictError, GlossaryDuplicateError, GlossaryEntryDraft
+from .glossary_ui_helpers import normalize_search_text
 from .repeated_edits import repeated_edits_report
 from .window_utils import bring_window_to_front
+
+CANDIDATE_PAGE_SIZE = 40
+
+
+def candidate_page(items, page):
+    pages = (len(items) + CANDIDATE_PAGE_SIZE - 1) // CANDIDATE_PAGE_SIZE
+    page = max(0, min(page, pages - 1)) if pages else 0
+    start = page * CANDIDATE_PAGE_SIZE
+    return items[start:start + CANDIDATE_PAGE_SIZE], page, pages
 
 
 def rule_scope_for_pair(source_language, target_language):
@@ -63,7 +75,7 @@ def describe_pair(item):
     return (
         f"{item['count']}x em {item['lines']} linha(s)   "
         f"{preview(item['old'], 34)!r} -> {preview(item['new'], 34)!r}"
-        f"   |   {item['rule_label']}"
+        f"   |   {item['rule_label']}" + ("   |   ignorada" if item.get("ignored") else "")
     )
 
 
@@ -98,6 +110,33 @@ def already_automatic(item):
     )
 
 
+def filter_candidates(items, query="", *, uncovered_only=False, show_ignored=False):
+    terms = normalize_search_text(query).split()
+    result = []
+    for item in items:
+        if item.get("ignored") and not show_ignored:
+            continue
+        if uncovered_only and item.get("rule_produces") == item["new"]:
+            continue
+        if terms:
+            fields = [normalize_search_text(item["old"]), normalize_search_text(item["new"])]
+            if not all(any(term in field for field in fields) for term in terms):
+                continue
+        result.append(item)
+    return result
+
+
+def sort_candidates(items, order):
+    if order == "Frequência":
+        return sorted(items, key=lambda item: (-item["count"], -item["lines"], item["old"], item["new"]))
+    if order == "Mais comentários":
+        return sorted(items, key=lambda item: (-item["lines"], -item["count"], item["old"], item["new"]))
+    if order == "Ordem alfabética":
+        return sorted(items, key=lambda item: (normalize_search_text(item["old"]),
+                                               normalize_search_text(item["new"])))
+    raise ValueError("Ordenação de candidatos inválida")
+
+
 class RepeatedEditsWindow:
     """A janela. Le o historico uma vez por abertura e a cada regra criada."""
 
@@ -110,10 +149,14 @@ class RepeatedEditsWindow:
 
         self.events = []
         self.items = []
+        self.all_items = []
+        self.page_index = 0
+        self.page_count = 0
         self.buttons = []
         self.selected = None
         self.catalog = GlossaryCatalog(glossary_catalog_path(), _default_substitutions_path())
         self.snapshot = None
+        self.ignored_available = True
 
         self.build()
         self.refresh()
@@ -138,6 +181,36 @@ class RepeatedEditsWindow:
         )
         self.summary_label.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
 
+        filters = ctk.CTkFrame(self.win, fg_color="transparent")
+        filters.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 10))
+        filters.columnconfigure(0, weight=1)
+        self.search_var = tk.StringVar(master=self.win)
+        self.uncovered_var = tk.BooleanVar(master=self.win, value=False)
+        self.show_ignored_var = tk.BooleanVar(master=self.win, value=False)
+        self.sort_var = tk.StringVar(master=self.win, value="Frequência")
+        self.search_entry = ctk.CTkEntry(filters, textvariable=self.search_var,
+                                         placeholder_text="Buscar antes ou depois")
+        self.search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.win.bind("<Control-f>", self.focus_search)
+        ctk.CTkCheckBox(filters, text="Somente sem regra correspondente",
+                        variable=self.uncovered_var, command=self.reset_candidate_filter).grid(row=0, column=1)
+        ctk.CTkCheckBox(filters, text="Mostrar ignoradas", variable=self.show_ignored_var,
+                        command=self.reset_candidate_filter).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.btn_copy = ctk.CTkButton(filters, text="Copiar troca", width=120, command=self.copy_candidate)
+        self.btn_copy.grid(row=1, column=1, sticky="e", pady=(6, 0))
+        self.btn_restore_ignored = ctk.CTkButton(filters, text="Restaurar ignoradas da lista", width=170,
+                                                 command=self.restore_all_ignored)
+        self.btn_restore_ignored.grid(row=2, column=1, sticky="e", pady=(6, 0))
+        pager = ctk.CTkFrame(filters, fg_color="transparent")
+        pager.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        self.btn_previous = ctk.CTkButton(pager, text="Anterior", width=90, command=lambda: self.change_page(-1))
+        self.btn_previous.pack(side=tk.LEFT)
+        self.page_label = ctk.CTkLabel(pager, text="Página 0 de 0", width=130)
+        self.page_label.pack(side=tk.LEFT, padx=6)
+        self.btn_next = ctk.CTkButton(pager, text="Próxima", width=90, command=lambda: self.change_page(1))
+        self.btn_next.pack(side=tk.LEFT)
+        self.search_var.trace_add("write", lambda *_: self.reset_candidate_filter())
+
         self.rows_frame = ctk.CTkScrollableFrame(self.win)
         self.rows_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 6))
 
@@ -148,14 +221,18 @@ class RepeatedEditsWindow:
         self.detail_label = ctk.CTkLabel(
             detail, text="", anchor="w", justify=tk.LEFT, wraplength=900
         )
-        self.detail_label.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        self.detail_label.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(8, 4))
 
         actions = ctk.CTkFrame(detail, fg_color="transparent")
-        actions.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+        actions.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
         self.hint_label = ctk.CTkLabel(
-            actions, text="", anchor="w", text_color=MUTED_TEXT_COLOR
+            detail, text="", anchor="w", text_color=MUTED_TEXT_COLOR
         )
-        self.hint_label.pack(side=tk.LEFT)
+        self.hint_label.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 4))
+        self.sort_menu = ctk.CTkOptionMenu(detail, variable=self.sort_var,
+                                           values=["Frequência", "Mais comentários", "Ordem alfabética"],
+                                           width=160, command=lambda _value: self.reset_candidate_filter())
+        self.sort_menu.grid(row=1, column=1, sticky="e", padx=10, pady=(0, 4))
 
         btn_close = ctk.CTkButton(actions, text="Fechar", width=90, command=self.win.destroy)
         btn_close.pack(side=tk.RIGHT, padx=(6, 0))
@@ -170,6 +247,12 @@ class RepeatedEditsWindow:
             command=self.create_automatic_rule,
         )
         self.btn_create.pack(side=tk.RIGHT, padx=6)
+        self.btn_suggest = ctk.CTkButton(actions, text="Criar sugestão", width=140,
+                                         command=self.create_suggestion_rule)
+        self.btn_suggest.pack(side=tk.RIGHT, padx=6)
+        self.btn_ignore = ctk.CTkButton(actions, text="Ignorar", width=100, command=self.toggle_ignored)
+        self.btn_ignore.pack(side=tk.RIGHT, padx=6)
+        attach_tooltip(self.btn_ignore, "Ignora ou restaura a troca apenas para esta obra e este par de idiomas.")
 
     # ------------------------------------------------------------------ dados
 
@@ -187,7 +270,8 @@ class RepeatedEditsWindow:
             self.snapshot = self.catalog.list_entries()
         except Exception as exc:
             self.snapshot = None
-            self.items = repeated_edits_report(self.events, [])
+            self.ignored_available = False
+            self.items = repeated_edits_report(self.events, [], limit=None)
             messagebox.showerror("Trocas repetidas", f"Erro ao carregar catálogo:\n{exc}", parent=self.win)
             return
         entries = [
@@ -195,7 +279,18 @@ class RepeatedEditsWindow:
             for entry in self.snapshot.entries
             if scope_matches(entry.scope, self.source_language, self.target_language)
         ]
-        self.items = repeated_edits_report(self.events, entries)
+        self.items = repeated_edits_report(self.events, entries, limit=None)
+        try:
+            ignored = ignored_keys()
+            self.ignored_available = True
+        except (OSError, ValueError) as exc:
+            ignored = set()
+            self.ignored_available = False
+            messagebox.showwarning("Trocas repetidas", f"Não foi possível ler as decisões de curadoria:\n{exc}", parent=self.win)
+        for item in self.items:
+            item["ignored"] = bool(self.target_language) and candidate_key(
+                self.source_file, self.source_language, self.target_language, item["old"], item["new"]
+            ) in ignored
 
     def refresh(self, keep=None):
         """Rele o banco e o glossario e refaz a lista.
@@ -204,13 +299,47 @@ class RepeatedEditsWindow:
         regra, a linha continua a mesma e so a coluna "regra" muda.
         """
         self.load()
+        self.all_items = list(self.items)
+        self.apply_candidate_filter(keep)
+
+    def reset_candidate_filter(self):
+        self.page_index = 0
+        self.apply_candidate_filter(retain_selection=False)
+
+    def change_page(self, delta):
+        self.page_index += delta
+        self.apply_candidate_filter(retain_selection=False)
+
+    def apply_candidate_filter(self, keep=None, *, retain_selection=True):
+        if keep is None and retain_selection:
+            selected = self.current_item()
+            if selected is not None:
+                keep = (selected["old"], selected["new"])
+        filtered = filter_candidates(self.all_items, self.search_var.get(),
+                                     uncovered_only=bool(self.uncovered_var.get()),
+                                     show_ignored=bool(self.show_ignored_var.get()))
+        filtered = sort_candidates(filtered, self.sort_var.get())
+        if keep is not None:
+            for position, item in enumerate(filtered):
+                if (item["old"], item["new"]) == keep:
+                    self.page_index = position // CANDIDATE_PAGE_SIZE
+                    break
+        self.items, self.page_index, self.page_count = candidate_page(filtered, self.page_index)
+        self.page_label.configure(text=f"Página {self.page_index + 1 if self.page_count else 0} de {self.page_count}")
+        self.btn_previous.configure(state="normal" if self.page_index else "disabled")
+        self.btn_next.configure(state="normal" if self.page_index + 1 < self.page_count else "disabled")
+        self.btn_restore_ignored.configure(state="normal" if self.ignored_available and
+                                           any(item.get("ignored") for item in self.all_items) else "disabled")
         self.buttons = render_row_buttons(
             self.rows_frame,
             self.items,
             self.build_row_button,
-            "Nenhuma troca repetida.",
+            ("Nenhuma troca corresponde aos filtros." if self.all_items else "Nenhuma troca repetida."),
         )
-        self.summary_label.configure(text=describe_summary(self.events, self.items))
+        summary = describe_summary(self.events, self.all_items)
+        if self.search_var.get().strip() or self.uncovered_var.get() or any(i.get("ignored") for i in self.all_items):
+            summary += f" Correspondentes: {len(filtered)}."
+        self.summary_label.configure(text=summary)
         self.selected = None
         if not self.items:
             self.clear_detail()
@@ -259,28 +388,104 @@ class RepeatedEditsWindow:
                 f"Regra no glossário: {item['rule_label']}"
             )
         )
-        if self.snapshot is None:
+        self.btn_ignore.configure(
+            text="Restaurar" if item.get("ignored") else "Ignorar",
+            state="normal" if self.ignored_available and self.target_language else "disabled",
+        )
+        if item.get("ignored"):
             self.btn_create.configure(state="disabled")
+            self.btn_suggest.configure(state="disabled")
+            self.hint_label.configure(text="Troca ignorada; restaure-a para criar uma regra.")
+        elif self.snapshot is None:
+            self.btn_create.configure(state="disabled")
+            self.btn_suggest.configure(state="disabled")
             self.hint_label.configure(text="Recarregue o catálogo antes de criar uma regra.")
+        elif not self.target_language:
+            self.btn_create.configure(state="disabled")
+            self.btn_suggest.configure(state="disabled")
+            self.hint_label.configure(text="Selecione um idioma de destino para criar regras.")
         elif already_automatic(item):
             self.btn_create.configure(state="disabled")
+            self.btn_suggest.configure(state="normal" if self.target_language else "disabled")
             self.hint_label.configure(text="Já há regra automática para esta troca.")
         else:
             self.btn_create.configure(state="normal")
+            self.btn_suggest.configure(state="normal" if self.target_language else "disabled")
             escopo = rule_scope_for_pair(self.source_language, self.target_language)
             self.hint_label.configure(text=f"A regra nova vale para o escopo {escopo!r}.")
         self.btn_example.configure(state="normal")
+        self.btn_copy.configure(state="normal")
 
     def clear_detail(self):
         self.detail_label.configure(text="")
         self.hint_label.configure(text="")
         self.btn_create.configure(state="disabled")
+        self.btn_suggest.configure(state="disabled")
+        self.btn_ignore.configure(state="disabled")
         self.btn_example.configure(state="disabled")
+        self.btn_copy.configure(state="disabled")
 
     def current_item(self):
         if self.selected is None or not (0 <= self.selected < len(self.items)):
             return None
         return self.items[self.selected]
+
+    def focus_search(self, _event=None):
+        self.search_entry.focus_set()
+        return "break"
+
+    def copy_candidate(self):
+        item = self.current_item()
+        if item is None:
+            return
+        try:
+            self.win.clipboard_clear()
+            self.win.clipboard_append(f"{item['old']} → {item['new']}")
+        except tk.TclError:
+            messagebox.showwarning("Trocas repetidas", "Não foi possível copiar a troca.", parent=self.win)
+
+    def candidate_available(self, item):
+        """Confere decisões recentes de outras janelas antes de criar uma regra."""
+        try:
+            key = candidate_key(self.source_file, self.source_language, self.target_language,
+                                item["old"], item["new"])
+            ignored = key in ignored_keys()
+        except (OSError, ValueError) as exc:
+            messagebox.showwarning("Trocas repetidas", f"Não foi possível conferir a curadoria:\n{exc}", parent=self.win)
+            return False
+        if ignored:
+            self.refresh(keep=(item["old"], item["new"]))
+            messagebox.showwarning("Trocas repetidas", "Esta troca foi ignorada. Restaure-a antes de criar uma regra.", parent=self.win)
+            return False
+        return True
+
+    def toggle_ignored(self):
+        item = self.current_item()
+        if item is None or not self.target_language or not self.ignored_available:
+            return
+        pair = (item["old"], item["new"])
+        try:
+            key = candidate_key(self.source_file, self.source_language, self.target_language, *pair)
+            set_ignored(key, not item.get("ignored", False))
+        except (OSError, ValueError) as exc:
+            messagebox.showwarning("Trocas repetidas", f"Não foi possível salvar a decisão:\n{exc}", parent=self.win)
+            return
+        self.refresh(keep=pair)
+
+    def restore_all_ignored(self):
+        if not self.ignored_available or not self.target_language:
+            return
+        try:
+            keys = [candidate_key(self.source_file, self.source_language, self.target_language,
+                                  item["old"], item["new"])
+                    for item in self.all_items if item.get("ignored")]
+            if not keys:
+                return
+            restore_ignored(keys)
+        except (OSError, ValueError) as exc:
+            messagebox.showwarning("Trocas repetidas", f"Não foi possível restaurar as trocas:\n{exc}", parent=self.win)
+            return
+        self.refresh()
 
     # ----------------------------------------------------------------- acoes
 
@@ -301,6 +506,47 @@ class RepeatedEditsWindow:
                 parent=self.win,
             )
 
+    def create_suggestion_rule(self):
+        """Adiciona uma sugestão ao catálogo sem alterar traduções existentes."""
+        item = self.current_item()
+        if item is None or item.get("ignored") or self.snapshot is None:
+            return
+        if not self.target_language:
+            messagebox.showwarning("Trocas repetidas", "Selecione um idioma de destino antes de criar uma sugestão.", parent=self.win)
+            return
+        if not self.candidate_available(item):
+            return
+        scope = rule_scope_for_pair(self.source_language, self.target_language)
+        pair = (item["old"], item["new"])
+        try:
+            key = candidate_key(self.source_file, self.source_language, self.target_language, *pair)
+            with available_candidate(key):
+                result = self.catalog.add(
+                    GlossaryEntryDraft(item["old"], item["new"], GLOSSARY_RULE_SUGGESTION, scope),
+                    self.snapshot.catalog_revision,
+                )
+        except CandidateIgnored:
+            self.refresh(keep=pair)
+            messagebox.showwarning("Trocas repetidas", "Esta troca foi ignorada. Restaure-a antes de criar uma regra.", parent=self.win)
+            return
+        except GlossaryConflictError:
+            self.refresh(keep=pair)
+            messagebox.showwarning("Conflito de revisão", "O catálogo mudou. Nenhuma sugestão foi adicionada; revise a lista atualizada.", parent=self.win)
+            return
+        except GlossaryDuplicateError:
+            self.refresh(keep=pair)
+            messagebox.showinfo("Trocas repetidas", "Esta sugestão já existe neste escopo.", parent=self.win)
+            return
+        except Exception as exc:
+            messagebox.showerror("Trocas repetidas", f"Não foi possível criar a sugestão:\n{exc}", parent=self.win)
+            return
+        self.notify_glossary_change()
+        self.refresh(keep=pair)
+        if result.warning:
+            messagebox.showwarning("Trocas repetidas", result.warning, parent=self.win)
+        else:
+            messagebox.showinfo("Trocas repetidas", "Sugestão adicionada ao glossário; nenhuma tradução foi alterada.", parent=self.win)
+
     def create_automatic_rule(self):
         """Cria a regra `automatic` e oferece aplica-la as pendentes do arquivo.
 
@@ -312,7 +558,12 @@ class RepeatedEditsWindow:
         regra criada, valendo para as traducoes novas.
         """
         item = self.current_item()
-        if item is None or already_automatic(item) or self.snapshot is None:
+        if item is None or item.get("ignored") or already_automatic(item) or self.snapshot is None:
+            return
+        if not self.target_language:
+            messagebox.showwarning("Trocas repetidas", "Selecione um idioma de destino antes de criar uma regra automática.", parent=self.win)
+            return
+        if not self.candidate_available(item):
             return
         escopo = rule_scope_for_pair(self.source_language, self.target_language)
         entrada = (item["old"], item["new"], GLOSSARY_RULE_AUTOMATIC, 0, escopo)
@@ -326,11 +577,19 @@ class RepeatedEditsWindow:
         def decidido(promover):
             if not promover or not self.win.winfo_exists():
                 return
+            if not self.candidate_available(item):
+                return
             try:
-                resultado = self.catalog.add(
-                    GlossaryEntryDraft(item["old"], item["new"], GLOSSARY_RULE_AUTOMATIC, escopo),
-                    expected_catalog_revision,
-                )
+                key = candidate_key(self.source_file, self.source_language, self.target_language, *par)
+                with available_candidate(key):
+                    resultado = self.catalog.add(
+                        GlossaryEntryDraft(item["old"], item["new"], GLOSSARY_RULE_AUTOMATIC, escopo),
+                        expected_catalog_revision,
+                    )
+            except CandidateIgnored:
+                self.refresh(keep=par)
+                messagebox.showwarning("Trocas repetidas", "Esta troca foi ignorada. Restaure-a antes de criar uma regra.", parent=self.win)
+                return
             except GlossaryConflictError:
                 self.refresh(keep=par)
                 messagebox.showwarning("Conflito de revisão", "O catálogo mudou. Nada foi adicionado ou aplicado. Revise a lista recarregada.", parent=self.win)

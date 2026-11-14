@@ -1,0 +1,3 @@
+﻿# RG-031 — falhas de tradução por pacote
+
+Registrar no manifesto a contagem de comentários distintos que falharam durante a geração daquele arquivo, derivada do contador por arquivo do worker. Exibir na biblioteca como fotografia da geração, não como pendência de revisão nem garantia de que todo conteúdo foi traduzido. Pacotes anteriores ou chamadas sem dados continuam com valor desconhecido, nunca zero presumido. Validar valor inteiro não negativo, evitar exposição de comentários e manter publicação atômica. Testar pacote limpo, parcialmente traduzido, arquivos múltiplos, manifesto antigo e metadados inválidos, além da interface; não modificar pacotes já publicados.

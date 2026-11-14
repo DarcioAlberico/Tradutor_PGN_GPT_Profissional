@@ -1,0 +1,3 @@
+﻿# RG-031 — verificar integridade dos pacotes
+
+Verificar sob demanda os dois SHA-256 do manifesto v1 em thread de trabalho, sem alterar arquivos. Validar o pacote, registrar assinatura do manifesto e dos arquivos antes e após leitura e relatar alteração concorrente, divergência, indisponibilidade ou sucesso; não afirmar autenticidade, nem garantir detecção de toda alteração simultânea. Pacotes legados não possuem referência verificável. A interface apresenta o resultado sem congelar e permite apenas uma verificação por vez, interrompendo o polling ao fechar. Testar hash correto, arquivos modificados, ausência, manifesto substituído durante leitura, incompatibilidade legada e fluxo de janela; executar testes de publicação e interface.

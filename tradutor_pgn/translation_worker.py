@@ -2,6 +2,7 @@ import os
 import threading
 import time
 import traceback
+from collections import namedtuple
 from datetime import datetime
 from tkinter import messagebox
 
@@ -12,6 +13,7 @@ from .annotation_mask import (
     mask_annotations,
     restore_annotations,
 )
+from . import app_paths
 from .chess_notation import (
     anchor_divergence,
     describe_anchor_divergence,
@@ -43,8 +45,8 @@ from .glossario import (
 )
 from .pgn_utils import (
     BATCH_MAX_CHARS,
-    available_output_path,
     batch_index_groups,
+    isolate_batch_separator_groups,
     collect_pgn_files,
     create_comment_batches,
     extract_comment_texts_from_file,
@@ -54,13 +56,15 @@ from .pgn_utils import (
     misaligned_batch_part,
     read_pgn_text,
     split_batch_translation,
-    translated_output_path,
 )
 from .prose_fixes import normalize_prose
+from .translation_output import publish_translation_bundle, source_sha256
+from .translation_library_links import register_link
 from itertools import chain
 
 from .app_config import TRANSLATION_REQUEST_DELAY_SECONDS  # noqa: F401 (compat)
 from .failed_runs import build_failed_run_record, save_failed_run
+from .google_cooldown import GoogleCooldown
 from .deep_translation import DeepTranslatorAdapter
 from .llm_costs import describe_estimate, describe_estimate_line, describe_outcome, estimate_cost
 from .llm_providers import GOOGLE_PROVIDER, build_translator, model_setting_key
@@ -80,6 +84,30 @@ from .translation_api import TRANSLATION_PROVIDER, RequestPacer, translate_text
 # com tudo falhando igual. Tres da margem para uma instabilidade passageira sem
 # transformar uma queda em horas de espera.
 MAX_CONSECUTIVE_FAILED_BATCHES = 3
+
+GoogleWorkEstimate = namedtuple("GoogleWorkEstimate", "comments batches characters")
+
+
+def estimate_google_work(comments_by_file, cache, cleanup_rules):
+    """Estimativa otimista, assumindo sucesso e reutilização entre arquivos."""
+    seen = set()
+    count = batches = characters = 0
+    for comments in comments_by_file.values():
+        for batch in create_comment_batches(comments):
+            masked = []
+            for comment in batch:
+                if comment in cache or comment in seen:
+                    continue
+                seen.add(comment)
+                cleaned = clean_comment_for_translation(comment, cleanup_rules)
+                if not cleaned:
+                    continue
+                text, _ = mask_annotations(cleaned)
+                masked.append(text)
+                count += 1
+                characters += len(text)
+            batches += len(isolate_batch_separator_groups(masked, batch_index_groups(masked)))
+    return GoogleWorkEstimate(count, batches, characters)
 
 
 def format_eta(seconds):
@@ -189,15 +217,23 @@ def _first_pass(app, pgn_files, with_contexts=False):
     total_semicolon = 0
     por_arquivo = {}
     contextos = {}
+    fingerprints = {}
 
     for pgn_file in pgn_files:
         if app.cancel_flag.is_set():
             app.log_message("Traducao cancelada antes da extracao completa.")
             return None
 
+        fingerprint_before = source_sha256(pgn_file)
         info = extract_comment_texts_from_file(
             pgn_file, app.log_message, with_contexts=with_contexts
         )
+        fingerprint_after = source_sha256(pgn_file)
+        if fingerprint_before != fingerprint_after:
+            raise OSError(
+                f"O arquivo de origem foi alterado durante a leitura: {pgn_file}"
+            )
+        fingerprints[pgn_file] = fingerprint_after
         total_comments += len(info["comments"])
         for texto, contexto in (info.get("contexts") or {}).items():
             contextos.setdefault(texto, contexto)
@@ -225,6 +261,7 @@ def _first_pass(app, pgn_files, with_contexts=False):
         "semicolon": total_semicolon,
         "por_arquivo": por_arquivo,
         "contextos": contextos,
+        "fingerprints": fingerprints,
     }
 
 
@@ -268,6 +305,7 @@ def run_translation(
     # desta execucao era perdida — a lista da execucao ANTERIOR continuava
     # valendo, e "Reprocessar Falhas" reprocessava os arquivos errados (T4).
     failed_count = 0
+    delivery_failed_count = 0
     failed_files = set()
     failures_recorded = False
     # O registro da execucao (garantia Z5, ROADMAP 28.6). Fora do `try` pelo
@@ -309,6 +347,7 @@ def run_translation(
                     failed_count,
                     when=datetime.now().isoformat(timespec="seconds"),
                     source_language=source_language,
+                    delivery_failed_count=delivery_failed_count,
                 )
             )
         except Exception as exc:  # pragma: no cover - defensivo
@@ -317,7 +356,9 @@ def run_translation(
             app.log_message(f"[AVISO] Nao foi possivel anotar as falhas: {exc}")
     # Um por execucao: o ritmo aprendido com os 429 vale para o resto da
     # traducao, e nao so para o lote em que a reclamacao apareceu (ROADMAP 7.2).
-    pacer = RequestPacer()
+    pacer = RequestPacer(
+        shared_cooldown=GoogleCooldown(app_paths.data_path("google-cooldown.db"))
+    )
 
     try:
         origem_dita = source_language or "detectar automaticamente"
@@ -387,6 +428,12 @@ def run_translation(
             if deep_translator is not None:
                 return deep_translator.translate(texto, app.log_message, app.cancel_flag, pacer)
             if llm is not None:
+                if hasattr(llm, "translate_batch"):
+                    partes = llm.translate_batch(
+                        [texto], target_language, app.log_message, app.cancel_flag,
+                        contexts=contextos,
+                    )
+                    return partes[0] if partes else None
                 return llm.translate(
                     texto, target_language, app.log_message, app.cancel_flag,
                     contexts=contextos,
@@ -459,6 +506,7 @@ def run_translation(
         total_distintos = primeira["distintos"]
         total_semicolon = primeira["semicolon"]
         comentarios_por_arquivo = primeira["por_arquivo"]
+        fingerprints_por_arquivo = primeira["fingerprints"]
         primeira = None
 
         def comentarios_do_lote():
@@ -529,6 +577,17 @@ def run_translation(
             f"Cache carregado: {reaproveitaveis} destes comentarios ja estavam "
             f"traduzidos"
         )
+
+        if llm is None:
+            estimate = estimate_google_work(comentarios_por_arquivo, app.translation_cache, cleanup_rules)
+            per_minute, per_day = pacer.shared_cooldown.get_limits()
+            app.log_message(
+                f"Estimativa Google: {estimate.comments} comentario(s), "
+                f"{estimate.characters} caracteres de comentarios (sem separadores) e "
+                f"{estimate.batches} lote(s) inicial(is). "
+                f"Limites compartilhados: {per_minute}/minuto e {per_day}/24 horas. "
+                "Divisões, falhas e novas tentativas podem aumentar as requisições."
+            )
 
         # O custo, DEPOIS da carga do cache e ANTES da primeira requisicao
         # (ROADMAP 28.7): o que ja esta no banco nao vai para a API e nao entra
@@ -792,6 +851,7 @@ def run_translation(
             return translation, corrigidos, consertos
 
         for pgn_index, pgn_file in enumerate(pgn_files, start=1):
+            file_failed_start = failed_count
             if app.cancel_flag.is_set():
                 canceled = True
                 app.log_message("Traducao cancelada pelo usuario.")
@@ -896,11 +956,15 @@ def run_translation(
                     # envio e dividido em vez de chegar a camada de API grande
                     # demais e ser cortado por sentenca no meio de um `|||`.
                     grupos = batch_index_groups([item[1] for item in to_translate])
+                    if llm is None or not hasattr(llm, "translate_batch"):
+                        grupos = isolate_batch_separator_groups(
+                            [item[1] for item in to_translate], grupos
+                        )
                     if len(grupos) > 1:
                         app.log_message(
                             f"  - Lote {batch_idx} dividido em {len(grupos)} "
-                            f"envios: depois da limpeza e da mascara o texto "
-                            f"passou de {BATCH_MAX_CHARS} caracteres."
+                            f"envios para respeitar o limite de {BATCH_MAX_CHARS} "
+                            f"caracteres e preservar separadores literais."
                         )
 
                     for grupo in grupos:
@@ -918,14 +982,25 @@ def run_translation(
                         joined = join_comments_for_batch(masked_texts)
 
                         api_started = time.perf_counter()
-                        translated_joined = traduzir(
-                            joined, [contexto_de(item[0]) for item in grupo_items]
-                        )
+                        structured_parts = None
+                        if llm is not None and hasattr(llm, "translate_batch"):
+                            structured_parts = llm.translate_batch(
+                                masked_texts, target_language, app.log_message,
+                                app.cancel_flag,
+                                contexts=[contexto_de(item[0]) for item in grupo_items],
+                            )
+                            translated_joined = bool(structured_parts and any(structured_parts))
+                        else:
+                            translated_joined = traduzir(
+                                joined, [contexto_de(item[0]) for item in grupo_items]
+                            )
                         batch_api_time += time.perf_counter() - api_started
                         batch_api_requests += 1
 
                         parts = None
-                        if translated_joined:
+                        if structured_parts is not None:
+                            parts = structured_parts if len(structured_parts) == len(originals) else None
+                        elif translated_joined:
                             parts = split_batch_translation(
                                 translated_joined, len(originals)
                             )
@@ -1196,6 +1271,10 @@ def run_translation(
             # esta a fase da API, e o que nao precisa atravessa-la nao atravessa.
             try:
                 content, encoding = read_pgn_text(pgn_file)
+                current_sha256 = source_sha256(pgn_file)
+                input_sha256 = fingerprints_por_arquivo[pgn_file]
+                if current_sha256 != input_sha256:
+                    raise OSError("O arquivo de origem foi alterado durante a tradução")
                 # `known_texts`: os textos que a primeira passada ja tem na mao
                 # voltam como os MESMOS objetos, e nao como copias de igual
                 # conteudo. Sem isso, ler o arquivo duas vezes faria o texto do
@@ -1215,6 +1294,8 @@ def run_translation(
                     f"  - [ERRO] Nao foi possivel reler "
                     f"{os.path.basename(pgn_file)}: {exc}"
                 )
+                delivery_failed_count += 1
+                failed_files.add(pgn_file)
                 if aborted_by_api:
                     break
                 continue
@@ -1270,33 +1351,60 @@ def run_translation(
                 break
 
             if translated_map:
-                preferred_output_pgn = translated_output_path(pgn_file, target_language)
-                output_pgn = available_output_path(preferred_output_pgn)
+                def generate_bundle_output(output_pgn):
+                    return generate_translated_pgn(
+                        pgn_file,
+                        output_pgn,
+                        translated_map,
+                        positions,
+                        app.log_message,
+                        use_bom=use_bom,
+                        wrap_columns=wrap_columns,
+                        content=content,
+                        encoding=encoding,
+                        cancel_flag=app.cancel_flag,
+                    )
 
-                if output_pgn != preferred_output_pgn:
-                    app.log_message(f"  - Arquivo de saida ja existia; usando: {output_pgn}")
-
-                if generate_translated_pgn(
+                bundle = publish_translation_bundle(
                     pgn_file,
-                    output_pgn,
-                    translated_map,
-                    positions,
-                    app.log_message,
-                    use_bom=use_bom,
-                    wrap_columns=wrap_columns,
-                    content=content,
-                    encoding=encoding,
-                    cancel_flag=app.cancel_flag,
-                ):
+                    target_language,
+                    app_paths.translations_dir(),
+                    generate_bundle_output,
+                    is_canceled=app.cancel_flag.is_set,
+                    expected_source_sha256=input_sha256,
+                    source_language=source_language,
+                    provider=provider_name,
+                    failed_comments=failed_count - file_failed_start,
+                )
+                if bundle.status == "canceled":
+                    canceled = True
+                    app.log_message("Traducao cancelada durante a geracao do arquivo final.")
+                    return
+                if bundle.status == "published":
+                    output_pgn = bundle.translated_path
                     generated_files += 1
                     arquivos_gerados.append(os.path.abspath(output_pgn))
                     app.log_message(f"  - Arquivo traduzido gerado: {output_pgn}")
+                    try:
+                        register_link(conn, bundle.bundle_id, os.path.abspath(pgn_file), source_language, target_language)
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        app.log_message("[AVISO] Pacote publicado, mas não foi possível vinculá-lo à revisão no banco.")
+                else:
+                    delivery_failed_count += 1
+                    failed_files.add(pgn_file)
+                    detalhe = f": {bundle.error}" if bundle.error else ""
+                    app.log_message(
+                        f"  - [FALHA DE ENTREGA] Nao foi possivel publicar o "
+                        f"pacote de {os.path.basename(pgn_file)}{detalhe}"
+                    )
 
         conn.commit()
 
         if aborted_by_api:
             app.log_message("====== TRADUCAO INTERROMPIDA: API SEM RESPOSTA ======")
-        elif failed_count:
+        elif failed_count or delivery_failed_count:
             app.log_message("====== TRADUCAO FINALIZADA COM FALHAS ======")
         else:
             app.log_message("====== TRADUCAO FINALIZADA ======")
@@ -1311,6 +1419,7 @@ def run_translation(
         app.log_message(f"Comentarios removidos por limpeza: {cleaned_empty_count}")
         app.log_message(f"Traducoes reutilizadas do cache: {cache_count}")
         app.log_message(f"Comentarios que falharam: {failed_count}")
+        app.log_message(f"Falhas de entrega: {delivery_failed_count}")
         app.log_message(f"Arquivos PGN traduzidos gerados: {generated_files}")
         if llm is not None:
             # O que o modelo custou, em tokens e em dolares — estimado antes,
@@ -1380,7 +1489,7 @@ def run_translation(
         # Chegou ao fim sem cancelamento e sem excecao: a barra pode ir a 100%.
         # Com o disjuntor a execucao passa por aqui tambem (`aborted_by_api`), e
         # ai o `finally` a devolve ao repouso — nada foi concluido.
-        completed = not aborted_by_api
+        completed = not aborted_by_api and not delivery_failed_count
 
         # O que a janela principal precisa para "Revisar as pendentes desta
         # execucao" e "Abrir pasta" (ROADMAP 28.10): os arquivos com posicoes
@@ -1422,6 +1531,7 @@ def run_translation(
                 f"Removidos por limpeza: {cleaned_empty_count}\n"
                 f"Reutilizados do cache: {cache_count}\n"
                 f"Falharam: {failed_count}\n"
+                f"Falhas de entrega: {delivery_failed_count}\n"
                 f"Arquivos gerados: {generated_files}{linha_lances}{linha_semicolon}"
             )
 
@@ -1439,15 +1549,16 @@ def run_translation(
                         )
                     )
                 )
-            elif failed_count:
+            elif failed_count or delivery_failed_count:
                 app.root.after(
                     0,
-                    lambda texto=resumo, n=failed_count, arquivos=len(failed_files): (
+                    lambda texto=resumo, n=failed_count, entregas=delivery_failed_count,
+                    arquivos=len(failed_files): (
                         messagebox.showwarning(
                             "Concluido com falhas",
-                            f"Traducao finalizada, mas {n} comentario(s) nao "
-                            f"puderam ser traduzidos e permaneceram no idioma "
-                            f"original em {arquivos} arquivo(s).\n\n{texto}"
+                            f"Traducao finalizada com {n} comentario(s) sem "
+                            f"traducao e {entregas} falha(s) de entrega em "
+                            f"{arquivos} arquivo(s).\n\n{texto}"
                         )
                     )
                 )
@@ -1482,6 +1593,17 @@ def run_translation(
         )
 
     finally:
+        if provider in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP):
+            metrics = pacer.metrics
+            app.log_message(
+                f"Métricas Google: {metrics.attempts} tentativa(s) HTTP; "
+                f"{metrics.characters} caracteres nas tentativas; "
+                f"403: {metrics.forbidden}; 429: {metrics.rate_limited}; "
+                f"consulta e espera compartilhada: {metrics.shared_wait_seconds:.1f} s "
+                f"(cota: {metrics.quota_wait_seconds:.1f} s; "
+                f"cooldown: {metrics.cooldown_wait_seconds:.1f} s; "
+                f"ambos: {metrics.overlap_wait_seconds:.1f} s)."
+            )
         if conn is not None:
             try:
                 conn.close()
@@ -1503,7 +1625,7 @@ def run_translation(
                 desfecho = RUN_CANCELED
             elif aborted_by_api:
                 desfecho = RUN_ABORTED
-            elif failed_count:
+            elif failed_count or delivery_failed_count:
                 desfecho = RUN_FAILED
             else:
                 desfecho = RUN_COMPLETED
@@ -1511,7 +1633,8 @@ def run_translation(
                 registro = initialize_database(app.output_db)
                 try:
                     finish_translation_run(
-                        registro.cursor(), run_id, desfecho, translated_count, failed_count
+                        registro.cursor(), run_id, desfecho, translated_count,
+                        failed_count + delivery_failed_count
                     )
                     registro.commit()
                 finally:

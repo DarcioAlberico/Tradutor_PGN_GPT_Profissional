@@ -1,0 +1,3 @@
+﻿# RG-040 — benchmark de geração de PGN
+
+Gerar PGNs sintéticos UTF-8 com acentos e quebras CRLF em diretório temporário exclusivo. Preparar posições fora da cronometragem e medir a interface real `generate_translated_pgn` com conteúdo já carregado e requebra desligada. Conferir após cada execução o SHA-256 e tamanho de uma saída esperada construída por partidas sintéticas, comprovando nesse corpus as substituições e os bytes externos; não incluir verificação no tempo medido. Medir pico Python em execução separada e relatar mediana, p95, amostras e ambiente. Testar tamanho, integridade, detecção de saída corrompida e isolamento. Registrar 1 e 10 MiB localmente; outros cenários, memória nativa e CI continuam pendentes.
