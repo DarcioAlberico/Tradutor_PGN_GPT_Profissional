@@ -2039,6 +2039,19 @@ def find_glossary_matches(text, orig):
     if not text or not orig:
         return []
 
+    # Padrões com maiúsculas usam busca literal sensível a caixa.
+    if orig != orig.lower():
+        if orig not in text:
+            return []
+    elif orig.isascii():
+        # Apenas para decidir ausência: IGNORECASE também casa i com İ/ı,
+        # s com ſ e k com K. O casefold cobre todos exceto ı e expande İ em
+        # i + ponto combinante. Remover pontos pode criar falsos positivos,
+        # mas a regex original abaixo continua decidindo os casamentos reais.
+        search_text = text.lower() if text.isascii() else text.casefold().replace("\u0307", "").replace("ı", "i")
+        if orig not in search_text:
+            return []
+
     pattern = _compiled_glossary_pattern(orig)
     matches = []
     position = 0
@@ -2637,6 +2650,9 @@ def apply_all_substitutions(
     suggestions,
     order_by_specificity=True,
     protect_replacements=True,
+    *,
+    _on_match=None,
+    _check_cancel=None,
 ):
     """Aplica todas as substituições, da regra mais específica para a mais genérica.
 
@@ -2662,39 +2678,74 @@ def apply_all_substitutions(
             text = _replace_glossary_matches(text, rule[0], rule[1])
         return text
 
-    # (trecho, congelado): um trecho congelado veio de uma substituição e não
-    # pode ser reexaminado pelas regras seguintes.
-    segments = [(text or "", False)]
+    if _on_match is None:
+        # O caminho de produção não precisa conservar offsets da explicação.
+        # Evitar metadados por trecho mantém a passagem de corpus volumosos leve.
+        segments = [(text or "", False)]
+        for rule_index, rule in enumerate(rules):
+            if _check_cancel is not None and rule_index % 128 == 0:
+                _check_cancel()
+            orig, new = rule[0], rule[1]
+            if not orig:
+                continue
+            updated = []
+            for chunk, frozen in segments:
+                if frozen or not chunk:
+                    updated.append((chunk, frozen))
+                    continue
+                matches = find_glossary_matches(chunk, orig)
+                if not matches:
+                    updated.append((chunk, frozen))
+                    continue
+                last = 0
+                for start, end in matches:
+                    if start > last:
+                        updated.append((chunk[last:start], False))
+                    updated.append((case_adjusted_replacement(chunk[start:end], new), True))
+                    last = end
+                if last < len(chunk):
+                    updated.append((chunk[last:], False))
+            segments = updated
+        return "".join(chunk for chunk, _ in segments)
 
-    for rule in rules:
+    # O caminho de explicação conserva o deslocamento no texto original.
+    segments = [(text or "", False, 0)]
+
+    for rule_index, rule in enumerate(rules):
+        if _check_cancel is not None and rule_index % 128 == 0:
+            _check_cancel()
         # Indexado: uma regra priorizada tem tres elementos (ver `_as_rule`).
         orig, new = rule[0], rule[1]
         if not orig:
             continue
 
         updated = []
-        for chunk, frozen in segments:
+        for chunk, frozen, offset in segments:
             if frozen or not chunk:
-                updated.append((chunk, frozen))
+                updated.append((chunk, frozen, offset))
                 continue
 
             matches = find_glossary_matches(chunk, orig)
             if not matches:
-                updated.append((chunk, frozen))
+                updated.append((chunk, frozen, offset))
                 continue
 
             last = 0
             for start, end in matches:
                 if start > last:
-                    updated.append((chunk[last:start], False))
-                updated.append((case_adjusted_replacement(chunk[start:end], new), True))
+                    updated.append((chunk[last:start], False, offset + last))
+                matched = chunk[start:end]
+                replacement = case_adjusted_replacement(matched, new)
+                if _on_match is not None:
+                    _on_match(rule, matched, replacement, offset + start, offset + end, rule_index)
+                updated.append((replacement, True, offset + start))
                 last = end
             if last < len(chunk):
-                updated.append((chunk[last:], False))
+                updated.append((chunk[last:], False, offset + last))
 
         segments = updated
 
-    return "".join(chunk for chunk, _ in segments)
+    return "".join(chunk for chunk, _, _ in segments)
 
 
 def clean_comment_for_translation(text, cleanup_rules):

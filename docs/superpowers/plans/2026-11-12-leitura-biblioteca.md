@@ -1,0 +1,3 @@
+﻿# RG-031 — leitura da biblioteca local
+
+Criar uma interface somente de leitura para listar pacotes em um nível de `Minhas Traduções`. Identificar manifestos v1 válidos, pacotes antigos com dois PGNs reconhecíveis, metadados inválidos e pacotes incompletos; não escrever nem migrar dados e não calcular hashes na listagem. Rejeitar caminhos absolutos, subdiretórios, symlinks, arquivos ausentes, JSON grande/malformado e versões desconhecidas sem impedir a listagem dos demais. Ignorar diretórios de publicação temporários, oferecer busca e filtros determinísticos e não inventar metadados de pacotes antigos. Testar cenários reais, caminhos hostis, legados e acervo imutável. Interface visual, verificação efetiva dos hashes e índice persistente ficam para etapas posteriores.

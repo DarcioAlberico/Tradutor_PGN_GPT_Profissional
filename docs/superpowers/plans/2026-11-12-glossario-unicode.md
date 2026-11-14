@@ -1,0 +1,3 @@
+﻿# RG-041 — filtragem de padrões ASCII em comentários Unicode
+
+Medir o caso de comentário sintético com acentos antes e depois. Para padrões ASCII sem distinção de maiúsculas, normalizar somente para uma verificação de ausência, preservando integralmente o regex original para candidatos. A normalização deve incluir os quatro caracteres especiais de IGNORECASE e tratar expansão de İ sem provocar falsos negativos; falsas presenças são seguras pois a regex decide o resultado. Comparar com a busca anterior em combinações Unicode, fronteiras, sobreposições e padrões literais; manter precedência e índices originais. Executar as suítes e registrar limitações dos benchmarks.

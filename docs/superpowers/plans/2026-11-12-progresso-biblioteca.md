@@ -1,0 +1,3 @@
+﻿# RG-031 — consulta do progresso de revisão
+
+Adicionar consulta sob demanda e em segundo plano para pacotes com vínculo confiável: verificar integridade e vínculo pelo mecanismo existente, consultar somente leitura as contagens do editor para o mesmo arquivo e par, e mostrar total de comentários distintos, verificados e pendentes. Não inferir progresso de correspondência compatível não confirmada ou pacotes sem vínculo, não confundir pendentes com falhas de tradução e não guardar contagens obsoletas no manifesto. Tratar banco/arquivos indisponíveis e concorrência sem retornar zero enganoso. Testar reaproveitamento de comentário, pares de idiomas, alterações no banco, interface e ausência de escrita.

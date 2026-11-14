@@ -25,10 +25,19 @@ def grid_button_row(parent, button_specs, columns=3):
         parent.columnconfigure(column, weight=1)
 
 
-def create_section(parent, title):
+def create_section(parent, title, action=None):
     section = ctk.CTkFrame(parent, corner_radius=8)
-    title_label = ctk.CTkLabel(section, text=title, font=ctk.CTkFont(weight="bold"))
-    title_label.pack(anchor="w", padx=12, pady=(10, 2))
+    if action is None:
+        title_label = ctk.CTkLabel(section, text=title, font=ctk.CTkFont(weight="bold"))
+        title_label.pack(anchor="w", padx=12, pady=(10, 2))
+    else:
+        header = ctk.CTkFrame(section, fg_color="transparent")
+        header.pack(fill=tk.X, padx=12, pady=(6, 2))
+        section.header_action = ctk.CTkButton(
+            header, text="Verificar meus dados", command=action, width=170, height=26
+        )
+        section.header_action.pack(side=tk.RIGHT)
+        ctk.CTkLabel(header, text=title, font=ctk.CTkFont(weight="bold")).pack(side=tk.LEFT)
 
     content = ctk.CTkFrame(section, fg_color="transparent")
     content.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
@@ -101,6 +110,14 @@ def setup_main_ui(app):
         side=tk.LEFT, padx=(0, 6)
     )
     ctk.CTkButton(btn_frame, text="Pasta", width=82, command=app.select_directory).pack(
+        side=tk.LEFT, padx=(0, 6)
+    )
+    ctk.CTkButton(
+        btn_frame,
+        text="Abrir Traduzidos",
+        width=125,
+        command=app.open_translations_folder,
+    ).pack(
         side=tk.LEFT
     )
 
@@ -108,7 +125,10 @@ def setup_main_ui(app):
         input_frame,
         text="Processar subdiretórios",
         variable=app.process_subdirs,
-    ).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(6, 0))
+    ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+
+    ctk.CTkButton(input_frame, text="Biblioteca", width=125,
+                  command=app.open_translation_library).grid(row=1, column=2, sticky=tk.E, pady=(6, 0))
 
     input_frame.columnconfigure(1, weight=1)
 
@@ -248,8 +268,9 @@ def setup_main_ui(app):
     app.progress_label = ctk.CTkLabel(btns_line, text="", anchor="e")
     app.progress_label.pack(side=tk.RIGHT, padx=(8, 0))
 
-    tools_section, tools_frame = create_section(main_frame, "Ferramentas")
+    tools_section, tools_frame = create_section(main_frame, "Ferramentas", app.verify_user_data)
     tools_section.pack(fill=tk.X, pady=(0, 8))
+    app.verify_data_button = tools_section.header_action
 
     grid_button_row(
         tools_frame,
@@ -276,9 +297,7 @@ def setup_main_ui(app):
             # (garantia Q2); este botao e para quem cancelou aquela, ou quem quer
             # conferir em que versao o banco esta.
             {"text": "Reavaliar QA", "command": app.reevaluate_quality_warnings},
-            # A decima sexta fecha a grade de 4 x 4 sem custar uma fileira —
-            # e esta janela nao tem uma fileira sobrando (28.10). Antes das
-            # duas vermelhas, para elas continuarem sendo as ultimas.
+            # Antes das duas acoes destrutivas, que continuam por ultimo.
             {"text": "Configurações", "command": app.open_settings_window},
             # As duas ultimas, e em vermelho. Sao as unicas acoes da janela que
             # destroem trabalho, e ficam distinguiveis a distancia de um clique

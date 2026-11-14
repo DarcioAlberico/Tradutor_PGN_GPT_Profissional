@@ -13,11 +13,13 @@ import unittest.mock
 from pathlib import Path
 
 from tradutor_pgn import (
+    app_paths,
     glossario,
     settings,
 )
 from tradutor_pgn.database import (
     RUN_COMPLETED,
+    RUN_CANCELED,
     RUN_CRASHED,
     RUN_FAILED,
     list_translation_runs,
@@ -42,7 +44,6 @@ from tradutor_pgn.pgn_utils import (
     extract_comments_from_file,
     generate_translated_pgn,
     read_pgn_text,
-    translated_output_path,
 )
 from tradutor_pgn import pgn_utils
 from tradutor_pgn import (
@@ -88,6 +89,15 @@ class FailedRunRecordTests(unittest.TestCase):
         self.assertEqual(registro["target_language"], "en")
         self.assertEqual(registro["files"], ["a.pgn", "b.pgn"])
         self.assertEqual(registro["failed_count"], 7)
+
+    def test_a_delivery_failure_is_reprocessable_without_failed_comments(self):
+        registro = failed_runs.build_failed_run_record(
+            "pt", ["livro.pgn"], 0, delivery_failed_count=1
+        )
+
+        self.assertEqual(registro["failed_count"], 0)
+        self.assertEqual(registro["delivery_failed_count"], 1)
+        self.assertIn("1 falha(s) de entrega", failed_runs.describe_failed_run(registro))
 
     def test_duplicated_files_are_counted_once(self):
         registro = failed_runs.build_failed_run_record("pt", ["a.pgn", "a.pgn"], 2)
@@ -248,9 +258,9 @@ class LastRunRecordTests(unittest.TestCase):
         app.last_run = None
         self.rodar(app)
         self.assertEqual(app.last_run["files"], [os.path.abspath(str(self.pgn))])
-        self.assertEqual(
-            app.last_run["generated"], [os.path.abspath(str(self.base / "game-BR.pgn"))]
-        )
+        gerado = Path(app.last_run["generated"][0])
+        self.assertEqual(gerado.parent.name, gerado.stem)
+        self.assertEqual(gerado.parent.parent, Path(app_paths.translations_dir()))
         self.assertEqual(app.last_run["target_language"], "pt")
         self.assertTrue(app.last_run["completed"])
 
@@ -370,14 +380,159 @@ class TranslationWorkerTests(unittest.TestCase):
                 translation_worker.translate_text = original_translate_text
                 translation_worker.messagebox.showinfo = original_showinfo
 
-            output = tmp_path / "game-BR.pgn"
+            output = Path(app.last_run["generated"][0])
             self.assertTrue(output.exists())
+            self.assertEqual(
+                (output.parent / "game.pgn").read_bytes(), pgn.read_bytes()
+            )
             output_text = output.read_text(encoding="utf-8")
             self.assertIn("{As brancas começam}", output_text)
             self.assertIn("{As pretas respondem}", output_text)
             self.assertEqual(app.progress.value, 1)
             self.assertFalse(app.is_processing)
             self.assertTrue(app.reset_called)
+
+    def test_output_publication_failure_marks_the_run_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n1. e4 {White starts}\n', encoding="utf-8"
+            )
+            conn = initialize_database(str(db_path))
+            save_translation(conn.cursor(), "White starts", "As brancas começam", "pt")
+            conn.commit()
+            conn.close()
+            app = FakeApp(db_path)
+            app.last_run = None
+
+            with unittest.mock.patch.object(
+                translation_worker, "generate_translated_pgn", return_value=False
+            ):
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+
+            conn = initialize_database(str(db_path))
+            try:
+                run = list_translation_runs(conn.cursor(), limit=1)[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(run["outcome"], RUN_FAILED)
+            self.assertFalse(app.last_run["completed"])
+            self.assertEqual(app.last_run["generated"], [])
+            self.assertIn("Falhas de entrega: 1", "\n".join(app.logs))
+
+    def test_cancel_during_output_publication_marks_the_run_canceled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n1. e4 {White starts}\n', encoding="utf-8"
+            )
+            conn = initialize_database(str(db_path))
+            save_translation(conn.cursor(), "White starts", "As brancas começam", "pt")
+            conn.commit()
+            conn.close()
+            app = FakeApp(db_path)
+
+            def cancel_generation(*_args, **_kwargs):
+                app.cancel_flag.set()
+                return False
+
+            with unittest.mock.patch.object(
+                translation_worker,
+                "generate_translated_pgn",
+                side_effect=cancel_generation,
+            ):
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+
+            conn = initialize_database(str(db_path))
+            try:
+                run = list_translation_runs(conn.cursor(), limit=1)[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(run["outcome"], RUN_CANCELED)
+            self.assertIn("cancelada durante a geracao", "\n".join(app.logs).lower())
+
+    def test_source_changed_during_translation_is_not_published(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n1. e4 {White starts}\n', encoding="utf-8"
+            )
+            conn = initialize_database(str(db_path))
+            save_translation(conn.cursor(), "White starts", "As brancas começam", "pt")
+            conn.commit()
+            conn.close()
+            app = FakeApp(db_path)
+            existing_outputs = set(Path(app_paths.translations_dir()).glob("**/*.pgn"))
+
+            def change_source_then_generate(_input, output, *_args, **_kwargs):
+                pgn.write_text('[Event "Alterado"]\n', encoding="utf-8")
+                Path(output).write_text('[Event "Traduzido"]\n', encoding="utf-8")
+                return True
+
+            with unittest.mock.patch.object(
+                translation_worker,
+                "generate_translated_pgn",
+                side_effect=change_source_then_generate,
+            ):
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+
+            conn = initialize_database(str(db_path))
+            try:
+                run = list_translation_runs(conn.cursor(), limit=1)[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(run["outcome"], RUN_FAILED)
+            self.assertEqual(
+                set(Path(app_paths.translations_dir()).glob("**/*.pgn")),
+                existing_outputs,
+            )
+            self.assertIn("alterado durante a tradução", "\n".join(app.logs))
+
+    def test_source_changed_while_api_runs_is_not_published(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text(
+                '[Event "Test"]\n\n1. e4 {White starts}\n', encoding="utf-8"
+            )
+            app = FakeApp(db_path)
+            existing_outputs = set(Path(app_paths.translations_dir()).glob("**/*.pgn"))
+            changed = False
+
+            def translate(text, *_args, **_kwargs):
+                nonlocal changed
+                if not changed:
+                    changed = True
+                    pgn.write_text('[Event "Alterado"]\n', encoding="utf-8")
+                return f"PT:{text}"
+
+            with unittest.mock.patch.object(
+                translation_worker, "translate_text", side_effect=translate
+            ):
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+
+            conn = initialize_database(str(db_path))
+            try:
+                run = list_translation_runs(conn.cursor(), limit=1)[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(run["outcome"], RUN_FAILED)
+            self.assertEqual(
+                set(Path(app_paths.translations_dir()).glob("**/*.pgn")),
+                existing_outputs,
+            )
+            self.assertIn("alterado durante a tradução", "\n".join(app.logs))
 
     def test_run_translation_reports_failed_comments_instead_of_silent_success(self):
         # Garantia T2: uma falha parcial nao pode ser apresentada como sucesso.
@@ -442,9 +597,12 @@ class TranslationWorkerTests(unittest.TestCase):
             self.assertIn("game.pgn", log)
 
             # Garantia T3: o comentario que falhou fica no idioma original.
-            output_text = (tmp_path / "game-BR.pgn").read_text(encoding="utf-8")
+            output_text = Path(app.last_run["generated"][0]).read_text(encoding="utf-8")
             self.assertIn("{As brancas tomam o centro}", output_text)
             self.assertIn("{Black responds}", output_text)
+            import json
+            manifest = json.loads((Path(app.last_run["generated"][0]).parent / "manifesto.json").read_text(encoding="utf8"))
+            self.assertEqual(manifest["failed_comments"], 1)
 
     def test_run_translation_reports_clean_success_when_nothing_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -478,6 +636,28 @@ class TranslationWorkerTests(unittest.TestCase):
 
             self.assertEqual([d[0] for d in dialogs], ["info"])
             self.assertIn("Falharam: 0", dialogs[0][2])
+            import json
+            manifest = json.loads((Path(app.last_run["generated"][0]).parent / "manifesto.json").read_text(encoding="utf8"))
+            self.assertEqual(manifest["failed_comments"], 0)
+
+    def test_each_bundle_records_only_its_own_failed_comments(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "a.pgn").write_text('[Event "A"]\n\n1. e4 {first} e5 {bad} *\n', encoding="utf8")
+            (base / "b.pgn").write_text('[Event "B"]\n\n1. e4 {second} *\n', encoding="utf8")
+            app = FakeApp(base / "cache.db")
+            def translate(text, *_args, **_kwargs):
+                if "|||" in text:
+                    return "invalid batch"
+                return None if text == "bad" else text.upper()
+            with unittest.mock.patch.object(translation_worker, "translate_text", translate):
+                translation_worker.run_translation(app, str(base), "pt", False)
+            counts = {}
+            for output in app.last_run["generated"]:
+                manifest = json.loads((Path(output).parent / "manifesto.json").read_text(encoding="utf8"))
+                counts[manifest["files"]["original"]["path"]] = manifest["failed_comments"]
+            self.assertEqual(counts, {"a.pgn": 1, "b.pgn": 0})
 
     def test_run_translation_applies_cleanup_rules_before_api_call(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -513,7 +693,7 @@ class TranslationWorkerTests(unittest.TestCase):
                 translation_worker.load_cleanup_substitutions = original_cleanup
 
             self.assertEqual(translated_inputs, ["White starts"])
-            output = tmp_path / "game-BR.pgn"
+            output = Path(app.last_run["generated"][0])
             output_text = output.read_text(encoding="utf-8")
             # Garantia X2: o comentario esvaziado pela limpeza sai do arquivo
             # inteiro, sem deixar um `{}` pontilhando o movetext. Este assert
@@ -567,7 +747,7 @@ class TranslationWorkerTests(unittest.TestCase):
                 translation_worker.load_cleanup_substitutions = original_cleanup
                 translation_worker.load_automatic_substitutions = original_automatic
 
-            output = tmp_path / "game-BR.pgn"
+            output = Path(app.last_run["generated"][0])
             output_text = output.read_text(encoding="utf-8")
             self.assertIn("{As brancas ganham a dama}", output_text)
 
@@ -791,6 +971,27 @@ class BatchFallbackTests(WorkerFallbackHarness, unittest.TestCase):
     possivel do programa: atribuir a traducao de um comentario a outro.
     """
 
+    def test_literal_separator_is_sent_alone_and_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "game.pgn").write_text(
+                '[Event "Test"]\n\n1. e4 {first} e5 {literal ||| marker} '
+                '2. Nf3 {last} *\n', encoding="utf-8"
+            )
+            calls = []
+            def translate(text, *_args, **_kwargs):
+                calls.append(text)
+                return text.upper()
+            app = FakeApp(base / "cache.db")
+            with unittest.mock.patch.object(translation_worker, "translate_text", translate), \
+                 unittest.mock.patch.object(translation_worker.messagebox, "showinfo"), \
+                 unittest.mock.patch.object(translation_worker.messagebox, "showwarning"), \
+                 unittest.mock.patch.object(translation_worker.messagebox, "showerror"):
+                translation_worker.run_translation(app, str(base / "game.pgn"), "pt", False)
+            self.assertEqual(calls, ["first", "literal ||| marker", "last"])
+            self.assertEqual(self.stored(base / "cache.db")["literal ||| marker"],
+                             "LITERAL ||| MARKER")
+
     def test_misaligned_batch_falls_back_to_one_by_one(self):
         chamadas = []
 
@@ -909,7 +1110,7 @@ class BatchFallbackTests(WorkerFallbackHarness, unittest.TestCase):
             tmp_path = Path(tmp)
             app, pgn = self.run_worker(tmp_path, translate)
             gravadas = self.stored(tmp_path / "cache.db")
-            gerado = list(tmp_path.glob("*-BR.pgn"))
+            gerado = [Path(path) for path in app.last_run["generated"]]
             self.assertTrue(gerado, "o PGN traduzido devia ter sido gerado")
             # Lido aqui dentro: o diretorio temporario some ao sair do `with`.
             conteudo = gerado[0].read_text(encoding="utf-8")
@@ -1306,7 +1507,7 @@ class WorkerTrailingPrepositionTests(WorkerFallbackHarness, unittest.TestCase):
                 tmp_path = Path(tmp)
                 app, _pgn = self.roda(tmp_path, alinhado)
                 gravadas = self.stored(tmp_path / "cache.db")
-                saida = next(tmp_path.glob("*-BR.pgn")).read_text(encoding="utf-8")
+                saida = Path(app.last_run["generated"][0]).read_text(encoding="utf-8")
 
                 self.assertEqual(
                     gravadas["White is better after"], "As brancas estao melhores depois de"
@@ -1748,7 +1949,7 @@ class WorkerMoveNotationTests(unittest.TestCase):
         entregue ao usuario teria os lances errados e o banco os certos."""
         _app, pgn = self.roda("O rei vai Kf1 e a torre Rxe4+ ganha.")
 
-        saida = pgn.with_name("game-BR.pgn").read_text(encoding="utf-8")
+        saida = Path(_app.last_run["generated"][0]).read_text(encoding="utf-8")
         self.assertIn("{O rei vai Rf1 e a torre Txe4+ ganha.}", saida)
 
     def test_without_a_declared_source_the_worker_stores_what_came_back(self):
@@ -1871,7 +2072,7 @@ class WorkerAnnotationMaskTests(unittest.TestCase):
                 conn.close()
             self.assertEqual(gravado, esperado)
 
-            output_text = (tmp_path / "game-BR.pgn").read_text(encoding="utf-8")
+            output_text = Path(app.last_run["generated"][0]).read_text(encoding="utf-8")
             self.assertIn("{" + esperado + "}", output_text)
 
     def test_lost_sentinel_becomes_reported_failure(self):
@@ -2067,7 +2268,7 @@ class WorkerProgressEndStateTests(WorkerFallbackHarness, unittest.TestCase):
         )
         self.assertEqual(app.progress.value, 0.0)
 
-    def test_a_general_exception_puts_the_bar_back_to_rest(self):
+    def test_an_output_exception_puts_the_bar_back_to_rest(self):
         original = translation_worker.generate_translated_pgn
         translation_worker.generate_translated_pgn = lambda *_a, **_k: 1 / 0
         self.addCleanup(
@@ -2089,7 +2290,7 @@ class WorkerProgressEndStateTests(WorkerFallbackHarness, unittest.TestCase):
             finally:
                 (translation_worker.messagebox.showerror,) = originais
 
-        self.assertTrue(any("ERRO GERAL" in linha for linha in app.logs))
+        self.assertTrue(any("FALHA DE ENTREGA" in linha for linha in app.logs))
         self.assertEqual(app.progress.value, 0.0)
 
     def test_a_cancelled_run_puts_the_bar_back_to_rest(self):
@@ -2172,7 +2373,8 @@ class WorkerFailureListSurvivesAnExceptionTests(
         self.assertIsNotNone(registro, "a lista desta execucao devia ter sido gravada")
         self.assertEqual(registro["files"], [str(pgn)])
         self.assertEqual(registro["failed_count"], 1)
-        self.assertTrue(any("ERRO GERAL" in linha for linha in app.logs))
+        self.assertEqual(registro["delivery_failed_count"], 1)
+        self.assertTrue(any("FALHA DE ENTREGA" in linha for linha in app.logs))
 
     def test_it_is_written_only_once(self):
         """O caminho normal grava no fim, e o tratador de excecao grava se o
@@ -2890,7 +3092,7 @@ class WorkerDeduplicatesTheBatchTests(unittest.TestCase):
     def test_every_occurrence_is_still_replaced_in_the_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             _app, pgn, _enviados = self.rodar(Path(tmp))
-            saida = Path(str(pgn).replace("game.pgn", "game-BR.pgn"))
+            saida = Path(_app.last_run["generated"][0])
             texto = saida.read_text(encoding="utf-8")
 
         self.assertEqual(texto.count("{[Diagram]}"), 4)
@@ -3196,6 +3398,25 @@ class WorkerProviderTests(WorkerFallbackHarness, unittest.TestCase):
     def google_nunca(self, *_a, **_k):
         raise AssertionError("o Google foi chamado numa execucao com provedor de modelo")
 
+    def test_structured_provider_receives_comments_without_joining(self):
+        class Structured(FakeLLMTranslator):
+            def translate_batch(self, parts, target_language, log_message=None,
+                                cancel_flag=None, contexts=None):
+                self.calls.append(list(parts))
+                return [f"<{part}>" for part in parts]
+
+            def translate(self, *args, **kwargs):
+                raise AssertionError("a interface textual nao deve ser usada")
+
+        falso = Structured()
+        with unittest.mock.patch.object(translation_worker, "build_translator", return_value=falso):
+            with tempfile.TemporaryDirectory() as tmp:
+                base = Path(tmp)
+                self.run_worker(base, self.google_nunca, provider="deepseek")
+                stored = self.stored(base / "cache.db")
+        self.assertEqual(falso.calls, [self.COMMENTS])
+        self.assertEqual(stored, {c: f"<{c}>" for c in self.COMMENTS})
+
     def execucoes(self, tmp_path):
         conn = initialize_database(str(tmp_path / "cache.db"))
         try:
@@ -3264,6 +3485,38 @@ class WorkerProviderTests(WorkerFallbackHarness, unittest.TestCase):
         self.assertEqual(stored, {c: c.upper() for c in self.COMMENTS})
         montado.assert_not_called()
 
+    def test_generated_bundle_manifest_records_run_metadata(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _ = self.run_worker(
+                Path(tmp), lambda text, *_a, **_k: text.upper(), source_language="en"
+            )
+            output = Path(app.last_run["generated"][0])
+            manifest = json.loads((output.parent / "manifesto.json").read_text(encoding="utf8"))
+            self.assertEqual(manifest["source_language"], "en")
+            self.assertEqual(manifest["target_language"], "pt")
+            self.assertEqual(manifest["execution_provider"], translation_worker.TRANSLATION_PROVIDER)
+            self.assertEqual(manifest["files"]["translation"]["path"], output.name)
+            from tradutor_pgn.translation_library_links import resolve_link
+            import sqlite3
+            from contextlib import closing
+            with closing(sqlite3.connect(str(Path(tmp) / "cache.db"))) as conn:
+                link = resolve_link(conn, manifest["bundle_id"])
+            self.assertEqual(link.source_file, str(Path(tmp) / "game.pgn"))
+            self.assertEqual((link.source_language, link.target_language), ("en", "pt"))
+            from tradutor_pgn.translation_library_links import resolve_bundle_review
+            resolved = resolve_bundle_review(Path(tmp) / "cache.db", output.parent)
+            self.assertEqual(resolved.status, "ready")
+            self.assertEqual(resolved.link, link)
+
+    def test_link_write_failure_preserves_published_translation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch.object(translation_worker, "register_link", side_effect=OSError("disk")):
+                app, _ = self.run_worker(Path(tmp), lambda text, *_a, **_k: text.upper())
+            self.assertTrue(Path(app.last_run["generated"][0]).is_file())
+            self.assertTrue(any("não foi possível vinculá-lo" in line for line in app.logs))
+
     def test_the_cost_is_estimated_after_the_cache_and_asked_before_the_first_request(self):
         """A pergunta vem DEPOIS da carga do cache — o que ja esta no banco nao
         entra na conta — e ANTES da primeira requisicao; com tudo em cache nao
@@ -3331,6 +3584,46 @@ class WorkerProviderTests(WorkerFallbackHarness, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.run_worker(Path(tmp), lambda text, *_a, **_k: text.upper(), ask_yes_no=ask)
         self.assertEqual(perguntas, [])
+
+    def test_google_estimate_precedes_request_and_accounts_for_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            app, _ = self.run_worker(base, lambda text, *_a, **_k: text.upper())
+            estimate_index = next(i for i, line in enumerate(app.logs) if "Estimativa Google:" in line)
+            process_index = next(i for i, line in enumerate(app.logs) if "Processando arquivo" in line)
+            self.assertLess(estimate_index, process_index)
+            self.assertIn("3 comentario(s)", app.logs[estimate_index])
+            self.assertIn("1 lote(s)", app.logs[estimate_index])
+            app, _ = self.run_worker(base, lambda *_a, **_k: self.fail("cache não foi usado"))
+            self.assertTrue(any("Estimativa Google: 0 comentario(s)" in line for line in app.logs))
+
+    def test_google_metrics_are_logged_at_end_without_content(self):
+        def translate(text, *_args, **kwargs):
+            metrics = kwargs["pacer"].metrics
+            metrics.record_attempt(len(text))
+            metrics.record_status(403)
+            metrics.record_wait("quota", 1.0)
+            metrics.record_wait("cooldown", 2.0)
+            metrics.record_wait("both", 3.0)
+            return text.upper()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _ = self.run_worker(Path(tmp), translate)
+        line = next(line for line in app.logs if "Métricas Google:" in line)
+        self.assertIn("1 tentativa(s)", line)
+        self.assertIn("403: 1", line)
+        self.assertIn("cota: 1.0 s; cooldown: 2.0 s; ambos: 3.0 s", line)
+        self.assertNotIn(self.COMMENTS[0], line)
+
+    def test_google_metrics_are_logged_when_cancelled(self):
+        def translate(text, *_args, **kwargs):
+            kwargs["pacer"].metrics.record_attempt(len(text))
+            kwargs["cancel_flag"].set()
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app, _ = self.run_worker(Path(tmp), translate)
+        self.assertTrue(any("Métricas Google: 1 tentativa(s)" in line for line in app.logs))
 
     def test_a_priced_model_reports_estimated_and_real_dollars(self):
         falso = FakeLLMTranslator()
@@ -3407,8 +3700,12 @@ class WorkerAnchorGateTests(WorkerFallbackHarness, unittest.TestCase):
                 tmp_path = Path(tmp)
                 app, pgn = self.run_worker(tmp_path, self.google_nunca, provider="deepseek")
                 stored = self.stored(tmp_path / "cache.db")
-                saida = Path(translated_output_path(str(pgn), "pt"))
-                gerado = saida.read_text(encoding="utf-8") if saida.exists() else None
+                generated = getattr(app, "last_run", {}).get("generated", [])
+                gerado = (
+                    Path(generated[0]).read_text(encoding="utf-8")
+                    if generated
+                    else None
+                )
         return app, falso, stored, gerado
 
     def test_a_rewritten_move_is_resent_once_and_then_refused(self):

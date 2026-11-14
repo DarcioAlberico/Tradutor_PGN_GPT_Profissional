@@ -44,7 +44,8 @@ from .chess_terms import find_suspect_terms
 #
 # Versao 2 (2026-09-14, ROADMAP 28.2 camada 1): tres heuristicas de prosa com
 # escopo de par (`_prose_warnings`) e 35 formas novas no `Termos-suspeitos.txt`.
-QUALITY_HEURISTICS_VERSION = 2
+# Versao 3: compara o marcador literal de lote com o texto original.
+QUALITY_HEURISTICS_VERSION = 3
 
 QUALITY_REPORT_HEADERS = [
     "id",
@@ -105,8 +106,8 @@ _EVAL_SYMBOLS_BY_LENGTH = tuple(sorted(EVAL_SYMBOLS, key=len, reverse=True))
 # G2 impedem isso em arquivo novo; isto acha o legado que ja esta no banco.
 REPLACEMENT_CHAR = "�"
 
-# O separador de lote. No texto GRAVADO ele e evidencia de um desalinhamento que
-# a contagem de partes nao pegou (garantia B2).
+# O marcador pode ser texto legítimo; uma contagem diferente é indício de perda
+# ou inclusão durante a tradução, não prova da causa.
 BATCH_SEPARATOR_MARK = "|||"
 
 
@@ -355,10 +356,14 @@ def evaluate_translation_quality(
             "Contém U+FFFD: bytes perdidos na leitura do arquivo de origem."
         )
 
-    if BATCH_SEPARATOR_MARK in translated:
+    original_separators = original.count(BATCH_SEPARATOR_MARK)
+    translated_separators = translated.count(BATCH_SEPARATOR_MARK)
+    if translated_separators > original_separators:
         warnings.append(
-            "Contém o separador de lote (|||): sinal de desalinhamento na tradução."
+            "Contém separador de lote (|||) adicional em relação ao original."
         )
+    elif translated_separators < original_separators:
+        warnings.append("Separador de lote (|||) presente no original está ausente ou incompleto na tradução.")
 
     warnings.extend(
         _terminology_warnings(original, translated, source_language, target_language)

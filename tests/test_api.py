@@ -136,7 +136,11 @@ class CancelReachesTheRetryLoopTests(unittest.TestCase):
         flag = threading.Event()
         sessao = self.SessaoQueFalha()
         # O cancelamento acontece enquanto o programa dorme entre as tentativas.
-        translation_api.time.sleep = lambda _s: flag.set()
+        def cancel_during_wait(_seconds):
+            flag.set()
+            return True
+
+        flag.wait = cancel_during_wait
 
         resultado = translation_api.translate_text_chunk(
             "Hello", "pt", session=sessao, cancel_flag=flag

@@ -232,6 +232,12 @@ class PGNTranslatorApp:
     def select_directory(self):
         app_actions.select_directory(self)
 
+    def open_translations_folder(self):
+        return app_actions.open_translations_folder(self)
+
+    def open_translation_library(self):
+        return app_actions.open_translation_library(self)
+
     # ============================
     #     SISTEMA DE LOG
     # ============================
@@ -294,6 +300,9 @@ class PGNTranslatorApp:
 
     def restore_database(self):
         app_actions.restore_database(self)
+
+    def verify_user_data(self):
+        app_actions.verify_user_data(self)
 
     def apply_automatic_rules(self):
         app_actions.apply_automatic_rules(self)

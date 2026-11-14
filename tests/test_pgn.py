@@ -3,6 +3,9 @@
 Parte da divisao de `test_core.py` (ROADMAP 28.11); ver `tests/helpers.py`."""
 
 import os
+import importlib.util
+import inspect
+import hashlib
 import sqlite3
 import tempfile
 import unittest
@@ -34,8 +37,10 @@ from tradutor_pgn.pgn_utils import (
     split_batch_translation,
     strip_generated_suffix,
     translated_output_path,
+    translated_bundle_paths,
     wrap_pgn_comment,
 )
+from tradutor_pgn import translation_output
 from tradutor_pgn.pgn_spellcheck import (
     SPELLING_DB_FILENAME,
     build_spelling_index,
@@ -85,6 +90,167 @@ def tearDownModule():
 
 
 class PgnUtilsTests(unittest.TestCase):
+    def test_translation_bundle_publisher_is_available(self):
+        spec = importlib.util.find_spec("tradutor_pgn.translation_output")
+        self.assertIsNotNone(spec)
+
+    def test_bundle_publication_is_atomic_when_generation_fails(self):
+        self.assertTrue(hasattr(translation_output, "publish_translation_bundle"))
+        publish_translation_bundle = translation_output.publish_translation_bundle
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Minhas Traduções"
+            source = Path(tmp) / "livro.pgn"
+            source.write_bytes(b"[Event \"Original\"]\n")
+
+            def fail_after_partial_write(output_path):
+                Path(output_path).write_text("parcial", encoding="utf-8")
+                raise OSError("disco cheio")
+
+            result = publish_translation_bundle(
+                str(source), "pt", str(root), fail_after_partial_write
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertIsInstance(result.error, OSError)
+            self.assertFalse(root.exists() and any(root.iterdir()))
+
+    def test_bundle_publication_contains_original_and_translation(self):
+        self.assertTrue(hasattr(translation_output, "publish_translation_bundle"))
+        publish_translation_bundle = translation_output.publish_translation_bundle
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Minhas Traduções"
+            source = Path(tmp) / "livro.pgn"
+            source.write_bytes(b"[Event \"Original\"]\n")
+
+            def generate(output_path):
+                Path(output_path).write_text(
+                    '[Event "Traduzido"]\n', encoding="utf-8"
+                )
+                return True
+
+            result = publish_translation_bundle(
+                str(source), "pt", str(root), generate
+            )
+
+            self.assertEqual(result.status, "published")
+            self.assertEqual(Path(result.bundle_dir).name, "livro-BR")
+            self.assertEqual(Path(result.original_path).read_bytes(), source.read_bytes())
+            self.assertEqual(
+                Path(result.translated_path).read_text(encoding="utf-8"),
+                '[Event "Traduzido"]\n',
+            )
+
+    def test_bundle_publisher_accepts_the_source_snapshot_fingerprint(self):
+        parameters = inspect.signature(
+            translation_output.publish_translation_bundle
+        ).parameters
+        self.assertIn("expected_source_sha256", parameters)
+
+    def test_bundle_publication_refuses_a_changed_source_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Minhas Traduções"
+            source = Path(tmp) / "livro.pgn"
+            original = b'[Event "Original"]\n'
+            source.write_bytes(original)
+            expected = hashlib.sha256(original).hexdigest()
+
+            def generate(output_path):
+                source.write_bytes(b'[Event "Alterado"]\n')
+                Path(output_path).write_text(
+                    '[Event "Traduzido"]\n', encoding="utf-8"
+                )
+                return True
+
+            result = translation_output.publish_translation_bundle(
+                str(source),
+                "pt",
+                str(root),
+                generate,
+                expected_source_sha256=expected,
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertIn("alterado", str(result.error).lower())
+            self.assertFalse(root.exists() and any(root.iterdir()))
+
+    def test_bundle_publication_honors_cancellation_after_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Minhas Traduções"
+            source = Path(tmp) / "livro.pgn"
+            source.write_text('[Event "Original"]\n', encoding="utf-8")
+
+            def generate(output_path):
+                Path(output_path).write_text('[Event "Traduzido"]\n', encoding="utf-8")
+                return True
+
+            result = translation_output.publish_translation_bundle(
+                str(source), "pt", str(root), generate, is_canceled=lambda: True
+            )
+
+            self.assertEqual(result.status, "canceled")
+            self.assertFalse(root.exists() and any(root.iterdir()))
+
+    def test_bundle_setup_failure_is_returned_as_a_delivery_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "nao-e-diretorio"
+            root.write_text("ocupado", encoding="utf-8")
+            source = Path(tmp) / "livro.pgn"
+            source.write_text('[Event "Original"]\n', encoding="utf-8")
+
+            result = translation_output.publish_translation_bundle(
+                str(source), "pt", str(root), lambda _output: True
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertIsInstance(result.error, OSError)
+
+    def test_translated_bundle_contains_matching_names_and_avoids_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Minhas Traduções"
+            source = Path(tmp) / "livro.pgn"
+
+            folder, original, translated = translated_bundle_paths(
+                str(source), "pt", str(root)
+            )
+            self.assertEqual(Path(folder).name, "livro-BR")
+            self.assertEqual(Path(original).name, "livro.pgn")
+            self.assertEqual(Path(translated).name, "livro-BR.pgn")
+
+            Path(folder).mkdir(parents=True)
+            Path(translated).write_text("anterior", encoding="utf-8")
+            folder, _original, translated = translated_bundle_paths(
+                str(source), "pt", str(root)
+            )
+            self.assertEqual(Path(folder).name, "livro-BR-2")
+            self.assertEqual(Path(translated).name, "livro-BR-2.pgn")
+
+    def test_translated_bundle_skips_an_existing_incomplete_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Minhas Traduções"
+            source = Path(tmp) / "livro.pgn"
+            incomplete = root / "livro-BR"
+            incomplete.mkdir(parents=True)
+
+            folder, _original, translated = translated_bundle_paths(
+                str(source), "pt", str(root)
+            )
+
+            self.assertEqual(Path(folder).name, "livro-BR-2")
+            self.assertEqual(Path(translated).name, "livro-BR-2.pgn")
+
+    def test_bundle_never_uses_the_same_name_for_original_and_translation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Minhas Traduções"
+            (root / "game-BR").mkdir(parents=True)
+            source = Path(tmp) / "game-BR-2.pgn"
+
+            _folder, original, translated = translated_bundle_paths(
+                str(source), "pt", str(root)
+            )
+
+            self.assertNotEqual(Path(original).name, Path(translated).name)
+            self.assertEqual(Path(original).name, "game-BR-2-original.pgn")
+
     def test_extract_and_generate_translated_pgn(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

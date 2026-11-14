@@ -1,0 +1,3 @@
+﻿# RG-031 — janela inicial da biblioteca
+
+Adicionar um botão Biblioteca na janela principal preservando Abrir Traduzidos. Abrir janela local com busca por nome, idioma e motor, atualização, estados vazio/erro e cartões com metadados e situação. A lista é carregada em thread de trabalho; Tk é atualizado somente pela thread principal, com polling cancelável e resultados antigos descartados. Ações de abrir arquivos conferem novamente o pacote e recusam se ele mudou ou ficou inválido; pacotes incompletos só oferecem abertura da pasta. Informar que hashes não foram verificados. Testar interface real em sandbox, busca, abertura, estados e atualização, sem abrir programas externos. Paginação, índice, filtros avançados, revisão e verificação de integridade continuam pendentes.

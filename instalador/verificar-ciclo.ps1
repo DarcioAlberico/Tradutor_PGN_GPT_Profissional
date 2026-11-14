@@ -27,8 +27,23 @@ function Confere($descricao, $condicao) {
     else { Write-Host "   [FALHOU] $descricao" -ForegroundColor Red; $script:falhas += $descricao }
 }
 
+if (-not [string]::IsNullOrWhiteSpace($env:PGN_TRADUTOR_DATA)) {
+    throw 'PGN_TRADUTOR_DATA esta definida. Remova a variavel e use uma maquina isolada.'
+}
 if (Test-Path $dados) {
     throw "Ja existe $dados. Este roteiro escreve nessa pasta e nao pode rodar sobre dados de verdade."
+}
+if (Test-Path -LiteralPath $programa) {
+    throw "Instalacao existente em $programa. Use uma maquina isolada para este ensaio."
+}
+$chaveProduto = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{7C1D9F2E-5A64-4B7C-9E3D-1F2A6B8C4D50}_is1'
+foreach ($raizRegistro in @('HKCU:', 'HKLM:', 'HKLM:\SOFTWARE\WOW6432Node')) {
+    $chave = if ($raizRegistro -eq 'HKLM:\SOFTWARE\WOW6432Node') {
+        Join-Path $raizRegistro 'Microsoft\Windows\CurrentVersion\Uninstall\{7C1D9F2E-5A64-4B7C-9E3D-1F2A6B8C4D50}_is1'
+    } else { Join-Path $raizRegistro $chaveProduto }
+    if (Test-Path -LiteralPath $chave) {
+        throw 'Instalacao existente registrada. Use uma maquina isolada para este ensaio.'
+    }
 }
 if (-not (Test-Path (Join-Path $raiz 'dist\PGN_Tradutor_Pro\PGN_Tradutor_Pro.exe'))) {
     throw "Falta o dist\. Rode: python -m PyInstaller PGN_Tradutor_Pro.spec"
@@ -49,12 +64,12 @@ Confere 'o programa foi instalado' (Test-Path (Join-Path $programa 'PGN_Tradutor
 Confere 'nenhum dado foi instalado junto' (-not (Test-Path (Join-Path $programa 'Substituicoes.txt')))
 
 Passo 'Primeira execucao: a pasta de dados nasce'
-$app = Start-Process -FilePath (Join-Path $programa 'PGN_Tradutor_Pro.exe') -PassThru
+$app = Start-Process -FilePath (Join-Path $programa 'PGN_Tradutor_Pro.exe') -WindowStyle Hidden -PassThru
 $glossario = Join-Path $dados 'Substituicoes.txt'
 for ($i = 0; $i -lt 40 -and -not (Test-Path $glossario); $i++) { Start-Sleep -Milliseconds 750 }
 Confere 'a pasta de dados foi criada em %APPDATA%' (Test-Path $dados)
 Confere 'o glossario inicial foi instalado nela' (Test-Path $glossario)
-Get-Process -Name 'PGN_Tradutor_Pro' -ErrorAction SilentlyContinue | Stop-Process -Force
+if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force }
 Start-Sleep -Milliseconds 500
 
 Passo 'Simulando o trabalho do usuario'
@@ -103,10 +118,9 @@ Confere 'o programa foi removido' (-not (Test-Path (Join-Path $programa 'PGN_Tra
 Confere 'I4: a pasta de dados sobreviveu a desinstalacao' (Test-Path $dados)
 Confere 'I4: o glossario continua intacto' ((Get-FileHash $glossario).Hash -eq $antes)
 
-Passo 'Limpando o que o roteiro criou'
-Remove-Item $dados -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $saida "PGN-Tradutor-Pro-$maisNova-instalador.exe") -Force -ErrorAction SilentlyContinue
-if (Test-Path $programa) { Remove-Item $programa -Recurse -Force -ErrorAction SilentlyContinue }
+Passo 'Preservando os dados e os artefatos do ensaio para inspecao'
+Write-Host "   Dados de teste: $dados"
+Write-Host "   Verifique o conteudo antes de remover manualmente os arquivos da maquina isolada."
 
 Write-Host ''
 if ($falhas.Count -eq 0) { Write-Host 'CICLO COMPLETO: todas as checagens passaram.' -ForegroundColor Green }

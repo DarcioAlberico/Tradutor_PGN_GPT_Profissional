@@ -87,6 +87,7 @@ class MainWindowTestCase(GuiTestCase):
         # pararia num `wait_window`. Quem quer o dialogo o pede (ProviderDialogTests).
         self.patch(app_actions, "configured_providers", lambda: [])
         self.patch(app_actions, "ask_translation_provider", lambda *_args: "google")
+        self.patch(app_actions, "confirm_unofficial_google", lambda *_args: True)
 
         self.app = app_module.PGNTranslatorApp(self.root)
         self.root.withdraw()
@@ -106,6 +107,27 @@ class MainWindowTestCase(GuiTestCase):
         except OSError:
             pass
         self.app._log_file_handle = None
+
+    def test_library_button_opens_library_without_replacing_open_folder(self):
+        calls = []
+        self.patch(app_actions, "open_translation_library", lambda app: calls.append(app))
+        self.button("Biblioteca").invoke()
+        self.assertEqual(calls, [self.app])
+        self.assertIsNotNone(self.button("Abrir Traduzidos"))
+
+    def test_library_review_does_not_leave_editor_open_if_source_filter_disappears(self):
+        from tradutor_pgn.translation_library_links import ReviewLink
+        class Editor:
+            closed = False
+            lang = "pt"
+            def selected_source_file(self): return None
+            def selected_source_language(self): return "en"
+            def close_editor(self): self.closed = True
+        editor = Editor()
+        self.patch(app_actions, "open_translation_editor", lambda *_a, **_k: editor)
+        app_actions.open_library_review(self.app, ReviewLink("source.pgn", "en", "pt"))
+        self.assertTrue(editor.closed)
+        self.assertEqual(len(self.dialogs.messages("error")), 1)
 
     def patch(self, modulo, nome, valor):
         """Troca um atributo de modulo e agenda a restauracao."""
@@ -402,6 +424,20 @@ class StartTranslationTests(MainWindowTestCase):
         self.pump()
 
 
+class OpenTranslationsFolderTests(MainWindowTestCase):
+    def test_button_creates_and_opens_the_translations_folder(self):
+        abertas = []
+        self.patch(app_actions, "open_path_in_explorer", abertas.append)
+        pasta = Path(app_paths.translations_dir())
+        self.assertFalse(pasta.exists())
+
+        self.button("Abrir Traduzidos").invoke()
+        self.pump()
+
+        self.assertTrue(pasta.is_dir())
+        self.assertEqual(abertas, [str(pasta)])
+
+
 class RetryFailedTranslationTests(MainWindowTestCase):
     """O dialogo do item 7.3: reprocessar so o que ficou devendo."""
 
@@ -522,6 +558,109 @@ class ToolButtonTests(MainWindowTestCase):
         "Backup BD": "backup_database_file",
         "Restaurar BD": "restore_database_file",
     }
+
+    def test_verify_data_button_reaches_its_action(self):
+        received = []
+        self.patch(app_actions, "verify_user_data", lambda app: received.append(app))
+        self.button("Verificar meus dados").invoke()
+        self.assertEqual(received, [self.app])
+
+    def test_verify_data_runs_off_tk_and_displays_only_summary(self):
+        import threading
+        import time
+
+        owner = threading.get_ident()
+        calls, dialogs = [], []
+        def verify(path):
+            calls.append((path, threading.get_ident()))
+            return {"database": "ok", "glossary": "missing", "settings": "ok",
+                    "backups": {"valid": 2, "invalid": 1, "inaccessible": 0},
+                    "translations": 3, "warnings": ["Atenção ao WAL."]}
+        self.patch(app_actions, "_verify_data", verify)
+        self.patch(app_actions.messagebox, "showinfo",
+                   lambda title, body, **kwargs: dialogs.append((threading.get_ident(), body)))
+        self.button("Verificar meus dados").invoke()
+        deadline = time.monotonic() + 5
+        while not dialogs and time.monotonic() < deadline:
+            self.pump()
+            time.sleep(.02)
+        self.assertEqual(calls[0][0], app_paths.data_dir())
+        self.assertNotEqual(calls[0][1], owner)
+        self.assertEqual(dialogs[0][0], owner)
+        self.assertIn("Atenção ao WAL", dialogs[0][1])
+        self.assertIn("2", dialogs[0][1])
+        self.assertIn("3", dialogs[0][1])
+
+    def test_verify_data_hides_exception_details(self):
+        import time
+
+        dialogs = []
+        def fail(_path):
+            raise ValueError("texto secreto do usuário")
+        self.patch(app_actions, "_verify_data", fail)
+        self.patch(app_actions.messagebox, "showerror",
+                   lambda title, body, **kwargs: dialogs.append(body))
+        self.button("Verificar meus dados").invoke()
+        deadline = time.monotonic() + 5
+        while not dialogs and time.monotonic() < deadline:
+            self.pump()
+            time.sleep(.02)
+        self.assertTrue(dialogs)
+        self.assertNotIn("texto secreto", dialogs[0])
+
+    def test_verify_data_disables_button_until_result_is_received(self):
+        import threading
+        import time
+
+        release = threading.Event()
+        entered = threading.Event()
+        dialogs = []
+        def verify(_path):
+            entered.set()
+            release.wait(5)
+            return {"database": "ok", "glossary": "ok", "settings": "ok",
+                    "backups": {"valid": 0, "invalid": 0, "inaccessible": 0},
+                    "translations": 0, "warnings": []}
+        self.addCleanup(release.set)
+        self.patch(app_actions, "_verify_data", verify)
+        self.patch(app_actions.messagebox, "showinfo", lambda *args, **kwargs: dialogs.append(args))
+        self.button("Verificar meus dados").invoke()
+        self.assertTrue(entered.wait(1))
+        self.assertEqual(self.app.verify_data_button.cget("state"), "disabled")
+        release.set()
+        deadline = time.monotonic() + 5
+        while not dialogs and time.monotonic() < deadline:
+            self.pump()
+            time.sleep(.02)
+        self.assertTrue(dialogs)
+        self.assertEqual(self.app.verify_data_button.cget("state"), "normal")
+
+    def test_verify_data_summary_lists_backup_candidates(self):
+        summary = app_actions._format_data_verification({
+            "database": "ok", "glossary": "ok", "settings": "ok",
+            "backups": {"valid": 1, "invalid": 0, "inaccessible": 0,
+                        "candidates": ["traducoes-backup-20261106-120000.db"]},
+            "translations": 0, "warnings": [],
+        })
+        self.assertIn("Candidatos para restauração", summary)
+        self.assertIn("traducoes-backup-20261106-120000.db", summary)
+        self.assertIn("glossário", summary.lower())
+
+    def test_verify_data_header_reserves_space_for_title(self):
+        button = self.app.verify_data_button
+        labels = [widget for widget in button.master.winfo_children()
+                  if isinstance(widget, ctk.CTkLabel) and widget.cget("text") == "Ferramentas"]
+        self.assertEqual(len(labels), 1)
+        self.assertEqual(button.winfo_manager(), "pack")
+        self.assertEqual(labels[0].winfo_manager(), "pack")
+        self.root.deiconify()
+        label = labels[0]
+        self.addCleanup(ctk.set_widget_scaling, 1.0)
+        for scale in (1.0, 1.5, 2.0):
+            ctk.set_widget_scaling(scale)
+            self.pump()
+            self.assertLessEqual(label.winfo_rootx() + label.winfo_width(), button.winfo_rootx(),
+                                 f"sobreposição na escala {scale}")
 
     def test_each_tool_button_reaches_its_own_operation(self):
         """Sao delegacoes de uma linha, e e por isso que trocam de lugar facil.
@@ -1812,6 +1951,12 @@ class ClosingTheMainWindowTests(MainWindowTestCase):
     def test_the_x_is_wired(self):
         self.assertTrue(self.app.root.protocol("WM_DELETE_WINDOW"))
 
+    def test_closing_waits_for_data_verification_and_temporary_cleanup(self):
+        self.app._data_verification_active = True
+        self.assertFalse(self.app.close_main_window())
+        self.assertEqual(self.destruida, [])
+        self.assertTrue(self.dialogs.messages("info"))
+
     def test_with_nothing_running_it_just_closes(self):
         self.assertTrue(self.app.close_main_window())
         self.assertEqual(len(self.destruida), 1)
@@ -2017,6 +2162,35 @@ class SettingsWindowTests(MainWindowTestCase):
             janela.win.destroy()
         except tk.TclError:
             pass
+
+    def test_google_request_limits_are_saved_and_reloaded(self):
+        from tradutor_pgn.google_cooldown import GoogleCooldown
+        janela = self.abre()
+        janela.google_minute_var.set('12')
+        janela.google_day_var.set('345')
+        self.assertTrue(janela.save_google_limits())
+        self.assertEqual(GoogleCooldown(app_paths.data_path('google-cooldown.db')).get_limits(), (12, 345))
+        nova = self.abre()
+        self.assertEqual((nova.google_minute_var.get(), nova.google_day_var.get()), ('12', '345'))
+
+    def test_invalid_google_limits_are_refused_without_modifying_previous_values(self):
+        from tradutor_pgn.google_cooldown import GoogleCooldown
+        controle = GoogleCooldown(app_paths.data_path('google-cooldown.db'))
+        controle.configure_limits(20, 200)
+        janela = self.abre()
+        for invalid in ('0', '-1', 'abc', '601'):
+            janela.google_minute_var.set(invalid)
+            janela.google_day_var.set('200')
+            self.assertFalse(janela.save_google_limits())
+            self.assertEqual(controle.get_limits(), (20, 200))
+            self.assertTrue(janela.google_quota_status.cget('text'))
+
+    def test_google_limit_controls_report_inaccessible_store(self):
+        from pathlib import Path
+        Path(app_paths.data_path('google-cooldown.db')).write_bytes(b'not sqlite')
+        janela = self.abre()
+        self.assertEqual(janela.google_quota_save_button.cget('state'), 'disabled')
+        self.assertTrue(janela.google_quota_status.cget('text'))
 
     def test_the_button_opens_the_window(self):
         antes = len(self.toplevels())
@@ -2651,7 +2825,7 @@ class SettingsFixtureIsolationTests(unittest.TestCase):
         enabled = gc.isenabled()
         gc.disable()
         self.addCleanup(lambda: gc.enable() if enabled else None)
-        root = tk.Tk()
+        root = gui_harness.criar_root()
         root.withdraw()
         font = ObservedFont(root=root, family="Arial")
         font.cycle = font
@@ -2792,7 +2966,7 @@ class ProviderDialogTests(MainWindowTestCase):
 
     def test_the_remembered_provider_is_preselected_only_with_a_key(self):
         self.assertEqual(self.dialogo(["openai"], "openai").choice_var.get(), "openai")
-        self.assertEqual(self.dialogo(["deepseek"], "openai").choice_var.get(), "google")
+        self.assertEqual(self.dialogo(["deepseek"], "openai").choice_var.get(), "")
 
     def test_confirm_returns_the_choice_and_cancel_returns_none(self):
         d = self.dialogo(["openai"], "openai")
@@ -2805,7 +2979,17 @@ class ProviderDialogTests(MainWindowTestCase):
         d = self.dialogo(["openai"])
         d.choice_var.set("anthropic")
         d.confirm()
-        self.assertEqual(d.result, "google")
+        self.assertIsNone(d.result)
+        self.assertIn("Selecione", d.prompt_label.cget("text"))
+
+    def test_declined_unofficial_provider_does_not_start_worker(self):
+        chamadas, pronto = self.worker_falso()
+        self.app.source_path.set(self.escreve_pgn("sem-consentimento.pgn"))
+        self.patch(app_actions, "confirm_unofficial_google", lambda *_args: False)
+        self.app.start_translation()
+        self.assertFalse(pronto.is_set())
+        self.assertEqual(chamadas, [])
+        self.assertFalse(self.app.is_processing)
 
     def test_start_asks_only_with_a_key_and_passes_the_choice_to_the_worker(self):
         chamadas, pronto = self.worker_falso()

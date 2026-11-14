@@ -1,0 +1,53 @@
+{
+  "timestamp_utc": "2026-11-12T20:42:57.638133+00:00",
+  "environment": {
+    "python": "3.13.2",
+    "platform": "Windows-10-10.0.19045-SP0",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 23 Model 113 Stepping 0, AuthenticAMD",
+    "logical_cpus": 12
+  },
+  "method": "primeira aplica\u00e7\u00e3o com caches limpos; p95 nearest-rank; pico Python em execu\u00e7\u00e3o fria separada",
+  "results": [
+    {
+      "rules": 6000,
+      "comment_characters": 56,
+      "unicode_text": true,
+      "samples": 5,
+      "cold_seconds": 0.01078540000889916,
+      "durations_seconds": [
+        0.009016500000143424,
+        0.008101200000965036,
+        0.008089800001471303,
+        0.00809550000121817,
+        0.008147000000462867
+      ],
+      "median_seconds": 0.008101200000965036,
+      "p95_seconds": 0.009016500000143424,
+      "following_cache_hits": 15,
+      "following_cache_misses": 0,
+      "regex_cache_capacity": 32768,
+      "peak_python_bytes": 1160196
+    },
+    {
+      "rules": 50000,
+      "comment_characters": 56,
+      "unicode_text": true,
+      "samples": 5,
+      "cold_seconds": 0.08979259998886846,
+      "durations_seconds": [
+        0.07041309999476653,
+        0.07634640000469517,
+        0.06908719999773894,
+        0.06955630000447854,
+        0.06978600000729784
+      ],
+      "median_seconds": 0.06978600000729784,
+      "p95_seconds": 0.07634640000469517,
+      "following_cache_hits": 15,
+      "following_cache_misses": 0,
+      "regex_cache_capacity": 32768,
+      "peak_python_bytes": 10664196
+    }
+  ]
+}

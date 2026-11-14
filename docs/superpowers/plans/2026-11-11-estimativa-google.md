@@ -1,0 +1,3 @@
+﻿# Estimativa de uso dos motores Google
+
+Após carregar o cache e antes de iniciar a execução, estimar os comentários distintos e os lotes iniciais a enviar. Usar a mesma limpeza, máscara e agrupamento do worker; considerar sucesso e reutilização entre arquivos, deixando explícito que divisões, novas tentativas e falhas podem aumentar a quantidade de requisições. Apresentar também os limites configurados, sem estimar duração nem consultar a rede. Testar cache, limpeza, duplicações e ordem anterior ao envio; executar os testes do worker e análise estática. A estimativa é informativa no log existente e não adiciona uma confirmação obrigatória.

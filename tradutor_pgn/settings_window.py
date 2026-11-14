@@ -17,7 +17,9 @@ o caso dos acentos no ChessBase foi resolvido pela promocao para UTF-8, e que
 o BOM sozinho nunca resolveria. O texto da tela diz o que o BOM faz, e so.
 """
 
+import os
 import queue
+import sqlite3
 import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +31,11 @@ import customtkinter as ctk
 from . import api_keys, app_paths, first_run
 from .editor_common import ERROR_TEXT_COLOR, MUTED_TEXT_COLOR, OK_TEXT_COLOR
 from .editor_widgets import flash_message
+from .google_cooldown import (
+    GoogleCooldown,
+    MAX_REQUESTS_PER_DAY,
+    MAX_REQUESTS_PER_MINUTE,
+)
 from .llm_providers import PROVIDERS, anthropic_sdk_available, check_credentials, model_setting_key
 from .pgn_positions import chess_available
 from .pgn_utils import PGN_EXPORT_LINE_WIDTH
@@ -58,6 +65,13 @@ from .settings import (
 from .writing_controller import get_shared_writing_assistant
 from .writing_types import AssistantStatus, WritingRequest
 from .window_utils import bring_window_to_front
+
+
+def key_storage_description():
+    if api_keys.dpapi_available():
+        return "As chaves gravadas são protegidas pelo DPAPI desta conta do Windows."
+    return ("Neste sistema, as chaves salvas ficam sem criptografia. "
+            "Prefira usar uma variável de ambiente para não gravá-las em disco.")
 
 # Rotulo -> valor gravado. A ordem e a do seletor.
 THEME_LABELS = {"Sistema": "system", "Claro": "light", "Escuro": "dark"}
@@ -150,6 +164,7 @@ class SettingsWindow:
         self.build_board_section()
         self.build_llm_section()
         self.build_data_dir_section()
+        self.build_google_quota_section()
         self.build_writing_section()
         self.build_actions()
 
@@ -420,6 +435,58 @@ class SettingsWindow:
             text_color=MUTED_TEXT_COLOR,
         ).grid(row=row, column=0, columnspan=columnspan, sticky="w", padx=10, pady=(0, 6))
 
+    def build_google_quota_section(self):
+        frame = self.section(6, "Limites dos motores Google não oficiais")
+        self.google_quota = GoogleCooldown(app_paths.data_path("google-cooldown.db"))
+        try:
+            limits = self.google_quota.get_limits()
+        except (OSError, sqlite3.Error, ValueError):
+            limits = None
+        self.google_minute_var = tk.StringVar(master=self.win, value=str(limits[0]) if limits else "")
+        self.google_day_var = tk.StringVar(master=self.win, value=str(limits[1]) if limits else "")
+        for row, label, variable in (
+            (1, "Requisições por minuto", self.google_minute_var),
+            (2, "Requisições em 24 horas", self.google_day_var),
+        ):
+            ctk.CTkLabel(frame, text=label, anchor="w").grid(row=row, column=0, sticky="w", padx=10, pady=3)
+            ctk.CTkEntry(frame, width=100, textvariable=variable, justify="right").grid(
+                row=row, column=1, sticky="w", padx=10, pady=3
+            )
+        self.google_quota_save_button = ctk.CTkButton(
+            frame, text="Salvar limites Google", command=self.save_google_limits,
+            state="normal" if limits else "disabled",
+        )
+        self.google_quota_save_button.grid(row=3, column=0, sticky="w", padx=10, pady=5)
+        self.google_quota_status = ctk.CTkLabel(
+            frame, text="" if limits else "Não foi possível consultar os limites.",
+            anchor="w", text_color=MUTED_TEXT_COLOR,
+        )
+        self.google_quota_status.grid(row=4, column=0, columnspan=2, sticky="w", padx=10)
+        self.hint(
+            frame, 5,
+            "Compartilhados entre instâncias com a mesma pasta de dados. Cada tentativa conta, "
+            "inclusive após falha. Limites menores podem reduzir a velocidade; não garantem "
+            "que o serviço deixe de limitar o acesso.",
+        )
+
+    def save_google_limits(self):
+        try:
+            minute = int(self.google_minute_var.get().strip())
+            day = int(self.google_day_var.get().strip())
+            if not 1 <= minute <= MAX_REQUESTS_PER_MINUTE or not 1 <= day <= MAX_REQUESTS_PER_DAY:
+                raise ValueError("fora dos limites")
+            self.google_quota.configure_limits(minute, day)
+        except ValueError:
+            self.google_quota_status.configure(
+                text=f"Use 1–{MAX_REQUESTS_PER_MINUTE} por minuto e 1–{MAX_REQUESTS_PER_DAY} por dia."
+            )
+            return False
+        except (OSError, sqlite3.Error):
+            self.google_quota_status.configure(text="Não foi possível salvar os limites.")
+            return False
+        self.google_quota_status.configure(text="Limites Google salvos.")
+        return True
+
     def build_output_section(self):
         frame = self.section(0, "Gravação dos PGN traduzidos")
 
@@ -566,8 +633,7 @@ class SettingsWindow:
             frame,
             linha + 1,
             "Com pelo menos uma chave gravada, \"Iniciar tradução\" pergunta qual "
-            "motor usar. A chave fica em chaves-api.json na pasta de dados, cifrada "
-            "com o DPAPI do Windows (só esta conta, nesta máquina); uma variável "
+            "motor usar. " + key_storage_description() + " Uma variável "
             "de ambiente (ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY) tem "
             "precedência. O campo da chave nasce vazio de propósito: digite para "
             "trocar, marque \"apagar\" para remover. O nome do modelo é o que a "
@@ -643,15 +709,15 @@ class SettingsWindow:
 
     def describe_key_state(self, spec):
         """O que o campo vazio diz da chave, sem mostra-la (K1)."""
-        do_ambiente = api_keys.load_api_key(spec.id, spec.env_var)
+        do_ambiente = os.environ.get(spec.env_var, "").strip()
         estado = api_keys.stored_key_state(spec.id)
-        if do_ambiente and estado == "ausente":
+        if do_ambiente:
             return f"do ambiente ({spec.env_var}) {api_keys.mask_api_key(do_ambiente)}"
         if estado == "ok":
             gravada = api_keys.load_api_key(spec.id)
             return f"gravada {api_keys.mask_api_key(gravada)}"
         if estado == "ilegivel":
-            return "gravada, mas ilegível nesta máquina — digite de novo"
+            return "chave ou arquivo ilegível — confira a pasta de dados"
         return "não configurada"
 
     def build_data_dir_section(self):
@@ -744,12 +810,11 @@ class SettingsWindow:
             for pid, chave in mudancas_de_chave.items():
                 api_keys.save_api_key(pid, chave)
         except OSError:
-            # O aviso ja saiu pelo canal de M3 (`set_settings_warning_handler`);
-            # aqui so o que a tela precisa dizer: nada foi gravado.
+            # A gravacao das preferencias pode ter terminado antes da chave.
             flash_message(
                 self.status_label,
                 self.win,
-                "Não foi possível gravar; as configurações continuam como estavam.",
+                "Não foi possível salvar tudo; pode haver gravação parcial. Confira configurações e chaves.",
                 6000,
                 text_color=ERROR_TEXT_COLOR,
             )

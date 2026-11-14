@@ -1,0 +1,3 @@
+﻿# RG-031 — paginação e filtros da biblioteca
+
+Paginar cartões em grupos de 20, preservando busca sobre todos os pacotes. Adicionar filtro por situação e ordenação por nome ou data, com datas ausentes no fim e interpretação correta dos fusos. Mudanças de busca/filtro/ordenação retornam à primeira página; atualização ajusta página fora do intervalo. Mostrar total e página, sem alterar acervo ou a verificação de integridade. Testar interface real com mais de uma página, limites, filtros, datas e ausência de resultados; validar as duas cópias. Índice persistente e integração com revisão seguem pendentes.

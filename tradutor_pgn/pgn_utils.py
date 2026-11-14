@@ -1,5 +1,6 @@
 import os
 import re
+import tempfile
 from bisect import bisect_right
 
 from .app_config import LANGUAGE_OUTPUT_SUFFIXES, MAX_TRANSLATE_CHARS
@@ -244,6 +245,33 @@ def translated_output_path(input_file: str, target_language: str) -> str:
         output_file = os.path.join(file_dir, f"{name}-novo{ext}")
 
     return output_file
+
+
+def translated_bundle_paths(input_file: str, target_language: str, output_root: str):
+    """Escolhe a pasta da traducao e os caminhos do original e do resultado.
+
+    A subpasta recebe o nome (sem extensao) do arquivo traduzido. Se uma
+    traducao com o mesmo nome ja existe, o mesmo sufixo numerico e aplicado a
+    pasta e ao novo PGN para nunca sobrescrever uma execucao anterior.
+    """
+    preferred_name = os.path.basename(translated_output_path(input_file, target_language))
+    translated_stem, extension = os.path.splitext(preferred_name)
+    original_name = os.path.basename(input_file)
+    index = 1
+
+    while True:
+        suffix = "" if index == 1 else f"-{index}"
+        bundle_dir = os.path.join(output_root, f"{translated_stem}{suffix}")
+        output_file = os.path.join(
+            bundle_dir, f"{translated_stem}{suffix}{extension}"
+        )
+        if not os.path.lexists(bundle_dir) and not os.path.lexists(output_file):
+            output_name = os.path.basename(output_file)
+            if os.path.normcase(original_name) == os.path.normcase(output_name):
+                original_stem, original_extension = os.path.splitext(original_name)
+                original_name = f"{original_stem}-original{original_extension}"
+            return bundle_dir, os.path.join(bundle_dir, original_name), output_file
+        index += 1
 
 
 def available_output_path(output_file: str) -> str:
@@ -684,6 +712,24 @@ def create_comment_batches(comments, max_chars=BATCH_MAX_CHARS):
     ]
 
 
+def isolate_batch_separator_groups(texts, groups):
+    """Isola textos ambiguos antes de montar lotes para provedores textuais."""
+    result = []
+    for group in groups:
+        current = []
+        for index in group:
+            if "|||" in texts[index]:
+                if current:
+                    result.append(current)
+                    current = []
+                result.append([index])
+            else:
+                current.append(index)
+        if current:
+            result.append(current)
+    return result
+
+
 def join_comments_for_batch(comments):
     """Junta comentários com separador para envio em uma única requisição."""
     return BATCH_SEPARATOR.join(comments)
@@ -886,10 +932,12 @@ def write_pgn_pieces(
     original (lido tambem sem traducao de linha), e a escrita nao pode troca-lo
     pelo da plataforma (ROADMAP 13.6).
 
-    O segundo `open` trunca o que a primeira tentativa deixou pela metade — um
-    `UnicodeEncodeError` acontece no meio da gravacao, e o arquivo parcial nao
-    pode sobreviver ao lado do bom.
+    A gravacao ocorre em arquivo temporario no mesmo diretorio. Somente uma
+    gravacao completa substitui o destino; falhas preservam o arquivo anterior.
     """
+    output_path = os.path.abspath(os.fspath(output_file))
+    fd, temporary = tempfile.mkstemp(prefix=".pgn-", suffix=".tmp", dir=os.path.dirname(output_path))
+    os.close(fd)
     try:
         enc = _output_encoding(preferred_encoding, use_bom)
         if log_message and not _is_unicode_encoding(preferred_encoding):
@@ -900,18 +948,22 @@ def write_pgn_pieces(
                 f"  - Codificacao de saida alterada de {preferred_encoding} "
                 f"para {enc}, para o acento sobreviver a leitura: {output_file}"
             )
-        with open(output_file, 'w', encoding=enc, newline='') as f:
-            for pedaco in pieces_factory():
-                f.write(pedaco)
+        try:
+            with open(temporary, 'w', encoding=enc, newline='') as f:
+                for pedaco in pieces_factory():
+                    f.write(pedaco)
+        except UnicodeEncodeError:
+            enc = _output_encoding('utf-8', use_bom)
+            with open(temporary, 'w', encoding=enc, newline='') as f:
+                for pedaco in pieces_factory():
+                    f.write(pedaco)
+            if log_message:
+                log_message(f"  - Codificacao de saida alterada para UTF-8: {output_file}")
+        os.replace(temporary, output_path)
         return enc
-    except UnicodeEncodeError:
-        enc = _output_encoding('utf-8', use_bom)
-        with open(output_file, 'w', encoding=enc, newline='') as f:
-            for pedaco in pieces_factory():
-                f.write(pedaco)
-        if log_message:
-            log_message(f"  - Codificacao de saida alterada para UTF-8: {output_file}")
-        return enc
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def write_translated_pgn(

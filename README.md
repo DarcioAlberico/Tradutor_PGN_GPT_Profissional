@@ -6,6 +6,12 @@ SQLite e glossario de substituicoes.
 O comportamento esperado do sistema e as garantias que os testes protegem estao
 em [SPEC.md](SPEC.md). O [ROADMAP.md](ROADMAP.md) registra as melhorias, feitas e
 pendentes, com o motivo de cada decisao e as medicoes que a sustentam.
+A [Revisão Geral](REVISAO_GERAL.md) consolida esse historico num roadmap
+executivo atual, com prioridades de produto, engenharia, glossario, interface,
+desempenho, rede e seguranca.
+A especificacao normativa do estado-alvo esta em
+[REVISAO_GERAL_SPEC.md](REVISAO_GERAL_SPEC.md), incluindo o corretor de
+portugues com sugestoes ortograficas e de concordancia.
 
 ## Revisão linguística em português (experimental)
 
@@ -83,11 +89,14 @@ O runtime medido tem **47.838.546 B** e os recursos LanguageTool **405.072.337 B
 (soma **452.910.883 B**, antes dos metadados). O tamanho real do novo instalador
 e portátil ainda não foi medido, pois sua geração está bloqueada.
 
-O corpus real da Task 9 obteve **66,67% de precisão** e **72,73% de recall**,
-abaixo das metas de 95%/80%. O p95 completo warm foi **3041–3272 ms/comentário**,
-acima de 500 ms; ortografia também excedeu 20 ms/linha. TA-004 literal passou,
-com zero violações protegidas, mas isso não aprova estabilidade ou distribuição.
-Veja [evidências e limitações](docs/superpowers/reports/task-9-report.md).
+No replay real mais recente do corpus sintético de 18 casos, a precisão foi
+**90%** e o recall **81,82%**: a meta de 95% de precisão ainda não foi atingida.
+Um protótipo que alcançou 100% nesse corpus foi rejeitado após outros testes
+encontrarem sugestões incorretas. As medições anteriores de desempenho também
+não aprovaram o modo completo; a publicação progressiva foi otimizada depois e
+precisa de validação final. A concordância continua experimental. Veja as
+[melhorias de qualidade](docs/superpowers/reports/task-9-quality-improvements.md)
+e o [protótipo rejeitado](docs/superpowers/reports/task-9-prefix-orthography-2026-11-05.md).
 
 ## Requisitos
 
@@ -241,6 +250,10 @@ explica onde os dados ficam e como atualizar sem perder o acervo.
 
 ### Onde ficam os seus dados
 
+Para verificar o acervo, use **Ferramentas → Verificar meus dados**. O [guia de
+backup e recuperação](docs/RECUPERACAO_DADOS.md) explica como copiar e testar
+uma restauração, incluindo arquivos SQLite WAL e chaves de API.
+
 **Nao e mais ao lado do `.exe`.** Quem decide e como o programa foi iniciado:
 
 | inicio | pasta de dados |
@@ -260,6 +273,24 @@ Quem ja usava a versao distribuida como pasta nao precisa fazer nada: na primeir
 execucao o programa **copia** o que encontrar ao lado do `.exe` para a pasta de
 dados. Copia, e nao move — voltar para a versao antiga continua funcionando.
 `backups\` e `logs\` ficam onde estao (podem ter centenas de MB) e o log diz onde.
+
+O Google não oficial e o `deep-translator` compartilham uma pausa após sinais
+de limite quando usam a mesma pasta de dados. Por padrão, o programa permite
+até 60 tentativas por minuto e 3.000 em 24 horas; ajuste esses valores em
+**Configurações → Limites dos motores Google não oficiais** e clique em
+**Salvar limites Google**. Cada reserva conta, mesmo se a tentativa falhar ou
+for cancelada logo antes do envio.
+O arquivo `google-cooldown.db` guarda limites, prazos e registros de tentativas
+usados na contagem, sem comentários ou chaves. A espera pode ser cancelada;
+outras pastas de dados têm controles próprios. A proteção reduz tentativas, mas
+não garante que o serviço deixe de limitar o acesso.
+Após reinício ou ajuste significativo do relógio, o programa pode prolongar a
+espera por segurança. Instâncias de versões antigas não respeitam esses limites.
+As tentativas são reservadas antes do envio; uma suspensão do computador nesse
+intervalo pode deslocar o horário em que o serviço recebe a requisição.
+Antes do primeiro uso de cada um desses motores não oficiais, o programa pede
+consentimento para enviar os comentários e idiomas ao Google. Recusar impede
+o início da tradução; a escolha aceita é registrada para aquele motor.
 
 ### Instalador
 

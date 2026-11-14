@@ -1,0 +1,3 @@
+﻿# Métricas locais dos motores Google
+
+Contar por execução, no controlador já compartilhado pelo worker: tentativas HTTP iniciadas, caracteres do parâmetro de texto por tentativa, respostas HTTP 403/429 e tempo total na consulta/espera compartilhada. Capturar cada GET real dos dois adaptadores, incluindo recursão e falhas de rede; não contar reservas canceladas como envios. Exibir resumo agregado no registro ao encerrar, também em cancelamento/erro; não persistir texto nem enviar telemetria. O tempo medido inclui consulta ao SQLite e espera por limite ou cooldown, sem separar as causas. Validar com respostas simuladas, cancelamento, chamadas internas e encerramento do worker.

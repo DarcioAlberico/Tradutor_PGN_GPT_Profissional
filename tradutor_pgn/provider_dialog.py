@@ -36,7 +36,7 @@ class ProviderChoiceDialog:
         self.models = models
         self.result: str | None = None
         if preselected not in self.configured and preselected not in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP):
-            preselected = GOOGLE_PROVIDER
+            preselected = ""
         self.choice_var = tk.StringVar(value=preselected)
         self.radios: dict[str, ctk.CTkRadioButton] = {}
         self.build()
@@ -49,26 +49,27 @@ class ProviderChoiceDialog:
         bring_window_to_front(self.win, self.app.root, maximize=False)
         self.win.protocol("WM_DELETE_WINDOW", self.cancel)
 
-        ctk.CTkLabel(
+        self.prompt_label = ctk.CTkLabel(
             self.win,
             text="Qual motor usar nesta tradução?",
             font=ctk.CTkFont(weight="bold"),
             anchor="w",
-        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 6))
+        )
+        self.prompt_label.grid(row=0, column=0, sticky="w", padx=16, pady=(14, 6))
 
         opcoes = ctk.CTkFrame(self.win, fg_color="transparent")
         opcoes.grid(row=1, column=0, sticky="ew", padx=16)
         linha = 0
         self.radios[GOOGLE_PROVIDER] = ctk.CTkRadioButton(
             opcoes,
-            text="Google (gratuito, o motor de sempre)",
+            text="Google gtx (não oficial, experimental)",
             variable=self.choice_var,
             value=GOOGLE_PROVIDER,
         )
         self.radios[GOOGLE_PROVIDER].grid(row=linha, column=0, sticky="w", pady=3)
         linha += 1
         self.radios[TRANSLATION_PROVIDER_DEEP] = ctk.CTkRadioButton(
-            opcoes, text="Google via deep-translator (gratuito)",
+            opcoes, text="Google via deep-translator (não oficial, experimental)",
             variable=self.choice_var, value=TRANSLATION_PROVIDER_DEEP,
         )
         self.radios[TRANSLATION_PROVIDER_DEEP].grid(row=linha, column=0, sticky="w", pady=3)
@@ -120,7 +121,8 @@ class ProviderChoiceDialog:
         if escolhido not in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP) and escolhido not in self.configured:
             # Nao deveria acontecer (o radio esta desligado), mas a guarda e o
             # que impede um motor sem chave de sair daqui como escolha.
-            escolhido = GOOGLE_PROVIDER
+            self.prompt_label.configure(text="Selecione um motor disponível para continuar.")
+            return
         self.result = escolhido
         self.close()
 

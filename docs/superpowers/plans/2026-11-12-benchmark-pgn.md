@@ -1,0 +1,3 @@
+﻿# RG-040 — benchmark inicial da extração PGN
+
+Criar um corpus sintético determinístico, gerado em arquivo temporário e sem dados pessoais. Medir a interface real de leitura e extração de comentários para 1, 10 e 100 MiB, selecionáveis pela linha de comando. Executar uma medição extra com tracemalloc para pico Python, separada das amostras de tempo, e registrar mediana, percentil 95 pelo método nearest-rank, tamanhos efetivos, contagem conferida e identificação da máquina e Python em JSON. Exigir amostras positivas, avisar que p95 com poucas amostras é limitado, preservar dados e não definir limiares arbitrários. Testar geração, estatísticas e CLI com corpus pequeno; executar amostra local 1 MiB. Os demais cenários e gate de regressão do RG-040 permanecem pendentes.
