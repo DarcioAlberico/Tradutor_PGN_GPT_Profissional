@@ -2709,7 +2709,7 @@ class SettingsWindowTests(MainWindowTestCase):
 
         self.assertFalse(janela.save())
         self.assertEqual(self.aplicados, [], "aplicou um tema que o arquivo nao tem")
-        self.assertIn("continuam como estavam", janela.status_label.cget("text"))
+        self.assertIn("gravação parcial", janela.status_label.cget("text"))
 
     def test_the_saved_theme_is_applied_when_the_program_opens(self):
         """A escolha vale na proxima abertura, sem passar pela tela de novo."""
