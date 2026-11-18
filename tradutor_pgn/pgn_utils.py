@@ -913,12 +913,17 @@ def _output_encoding(preferred_encoding: str, use_bom: bool) -> str:
     return encoding
 
 
+class PgnWriteCanceled(Exception):
+    """A gravação foi cancelada antes da publicação do arquivo."""
+
+
 def write_pgn_pieces(
     output_file: str,
     pieces_factory,
     preferred_encoding: str,
     log_message=None,
     use_bom: bool = False,
+    cancel_flag=None,
 ):
     """Grava os pedacos do PGN em sequencia, sem junta-los numa string.
 
@@ -951,14 +956,20 @@ def write_pgn_pieces(
         try:
             with open(temporary, 'w', encoding=enc, newline='') as f:
                 for pedaco in pieces_factory():
+                    if cancel_flag is not None and cancel_flag.is_set():
+                        raise PgnWriteCanceled()
                     f.write(pedaco)
         except UnicodeEncodeError:
             enc = _output_encoding('utf-8', use_bom)
             with open(temporary, 'w', encoding=enc, newline='') as f:
                 for pedaco in pieces_factory():
+                    if cancel_flag is not None and cancel_flag.is_set():
+                        raise PgnWriteCanceled()
                     f.write(pedaco)
             if log_message:
                 log_message(f"  - Codificacao de saida alterada para UTF-8: {output_file}")
+        if cancel_flag is not None and cancel_flag.is_set():
+            raise PgnWriteCanceled()
         os.replace(temporary, output_path)
         return enc
     finally:
@@ -1144,9 +1155,13 @@ def generate_translated_pgn(
                 ultimo = fim
             yield content[ultimo:]
 
-        write_pgn_pieces(output_file, pedacos, enc, log_message, use_bom=use_bom)
+        write_pgn_pieces(output_file, pedacos, enc, log_message, use_bom=use_bom, cancel_flag=cancel_flag)
         return True
 
+    except PgnWriteCanceled:
+        if log_message:
+            log_message("  - Geracao do PGN traduzido cancelada.")
+        return False
     except Exception as e:
         if log_message:
             log_message(f"[ERRO] Falha ao gravar PGN traduzido: {e}")

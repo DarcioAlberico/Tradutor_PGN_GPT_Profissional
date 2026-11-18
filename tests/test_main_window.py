@@ -2957,7 +2957,7 @@ class ProviderDialogTests(MainWindowTestCase):
 
     def test_it_lists_google_and_every_provider_and_disables_the_keyless(self):
         d = self.dialogo(["deepseek"])
-        self.assertEqual(set(d.radios), {"google", "deep-translator", *llm_providers.PROVIDER_ORDER})
+        self.assertEqual(set(d.radios), {"google", "deep-translator", "libretranslate", *llm_providers.PROVIDER_ORDER})
         self.assertEqual(d.radios["deepseek"].cget("state"), "normal")
         self.assertEqual(d.radios["anthropic"].cget("state"), "disabled")
         self.assertEqual(d.radios["google"].cget("state"), "normal")

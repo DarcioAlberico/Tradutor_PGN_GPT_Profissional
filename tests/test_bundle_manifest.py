@@ -64,8 +64,7 @@ def test_cancel_after_manifest_write_publishes_nothing(tmp_path):
     def generate(path):
         Path(path).write_text("translated", encoding="utf8")
         return True
-    checks = iter([False, False, True])
     result = publish_translation_bundle(str(source), "pt", str(root), generate,
-                                        is_canceled=lambda: next(checks))
+                                        is_canceled=lambda: any(root.glob(".source-BR.tmp-*/manifesto.json")))
     assert result.status == "canceled"
     assert not list(root.iterdir())

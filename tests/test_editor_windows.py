@@ -6379,6 +6379,34 @@ class GlossaryPreviewUsesTheRealPipelineTests(EditorWindowTestCase):
     def previa(self):
         return self.editor.preview_text.get("1.0", tk.END).strip()
 
+    def test_rule_impact_uses_draft_without_saving_and_reports_competition(self):
+        self.abrir([('rook', 'castelo', 'automatic', 10, 'pt')])
+        self.editor.new_entry()
+        self.editor.set_text(self.editor.orig_text, 'rook')
+        self.editor.set_text(self.editor.new_text, 'torre')
+        self.editor.set_rule_type('automatic')
+        self.editor.set_priority(0)
+        self.editor.test_text_var.set('rook')
+        def run(_parent, _title, work, on_success=None, **_kwargs):
+            on_success(work(types.SimpleNamespace(cancelado=lambda: False)))
+        with unittest.mock.patch.object(glossary_editor, 'run_with_progress', side_effect=run), \
+             unittest.mock.patch.object(glossary_editor, 'show_rule_impact_report') as dialog:
+            self.editor.btn_rule_impact.invoke()
+        report = dialog.call_args.args[1]
+        self.assertIn('torre', report)
+        self.assertIn('castelo', report)
+        self.assertIn('bloqueada', report)
+        self.assertEqual(len(self.editor.state.entries), 1)
+
+    def test_rule_impact_report_has_scrollable_read_only_text(self):
+        self.abrir([('rook', 'torre', 'suggestion')])
+        dialog = glossary_editor.show_rule_impact_report(self.win, 'Relatório de teste')
+        self.addCleanup(lambda: dialog.win.destroy() if dialog.win.winfo_exists() else None)
+        self.assertIn('Relatório de teste', dialog.text.get('1.0', 'end-1c'))
+        self.assertEqual(dialog.text._textbox.cget('state'), 'disabled')
+        dialog.copy()
+        self.assertEqual(self.root.clipboard_get(), 'Relatório de teste')
+
     def test_preview_details_explain_a_blocked_rule(self):
         self.abrir([("rook", "torre", "suggestion"), ("white rook", "torre branca", "suggestion")])
         self.editor.test_text_var.set("white rook")
@@ -6863,6 +6891,13 @@ class GlossaryPromotionPreviewTests(EditorWindowTestCase):
         self.assertEqual(self.editor.settings["glossary_editor"]["scope_filter"], "Somente específicos")
         self.editor.clear_all_filters()
         self.assertEqual(len(self.editor.state.filtered_indices), 2)
+
+    def test_priority_filter_is_saved_and_cleared(self):
+        self.editor.priority_filter_text.set("Prioridade positiva")
+        self.editor.apply_filter()
+        self.assertEqual(self.editor.settings["glossary_editor"]["priority_filter"], "Prioridade positiva")
+        self.editor.clear_all_filters()
+        self.assertEqual(self.editor.priority_filter_text.get(), "Todas as prioridades")
 
     def test_pair_filter_resets_when_the_destination_is_removed(self):
         self.editor.scope_filter_text.set("Compatíveis com o par atual")
@@ -7438,6 +7473,36 @@ class RepeatedEditsWindowTests(EditorWindowTestCase):
     def rotulos(self, janela):
         return [b.cget("text") for b in janela.buttons]
 
+    def test_clear_candidate_filters_preserves_sort_and_data(self):
+        janela = self.abrir()
+        before = list(janela.all_items)
+        janela.search_var.set("ausente")
+        janela.uncovered_var.set(True)
+        janela.show_ignored_var.set(True)
+        janela.only_ignored_var.set(True)
+        janela.frequency_var.set("Ao menos 10 ocorrências")
+        janela.sort_var.set("Mais comentários")
+        self.click(janela.btn_clear_filters)
+        self.assertEqual(janela.search_var.get(), "")
+        self.assertFalse(janela.uncovered_var.get())
+        self.assertFalse(janela.show_ignored_var.get())
+        self.assertFalse(janela.only_ignored_var.get())
+        self.assertEqual(janela.frequency_var.get(), "Todas as frequências")
+        self.assertEqual(janela.sort_var.get(), "Mais comentários")
+        self.assertEqual(janela.all_items, before)
+        self.assertTrue(janela.items)
+        self.assertTrue(janela.win.bind("<Alt-Right>"))
+
+    def test_restore_button_only_enables_for_matching_ignored_candidates(self):
+        janela = self.abrir()
+        janela.all_items[0]["ignored"] = True
+        janela.apply_candidate_filter()
+        self.assertEqual(janela.btn_restore_ignored.cget("state"), "normal")
+        janela.search_var.set("nao-corresponde")
+        self.assertEqual(janela.btn_restore_ignored.cget("state"), "disabled")
+        janela.search_var.set("")
+        self.assertEqual(janela.btn_restore_ignored.cget("state"), "normal")
+
     def test_catalog_change_during_preview_does_not_add_or_apply_candidate(self):
         from tradutor_pgn import repeated_edits_window
         from tradutor_pgn.glossary_catalog import GlossaryEntryDraft
@@ -7628,6 +7693,29 @@ class RepeatedEditsWindowTests(EditorWindowTestCase):
         self.click(janela.btn_example)
         self.assertEqual(self.editor.current["id"], self.ids["line 0"])
 
+    def test_choose_another_example_and_show_its_historical_edit(self):
+        janela = self.abrir()
+        item = janela.current_item()
+        self.assertEqual(len(item['examples']), 5)
+        chosen = item['examples'][1]
+        janela.example_choice.set(f"2/5 · ID {chosen['comment_id']}")
+        self.click(janela.btn_example)
+        self.assertEqual(self.editor.current['id'], chosen['comment_id'])
+        with unittest.mock.patch.object(repeated_edits_window, 'show_historical_example') as dialog:
+            self.click(janela.btn_example_history)
+        report = dialog.call_args.args[1]
+        self.assertIn(chosen['before'], report)
+        self.assertIn(chosen['after'], report)
+        self.assertIn('histórica', report)
+
+    def test_historical_example_dialog_is_read_only_and_can_copy(self):
+        janela = self.abrir()
+        dialog = repeated_edits_window.show_historical_example(janela.win, 'Edição histórica de teste')
+        self.addCleanup(lambda: dialog.win.destroy() if dialog.win.winfo_exists() else None)
+        self.assertEqual(dialog.text._textbox.cget('state'), 'disabled')
+        dialog.copy()
+        self.assertEqual(self.root.clipboard_get(), 'Edição histórica de teste')
+
     # ------------------------------------------------------------- criar
 
     def test_create_measures_writes_the_rule_and_offers_to_apply_to_the_file(self):
@@ -7757,6 +7845,20 @@ class EditorBoardTests(EditorWindowTestCase):
         self.abrir("sem posicao")
         self.assertFalse(self.quadro_visivel(), "linha sem FEN: quadro some, sem aviso")
         self.assertIsNone(self.editor.board_canvas.fen)
+
+    def test_textual_position_is_available_and_can_be_copied(self):
+        self.abrir("com posicao")
+        self.assertTrue(self.editor.win.bind("<F8>"))
+        self.editor.board_description_button.invoke()
+        self.pump()
+        dialog = self.editor.board_description_window
+        self.assertTrue(dialog.winfo_exists())
+        text = self.editor.board_description_text.get("1.0", "end-1c")
+        self.assertIn("Pretas jogam", text)
+        self.assertIn("peão em e4", text)
+        self.editor.copy_board_description()
+        self.assertEqual(dialog.clipboard_get(), text)
+        dialog.destroy()
 
     def test_the_fen_follows_the_file_filter(self):
         self.abrir("em dois arquivos")

@@ -13,6 +13,7 @@ from pathlib import Path
 from .app_paths import TRANSLATIONS_FOLDER
 from .glossary_catalog import GlossaryCatalog
 from .settings import SETTINGS_FILENAME
+from .translation_library import list_bundles
 
 
 def _signature(path):
@@ -88,7 +89,11 @@ def verify_data(data_dir):
     confiável, feche o programa e teste uma cópia completa do acervo.
     """
     root = Path(data_dir)
-    backup_counts = {"valid": 0, "invalid": 0, "inaccessible": 0, "candidates": []}
+    backup_counts = {"valid": 0, "invalid": 0, "inaccessible": 0, "candidates": [],
+                     "candidates_omitted": 0,
+                     "by_type": {kind: {"valid": 0, "invalid": 0, "inaccessible": 0}
+                                 for kind in ("translations", "glossary")}}
+    backup_directory = "ok"
     warnings = [
         "Feche o programa antes de copiar os dados; um WAL com dados impede a validação segura.",
         "Cópias temporárias podem permanecer após interrupção abrupta; proteja a pasta temporária do usuário.",
@@ -98,35 +103,58 @@ def verify_data(data_dir):
     try:
         backup_dir = root / "backups"
         patterns = (
-            ("traducoes-backup-*.db", ("comments",), False),
-            ("glossario-v2-*.db", ("glossary_entries", "glossary_metadata"), True),
+            ("traducoes-backup-*.db", ("comments",), False, "translations"),
+            ("glossario-v2-*.db", ("glossary_entries", "glossary_metadata"), True, "glossary"),
         )
         with os.scandir(backup_dir) as entries:
             paths = [Path(entry.path) for entry in entries
                      if entry.is_symlink() or entry.is_file(follow_symlinks=False)]
-        for pattern, tables, glossary in patterns:
+        for pattern, tables, glossary, kind in patterns:
             for path in paths:
                 if not fnmatch.fnmatch(path.name, pattern):
                     continue
                 status = _database_status(path, tables, glossary=glossary)
-                backup_counts[{"ok": "valid", "missing": "inaccessible"}.get(status, status)] += 1
+                category = {"ok": "valid", "missing": "inaccessible"}.get(status, status)
+                backup_counts[category] += 1
+                backup_counts["by_type"][kind][category] += 1
                 if status == "ok" and re.fullmatch(
                     r"(?:traducoes-backup|glossario-v2)-[0-9-]+\.db", path.name
                 ):
                     backup_counts["candidates"].append(path.name)
+        backup_counts["candidates"].sort(reverse=True)
+        backup_counts["candidates_omitted"] = max(0, len(backup_counts["candidates"]) - 20)
+        backup_counts["candidates"] = backup_counts["candidates"][:20]
     except FileNotFoundError:
-        pass
+        backup_directory = "missing"
     except OSError:
+        backup_directory = "inaccessible"
         warnings.append("Não foi possível listar todos os backups.")
     count = 0
+    translations_directory = "ok"
+    packages = None
     try:
         translations = root / TRANSLATIONS_FOLDER
+        translations.stat()
+        directory_before = _signature(translations)
         def on_error(_error):
-            warnings.append("Não foi possível listar todas as traduções.")
+            nonlocal translations_directory
+            translations_directory = "inaccessible"
+            warning = "Não foi possível listar todas as traduções."
+            if warning not in warnings:
+                warnings.append(warning)
 
         for _directory, _subdirs, files in os.walk(translations, onerror=on_error):
             count += sum(name.lower().endswith(".pgn") for name in files)
+        if translations_directory == "ok":
+            bundles = list_bundles(translations)
+            if _signature(translations) != directory_before:
+                raise OSError("A pasta mudou durante a leitura")
+            packages = {status: sum(bundle.status == status for bundle in bundles)
+                        for status in ("ready", "legacy", "incomplete", "invalid")}
+    except FileNotFoundError:
+        translations_directory = "missing"
     except OSError:
+        translations_directory = "inaccessible"
         warnings.append("Não foi possível listar todas as traduções.")
     return {
         "database": _database_status(root / "traducoes.db", ("comments",)),
@@ -135,6 +163,9 @@ def verify_data(data_dir):
         ),
         "settings": _settings_status(root / SETTINGS_FILENAME),
         "backups": backup_counts,
+        "backup_directory": backup_directory,
         "translations": count,
+        "translations_directory": translations_directory,
+        "packages": packages,
         "warnings": warnings,
     }

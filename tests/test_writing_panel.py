@@ -11,6 +11,10 @@ def issue(start=0, version=1, category="SPELLING"):
 
 
 class WritingPanelTests(GuiTestCase):
+    def test_verbal_agreement_is_named_in_issue_list(self):
+        self.panel.set_snapshot((issue(category="VERBAL_AGREEMENT"),))
+        self.assertIn("Concordância verbal", self.panel.issue_buttons[0].cget("text"))
+
     def setUp(self):
         super().setUp()
         self.selected = []

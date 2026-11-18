@@ -7,7 +7,7 @@ import json
 import subprocess
 import sys
 import os
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tradutor_pgn.translation_output import publish_translation_bundle
 from tradutor_pgn.pgn_utils import translated_bundle_paths
@@ -138,15 +138,102 @@ def test_cancel_immediately_before_publication_leaves_no_bundle(tmp_path):
     source = tmp_path / "game.pgn"
     source.write_text("original", encoding="utf8")
     root = tmp_path / "out"
-    calls = iter([False, False, False, True])
     def generate(path):
         Path(path).write_text("tradução", encoding="utf8")
         return True
     result = publish_translation_bundle(str(source), "pt", str(root), generate,
-                                        is_canceled=lambda: next(calls))
+                                        is_canceled=lambda: (root / ".publicacao.lock").exists())
     assert result.status == "canceled"
     assert not any(path.is_dir() for path in root.iterdir())
     assert source.read_text(encoding="utf8") == "original"
+
+
+def test_cancel_during_source_copy_discards_partial_bundle(tmp_path):
+    source = tmp_path / "game.pgn"
+    source.write_bytes(b"x" * (3 * 1024 * 1024))
+    root = tmp_path / "out"
+    def generate(path):
+        Path(path).write_bytes(b"traduzido")
+        return True
+    observed_sizes = []
+    def canceled():
+        for path in root.glob(".game-BR.tmp-*/game.pgn"):
+            size = path.stat().st_size
+            if size >= 1024 * 1024:
+                observed_sizes.append(size)
+                return True
+        return False
+    result = publish_translation_bundle(str(source), "pt", str(root), generate, is_canceled=canceled)
+    assert result.status == "canceled"
+    assert observed_sizes[0] < source.stat().st_size
+    assert not any(path.is_dir() for path in root.iterdir())
+    assert source.stat().st_size == 3 * 1024 * 1024
+
+
+def test_cancel_during_translation_hash_discards_partial_bundle(tmp_path):
+    import hashlib
+    source = tmp_path / "game.pgn"
+    source.write_bytes(b"original")
+    root = tmp_path / "out"
+    original_sha256 = hashlib.sha256
+    processed = []
+    class Digest:
+        def __init__(self):
+            self.digest = original_sha256()
+        def update(self, chunk):
+            if chunk.startswith(b"y"):
+                processed.append(len(chunk))
+            self.digest.update(chunk)
+        def hexdigest(self):
+            return self.digest.hexdigest()
+    def generate(path):
+        Path(path).write_bytes(b"y" * (3 * 1024 * 1024))
+        return True
+    with patch("tradutor_pgn.translation_output.hashlib.sha256", side_effect=Digest):
+        result = publish_translation_bundle(str(source), "pt", str(root), generate,
+                                            is_canceled=lambda: bool(processed))
+    assert result.status == "canceled"
+    assert sum(processed) < 3 * 1024 * 1024
+    assert not any(path.is_dir() for path in root.iterdir())
+
+
+def test_initial_fingerprint_can_be_cancelled_before_extraction(tmp_path):
+    from types import SimpleNamespace
+    from threading import Event
+    from tradutor_pgn import translation_worker
+    from tradutor_pgn.translation_output import _PublicationCanceled
+    source = tmp_path / "game.pgn"
+    source.write_bytes(b"original")
+    flag = Event()
+    app = SimpleNamespace(cancel_flag=flag, log_message=Mock())
+    def stopped(_path, is_canceled=None):
+        flag.set()
+        assert is_canceled is not None and is_canceled()
+        raise _PublicationCanceled()
+    with patch.object(translation_worker, "source_sha256", side_effect=stopped), \
+         patch.object(translation_worker, "extract_comment_texts_from_file") as extract:
+        assert translation_worker._first_pass(app, [str(source)]) is None
+    extract.assert_not_called()
+
+
+def test_fingerprint_cancellation_after_extraction_discards_first_pass(tmp_path):
+    from types import SimpleNamespace
+    from tradutor_pgn import translation_worker
+    from tradutor_pgn.translation_output import _PublicationCanceled
+    source = tmp_path / "game.pgn"
+    source.write_bytes(b"original")
+    flag = Event()
+    app = SimpleNamespace(cancel_flag=flag, log_message=Mock())
+    def digest(_path, _cancel):
+        if flag.is_set():
+            raise _PublicationCanceled()
+        return "hash"
+    def extract(*_args, **_kwargs):
+        flag.set()
+        return {"comments": ["example"]}
+    with patch.object(translation_worker, "source_sha256", side_effect=digest), \
+         patch.object(translation_worker, "extract_comment_texts_from_file", side_effect=extract):
+        assert translation_worker._first_pass(app, [str(source)]) is None
 
 
 def test_cancel_while_waiting_for_publication_lock_returns_promptly(tmp_path):

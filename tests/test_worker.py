@@ -457,6 +457,35 @@ class TranslationWorkerTests(unittest.TestCase):
             self.assertEqual(run["outcome"], RUN_CANCELED)
             self.assertIn("cancelada durante a geracao", "\n".join(app.logs).lower())
 
+    def test_cancel_during_final_source_hash_marks_run_canceled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = tmp_path / "cache.db"
+            pgn = tmp_path / "game.pgn"
+            pgn.write_text('[Event "Test"]\n\n1. e4 {White starts}\n', encoding="utf-8")
+            conn = initialize_database(str(db_path))
+            save_translation(conn.cursor(), "White starts", "As brancas começam", "pt")
+            conn.commit()
+            conn.close()
+            app = FakeApp(db_path)
+            actual = translation_worker.source_sha256
+            calls = 0
+            def digest(path, is_canceled=None):
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    app.cancel_flag.set()
+                return actual(path, is_canceled)
+            with unittest.mock.patch.object(translation_worker, "source_sha256", side_effect=digest):
+                translation_worker.run_translation(app, str(pgn), "pt", False)
+            conn = initialize_database(str(db_path))
+            try:
+                run = list_translation_runs(conn.cursor(), limit=1)[0]
+            finally:
+                conn.close()
+            self.assertEqual(run["outcome"], RUN_CANCELED)
+            self.assertIn("origem cancelada", "\n".join(app.logs).lower())
+
     def test_source_changed_during_translation_is_not_published(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

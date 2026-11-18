@@ -17,7 +17,7 @@ import customtkinter as ctk
 
 from .editor_common import MUTED_TEXT_COLOR
 from .llm_providers import GOOGLE_PROVIDER, PROVIDERS, model_setting_key
-from .settings import TRANSLATION_PROVIDER_DEEP
+from .settings import TRANSLATION_PROVIDER_DEEP, TRANSLATION_PROVIDER_LIBRE
 from .window_utils import bring_window_to_front
 
 
@@ -35,7 +35,7 @@ class ProviderChoiceDialog:
         self.configured = set(configured)
         self.models = models
         self.result: str | None = None
-        if preselected not in self.configured and preselected not in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP):
+        if preselected not in self.configured and preselected not in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP, TRANSLATION_PROVIDER_LIBRE):
             preselected = ""
         self.choice_var = tk.StringVar(value=preselected)
         self.radios: dict[str, ctk.CTkRadioButton] = {}
@@ -73,6 +73,12 @@ class ProviderChoiceDialog:
             variable=self.choice_var, value=TRANSLATION_PROVIDER_DEEP,
         )
         self.radios[TRANSLATION_PROVIDER_DEEP].grid(row=linha, column=0, sticky="w", pady=3)
+        linha += 1
+        self.radios[TRANSLATION_PROVIDER_LIBRE] = ctk.CTkRadioButton(
+            opcoes, text="LibreTranslate (instância configurável)",
+            variable=self.choice_var, value=TRANSLATION_PROVIDER_LIBRE,
+        )
+        self.radios[TRANSLATION_PROVIDER_LIBRE].grid(row=linha, column=0, sticky="w", pady=3)
         for spec in PROVIDERS.values():
             linha += 1
             modelo = self.models.get(model_setting_key(spec.id), spec.default_model)
@@ -118,7 +124,7 @@ class ProviderChoiceDialog:
 
     def confirm(self) -> None:
         escolhido = self.choice_var.get()
-        if escolhido not in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP) and escolhido not in self.configured:
+        if escolhido not in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP, TRANSLATION_PROVIDER_LIBRE) and escolhido not in self.configured:
             # Nao deveria acontecer (o radio esta desligado), mas a guarda e o
             # que impede um motor sem chave de sair daqui como escolha.
             self.prompt_label.configure(text="Selecione um motor disponível para continuar.")

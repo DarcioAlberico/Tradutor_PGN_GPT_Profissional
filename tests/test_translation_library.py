@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from tradutor_pgn.translation_library import list_bundles, search_bundles
+from tradutor_pgn.translation_library import LibraryScanCanceled, list_bundles, search_bundles
 from tradutor_pgn.translation_output import publish_translation_bundle
 
 
@@ -65,6 +65,19 @@ def test_missing_library_is_empty_without_creating_directory(tmp_path):
     path = tmp_path / "missing"
     assert list_bundles(path) == []
     assert not path.exists()
+
+
+def test_library_scan_cancellation_never_returns_a_partial_list(tmp_path):
+    for name in ("a", "b", "c"):
+        (tmp_path / name).mkdir()
+    calls = 0
+    def cancel():
+        nonlocal calls
+        calls += 1
+        return calls >= 3
+    with pytest.raises(LibraryScanCanceled):
+        list_bundles(tmp_path, should_cancel=cancel)
+    assert calls == 3
 
 
 @pytest.mark.parametrize("mutation", ["version", "hash", "missing_file", "metadata"])

@@ -49,6 +49,8 @@ from .repeated_edits import repeated_edits_report
 from .window_utils import bring_window_to_front
 
 CANDIDATE_PAGE_SIZE = 40
+FREQUENCY_FILTERS = {"Todas as frequências": 0, "Ao menos 5 ocorrências": 5,
+                     "Ao menos 10 ocorrências": 10, "Ao menos 20 ocorrências": 20}
 
 
 def candidate_page(items, page):
@@ -77,6 +79,45 @@ def describe_pair(item):
         f"{preview(item['old'], 34)!r} -> {preview(item['new'], 34)!r}"
         f"   |   {item['rule_label']}" + ("   |   ignorada" if item.get("ignored") else "")
     )
+
+
+def format_historical_example(example):
+    """Mostra uma edição histórica limitada, sem representar o texto atual como histórico."""
+    def shorten(value):
+        value = value or ""
+        return value if len(value) <= 10000 else value[:10000] + "\n[Texto truncado]"
+    return (f"Edição histórica do comentário ID {example['comment_id']}. "
+            "A tradução atual pode ter sido alterada depois.\n\n"
+            f"Antes:\n{shorten(example['before'])}\n\nDepois:\n{shorten(example['after'])}")
+
+
+class HistoricalExampleDialog:
+    def __init__(self, parent, text):
+        self.win = ctk.CTkToplevel(parent)
+        self.win.title("Exemplo de edição histórica")
+        self.win.geometry("720x560")
+        self.win.minsize(450, 300)
+        self.win.transient(parent)
+        self.win.columnconfigure(0, weight=1)
+        self.win.rowconfigure(0, weight=1)
+        self.text = ctk.CTkTextbox(self.win, wrap=tk.WORD)
+        self.text.grid(row=0, column=0, sticky="nsew", padx=14, pady=(14, 6))
+        self.text.insert("1.0", text)
+        self.text.configure(state="disabled")
+        actions = ctk.CTkFrame(self.win, fg_color="transparent")
+        actions.grid(row=1, column=0, sticky="e", padx=14, pady=(0, 12))
+        ctk.CTkButton(actions, text="Copiar exemplo", width=130, command=self.copy).pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkButton(actions, text="Fechar", width=100, command=self.win.destroy).pack(side=tk.LEFT)
+        self.win.bind("<Escape>", lambda _event: self.win.destroy())
+        bring_window_to_front(self.win, parent, maximize=False)
+
+    def copy(self):
+        self.win.clipboard_clear()
+        self.win.clipboard_append(self.text.get("1.0", "end-1c"))
+
+
+def show_historical_example(parent, text):
+    return HistoricalExampleDialog(parent, text)
 
 
 def describe_summary(events, items):
@@ -110,16 +151,22 @@ def already_automatic(item):
     )
 
 
-def filter_candidates(items, query="", *, uncovered_only=False, show_ignored=False):
+def filter_candidates(items, query="", *, uncovered_only=False, show_ignored=False, only_ignored=False,
+                      minimum_count=0):
     terms = normalize_search_text(query).split()
     result = []
     for item in items:
-        if item.get("ignored") and not show_ignored:
+        if minimum_count and item.get("count", 0) < minimum_count:
+            continue
+        if only_ignored and not item.get("ignored"):
+            continue
+        if item.get("ignored") and not (show_ignored or only_ignored):
             continue
         if uncovered_only and item.get("rule_produces") == item["new"]:
             continue
         if terms:
-            fields = [normalize_search_text(item["old"]), normalize_search_text(item["new"])]
+            fields = [normalize_search_text(value) for value in
+                      (item["old"], item["new"], item.get("rule_label") or "")]
             if not all(any(term in field for field in fields) for term in terms):
                 continue
         result.append(item)
@@ -131,6 +178,10 @@ def sort_candidates(items, order):
         return sorted(items, key=lambda item: (-item["count"], -item["lines"], item["old"], item["new"]))
     if order == "Mais comentários":
         return sorted(items, key=lambda item: (-item["lines"], -item["count"], item["old"], item["new"]))
+    if order == "Menor frequência":
+        return sorted(items, key=lambda item: (item["count"], item["lines"], item["old"], item["new"]))
+    if order == "Menos comentários":
+        return sorted(items, key=lambda item: (item["lines"], item["count"], item["old"], item["new"]))
     if order == "Ordem alfabética":
         return sorted(items, key=lambda item: (normalize_search_text(item["old"]),
                                                normalize_search_text(item["new"])))
@@ -157,6 +208,7 @@ class RepeatedEditsWindow:
         self.catalog = GlossaryCatalog(glossary_catalog_path(), _default_substitutions_path())
         self.snapshot = None
         self.ignored_available = True
+        self._batching_filters = False
 
         self.build()
         self.refresh()
@@ -187,32 +239,56 @@ class RepeatedEditsWindow:
         self.search_var = tk.StringVar(master=self.win)
         self.uncovered_var = tk.BooleanVar(master=self.win, value=False)
         self.show_ignored_var = tk.BooleanVar(master=self.win, value=False)
+        self.only_ignored_var = tk.BooleanVar(master=self.win, value=False)
         self.sort_var = tk.StringVar(master=self.win, value="Frequência")
+        self.frequency_var = tk.StringVar(master=self.win, value="Todas as frequências")
         self.search_entry = ctk.CTkEntry(filters, textvariable=self.search_var,
-                                         placeholder_text="Buscar antes ou depois")
+                                         placeholder_text="Buscar texto ou tipo de regra")
         self.search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.win.bind("<Control-f>", self.focus_search)
+        self.win.bind("<Control-l>", self.clear_filters_shortcut)
+        self.win.bind("<Alt-Left>", lambda _event: self.page_shortcut("previous"))
+        self.win.bind("<Alt-Right>", lambda _event: self.page_shortcut("next"))
+        self.win.bind("<Alt-Home>", lambda _event: self.page_shortcut("first"))
+        self.win.bind("<Alt-End>", lambda _event: self.page_shortcut("last"))
+        self.win.bind("<Alt-Up>", lambda _event: self.select_candidate_shortcut(-1))
+        self.win.bind("<Alt-Down>", lambda _event: self.select_candidate_shortcut(1))
+        self.win.bind("<Control-Shift-C>", self.copy_candidate_shortcut)
         ctk.CTkCheckBox(filters, text="Somente sem regra correspondente",
                         variable=self.uncovered_var, command=self.reset_candidate_filter).grid(row=0, column=1)
         ctk.CTkCheckBox(filters, text="Mostrar ignoradas", variable=self.show_ignored_var,
                         command=self.reset_candidate_filter).grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.btn_copy = ctk.CTkButton(filters, text="Copiar troca", width=120, command=self.copy_candidate)
         self.btn_copy.grid(row=1, column=1, sticky="e", pady=(6, 0))
+        attach_tooltip(self.btn_copy, "Copia a troca selecionada. Atalho: Ctrl+Shift+C.")
         self.btn_restore_ignored = ctk.CTkButton(filters, text="Restaurar ignoradas da lista", width=170,
                                                  command=self.restore_all_ignored)
         self.btn_restore_ignored.grid(row=2, column=1, sticky="e", pady=(6, 0))
+        attach_tooltip(self.btn_restore_ignored, "Restaura ignoradas que correspondem à busca e aos filtros de regras e frequência, em todas as páginas.")
+        self.btn_clear_filters = ctk.CTkButton(filters, text="Limpar filtros (Ctrl+L)", width=170,
+                                               command=self.clear_candidate_filters)
+        self.btn_clear_filters.grid(row=3, column=1, sticky="e", pady=(6, 0))
+        self.only_ignored_check = ctk.CTkCheckBox(filters, text="Somente ignoradas", variable=self.only_ignored_var,
+                                                  command=self.reset_candidate_filter)
+        self.only_ignored_check.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        attach_tooltip(self.only_ignored_check, "Mostra apenas ignoradas, mesmo quando 'Mostrar ignoradas' estiver desmarcado.")
+        self.frequency_menu = ctk.CTkOptionMenu(filters, variable=self.frequency_var,
+                                                 values=list(FREQUENCY_FILTERS),
+                                                 command=lambda _value: self.reset_candidate_filter())
+        self.frequency_menu.grid(row=4, column=0, sticky="w", pady=(6, 0))
         pager = ctk.CTkFrame(filters, fg_color="transparent")
         pager.grid(row=2, column=0, sticky="ew", pady=(6, 0))
-        self.btn_previous = ctk.CTkButton(pager, text="Anterior", width=90, command=lambda: self.change_page(-1))
+        self.btn_previous = ctk.CTkButton(pager, text="Anterior (Alt+←)", width=120, command=lambda: self.change_page(-1))
         self.btn_previous.pack(side=tk.LEFT)
         self.page_label = ctk.CTkLabel(pager, text="Página 0 de 0", width=130)
         self.page_label.pack(side=tk.LEFT, padx=6)
-        self.btn_next = ctk.CTkButton(pager, text="Próxima", width=90, command=lambda: self.change_page(1))
+        self.btn_next = ctk.CTkButton(pager, text="Próxima (Alt+→)", width=120, command=lambda: self.change_page(1))
         self.btn_next.pack(side=tk.LEFT)
         self.search_var.trace_add("write", lambda *_: self.reset_candidate_filter())
 
         self.rows_frame = ctk.CTkScrollableFrame(self.win)
         self.rows_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 6))
+        attach_tooltip(self.rows_frame, "Alt+↑/↓ seleciona a troca anterior ou seguinte, inclusive entre páginas.")
 
         detail = ctk.CTkFrame(self.win, corner_radius=8)
         detail.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
@@ -230,7 +306,8 @@ class RepeatedEditsWindow:
         )
         self.hint_label.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 4))
         self.sort_menu = ctk.CTkOptionMenu(detail, variable=self.sort_var,
-                                           values=["Frequência", "Mais comentários", "Ordem alfabética"],
+                                           values=["Frequência", "Menor frequência", "Mais comentários",
+                                                   "Menos comentários", "Ordem alfabética"],
                                            width=160, command=lambda _value: self.reset_candidate_filter())
         self.sort_menu.grid(row=1, column=1, sticky="e", padx=10, pady=(0, 4))
 
@@ -253,6 +330,17 @@ class RepeatedEditsWindow:
         self.btn_ignore = ctk.CTkButton(actions, text="Ignorar", width=100, command=self.toggle_ignored)
         self.btn_ignore.pack(side=tk.RIGHT, padx=6)
         attach_tooltip(self.btn_ignore, "Ignora ou restaura a troca apenas para esta obra e este par de idiomas.")
+        examples = ctk.CTkFrame(detail, fg_color="transparent")
+        examples.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
+        ctk.CTkLabel(examples, text="Exemplo:").pack(side=tk.LEFT, padx=(0, 6))
+        self.example_choice = tk.StringVar(master=self.win, value="Nenhum")
+        self.example_menu = ctk.CTkOptionMenu(examples, variable=self.example_choice,
+                                              values=["Nenhum"], width=160, state="disabled")
+        self.example_menu.pack(side=tk.LEFT, padx=(0, 8))
+        self.btn_example_history = ctk.CTkButton(examples, text="Ver edição histórica", width=160,
+                                                 command=self.show_example_history, state="disabled")
+        self.btn_example_history.pack(side=tk.LEFT)
+        attach_tooltip(self.btn_example_history, "Mostra o antes e o depois registrados na primeira edição desse comentário para a troca.")
 
     # ------------------------------------------------------------------ dados
 
@@ -303,8 +391,51 @@ class RepeatedEditsWindow:
         self.apply_candidate_filter(keep)
 
     def reset_candidate_filter(self):
+        if self._batching_filters:
+            return
         self.page_index = 0
         self.apply_candidate_filter(retain_selection=False)
+
+    def clear_candidate_filters(self):
+        self._batching_filters = True
+        try:
+            self.search_var.set("")
+            self.uncovered_var.set(False)
+            self.show_ignored_var.set(False)
+            self.only_ignored_var.set(False)
+            self.frequency_var.set("Todas as frequências")
+        finally:
+            self._batching_filters = False
+        self.reset_candidate_filter()
+
+    def clear_filters_shortcut(self, _event=None):
+        self.clear_candidate_filters()
+        return "break"
+
+    def page_shortcut(self, action):
+        if not self.page_count:
+            return "break"
+        target = {"first": 0, "last": self.page_count - 1,
+                  "previous": max(0, self.page_index - 1),
+                  "next": min(self.page_count - 1, self.page_index + 1)}[action]
+        if target != self.page_index:
+            self.page_index = target
+            self.apply_candidate_filter(retain_selection=False)
+        return "break"
+
+    def select_candidate_shortcut(self, direction):
+        if not self.items or self.selected is None:
+            return "break"
+        target = self.selected + direction
+        if 0 <= target < len(self.items):
+            self.select(target)
+        elif target < 0 and self.page_index > 0:
+            self.change_page(-1)
+            if self.items:
+                self.select(len(self.items) - 1)
+        elif target >= len(self.items) and self.page_index + 1 < self.page_count:
+            self.change_page(1)
+        return "break"
 
     def change_page(self, delta):
         self.page_index += delta
@@ -317,7 +448,9 @@ class RepeatedEditsWindow:
                 keep = (selected["old"], selected["new"])
         filtered = filter_candidates(self.all_items, self.search_var.get(),
                                      uncovered_only=bool(self.uncovered_var.get()),
-                                     show_ignored=bool(self.show_ignored_var.get()))
+                                     show_ignored=bool(self.show_ignored_var.get()),
+                                     only_ignored=bool(self.only_ignored_var.get()),
+                                     minimum_count=FREQUENCY_FILTERS[self.frequency_var.get()])
         filtered = sort_candidates(filtered, self.sort_var.get())
         if keep is not None:
             for position, item in enumerate(filtered):
@@ -328,8 +461,10 @@ class RepeatedEditsWindow:
         self.page_label.configure(text=f"Página {self.page_index + 1 if self.page_count else 0} de {self.page_count}")
         self.btn_previous.configure(state="normal" if self.page_index else "disabled")
         self.btn_next.configure(state="normal" if self.page_index + 1 < self.page_count else "disabled")
-        self.btn_restore_ignored.configure(state="normal" if self.ignored_available and
-                                           any(item.get("ignored") for item in self.all_items) else "disabled")
+        restorable = filter_candidates(self.all_items, self.search_var.get(),
+                                       uncovered_only=bool(self.uncovered_var.get()), only_ignored=True,
+                                       minimum_count=FREQUENCY_FILTERS[self.frequency_var.get()])
+        self.btn_restore_ignored.configure(state="normal" if self.ignored_available and self.target_language and restorable else "disabled")
         self.buttons = render_row_buttons(
             self.rows_frame,
             self.items,
@@ -337,7 +472,9 @@ class RepeatedEditsWindow:
             ("Nenhuma troca corresponde aos filtros." if self.all_items else "Nenhuma troca repetida."),
         )
         summary = describe_summary(self.events, self.all_items)
-        if self.search_var.get().strip() or self.uncovered_var.get() or any(i.get("ignored") for i in self.all_items):
+        if (self.search_var.get().strip() or self.uncovered_var.get() or self.only_ignored_var.get()
+                or FREQUENCY_FILTERS[self.frequency_var.get()]
+                or any(i.get("ignored") for i in self.all_items)):
             summary += f" Correspondentes: {len(filtered)}."
         self.summary_label.configure(text=summary)
         self.selected = None
@@ -376,15 +513,38 @@ class RepeatedEditsWindow:
             self.buttons[index].configure(
                 fg_color=SELECTED_ROW_COLOR, text_color=SELECTED_ROW_TEXT_COLOR
             )
+            self.win.after_idle(self._reveal_selected)
         self.show_detail(self.items[index])
 
+    def _reveal_selected(self):
+        if self.selected is None or not (0 <= self.selected < len(self.buttons)):
+            return
+        canvas = self.rows_frame._parent_canvas
+        bounds = canvas.bbox("all")
+        if not bounds or bounds[3] <= 0:
+            return
+        button = self.buttons[self.selected]
+        top = canvas.canvasy(0)
+        height = canvas.winfo_height()
+        y = button.winfo_y()
+        bottom = y + button.winfo_height()
+        if y < top:
+            canvas.yview_moveto(max(0, y / bounds[3]))
+        elif bottom > top + height:
+            canvas.yview_moveto(max(0, (bottom - height) / bounds[3]))
+
     def show_detail(self, item):
+        examples = item.get("examples") or ({"comment_id": item["example_id"], "before": None, "after": None},)
+        labels = [f"{index}/{len(examples)} · ID {example['comment_id']}" for index, example in enumerate(examples, 1)]
+        self.example_menu.configure(values=labels, state="normal" if len(labels) > 1 else "disabled")
+        self.example_choice.set(labels[0])
+        self.btn_example_history.configure(state="normal" if examples[0].get("before") is not None else "disabled")
         self.detail_label.configure(
             text=(
                 f"Antes: {item['old']!r}\n"
                 f"Depois: {item['new']!r}\n"
-                f"{item['count']} ocorrência(s) em {item['lines']} linha(s); "
-                f"primeiro exemplo: ID {item['example_id']}\n"
+                f"{item['count']} ocorrência(s) no histórico em {item['lines']} comentário(s) distinto(s); "
+                f"{len(examples)} exemplo(s) disponível(is) de até 5 comentários distintos\n"
                 f"Regra no glossário: {item['rule_label']}"
             )
         )
@@ -423,12 +583,26 @@ class RepeatedEditsWindow:
         self.btn_suggest.configure(state="disabled")
         self.btn_ignore.configure(state="disabled")
         self.btn_example.configure(state="disabled")
+        self.btn_example_history.configure(state="disabled")
+        self.example_menu.configure(values=["Nenhum"], state="disabled")
+        self.example_choice.set("Nenhum")
         self.btn_copy.configure(state="disabled")
 
     def current_item(self):
         if self.selected is None or not (0 <= self.selected < len(self.items)):
             return None
         return self.items[self.selected]
+
+    def current_example(self):
+        item = self.current_item()
+        if item is None:
+            return None
+        examples = item.get("examples") or ({"comment_id": item["example_id"], "before": None, "after": None},)
+        chosen = self.example_choice.get()
+        for index, example in enumerate(examples, 1):
+            if chosen == f"{index}/{len(examples)} · ID {example['comment_id']}":
+                return example
+        return examples[0]
 
     def focus_search(self, _event=None):
         self.search_entry.focus_set()
@@ -443,6 +617,10 @@ class RepeatedEditsWindow:
             self.win.clipboard_append(f"{item['old']} → {item['new']}")
         except tk.TclError:
             messagebox.showwarning("Trocas repetidas", "Não foi possível copiar a troca.", parent=self.win)
+
+    def copy_candidate_shortcut(self, _event=None):
+        self.copy_candidate()
+        return "break"
 
     def candidate_available(self, item):
         """Confere decisões recentes de outras janelas antes de criar uma regra."""
@@ -476,9 +654,11 @@ class RepeatedEditsWindow:
         if not self.ignored_available or not self.target_language:
             return
         try:
+            candidates = filter_candidates(self.all_items, self.search_var.get(),
+                                           uncovered_only=bool(self.uncovered_var.get()), only_ignored=True,
+                                           minimum_count=FREQUENCY_FILTERS[self.frequency_var.get()])
             keys = [candidate_key(self.source_file, self.source_language, self.target_language,
-                                  item["old"], item["new"])
-                    for item in self.all_items if item.get("ignored")]
+                                  item["old"], item["new"]) for item in candidates]
             if not keys:
                 return
             restore_ignored(keys)
@@ -495,16 +675,21 @@ class RepeatedEditsWindow:
         Pela mesma maquina do "Ir para ID" (`jump_to_id`): filtros e ordem
         ativos. Se a linha saiu do filtro atual, o editor diz — nao a janela.
         """
-        item = self.current_item()
-        if item is None:
+        example = self.current_example()
+        if example is None:
             return
-        if not self.editor.jump_to_id(item["example_id"]):
+        if not self.editor.jump_to_id(example["comment_id"]):
             messagebox.showinfo(
                 "Trocas repetidas",
-                f"A tradução {item['example_id']} não está na lista "
+                f"A tradução {example['comment_id']} não está na lista "
                 "com os filtros atuais do editor.",
                 parent=self.win,
             )
+
+    def show_example_history(self):
+        example = self.current_example()
+        if example is not None and example.get("before") is not None:
+            show_historical_example(self.win, format_historical_example(example))
 
     def create_suggestion_rule(self):
         """Adiciona uma sugestão ao catálogo sem alterar traduções existentes."""

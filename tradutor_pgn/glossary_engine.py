@@ -68,15 +68,42 @@ class SimulationExample:
 
 
 @dataclass(frozen=True)
+class SimulationPair:
+    source_language: str | None
+    target_language: str
+    scanned: int
+    changed: int
+
+
+@dataclass(frozen=True)
 class SimulationResult:
     scanned: int
     changed: int
     unchanged: int
     examples: tuple[SimulationExample, ...]
+    pairs: tuple[SimulationPair, ...] = ()
 
 
 class SimulationCanceled(Exception):
     """A simulação foi cancelada e seus resultados parciais foram descartados."""
+
+
+def format_simulation_summary(result):
+    """Resume a fotografia analisada, sem inferir impacto em textos futuros."""
+    if not result.scanned:
+        return "Nenhuma tradução pendente foi encontrada para os filtros selecionados."
+    percent = result.changed * 100 // result.scanned
+    lines = [f"{result.changed} de {result.scanned} traduções analisadas teriam resultado diferente ({percent}%)."]
+    if result.pairs:
+        lines.append("Por par de idiomas:")
+        for pair in result.pairs[:10]:
+            lines.append(f"  {pair.source_language or '?'} → {pair.target_language}: {pair.changed} de {pair.scanned}.")
+        if len(result.pairs) > 10:
+            lines.append(f"  Mais {len(result.pairs) - 10} par(es) não exibidos.")
+    omitted = result.changed - len(result.examples)
+    if omitted > 0:
+        lines.append(f"{omitted} exemplo(s) de alterações não exibidos.")
+    return "\n".join(lines)
 
 
 def format_simulation_examples(result):
@@ -100,6 +127,7 @@ def simulate_rule_change(items, before_entries, after_entries, *, max_examples=1
         raise SimulationCanceled()
     before_entries, after_entries = list(before_entries), list(after_entries)
     cached = {}
+    pair_counts = {}
     scanned = changed = 0
     examples = []
     def check_cancel():
@@ -119,13 +147,18 @@ def simulate_rule_change(items, before_entries, after_entries, *, max_examples=1
         before = apply_all_substitutions(item.text, old_rules, _check_cancel=cancel_check)
         after = apply_all_substitutions(item.text, new_rules, _check_cancel=cancel_check)
         scanned += 1
+        counts = pair_counts.setdefault(pair, [0, 0])
+        counts[0] += 1
         if before != after:
             changed += 1
+            counts[1] += 1
             if len(examples) < max_examples:
                 examples.append(SimulationExample(item, before, after))
     if should_cancel is not None and should_cancel():
         raise SimulationCanceled()
-    return SimulationResult(scanned, changed, scanned - changed, tuple(examples))
+    pairs = tuple(SimulationPair(source, target, counts[0], counts[1])
+                  for (source, target), counts in pair_counts.items())
+    return SimulationResult(scanned, changed, scanned - changed, tuple(examples), pairs)
 
 
 def simulate_database_rule_change(path, before_entries, after_entries, *, max_examples=10,

@@ -29,6 +29,7 @@ import unicodedata
 import customtkinter as ctk
 
 from . import api_keys, app_paths, first_run
+from .libre_translation import DEFAULT_URL, check_instance, validate_url
 from .editor_common import ERROR_TEXT_COLOR, MUTED_TEXT_COLOR, OK_TEXT_COLOR
 from .editor_widgets import flash_message
 from .google_cooldown import (
@@ -110,6 +111,8 @@ class SettingsWindow:
         self.board = read_board_settings(settings)
         self.llm = read_llm_settings(settings)
         self.writing = read_writing_settings(settings)
+        libre = settings.get("libretranslate", {})
+        self.libre_url = libre.get("url", DEFAULT_URL) if isinstance(libre, dict) else DEFAULT_URL
         self._writing_category_changes = {}
         self._syncing_writing_categories = False
         self._writing_revision = writing_settings_revision()
@@ -163,6 +166,7 @@ class SettingsWindow:
         self.build_appearance_section()
         self.build_board_section()
         self.build_llm_section()
+        self.build_libre_section()
         self.build_data_dir_section()
         self.build_google_quota_section()
         self.build_writing_section()
@@ -568,6 +572,57 @@ class SettingsWindow:
             f"por 800 KB de PGN, na vez de cada arquivo. {aviso}",
         )
 
+    def build_libre_section(self):
+        frame = self.section(7, "LibreTranslate")
+        frame.columnconfigure(1, weight=1)
+        ctk.CTkLabel(frame, text="Endereço da instância", anchor="w").grid(row=1, column=0, padx=10, pady=4, sticky="w")
+        self.libre_url_var = tk.StringVar(value=self.libre_url)
+        ctk.CTkEntry(frame, textvariable=self.libre_url_var).grid(row=1, column=1, padx=10, pady=4, sticky="ew")
+        ctk.CTkLabel(frame, text="Chave de API (opcional)", anchor="w").grid(row=2, column=0, padx=10, pady=4, sticky="w")
+        self.key_entries["libretranslate"] = ctk.CTkEntry(frame, show="*", placeholder_text="Deixe vazio para manter")
+        self.key_entries["libretranslate"].grid(row=2, column=1, padx=10, pady=4, sticky="ew")
+        self.clear_key_vars["libretranslate"] = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(frame, text="Apagar chave salva", variable=self.clear_key_vars["libretranslate"]).grid(row=3, column=1, padx=10, sticky="w")
+        self.hint(frame, 4, "A instância deve estar em execução e ter os idiomas instalados. Um endereço remoto recebe os comentários. " + key_storage_description())
+        self.libre_test_button = ctk.CTkButton(frame, text="Testar conexão e idiomas", command=self.test_libre_instance)
+        self.libre_test_button.grid(row=5, column=0, padx=10, pady=(6, 4), sticky="w")
+        self.libre_test_label = ctk.CTkLabel(frame, text="", anchor="w", justify=tk.LEFT, wraplength=self.HINT_WRAP)
+        self.libre_test_label.grid(row=6, column=0, columnspan=2, padx=10, sticky="ew")
+
+    def test_libre_instance(self):
+        """Executa a consulta de idiomas fora da thread da interface."""
+        url = self.libre_url_var.get().strip()
+        source = self.app.source_language.get()
+        target = self.app.target_language.get()
+        self._libre_test_results = queue.Queue()
+        results = self._libre_test_results
+        self.libre_test_button.configure(state="disabled")
+        self.libre_test_label.configure(text="Testando conexão e idiomas…")
+
+        def run():
+            try:
+                results.put(check_instance(url, source, target))
+            except Exception:
+                results.put((False, "Não foi possível testar a instância LibreTranslate."))
+
+        threading.Thread(target=run, daemon=True).start()
+        self.win.after(100, self._poll_libre_test)
+
+    def _poll_libre_test(self):
+        try:
+            ok, message = self._libre_test_results.get_nowait()
+        except queue.Empty:
+            try:
+                self.win.after(100, self._poll_libre_test)
+            except tk.TclError:
+                pass
+            return
+        try:
+            self.libre_test_button.configure(state="normal")
+            self.libre_test_label.configure(text=message, text_color=OK_TEXT_COLOR if ok else ERROR_TEXT_COLOR)
+        except tk.TclError:
+            pass
+
     def build_llm_section(self):
         frame = self.section(3, "Modelos de linguagem (Claude, ChatGPT, DeepSeek)")
         frame.columnconfigure(1, weight=1)
@@ -766,7 +821,12 @@ class SettingsWindow:
         colunas, erro = parse_wrap_columns(self.wrap_var.get())
         if erro:
             return None, erro
+        try:
+            libre_url = validate_url(self.libre_url_var.get())
+        except (ValueError, TypeError):
+            return None, "Informe um endereço LibreTranslate HTTP(S) válido, sem credenciais."
         return {
+            "libretranslate": {"url": libre_url},
             OUTPUT_KEY: {
                 "utf8_bom": bool(self.bom_var.get()),
                 "wrap_columns": colunas,

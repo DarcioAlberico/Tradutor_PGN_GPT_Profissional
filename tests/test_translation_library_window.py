@@ -2,6 +2,7 @@
 
 import os
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,6 +19,66 @@ class LibraryWindowTests(GuiTestCase):
             time.sleep(0.01)
         self.root.update()
         self.assertFalse(window.loading)
+
+    def test_batch_integrity_checks_every_filtered_page(self):
+        from tradutor_pgn.translation_library import IntegrityResult
+        items = [LibraryBundle(self.base / f'livro-{n:02}', 'ready', target_language='pt') for n in range(25)]
+        items.append(LibraryBundle(self.base / 'outro', 'ready', target_language='en'))
+        calls = []
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=lambda _: items,
+                                          verifier=lambda path: (calls.append(path), IntegrityResult('verified'))[1])
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        window.query.set('livro')
+        self.root.update()
+        self.assertEqual(len(window.visible_bundles), 20)
+        task = SimpleNamespace(cancelado=lambda: False, report=lambda *_: None)
+        def run(_parent, _title, work, on_success=None, **_kwargs):
+            on_success(work(task))
+        with patch('tradutor_pgn.translation_library_window.run_with_progress', side_effect=run), \
+             patch('tradutor_pgn.translation_library_window.messagebox.showinfo') as dialog:
+            window.check_filtered_integrity()
+        self.assertEqual(len(calls), 25)
+        self.assertIn('25', dialog.call_args.args[1])
+
+    def test_batch_integrity_cancel_does_not_show_partial_report(self):
+        from tradutor_pgn.background_task import TaskCanceled
+        item = LibraryBundle(self.base / 'livro', 'ready')
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=lambda _: [item])
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        task = SimpleNamespace(cancelado=lambda: True, report=lambda *_: None)
+        def run(_parent, _title, work, on_cancel=None, **_kwargs):
+            try:
+                work(task)
+            except TaskCanceled:
+                on_cancel(None)
+        with patch('tradutor_pgn.translation_library_window.run_with_progress', side_effect=run), \
+             patch('tradutor_pgn.translation_library_window.messagebox.showinfo') as dialog:
+            window.check_filtered_integrity()
+        dialog.assert_not_called()
+        self.assertIn('cancelada', window.status_label.cget('text'))
+        self.assertEqual(window.batch_integrity_button.cget('state'), 'normal')
+
+    def test_batch_integrity_with_empty_filter_does_not_start_task(self):
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=lambda _: [])
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        with patch('tradutor_pgn.translation_library_window.run_with_progress') as run:
+            window.check_filtered_integrity()
+        run.assert_not_called()
+        self.assertIn('Nenhum', window.status_label.cget('text'))
+
+    def test_closing_library_cancels_batch_integrity(self):
+        item = LibraryBundle(self.base / 'livro', 'ready')
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=lambda _: [item])
+        self.wait_loaded(window)
+        canceled = []
+        task = SimpleNamespace(cancel=lambda: canceled.append(True))
+        with patch('tradutor_pgn.translation_library_window.run_with_progress', return_value=task):
+            window.check_filtered_integrity()
+        window.close()
+        self.assertEqual(canceled, [True])
 
     def test_filter_preferences_survive_reopening_without_saving_search(self):
         bundle = LibraryBundle(self.base / "livro", "ready", source_language="en",
@@ -174,6 +235,160 @@ class LibraryWindowTests(GuiTestCase):
         self.root.update()
         self.assertIn("Nenhum", window.status_label.cget("text"))
 
+    def test_search_by_language_date_and_file_name_in_window(self):
+        bundle = LibraryBundle(self.base / "pasta", "ready", original=self.base / "original-livro.pgn",
+                               translated=self.base / "portugues-final.pgn", source_language="en",
+                               target_language="pt", created_at="2026-11-14T10:00:00+00:00")
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=lambda _root: [bundle])
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        for query in ("ingles portugues", "14/11/2026", "original-livro"):
+            window.query.set(query)
+            self.root.update()
+            self.assertEqual(window.visible_bundles, [bundle])
+
+    def test_regenerate_action_uses_saved_version_and_refreshes(self):
+        from tradutor_pgn.regenerate_pgn import RegenerationResult
+        bundle = LibraryBundle(self.base / "livro", "ready")
+        calls = []
+        def regenerate(path, task):
+            calls.append(path)
+            return RegenerationResult("published", 0, str(self.base / "novo"), str(self.base / "novo.pgn"), True)
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=lambda _: [bundle],
+                                          regenerator=regenerate)
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        def run(_parent, _title, work, on_success=None, **_kwargs):
+            on_success(work(SimpleNamespace(cancelado=lambda: False)))
+        with patch("tradutor_pgn.translation_library_window.run_with_progress", side_effect=run), \
+             patch("tradutor_pgn.translation_library_window.messagebox.showinfo") as dialog:
+            window.regenerate(bundle)
+        assert calls == [bundle.directory]
+        assert "novo.pgn" in dialog.call_args.args[1]
+
+    def test_regenerate_button_creates_new_package_with_saved_edits(self):
+        from test_regenerate_pgn import fixture_package
+        from tradutor_pgn.regenerate_pgn import regenerate_bundle
+        from tradutor_pgn.translation_library import list_bundles
+        import customtkinter as ctk
+        db, old, root = fixture_package(self.base)
+        window = TranslationLibraryWindow(self.root, root, lambda _: None,
+                                          regenerator=lambda path, task: regenerate_bundle(db, path, root, should_cancel=task.cancelado))
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        def run(_parent, _title, work, on_success=None, **_kwargs):
+            on_success(work(SimpleNamespace(cancelado=lambda: False)))
+        card = window.cards.winfo_children()[0]
+        button = next(child for child in card.winfo_children() if isinstance(child, ctk.CTkButton)
+                      and child.cget("text") == "Regerar PGN")
+        with patch("tradutor_pgn.translation_library_window.run_with_progress", side_effect=run), \
+             patch("tradutor_pgn.translation_library_window.messagebox.showinfo"):
+            button.invoke()
+        items = list_bundles(root)
+        assert len(items) == 2
+        created = next(item for item in items if item.directory != Path(old.bundle_dir))
+        assert "{olá revisado}" in created.translated.read_text(encoding="utf-8")
+
+    def test_regenerate_does_not_offer_incomplete_output(self):
+        from tradutor_pgn.regenerate_pgn import RegenerationResult
+        bundle = LibraryBundle(self.base / "livro", "ready")
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=lambda _: [bundle],
+                                          regenerator=lambda _path, _task: RegenerationResult("missing", 2, missing_examples=("exemplo",)))
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        def run(_parent, _title, work, on_success=None, **_kwargs):
+            on_success(work(SimpleNamespace(cancelado=lambda: False)))
+        with patch("tradutor_pgn.translation_library_window.run_with_progress", side_effect=run), \
+             patch("tradutor_pgn.translation_library_window.messagebox.showwarning") as dialog, \
+             patch("tradutor_pgn.translation_library_window.messagebox.askyesno") as confirm:
+            window.regenerate(bundle)
+        assert "2" in dialog.call_args.args[1]
+        assert "exemplo" in dialog.call_args.args[1]
+        confirm.assert_not_called()
+
+    def test_regenerate_legacy_requires_user_confirmation(self):
+        from tradutor_pgn.regenerate_pgn import RegenerationResult
+        from tradutor_pgn.translation_library_links import ReviewLink
+        link = ReviewLink("obra.pgn", "en", "pt")
+        bundle = LibraryBundle(self.base / "livro", "legacy")
+        calls = []
+        def regenerate(path, _task, confirmed=None):
+            calls.append(confirmed)
+            return RegenerationResult("compatible", link=link) if confirmed is None else RegenerationResult("published", link_saved=True)
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=lambda _: [bundle], regenerator=regenerate)
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        def run(_parent, _title, work, on_success=None, **_kwargs):
+            on_success(work(SimpleNamespace(cancelado=lambda: False)))
+        with patch("tradutor_pgn.translation_library_window.run_with_progress", side_effect=run), \
+             patch("tradutor_pgn.translation_library_window.messagebox.askyesno", return_value=False):
+            window.regenerate(bundle)
+        assert calls == [None]
+        with patch("tradutor_pgn.translation_library_window.run_with_progress", side_effect=run), \
+             patch("tradutor_pgn.translation_library_window.messagebox.askyesno", return_value=True), \
+             patch("tradutor_pgn.translation_library_window.messagebox.showinfo"):
+            window.regenerate(bundle)
+        assert calls == [None, None, link]
+
+    def test_closing_library_requests_scan_cancellation(self):
+        from tradutor_pgn import translation_library
+        (self.base / "one").mkdir()
+        (self.base / "two").mkdir()
+        entered = threading.Event()
+        release = threading.Event()
+        actual = translation_library._legacy_bundle
+        def slow(path):
+            entered.set()
+            release.wait(5)
+            return actual(path)
+        with patch.object(translation_library, "_legacy_bundle", side_effect=slow):
+            window = TranslationLibraryWindow(self.root, self.base, lambda _: None)
+            self.assertTrue(entered.wait(5))
+            window.close()
+            self.assertTrue(window._load_cancel.is_set())
+            release.set()
+            self.assertEqual(window._results.get(timeout=5), (False, None))
+
+    def test_cancel_refresh_keeps_previous_library_list(self):
+        bundle = LibraryBundle(self.base / "livro", "legacy")
+        entered = threading.Event()
+        release = threading.Event()
+        calls = 0
+        def loader(_root):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return [bundle]
+            entered.set()
+            release.wait(5)
+            return []
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=loader)
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        window.refresh()
+        self.assertTrue(entered.wait(5))
+        window.refresh_button.invoke()
+        release.set()
+        self.wait_loaded(window)
+        self.assertEqual(window.items, [bundle])
+        self.assertIn("cancelada", window.status_label.cget("text").lower())
+
+    def test_cancel_first_load_does_not_claim_a_previous_list_exists(self):
+        entered = threading.Event()
+        release = threading.Event()
+        def loader(_root):
+            entered.set()
+            release.wait(5)
+            return []
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=loader)
+        self.addCleanup(window.close)
+        self.assertTrue(entered.wait(5))
+        window.refresh_button.invoke()
+        release.set()
+        self.wait_loaded(window)
+        assert "atualize" in window.status_label.cget("text").lower()
+        assert "anterior" not in window.status_label.cget("text").lower()
+
     def test_card_reports_generation_failures(self):
         import customtkinter as ctk
         bundle = LibraryBundle(self.base / "livro", "ready", failed_comments=3)
@@ -191,6 +406,25 @@ class LibraryWindowTests(GuiTestCase):
         self.addCleanup(window.close)
         self.wait_loaded(window)
         self.assertIn("Não foi possível", window.status_label.cget("text"))
+
+    def test_failed_refresh_keeps_last_successful_list_and_warns_it_is_stale(self):
+        bundle = LibraryBundle(self.base / "livro", "legacy")
+        attempts = iter([True, False])
+        def loader(_root):
+            if not next(attempts):
+                raise OSError("disco indisponível")
+            return [bundle]
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=loader)
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        window.refresh()
+        self.wait_loaded(window)
+        assert window.items == [bundle]
+        assert window.visible_bundles == [bundle]
+        assert "desatualizada" in window.status_label.cget("text").lower()
+        assert not window._loaded_successfully
+        window.query.set("livro")
+        assert "desatualizada" in window.status_label.cget("text").lower()
 
     def test_integrity_check_reports_result_in_window(self):
         from tradutor_pgn.translation_library import IntegrityResult
@@ -386,6 +620,68 @@ class LibraryWindowTests(GuiTestCase):
         self.assertIn("1 de 3", window.status_label.cget("text"))
         self.assertIn("2 pendentes", window.status_label.cget("text"))
         self.assertIn("33%", window.status_label.cget("text"))
+
+    def test_progress_details_show_subsets_without_adding_them_to_pending(self):
+        from tradutor_pgn.translation_library_links import ReviewProgress
+        bundle = LibraryBundle(self.base / 'livro', 'ready')
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=lambda _: [bundle],
+            progress_resolver=lambda _: ReviewProgress('ready', 4, 1, 3, 1, 1, 2))
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        window.show_review_progress(bundle)
+        deadline = time.monotonic() + 5
+        while window.loading_progress and time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(0.01)
+        self.assertIn('3 pendentes', window.status_label.cget('text'))
+        details = window.progress_detail_label.cget('text')
+        for label in ('dúvida: 1', 'rejeitados: 1', 'com alerta QA: 2', 'sem alerta QA: 1'):
+            self.assertIn(label, details)
+        self.assertIn('subconjuntos', details.lower())
+
+    def test_cancel_progress_discards_even_a_late_success(self):
+        from tradutor_pgn.translation_library_links import ReviewProgress
+        bundle = LibraryBundle(self.base / 'livro', 'ready')
+        started, release = threading.Event(), threading.Event()
+        def resolve(_path, *, should_cancel):
+            started.set()
+            release.wait(3)
+            return ReviewProgress('ready', 4, 1, 3, 1, 1, 2)
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=lambda _: [bundle],
+                                          progress_resolver=resolve, progress_resolver_cancellable=True)
+        self.addCleanup(window.close)
+        self.wait_loaded(window)
+        window.show_review_progress(bundle)
+        self.assertTrue(started.wait(2))
+        window.cancel_integrity_button.invoke()
+        release.set()
+        deadline = time.monotonic() + 5
+        while window.loading_progress and time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(0.01)
+        self.assertIn('cancelada', window.status_label.cget('text'))
+        self.assertEqual(window.progress_detail_label.cget('text'), '')
+
+    def test_closing_library_signals_progress_cancellation(self):
+        from tradutor_pgn.translation_library_links import ReviewProgress
+        bundle = LibraryBundle(self.base / 'livro', 'ready')
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        observed = []
+        def resolve(_path, *, should_cancel):
+            started.set()
+            release.wait(3)
+            observed.append(should_cancel())
+            finished.set()
+            return ReviewProgress('canceled')
+        window = TranslationLibraryWindow(self.root, self.base, lambda _: None, loader=lambda _: [bundle],
+                                          progress_resolver=resolve, progress_resolver_cancellable=True)
+        self.wait_loaded(window)
+        window.show_review_progress(bundle)
+        self.assertTrue(started.wait(2))
+        window.close()
+        release.set()
+        self.assertTrue(finished.wait(2))
+        self.assertEqual(observed, [True])
 
     def test_failure_filter_order_shortcuts_and_copy(self):
         items = [LibraryBundle(self.base / "a", "ready", failed_comments=0),

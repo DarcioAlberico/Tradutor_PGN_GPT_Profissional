@@ -36,6 +36,7 @@ TOKEN_RE = re.compile(r"\w+(?:-\w+)*|[^\w\s]")
 # correcao; duas e um padrao que vai voltar na proxima linha.
 DEFAULT_MIN_COUNT = 2
 DEFAULT_LIMIT = 40
+MAX_HISTORICAL_EXAMPLES = 5
 
 RULE_STATUS_NONE = "sem regra"
 RULE_STATUS_LABELS = {
@@ -76,34 +77,40 @@ def count_repeated_edits(events, min_count=DEFAULT_MIN_COUNT, limit=DEFAULT_LIMI
     """Os pares mais frequentes de uma lista de `(comment_id, antes, depois)`.
 
     Cada item devolvido tem `old`, `new`, `count` (ocorrencias), `lines`
-    (comentarios distintos em que a troca aparece) e `example_id` (o primeiro
-    comentario em que apareceu — para abrir e ver o contexto). Ordenado por
+    (comentarios distintos em que a troca aparece), `example_id` (o primeiro
+    comentario) e ate cinco exemplos de edicoes historicas distintas. Ordenado por
     ocorrencias, depois por linhas, depois pelo texto, para a lista ser a mesma
     a cada abertura.
 
     `count` e `lines` sao numeros diferentes e os dois interessam: `o -> a` 24
     vezes em 19 linhas e uma troca que se repete DENTRO da linha, e isso pesa
-    menos do que 24 linhas distintas.
+    menos do que 24 linhas distintas. Varios eventos do mesmo comentario contam
+    para ocorrencias, mas nao repetem o comentario na contagem de linhas.
     """
     ocorrencias = Counter()
-    linhas = Counter()
-    exemplo = {}
+    linhas = {}
+    exemplos = {}
     for comment_id, previous, new in events:
         vistos = set()
         for par in token_replacements(previous, new):
             ocorrencias[par] += 1
             if par not in vistos:
                 vistos.add(par)
-                linhas[par] += 1
-                exemplo.setdefault(par, comment_id)
+                comment_ids = linhas.setdefault(par, set())
+                if comment_id not in comment_ids:
+                    comment_ids.add(comment_id)
+                    samples = exemplos.setdefault(par, [])
+                    if len(samples) < MAX_HISTORICAL_EXAMPLES:
+                        samples.append({"comment_id": comment_id, "before": previous or "", "after": new or ""})
 
     itens = [
         {
             "old": old,
             "new": new,
             "count": count,
-            "lines": linhas[(old, new)],
-            "example_id": exemplo[(old, new)],
+            "lines": len(linhas[(old, new)]),
+            "example_id": exemplos[(old, new)][0]["comment_id"],
+            "examples": tuple(exemplos[(old, new)]),
         }
         for (old, new), count in ocorrencias.items()
         if count >= min_count

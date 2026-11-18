@@ -129,12 +129,20 @@ falhas preservam o arquivo anterior e removem o temporário da tentativa. A
 publicação de pacotes já prepara original, tradução e manifesto em diretório
 temporário antes de publicá-los. Recuperação de temporários após encerramento
 abrupto e garantias de durabilidade após queda de energia continuam pendentes.
+Ao cancelar durante a publicação, a cópia do original e a verificação de hash
+do traduzido são interrompidas entre blocos; o pacote parcial é descartado.
+Uma leitura ou gravação de sistema já iniciada pode precisar terminar primeiro.
+A escrita do PGN e as verificações do hash de origem antes e depois da tradução
+também observam o cancelamento. O destino anterior é preservado quando a escrita
+é interrompida antes da troca atômica.
 
 **Inspeção de temporários:** a Biblioteca lista, sem acessar o conteúdo ou
 remover arquivos, pastas de preparação com pelo menos 24 horas. A idade não
 prova que uma tradução foi abandonada; o relatório alerta sobre trabalhos ainda
 ativos e limita os exemplos. Recuperação ou limpeza automática permanecem
 pendentes.
+O relatório também informa quantas pastas reconhecidas são recentes e quantas
+possuem data futura; essas contagens não provam se estão em uso.
 
 `write_pgn_pieces` abre e trunca diretamente o caminho final (`pgn_utils.py:912-937`). Crash, disco cheio ou erro pode deixar um arquivo parcial; a execução seguinte vê o nome ocupado e cria `-2`. No pacote novo, a pasta nasce antes, enquanto a cópia do original ocorre apenas após a geração.
 
@@ -233,6 +241,13 @@ publicação autocontida não foi validada; o diagnóstico abaixo é histórico.
 **Aceite:** nenhuma etapa funcional crítica é não bloqueante; flake conhecido tem issue, telemetria de frequência e prazo.
 
 ### RG-003 — recuperação é testada por peças, não como desastre completo
+
+**Inventário (17/11/2026):** a verificação separa backups de traduções e de
+glossário, limita a 20 os nomes candidatos exibidos e informa os omitidos. O
+relatório distingue pastas ausentes, vazias e listagens incompletas; resume os
+estados dos pacotes pela leitura de metadados da Biblioteca sem mostrar nomes e
+descarta a contagem se a pasta mudar durante a varredura. Essa leitura não
+compara os hashes dos PGNs nem garante que backups possam ser restaurados.
 
 **Avanço (13/11/2026):** a verificação aceita configurações UTF-8 com BOM e
 relata JSON excessivamente aninhado como inválido; a leitura tolerante e a
@@ -394,6 +409,13 @@ plano, limitando exemplos e permitindo cancelar. A comparação reaplica as
 regras do catálogo aos textos existentes; não inclui a semente nem a fase de
 limpeza e não prevê a tradução de textos futuros.
 
+**Detalhes do impacto (17/11/2026):** a comparação de pendências informa a
+proporção afetada, os totais por par de idiomas e quantos exemplos ficaram fora
+do limite de exibição. A mensagem distingue ausência de pendências de resultado
+sem alterações. Para regras não automáticas, explica que uma mudança pode
+retirar uma regra do conjunto automático. Os totais descrevem apenas a amostra
+consultada; a comparação completa do painel de impacto permanece pendente.
+
 O cancelamento também é conferido periodicamente durante a aplicação das
 regras a cada comentário. Uma busca de padrão já iniciada pode precisar terminar
 antes da interrupção; resultados parciais continuam descartados.
@@ -418,8 +440,21 @@ quantidade de comentários ou texto. A paginação permite acessar
 todos os candidatos mantendo até 40 linhas renderizadas por página. Continua sendo uma visão das
 edições de uma obra, não uma caixa de entrada persistente para todas as fontes.
 
+A curadoria oferece ordenação pelas trocas menos frequentes ou presentes em
+menos comentários, além das ordens anteriores. É possível limpar os filtros
+sem alterar a ordenação e navegar por páginas com `Alt+←`, `Alt+→`,
+`Alt+Home` e `Alt+End`; `Ctrl+L` limpa a busca e os filtros da lista.
+`Alt+↑` e `Alt+↓` selecionam a troca anterior ou seguinte, inclusive entre páginas.
+`Ctrl+Shift+C` copia a troca selecionada.
+O filtro **Somente ignoradas** restringe a lista às decisões ignoradas e pode
+ser combinado com a busca e com o filtro de regras ainda não correspondentes.
+A busca também reconhece o tipo de regra exibido. A faceta de frequência
+oferece limites mínimos de 5, 10 ou 20 ocorrências.
+
 **Ignorar e restaurar:** uma troca pode ser ignorada por obra e par de idiomas,
 ocultada da lista e restaurada individualmente ou para os candidatos da lista.
+A restauração em lote respeita busca, filtro de regra e frequência em todas as
+páginas; a opção de exibição de ignoradas não altera esse conjunto.
 A criação de regra confere novamente a decisão antes de gravar. A decisão é persistida como identificador
 derivado, sem gravar os textos ou caminhos em claro; não altera regras nem
 traduções. Mover a obra altera sua identificação e não transfere a decisão.
@@ -427,6 +462,14 @@ A conferência final e a gravação da regra compartilham o bloqueio usado para
 ignorar ou restaurar candidatos, evitando uma corrida entre essas ações.
 A lista completa de fontes e as demais ações de curadoria seguem
 pendentes.
+
+**Exemplos de curadoria (17/11/2026):** a contagem de comentários distintos
+agora deduplica o identificador ao longo de todas as edições, preservando a
+contagem de ocorrências. Cada troca oferece até cinco comentários distintos;
+é possível escolher um, abrir a linha atual no editor ou consultar e copiar o
+antes/depois da primeira edição histórica registrada para aquela troca e
+comentário. O relatório indica truncamento e esclarece que a tradução atual
+pode ter mudado. A consulta não altera histórico, traduções ou regras.
 
 Adicionar uma fila “Sugestões para o glossário” produzida por:
 
@@ -449,6 +492,12 @@ preservando a ordem do catálogo em empates. É possível limpar os filtros sem
 descartar o rascunho; quando a entrada selecionada deixa de aparecer, a tela
 indica que ela está fora do filtro. As demais facetas e operações em lote
 continuam pendentes.
+
+O filtro de prioridade distingue valores positivos, zero e negativos e pode
+ser combinado com tipo e escopo. A escolha é lembrada pelo editor e pode ser
+limpa sem descartar o rascunho.
+A busca sem filtro de diagnóstico evita calcular avisos por entrada; os filtros
+de duplicatas, conflitos e entradas inválidas continuam consultando os avisos.
 
 O editor atual tem busca, filtros, ordenação, paginação e diagnóstico, mas a lista de 6.071 regras pede facetas persistentes:
 
@@ -480,6 +529,14 @@ ações continuam pendentes.
 comando de priorização de conflito, também pedem simulação antes de salvar.
 O diálogo mostra ambos os valores e informa que a regra é simulada
 isoladamente, sem calcular concorrência com outras regras.
+
+**Entender esta regra (17/11/2026):** uma análise rolável e copiável explica a
+fase, o escopo e a prioridade do rascunho; aplica a regra isolada ao texto de
+teste e compara o catálogo carregado antes e depois da edição, incluindo
+concorrência e sobreposições na fase escolhida. A análise roda em segundo plano,
+pode ser cancelada e não grava dados. Sugestões são identificadas como não
+automáticas; regras de semente, outras fases e textos futuros não entram nessa
+comparação. Quando o tipo muda, a fase anterior ainda requer análise separada.
 
 - trocar `Idioma:` livre por controles de origem/destino com opção “todos”, mantendo modo avançado textual;
 - explicar tipo com exemplos diretamente na tela;
@@ -573,6 +630,18 @@ ativas. A coordenação não cobre alterações feitas por programas externos.
 
 **Busca:** aceita termos em qualquer ordem entre nome, idiomas e motor, sem
 exigir acentos nem diferenciar maiúsculas de minúsculas.
+Os idiomas podem ser pesquisados pelo código ou pelo nome exibido no programa;
+idiomas ausentes não são presumidos.
+A busca também reconhece a situação e a data do pacote exibidas na Biblioteca;
+datas podem ser digitadas como `AAAA-MM-DD` ou `DD/MM/AAAA`.
+Quando disponíveis, os nomes dos arquivos original e traduzido também são
+pesquisáveis; caminhos completos não entram na busca. A contagem de falhas da
+geração pode ser pesquisada quando informada, sem presumir zero nos pacotes antigos.
+Para exigir contagem exata, use `falhas:N` (por exemplo, `falhas:3`); esse
+termo pode ser combinado com a busca textual e os demais filtros.
+`falhas:?` encontra pacotes sem informação de contagem, sem confundi-los com zero.
+Também são aceitos limites como `falhas:>=2 falhas:<10`; valores desconhecidos
+não satisfazem comparações numéricas.
 
 **Avanço:** novos pacotes incluem `manifesto.json` versão 1, publicado junto
 com os PGNs. Ele contém nomes relativos, SHA-256, data UTC, versão do programa,
@@ -591,11 +660,25 @@ identifica pacotes antigos inequívocos, incompletos e metadados inválidos, sem
 alterar o acervo. O filtro permite buscar por nome, idioma ou motor. A listagem
 valida a estrutura e os caminhos, mas não recalcula hashes nem verifica a
 integridade do conteúdo. Um índice persistente e a migração continuam pendentes.
+Ao fechar a janela, a varredura da Biblioteca solicita cancelamento; a operação
+não retorna uma listagem parcial. Leituras de sistema já iniciadas podem demorar.
+Durante uma atualização, o botão **Cancelar** interrompe a leitura e mantém a
+última lista concluída; na primeira abertura, não há lista anterior a preservar.
+Se a atualização falhar, a última lista continua visível com aviso de que pode
+estar desatualizada; os filtros continuam funcionando sobre essa fotografia.
 
 **Cancelamento da integridade:** a Biblioteca permite interromper a leitura dos
 arquivos em blocos e informa que a verificação foi cancelada, sem afirmar que
 o pacote foi conferido. Fechar a janela também solicita o cancelamento; uma
 leitura do sistema operacional já em andamento pode precisar terminar antes.
+
+**Integridade em lote (17/11/2026):** **Verificar filtrados** examina todos os
+pacotes da lista filtrada, inclusive outras páginas, em segundo plano. Mostra
+progresso, permite cancelar sem apresentar resultados parciais e resume
+correspondências, divergências, alterações durante a leitura e pacotes não
+verificáveis, com até dez exemplos. A operação usa a verificação individual e
+não altera os pacotes. Ela não autentica a procedência do manifesto; pacotes
+sem manifesto compatível não podem ser conferidos.
 
 **Janela inicial:** o botão **Biblioteca** abre uma lista pesquisável com
 estados dos pacotes e ações para abrir pasta, original e tradução. A leitura
@@ -626,6 +709,29 @@ comentários distintos estão verificados e pendentes. As contagens representam 
 estado atual do banco, podem abranger traduções compartilhadas com outras obras
 e não representam falhas de tradução nem o número de ocorrências no PGN.
 Pacotes sem vínculo confiável não recebem um progresso presumido.
+
+**Detalhes e cancelamento (17/11/2026):** a consulta também mostra quantos
+pendentes estão em dúvida ou rejeitados e quantos possuem ou não alerta QA.
+Esses números são subconjuntos dos pendentes e podem se sobrepor. É possível
+cancelar a consulta; resultados que chegam depois do cancelamento são
+descartados. A leitura em blocos observa o cancelamento; uma consulta SQLite ou
+operação de sistema já iniciada pode precisar terminar antes.
+
+**Regerar PGN:** a Biblioteca cria um novo pacote usando as traduções salvas
+no banco, sem consultar o motor de tradução e sem substituir o pacote anterior.
+Se faltar alguma tradução para o par de idiomas, a geração é interrompida e a
+quantidade de comentários distintos ausentes é informada. Para pacotes antigos
+com uma única obra compatível, o usuário confirma a correspondência antes da
+geração. Os dados são consultados em uma fotografia do banco; edições ainda não
+salvas não entram na nova versão. A operação verifica integridade e usa as
+configurações atuais de BOM e requebra.
+A regeneração também é interrompida se o original contiver comentários `;`, que
+o programa ainda não traduz, ou traduções salvas apenas com espaços.
+O aviso de traduções ausentes mostra até cinco exemplos curtos. A busca do vínculo,
+a verificação dos arquivos e a leitura do original observam o cancelamento entre
+etapas ou blocos; uma operação de sistema já iniciada pode precisar terminar.
+
+**Busca estruturada (17/11/2026):** a Biblioteca aceita `origem:en`, `destino:pt`, `motor:google`, `situação:com-manifesto` e `data:2026-11-17`, inclusive comparações de data completa. Também aceita `nome:`, `original:`, `traduzido:`, `idioma:` e datas por ano ou mês. Os termos podem ser combinados com a busca e os filtros existentes; `?` seleciona dados não informados nos campos compatíveis. Datas inválidas não produzem correspondências.
 
 **Produtividade e teclado:** a Biblioteca filtra e ordena pela contagem de
 falhas da geração, mantendo pacotes sem essa informação como desconhecidos.
@@ -680,6 +786,13 @@ Plano:
 
 ### RG-034 — acessibilidade
 
+**Posição textual (17/11/2026):** no editor, **Descrição (F8)** abre texto
+selecionável e copiável com peças e casas, vez, direitos de roque, casa en
+passant e contadores informados pela FEN. Campos ausentes ou inválidos são
+indicados; a descrição não verifica a legalidade da posição. Ela é uma
+alternativa textual, mas a validação com Narrator e tecnologias assistivas,
+contraste e escalas continua pendente.
+
 A referência de release deve incluir teclado completo, nome/papel/estado para tecnologia assistiva, foco visível, alto contraste e escala de texto. A Microsoft recomenda expor nomes e estados via UI Automation, tornar toda interação acessível por teclado e testar 200% de escala ([Windows accessibility best practices](https://learn.microsoft.com/en-us/windows/apps/get-started/best-practices)). Como referência mensurável, WCAG 2.2 usa 4,5:1 para texto normal, alvo mínimo de 24×24 e foco com mudança de contraste de 3:1 ([WCAG 2.2](https://www.w3.org/TR/wcag/), [Target Size](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum), [Focus Appearance](https://www.w3.org/WAI/WCAG22/Understanding/focus-appearance)).
 
 Backlog:
@@ -693,6 +806,32 @@ Backlog:
 - alternativa textual completa ao tabuleiro.
 
 ### RG-035 — command palette e ações contextuais
+
+**Primeiro recorte (17/11/2026):** na janela principal, **Comandos (Ctrl+K)**
+oferece busca sem acentos, navegação por setas, Enter e Escape e cinco ações:
+selecionar arquivo, iniciar tradução, abrir Biblioteca, glossário e configurações.
+A tradução informa quando não há caminho válido ou já existe execução e
+confere essas condições novamente ao executar. Ações adicionais, atalhos nas
+janelas secundárias e validação com tecnologias assistivas permanecem pendentes.
+
+**Cinco ações adicionais (17/11/2026):** a paleta também permite selecionar uma
+pasta, revisar pendências da última execução, iniciar uma nova regra no
+glossário, exportar TMX e verificar dados. A revisão exige arquivos registrados;
+a verificação não pode ser iniciada duas vezes. A criação de regra usa a ação
+existente do editor e suas confirmações, e a lista possui barra de rolagem.
+
+**Controle da tradução (17/11/2026):** a paleta acrescenta abrir o editor de
+traduções, reprocessar falhas, pausar, continuar e cancelar. As ações usam os
+mecanismos existentes e indicam quando o estado atual não permite executá-las;
+o estado é conferido novamente na execução. Reprocessar mantém o diálogo e a
+seleção de idiomas do fluxo existente. A paleta continua restrita à janela
+principal.
+
+**Acesso a arquivos e dados (17/11/2026):** a paleta também oferece abrir
+Minhas Traduções, abrir a pasta da última execução, exportar e importar CSV e
+criar backup do banco. A importação fica indisponível durante tradução, e a
+pasta da última execução exige arquivos registrados; as condições são
+conferidas novamente ao executar. Os fluxos existentes mantêm seus diálogos.
 
 Uma command palette pesquisável reduz a densidade sem esconder capacidade. Deve oferecer “Abrir arquivo”, “Iniciar”, “Ir para pendentes”, “Nova regra”, “Exportar TMX”, “Verificar dados” e configurações, mostrando atalhos e recusando ações inválidas com motivo.
 
@@ -831,6 +970,14 @@ principal da Biblioteca ainda não possui índice persistente.
 ## 9. Rede, privacidade e segurança
 
 ### RG-050 — consentimento e política por provedor
+
+**Progresso (17/11/2026):** o LibreTranslate diferencia falhas de conexão,
+tempo esgotado, certificado, acesso recusado e limite do servidor, sem registrar
+o conteúdo das exceções. Em Configurações, **Testar conexão e idiomas** consulta
+a lista de idiomas em segundo plano e confere o par selecionado sem enviar
+comentários ou chave. A consulta não valida a chave nem garante que uma
+tradução posterior funcionará. Os demais requisitos de consentimento seguem
+pendentes.
 
 Antes da primeira chamada de cada motor, mostrar:
 

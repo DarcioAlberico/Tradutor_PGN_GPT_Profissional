@@ -22,8 +22,21 @@ def test_old_staging_directories_are_listed_without_modification(tmp_path):
     before = (old / "original.pgn").read_bytes()
     result = translation_library.inspect_staging_directories(tmp_path, now=now)
     assert result.total == 1
+    assert result.recent_count == 1
     assert result.entries[0].name == old.name
     assert (old / "original.pgn").read_bytes() == before
+
+
+def test_report_explains_recent_temporary_folders_without_deleting_them(tmp_path):
+    folder = tmp_path / ".obra.tmp-recent"
+    folder.mkdir()
+    now = time.time()
+    os.utime(folder, (now - 10, now - 10))
+    result = translation_library.inspect_staging_directories(tmp_path, now=now)
+    assert result.total == 0 and result.recent_count == 1
+    assert "1" in translation_library.format_staging_inspection(result)
+    assert "recent" in translation_library.format_staging_inspection(result).lower()
+    assert folder.is_dir()
 
 
 def test_inspection_limits_examples_and_ignores_future_directories(tmp_path):

@@ -1,7 +1,23 @@
-from tradutor_pgn.glossary_editor import glossary_filter_indices, sort_glossary_indices
-from tradutor_pgn.glossary_editor import GlossaryEditor
 from types import SimpleNamespace
 from unittest.mock import Mock
+from unittest.mock import patch
+from tradutor_pgn.glossary_editor import GlossaryEditor, glossary_filter_indices, sort_glossary_indices
+
+
+def test_priority_filter_composes_with_type_and_scope():
+    entries = [("a", "x", "automatic", -3, "pt"),
+               ("b", "y", "automatic", 0, "pt"),
+               ("c", "z", "automatic", 2, "pt"),
+               ("d", "w", "suggestion", 2, "")]
+    assert glossary_filter_indices(entries, priority_filter="positive", rule_type="automatic") == [2]
+    assert glossary_filter_indices(entries, priority_filter="zero") == [1]
+    assert glossary_filter_indices(entries, priority_filter="negative", scope_filter="specific") == [0]
+
+
+def test_plain_search_does_not_compute_diagnostics():
+    entries = [("rook", "torre", "automatic", 0, "pt")]
+    with patch("tradutor_pgn.glossary_editor.glossary_entry_warnings", side_effect=AssertionError("diagnóstico desnecessário")):
+        assert glossary_filter_indices(entries, "rook") == [0]
 
 
 def test_search_finds_glossary_entries_without_accents():
@@ -45,12 +61,12 @@ def test_scope_facet_combines_with_type_and_search():
 
 
 def test_clear_all_filters_keeps_the_selected_draft():
-    variables = [SimpleNamespace(set=Mock()) for _ in range(4)]
+    variables = [SimpleNamespace(set=Mock()) for _ in range(5)]
     editor = SimpleNamespace(search_text=variables[0], filter_segment=variables[1],
-                             type_filter_text=variables[2], scope_filter_text=variables[3],
+                             type_filter_text=variables[2], scope_filter_text=variables[3], priority_filter_text=variables[4],
                              state=SimpleNamespace(page_index=4, selected_id="keep"), apply_filter=Mock())
     GlossaryEditor.clear_all_filters(editor)
-    assert [v.set.call_args.args[0] for v in variables] == ["", "Todas", "Todos os tipos", "Todos os escopos"]
+    assert [v.set.call_args.args[0] for v in variables] == ["", "Todas", "Todos os tipos", "Todos os escopos", "Todas as prioridades"]
     assert editor.state.page_index == 0 and editor.state.selected_id == "keep"
     editor.apply_filter.assert_called_once()
 

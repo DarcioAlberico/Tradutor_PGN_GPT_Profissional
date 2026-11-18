@@ -45,6 +45,7 @@ from .provider_dialog import ask_translation_provider
 from .provider_consent import ConsentStore
 from .settings import (
     TRANSLATION_PROVIDER_DEEP,
+    TRANSLATION_PROVIDER_LIBRE,
     load_settings,
     read_llm_settings,
     write_main_window_settings,
@@ -253,12 +254,23 @@ def open_translations_folder(app):
 def open_translation_library(app):
     from .translation_library_window import TranslationLibraryWindow
     from .translation_library_links import bundle_review_progress, resolve_bundle_review
+    from .regenerate_pgn import regenerate_bundle
+    from .settings import read_output_settings
+
+    def regenerate(path, task, confirmed_link=None):
+        options = read_output_settings(load_settings())
+        return regenerate_bundle(app.output_db, path, app_paths.translations_dir(),
+                                 should_cancel=task.cancelado, use_bom=options["utf8_bom"],
+                                 wrap_columns=options["wrap_columns"], confirmed_link=confirmed_link)
 
     return TranslationLibraryWindow(
         app.root, app_paths.translations_dir(), open_path_in_explorer,
         review_resolver=lambda path: resolve_bundle_review(app.output_db, path),
         on_review=lambda link: open_library_review(app, link),
-        progress_resolver=lambda path: bundle_review_progress(app.output_db, path),
+        progress_resolver=lambda path, should_cancel=None: bundle_review_progress(
+            app.output_db, path, should_cancel=should_cancel),
+        progress_resolver_cancellable=True,
+        regenerator=regenerate,
     )
 
 
@@ -415,7 +427,7 @@ def choose_translation_provider(app):
     )
     if escolhido is None:
         return None
-    if escolhido not in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP) and escolhido not in configurados:
+    if escolhido not in (GOOGLE_PROVIDER, TRANSLATION_PROVIDER_DEEP, TRANSLATION_PROVIDER_LIBRE) and escolhido not in configurados:
         return None
     spec = PROVIDERS.get(escolhido)
     if spec is not None and spec.kind == "anthropic" and not anthropic_sdk_available():
@@ -809,14 +821,35 @@ def _format_data_verification(result):
         f"Glossário: {status('glossary')}",
         f"Configurações: {status('settings')}",
         f"Backups de traduções e glossário: {backups['valid']} íntegros, "
-        f"{backups['invalid']} inválidos ou incompatíveis, {backups['inaccessible']} inacessíveis",
-        f"Arquivos PGN encontrados: {result['translations']}",
+        f"{backups['invalid']} inválidos ou incompatíveis, {backups['inaccessible']} inacessíveis"
+        + (" (listagem incompleta)" if result.get("backup_directory") == "inaccessible" else ""),
+        f"Arquivos PGN encontrados: {result['translations']}"
+        + (" (listagem incompleta)" if result.get("translations_directory") == "inaccessible" else ""),
         "",
         "A verificação de integridade não garante restauração completa ou compatibilidade.",
     ]
+    for key, label in (("backup_directory", "Pasta de backups"),
+                       ("translations_directory", "Pasta de traduções")):
+        if result.get(key) == "missing":
+            lines.append(f"{label}: não encontrada.")
+        elif result.get(key) == "inaccessible":
+            lines.append(f"{label}: não foi possível concluir a listagem.")
+    by_type = backups.get("by_type")
+    if by_type:
+        for key, label in (("translations", "Backups de traduções"), ("glossary", "Backups de glossário")):
+            counts = by_type[key]
+            lines.append(f"{label}: {counts['valid']} íntegros, {counts['invalid']} inválidos, {counts['inaccessible']} inacessíveis.")
+    packages = result.get("packages")
+    if packages is not None:
+        lines.append(f"Pacotes: {packages['ready']} com manifesto, {packages['legacy']} antigos, "
+                     f"{packages['incomplete']} incompletos ou inacessíveis e "
+                     f"{packages['invalid']} com manifesto inválido ou inacessível.")
+        lines.append("A listagem confere metadados e arquivos presentes; não verifica hashes dos PGNs.")
     if backups.get("candidates"):
         lines.extend(["", "Candidatos para restauração (confira em cópia separada):",
                       *backups["candidates"]])
+        if backups.get("candidates_omitted"):
+            lines.append(f"Mais {backups['candidates_omitted']} candidato(s) não exibidos.")
     if result["warnings"]:
         lines.extend(["", *result["warnings"]])
     return "\n".join(lines)

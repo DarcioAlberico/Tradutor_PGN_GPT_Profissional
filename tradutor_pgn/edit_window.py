@@ -17,6 +17,7 @@ import customtkinter as ctk
 
 from .app_config import LANGUAGE_NAMES, LANGUAGES, UNKNOWN_SOURCE_LABEL, language_label
 from .board_widget import BoardCanvas
+from .pgn_positions import describe_fen
 from .database import (
     WritingConflictError,
     preview_identical_replacements,
@@ -138,6 +139,7 @@ from .writing_controller import WritingController, get_shared_writing_assistant
 from .writing_panel import WritingPanel
 from .editor_undo import TextUndoHistory
 from .writing_types import AssistantStatus, WritingRequest
+from .verbal_agreement_bulk import VerbalPreviewCancelled, filter_verbal_preview
 from .writing_metrics import is_valid_writing_action, record_writing_action
 from .writing_protection import protect_text
 
@@ -304,6 +306,7 @@ KEYBOARD_SHORTCUTS = (
             ("Alt+Backspace", "<Alt-BackSpace>", "Voltar ao ponto anterior"),
             ("F7", "<F7>", "Próxima ocorrência linguística; sem ocorrência ativa, próximo aviso QA"),
             ("Shift+F7", "<Shift-F7>", "Ocorrência linguística anterior"),
+            ("F8", "<F8>", "Descrição textual da posição de xadrez"),
         ),
     ),
     (
@@ -1696,18 +1699,56 @@ class TranslationEditor:
         self.board_toggle.grid(row=0, column=0, sticky="w", padx=(10, 4), pady=(0, 2))
         self.board_label = ctk.CTkLabel(self.board_row, text="Posição", anchor="w")
         self.board_label.grid(row=0, column=1, sticky="w", pady=(0, 2))
+        self.board_description_button = ctk.CTkButton(
+            self.board_row, text="Descrição (F8)", width=120, command=self.show_board_description
+        )
+        self.board_description_button.grid(row=0, column=2, padx=(4, 10), pady=(0, 2))
         self.board_canvas = BoardCanvas(self.board_row, mode=ctk.get_appearance_mode())
         # Margens curtas de proposito: na altura MINIMA da janela, com o quadro
         # aberto, o painel tem 387 px e o quadro terminava em 388 — um pixel
         # cortado (medido depois de a segunda fileira do rodape ganhar o
         # separador). Seis pixels a menos aqui e ele cabe inteiro.
-        self.board_canvas.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 6))
+        self.board_canvas.grid(row=1, column=0, columnspan=3, padx=10, pady=(0, 6))
         self.board_fen = None
         self.update_board_row()
 
     def toggle_board(self):
         self.board_collapsed = not self.board_collapsed
         self.update_board_row()
+
+    def show_board_description(self, _event=None):
+        if not self.board_fen:
+            self.show_message("Não há posição disponível para esta linha.")
+            return "break"
+        previous = getattr(self, "board_description_window", None)
+        if previous is not None and previous.winfo_exists():
+            previous.destroy()
+        dialog = ctk.CTkToplevel(self.win)
+        self.board_description_window = dialog
+        dialog.title("Descrição textual da posição")
+        dialog.geometry("640x480")
+        dialog.transient(self.win)
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(dialog, text="Posição ao abrir esta janela", anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+        text = tk.Text(dialog, wrap=tk.WORD, takefocus=True)
+        self.board_description_text = text
+        text.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        text.insert("1.0", describe_fen(self.board_fen))
+        text.configure(state="disabled")
+        controls = ctk.CTkFrame(dialog, fg_color="transparent")
+        controls.grid(row=2, column=0, sticky="e", padx=12, pady=(0, 12))
+        ctk.CTkButton(controls, text="Copiar descrição", command=self.copy_board_description).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(controls, text="Fechar", command=dialog.destroy).pack(side="left")
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        bring_window_to_front(dialog, self.win, maximize=False)
+        text.focus_set()
+        return "break"
+
+    def copy_board_description(self):
+        dialog = self.board_description_window
+        dialog.clipboard_clear()
+        dialog.clipboard_append(self.board_description_text.get("1.0", "end-1c"))
 
     def show_board(self, fen):
         """A FEN da linha aberta, ou `None`: decide se a linha do quadro existe."""
@@ -2019,6 +2060,7 @@ class TranslationEditor:
         # F1 e o "?" do rodape: os dois unicos caminhos de descoberta dos treze
         # atalhos (garantia F18, ROADMAP 22.8).
         self.win.bind("<F1>", self.open_shortcuts_window)
+        self.win.bind("<F8>", self.show_board_description)
         self.btn_shortcuts.configure(command=self.open_shortcuts_window)
         self.win.bind(
             "<Destroy>",
@@ -3122,6 +3164,9 @@ class TranslationEditor:
                     self._close_writing_dialog()
                     try:
                         result = job[0].result()
+                    except VerbalPreviewCancelled:
+                        if not self._writing_closed:
+                            self.show_message("Prévia cancelada; nenhuma alteração foi feita.")
                     except Exception as error:
                         message = str(error) if isinstance(error, (WritingConflictError, ValueError)) else "Não foi possível concluir a operação. Nada foi alterado."
                         if not self._writing_closed:
@@ -3256,16 +3301,18 @@ class TranslationEditor:
                 editor._writing_signature = None
                 editor.highlight_spelling()
 
-    def _run_writing_job(self, work, success):
+    def _run_writing_job(self, work, success, cancel_event=None):
         if self._writing_closed or self._writing_busy:
             return
         self._writing_busy = True
         dialog = ctk.CTkToplevel(self.win)
         dialog.title("Revisão linguística")
-        dialog.geometry("420x100")
+        dialog.geometry("420x150" if cancel_event else "420x100")
         dialog.transient(self.win)
         ctk.CTkLabel(dialog, text="Conferindo o livro. Aguarde…").pack(padx=20, pady=24)
-        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+        if cancel_event:
+            ctk.CTkButton(dialog, text="Cancelar", command=cancel_event.set).pack(pady=(0, 12))
+        dialog.protocol("WM_DELETE_WINDOW", cancel_event.set if cancel_event else lambda: None)
         dialog.grab_set()
         self._writing_dialog = dialog
         self._writing_job = (self._writing_executor.submit(work), success)
@@ -3345,16 +3392,24 @@ class TranslationEditor:
         saved_before = self.current["saved_trans"]
         revision = self.current.get("writing_revision", 0)
         db_path = self.app.output_db
+        cancel_event = threading.Event() if issue.category == "VERBAL_AGREEMENT" else None
         def work():
             with closing(initialize_database(db_path)) as conn:
-                return preview_identical_replacements(
+                preview = preview_identical_replacements(
                     conn, source_file, request.target_language, issue.original, replacement,
                     glossary_terms=book_terms, draft=(record_id, revision, request.text))
+            if issue.category == "VERBAL_AGREEMENT":
+                return filter_verbal_preview(preview, issue, request, self.writing_assistant,
+                                             cancelled=cancel_event.is_set)
+            return preview
         def confirm(preview):
             if self._writing_closed:
                 return
+            if cancel_event and cancel_event.is_set():
+                self.show_message("Prévia cancelada; nenhuma alteração foi feita.")
+                return
             if not preview.count:
-                self.show_message("Nenhuma ocorrência idêntica fora dos trechos protegidos.")
+                self.show_message("Nenhuma ocorrência aplicável encontrada fora dos trechos protegidos.")
                 return
             if not messagebox.askyesno("Aplicar todas iguais neste livro",
                     f"Substituir {preview.count} ocorrência(s) em {len(preview.rows)} tradução(ões) de {os.path.basename(source_file)}?\n\n"
@@ -3409,7 +3464,10 @@ class TranslationEditor:
             # The poller starts the continuation after this delivery releases
             # its barrier; idle callbacks cannot start a competing operation.
             return apply, applied
-        self._run_writing_job(work, confirm)
+        if cancel_event:
+            self._run_writing_job(work, confirm, cancel_event)
+        else:
+            self._run_writing_job(work, confirm)
 
     def _other_writing_drafts(self, ids):
         return any(editor is not self and not editor._writing_closed

@@ -13,6 +13,17 @@ A especificacao normativa do estado-alvo esta em
 [REVISAO_GERAL_SPEC.md](REVISAO_GERAL_SPEC.md), incluindo o corretor de
 portugues com sugestoes ortograficas e de concordancia.
 
+## Regerar um PGN após corrigir traduções
+
+Salve as correções no editor, abra **Biblioteca** e escolha **Regerar PGN** no
+pacote desejado. O programa usa as traduções salvas no banco e cria uma nova
+pasta em **Minhas Traduções**, preservando a versão anterior e sem chamar o
+tradutor. Se algum comentário não tiver tradução salva, a geração é interrompida
+e a quantidade de comentários distintos ausentes é informada. Em pacotes antigos,
+uma correspondência compatível precisa ser confirmada antes da geração.
+Comentários no formato `;` ainda não são traduzidos pelo programa; se o original
+os contiver, a regeneração é interrompida e o motivo é informado.
+
 ## Revisão linguística em português (experimental)
 
 No editor, o painel **Revisão linguística** lista as ocorrências na ordem do
@@ -886,3 +897,24 @@ preenchida e diz a taxa de "aceito sem editar" de cada motor. A barra e 80 %.
 - `glossario.db`: indice SQLite legado, conservado para compatibilidade e backup pre-migracao; o V2 nao o usa como autoridade.
 - `traducoes.db`: cache local de traducoes, uma linha por (comentario, idioma de origem, idioma de destino). Ao lado dela, a tabela `occurrences` guarda onde cada comentario foi lido — arquivo, partida, indice e numero do lance —, que e o que da ordem de leitura da obra ao editor e progresso por livro as estatisticas. As traducoes gravadas antes desta versao nao tem essa procedencia e a ganham ao reprocessar o PGN.
 - `backups/`, `logs/`: gerados em tempo de execucao, nao versionados.
+
+### LibreTranslate
+
+Em Configurações, **Testar conexão e idiomas** consulta a disponibilidade
+da instância e do par selecionado sem enviar comentários nem a chave. O teste
+não valida a chave e não garante que uma tradução posterior funcionará.
+
+
+O LibreTranslate é uma opção independente dos motores Google. Instale e execute
+uma instância separadamente, com os modelos dos idiomas de origem e destino.
+Em **Configurações → LibreTranslate**, informe o endereço da instância (por
+padrão `http://127.0.0.1:5000`) e, se necessário, a chave de API. Salve e
+escolha **LibreTranslate** ao iniciar a tradução. A variável de ambiente
+`LIBRETRANSLATE_API_KEY` também é aceita e tem precedência sobre a chave salva.
+
+O programa não instala nem inicia o servidor ou seus modelos. Uma instância
+local mantém as requisições na própria máquina; ao configurar um servidor
+remoto, os comentários são enviados a esse servidor. Servidores hospedados
+podem exigir chave e cobrar pelo uso; confira as condições do seu provedor.
+A configuração e instalação do servidor são explicadas na
+[documentação oficial do LibreTranslate](https://docs.libretranslate.com/).

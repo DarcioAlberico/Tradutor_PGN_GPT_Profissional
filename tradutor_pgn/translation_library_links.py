@@ -26,14 +26,27 @@ class ReviewProgress:
     total: int | None = None
     verified: int | None = None
     pending: int | None = None
+    doubt: int | None = None
+    rejected: int | None = None
+    pending_warnings: int | None = None
+
+    @property
+    def pending_without_warnings(self):
+        if self.pending is None or self.pending_warnings is None:
+            return None
+        return self.pending - self.pending_warnings
 
 
-def bundle_review_progress(database_path, directory):
+def bundle_review_progress(database_path, directory, *, should_cancel=None):
     """Conta comentários distintos do vínculo, sem gravar dados de revisão."""
     from .database import get_review_status_counts
     from .translation_library import _read_manifest_bytes
 
-    resolution = resolve_bundle_review(database_path, directory)
+    if should_cancel is not None and should_cancel():
+        return ReviewProgress("canceled")
+    resolution = resolve_bundle_review(database_path, directory, should_cancel=should_cancel)
+    if should_cancel is not None and should_cancel():
+        return ReviewProgress("canceled")
     if resolution.status != "ready" or resolution.link is None:
         return ReviewProgress(resolution.status)
     link = resolution.link
@@ -45,15 +58,20 @@ def bundle_review_progress(database_path, directory):
         with closing(sqlite3.connect(uri, uri=True, timeout=2)) as connection:
             if resolve_link(connection, bundle_id) != link:
                 return ReviewProgress("unavailable")
+            if should_cancel is not None and should_cancel():
+                return ReviewProgress("canceled")
             counts = get_review_status_counts(
                 connection.cursor(), link.target_language,
                 source_language=link.source_language, source_file=link.source_file,
             )
+        if should_cancel is not None and should_cancel():
+            return ReviewProgress("canceled")
         if manifest_before != _read_manifest_bytes(manifest_path):
             return ReviewProgress("unavailable")
         if not counts["total"]:
             return ReviewProgress("no_occurrences")
-        return ReviewProgress("ready", counts["total"], counts["verified"], counts["pending"])
+        return ReviewProgress("ready", counts["total"], counts["verified"], counts["pending"],
+                              counts["doubt"], counts["rejected"], counts["pending_warnings"])
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
         return ReviewProgress("unavailable")
 
@@ -90,32 +108,37 @@ def resolve_link(connection, bundle_id):
     return ReviewLink(*row) if row else None
 
 
-def resolve_bundle_review(database_path, directory):
+def resolve_bundle_review(database_path, directory, *, should_cancel=None):
     """Localiza origem por identificador, integridade e ocorrências do par."""
     from .translation_library import _legacy_bundle, _manifest_bundle, _read_manifest_bytes, verify_bundle
     from .app_config import LANGUAGE_NAMES
 
     directory = Path(directory)
     try:
+        if should_cancel is not None and should_cancel():
+            return ReviewResolution("canceled")
         if directory.is_symlink() or not directory.is_dir():
             return ReviewResolution("unavailable")
         manifest_path = directory / "manifesto.json"
         if not manifest_path.exists() and not manifest_path.is_symlink():
             bundle = _legacy_bundle(directory)
-            return _find_compatible_review(database_path, bundle) if bundle.status == "legacy" else ReviewResolution("unlinked")
-        if verify_bundle(directory).status != "verified":
+            return _find_compatible_review(database_path, bundle, should_cancel=should_cancel) if bundle.status == "legacy" else ReviewResolution("unlinked")
+        integrity = verify_bundle(directory, should_cancel=should_cancel)
+        if integrity.status == "canceled":
+            return ReviewResolution("canceled")
+        if integrity.status != "verified":
             return ReviewResolution("integrity")
         bundle = _manifest_bundle(directory)
         manifest = json.loads(_read_manifest_bytes(manifest_path).decode("utf-8"))
         bundle_id = manifest.get("bundle_id")
         if not bundle_id:
-            return _find_compatible_review(database_path, bundle)
+            return _find_compatible_review(database_path, bundle, should_cancel=should_cancel)
         _validated_id(bundle_id)
         uri = Path(database_path).resolve().as_uri() + "?mode=ro"
         with closing(sqlite3.connect(uri, uri=True, timeout=2)) as conn:
             link = resolve_link(conn, bundle_id)
             if link is None:
-                return _find_compatible_review(database_path, bundle)
+                return _find_compatible_review(database_path, bundle, should_cancel=should_cancel)
             if (bundle.status != "ready" or link.target_language != bundle.target_language or
                     link.source_language != (bundle.source_language or "") or
                     link.target_language not in LANGUAGE_NAMES or
@@ -131,21 +154,26 @@ def resolve_bundle_review(database_path, directory):
         return ReviewResolution("unavailable")
 
 
-def _find_compatible_review(database_path, bundle):
+def _find_compatible_review(database_path, bundle, *, should_cancel=None):
     """Compara originais, sem gravar nem alegar que são a mesma execução."""
-    from .translation_library import _hash_file, _read_manifest_bytes, _signature, verify_bundle
+    from .translation_library import IntegrityVerificationCanceled, _check_integrity_canceled, _hash_file, _read_manifest_bytes, _signature, verify_bundle
     from .app_config import LANGUAGE_NAMES
 
     try:
+        _check_integrity_canceled(should_cancel)
         original = bundle.original
         if original is None or bundle.directory.is_symlink():
             return ReviewResolution("unavailable")
         manifest_path = bundle.directory / "manifesto.json"
         manifest_before = _read_manifest_bytes(manifest_path) if bundle.status == "ready" else None
-        if manifest_before is not None and verify_bundle(bundle.directory).status != "verified":
-            return ReviewResolution("integrity")
+        if manifest_before is not None:
+            verified = verify_bundle(bundle.directory, should_cancel=should_cancel)
+            if verified.status == "canceled":
+                return ReviewResolution("canceled")
+            if verified.status != "verified":
+                return ReviewResolution("integrity")
         original_before = _signature(original)
-        original_hash = _hash_file(original)
+        original_hash = _hash_file(original, should_cancel)
         if _signature(original) != original_before:
             return ReviewResolution("unavailable")
         if manifest_before is not None:
@@ -160,6 +188,7 @@ def _find_compatible_review(database_path, bundle):
             )
             candidates = []
             for filename, source, target in rows:
+                _check_integrity_canceled(should_cancel)
                 if not isinstance(filename, str) or Path(filename).name.casefold() != original.name.casefold():
                     continue
                 if target not in LANGUAGE_NAMES or (source and source not in LANGUAGE_NAMES):
@@ -172,10 +201,11 @@ def _find_compatible_review(database_path, bundle):
         signatures = {}
         matching = []
         for candidate in candidates:
+            _check_integrity_canceled(should_cancel)
             path = Path(candidate.source_file)
             if path not in signatures:
                 signature = _signature(path)
-                digest = _hash_file(path)
+                digest = _hash_file(path, should_cancel)
                 if _signature(path) != signature:
                     return ReviewResolution("unavailable")
                 signatures[path] = (signature, digest)
@@ -188,5 +218,7 @@ def _find_compatible_review(database_path, bundle):
         if len(matching) > 1:
             return ReviewResolution("ambiguous")
         return ReviewResolution("compatible", matching[0]) if matching else ReviewResolution("unlinked")
+    except IntegrityVerificationCanceled:
+        return ReviewResolution("canceled")
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         return ReviewResolution("unavailable")

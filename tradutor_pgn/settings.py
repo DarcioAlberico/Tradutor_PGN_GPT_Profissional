@@ -452,7 +452,8 @@ MAIN_WINDOW_KEY = "main_window"
 # escritos aqui tambem para o arquivo validar sem importar a camada de rede.
 TRANSLATION_PROVIDER_GOOGLE = "google"
 TRANSLATION_PROVIDER_DEEP = "deep-translator"
-TRANSLATION_PROVIDER_IDS = (TRANSLATION_PROVIDER_GOOGLE, TRANSLATION_PROVIDER_DEEP, "anthropic", "openai", "deepseek")
+TRANSLATION_PROVIDER_LIBRE = "libretranslate"
+TRANSLATION_PROVIDER_IDS = (TRANSLATION_PROVIDER_GOOGLE, TRANSLATION_PROVIDER_DEEP, TRANSLATION_PROVIDER_LIBRE, "anthropic", "openai", "deepseek")
 
 MAIN_WINDOW_DEFAULTS = {
     "source_language": "",

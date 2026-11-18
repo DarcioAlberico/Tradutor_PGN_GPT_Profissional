@@ -58,7 +58,7 @@ from .pgn_utils import (
     split_batch_translation,
 )
 from .prose_fixes import normalize_prose
-from .translation_output import publish_translation_bundle, source_sha256
+from .translation_output import _PublicationCanceled, publish_translation_bundle, source_sha256
 from .translation_library_links import register_link
 from itertools import chain
 
@@ -66,11 +66,14 @@ from .app_config import TRANSLATION_REQUEST_DELAY_SECONDS  # noqa: F401 (compat)
 from .failed_runs import build_failed_run_record, save_failed_run
 from .google_cooldown import GoogleCooldown
 from .deep_translation import DeepTranslatorAdapter
+from .libre_translation import LibreTranslator, DEFAULT_URL
+from . import api_keys
 from .llm_costs import describe_estimate, describe_estimate_line, describe_outcome, estimate_cost
 from .llm_providers import GOOGLE_PROVIDER, build_translator, model_setting_key
 from .pgn_positions import chess_available, compute_comment_fens
 from .settings import (
     TRANSLATION_PROVIDER_DEEP,
+    TRANSLATION_PROVIDER_LIBRE,
     load_settings,
     read_board_settings,
     read_llm_settings,
@@ -224,11 +227,15 @@ def _first_pass(app, pgn_files, with_contexts=False):
             app.log_message("Traducao cancelada antes da extracao completa.")
             return None
 
-        fingerprint_before = source_sha256(pgn_file)
-        info = extract_comment_texts_from_file(
-            pgn_file, app.log_message, with_contexts=with_contexts
-        )
-        fingerprint_after = source_sha256(pgn_file)
+        try:
+            fingerprint_before = source_sha256(pgn_file, app.cancel_flag.is_set)
+            info = extract_comment_texts_from_file(
+                pgn_file, app.log_message, with_contexts=with_contexts
+            )
+            fingerprint_after = source_sha256(pgn_file, app.cancel_flag.is_set)
+        except _PublicationCanceled:
+            app.log_message("Traducao cancelada antes da extracao completa.")
+            return None
         if fingerprint_before != fingerprint_after:
             raise OSError(
                 f"O arquivo de origem foi alterado durante a leitura: {pgn_file}"
@@ -399,6 +406,21 @@ def run_translation(
                 app.log_message(f"[ERRO] deep-translator indisponivel ({type(exc).__name__}).")
                 aborted_by_api = True
                 return
+        elif provider == TRANSLATION_PROVIDER_LIBRE:
+            config = load_settings().get("libretranslate", {})
+            if not isinstance(config, dict):
+                config = {}
+            try:
+                llm = LibreTranslator(
+                    config.get("url", DEFAULT_URL),
+                    api_keys.load_api_key("libretranslate", "LIBRETRANSLATE_API_KEY"),
+                    source_language, target_language,
+                )
+            except (ValueError, TypeError):
+                app.log_message("[ERRO] Endereço LibreTranslate inválido. Confira Configurações.")
+                aborted_by_api = True
+                return
+            app.log_message(llm.describe())
         elif provider != GOOGLE_PROVIDER:
             modelos = read_llm_settings(load_settings())
             try:
@@ -596,7 +618,7 @@ def run_translation(
         # e a execucao so continua com o "Sim"; recusada, nada foi enviado nem
         # aberto (a linha da execucao vem depois). Sem nada a enviar nao ha o
         # que perguntar. O texto limpo, e nao o cru: e o que a API recebe.
-        if llm is not None:
+        if llm is not None and provider != TRANSLATION_PROVIDER_LIBRE:
             a_enviar = [
                 clean_comment_for_translation(comentario, cleanup_rules)
                 for comentario in dict.fromkeys(comentarios_do_lote())
@@ -1271,7 +1293,7 @@ def run_translation(
             # esta a fase da API, e o que nao precisa atravessa-la nao atravessa.
             try:
                 content, encoding = read_pgn_text(pgn_file)
-                current_sha256 = source_sha256(pgn_file)
+                current_sha256 = source_sha256(pgn_file, app.cancel_flag.is_set)
                 input_sha256 = fingerprints_por_arquivo[pgn_file]
                 if current_sha256 != input_sha256:
                     raise OSError("O arquivo de origem foi alterado durante a tradução")
@@ -1285,6 +1307,10 @@ def run_translation(
                     count_semicolons=False,
                     known_texts={texto: texto for texto in comments},
                 )
+            except _PublicationCanceled:
+                canceled = True
+                app.log_message("  - Verificacao do arquivo de origem cancelada.")
+                break
             except Exception as exc:
                 # A primeira passada leu este arquivo; se agora nao da, algo mudou
                 # no disco no meio da execucao. Um arquivo ilegivel nao derruba o
@@ -1421,7 +1447,7 @@ def run_translation(
         app.log_message(f"Comentarios que falharam: {failed_count}")
         app.log_message(f"Falhas de entrega: {delivery_failed_count}")
         app.log_message(f"Arquivos PGN traduzidos gerados: {generated_files}")
-        if llm is not None:
+        if llm is not None and provider != TRANSLATION_PROVIDER_LIBRE:
             # O que o modelo custou, em tokens e em dolares — estimado antes,
             # real agora: a fatura e do provedor, mas o numero que a explica
             # fica no log da execucao (ROADMAP 28.7).

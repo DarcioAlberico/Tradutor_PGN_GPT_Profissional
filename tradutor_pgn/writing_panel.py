@@ -96,7 +96,7 @@ class WritingPanel(ctk.CTkFrame):
             button.destroy()
         self.issue_buttons = []
         for index, issue in enumerate(self.issues):
-            category = "Ortografia" if issue.category == "SPELLING" else "Gramática"
+            category = {"SPELLING": "Ortografia", "VERBAL_AGREEMENT": "Concordância verbal"}.get(issue.category, "Gramática")
             button = ctk.CTkButton(self.issue_list, text=f"{index + 1}. {category}: {issue.original}",
                                  anchor="w", fg_color=ROW_COLOR, text_color=ROW_TEXT_COLOR,
                                  command=lambda i=index: self.select(i))

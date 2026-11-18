@@ -9,12 +9,17 @@ import os
 import stat
 import time
 import math
+import operator
 from bisect import insort
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path, PureWindowsPath
 
+from .app_config import LANGUAGE_NAMES
+
 MAX_MANIFEST_BYTES = 1024 * 1024
+LIBRARY_STATUS_LABELS = {"ready": "Com manifesto", "legacy": "Sem manifesto",
+                         "incomplete": "Incompleto", "invalid": "Manifesto inválido"}
 _HASH = re.compile(r"[0-9a-f]{64}")
 _STAGING_NAME = re.compile(r"^\..+\.tmp-.+$")
 
@@ -31,6 +36,7 @@ class StagingInspection:
     entries: tuple[StagingEntry, ...]
     min_age_seconds: float = 86400
     future_count: int = 0
+    recent_count: int = 0
 
 
 class StagingInspectionCanceled(Exception):
@@ -49,6 +55,7 @@ def inspect_staging_directories(root, *, now=None, min_age_seconds=86400, max_en
     entries = []
     total = 0
     future_count = 0
+    recent_count = 0
     try:
         iterator = os.scandir(root)
     except FileNotFoundError:
@@ -74,7 +81,9 @@ def inspect_staging_directories(root, *, now=None, min_age_seconds=86400, max_en
                         insort(entries, (key, StagingEntry(item.name, age)), key=lambda pair: pair[0])
                         if len(entries) > max_entries:
                             entries.pop()
-    return StagingInspection(total, tuple(entry for _, entry in entries), min_age_seconds, future_count)
+            else:
+                recent_count += 1
+    return StagingInspection(total, tuple(entry for _, entry in entries), min_age_seconds, future_count, recent_count)
 
 
 def format_staging_inspection(result):
@@ -91,6 +100,8 @@ def format_staging_inspection(result):
         lines.append(f"Outras {remaining} pasta(s) não exibidas.")
     if result.future_count:
         lines.append(f"{result.future_count} pasta(s) com data futura não puderam ser classificadas por idade.")
+    if result.recent_count:
+        lines.append(f"{result.recent_count} pasta(s) temporária(s) recente(s), abaixo do limite de idade.")
     lines.append("A idade não comprova abandono: uma tradução pode estar ativa. Nada foi removido.")
     return "\n".join(lines)
 
@@ -254,19 +265,32 @@ def _legacy_bundle(directory):
     return LibraryBundle(directory, "incomplete")
 
 
-def list_bundles(root):
+class LibraryScanCanceled(Exception):
+    """A leitura foi cancelada e não retorna uma lista parcial."""
+
+
+def list_bundles(root, *, should_cancel=None):
     """Lista pacotes em um nível, sem ler o conteúdo dos PGNs nem modificá-los."""
     root = Path(root)
+    def check_cancel():
+        if should_cancel is not None and should_cancel():
+            raise LibraryScanCanceled()
+    check_cancel()
     try:
-        directories = [path for path in root.iterdir()
-                       if not path.is_symlink() and path.is_dir()
-                       and not (path.name.startswith(".") and ".tmp-" in path.name)]
+        directories = []
+        for path in root.iterdir():
+            check_cancel()
+            if (not path.is_symlink() and path.is_dir()
+                    and not (path.name.startswith(".") and ".tmp-" in path.name)):
+                directories.append(path)
     except FileNotFoundError:
         return []
     result = []
     for directory in sorted(directories, key=lambda p: (p.name.casefold(), p.name)):
+        check_cancel()
         manifest = directory / "manifesto.json"
         result.append(_manifest_bundle(directory) if manifest.exists() or manifest.is_symlink() else _legacy_bundle(directory))
+    check_cancel()
     return result
 
 
@@ -278,9 +302,70 @@ def search_bundles(bundles, query="", status=None, *, source=None, target=None, 
         return "".join(c for c in unicodedata.normalize("NFD", value.casefold())
                        if unicodedata.category(c) != "Mn")
 
+    def local_date(value):
+        try:
+            parsed = date.fromisoformat((value or "")[:10])
+        except (ValueError, TypeError):
+            return ""
+        return f"{parsed.day:02d}/{parsed.month:02d}/{parsed.year:04d}"
+
+    def structured_match(bundle, term):
+        field, _, value = term.partition(":")
+        if field == "nome":
+            return value in searchable(bundle.directory.name)
+        if field in ("original", "traduzido"):
+            file = bundle.original if field == "original" else bundle.translated
+            return file is None if value == "?" else file is not None and value in searchable(file.name)
+        if field == "idioma":
+            source_code = bundle.source_language or ""
+            target_code = bundle.target_language or ""
+            return (not source_code and not target_code) if value == "?" else value in (
+                searchable(source_code), searchable(target_code))
+        if field == "situacao":
+            statuses = {"com-manifesto": "ready", "sem-manifesto": "legacy",
+                        "incompleto": "incomplete", "invalido": "invalid"}
+            return statuses.get(value) == bundle.status if value in statuses else False
+        if field == "data":
+            raw = (bundle.created_at or "")[:10]
+            try:
+                actual = date.fromisoformat(raw)
+            except (ValueError, TypeError):
+                actual = None
+            if value == "?":
+                return actual is None
+            if actual is not None and re.fullmatch(r"\d{4}(-\d{2})?", value):
+                try:
+                    date.fromisoformat(value + ("-01-01" if len(value) == 4 else "-01"))
+                except ValueError:
+                    return False
+                return raw.startswith(value)
+            match = re.fullmatch(r"(>=|<=|>|<)?(\d{4}-\d{2}-\d{2})", value)
+            if not match or actual is None:
+                return False
+            try:
+                requested = date.fromisoformat(match.group(2))
+            except ValueError:
+                return False
+            return operators[match.group(1) or ""](actual, requested)
+        attribute = {"origem": "source_language", "destino": "target_language",
+                     "motor": "provider"}[field]
+        actual = getattr(bundle, attribute) or ""
+        return not actual if value == "?" else searchable(actual) == value
+
     terms = searchable(query).split()
+    unknown_failures = "falhas:?" in terms
+    operators = {"": operator.eq, ">": operator.gt, ">=": operator.ge, "<": operator.lt, "<=": operator.le}
+    pattern = re.compile(r"falhas:(>=|<=|>|<)?([0-9]+)")
+    conditions = [(operators[match.group(1) or ""], match.group(2).lstrip("0") or "0")
+                  for term in terms if (match := pattern.fullmatch(term))]
+    terms = [term for term in terms if term != "falhas:?" and not pattern.fullmatch(term)]
+    structured = [term for term in terms
+                  if term.partition(":")[0] in {"origem", "destino", "motor", "situacao", "data", "nome", "original", "traduzido", "idioma"}
+                  and term.partition(":")[1] and term.partition(":")[2]]
+    terms = [term for term in terms if term not in structured]
     return [bundle for bundle in bundles
-            if (status is None or bundle.status == status)
+            if all(structured_match(bundle, term) for term in structured)
+            and (status is None or bundle.status == status)
             and (source is None or (bundle.source_language or "") == source)
             and (target is None or (bundle.target_language or "") == target)
             and (provider is None or (bundle.provider or "") == provider)
@@ -288,9 +373,23 @@ def search_bundles(bundles, query="", status=None, *, source=None, target=None, 
                  (failures == "unknown" and bundle.failed_comments is None) or
                  (failures == "with" and bundle.failed_comments is not None and bundle.failed_comments > 0) or
                  (failures == "without" and bundle.failed_comments == 0))
+            and (not conditions or
+                 (bundle.failed_comments is not None and
+                  all(compare((len(str(bundle.failed_comments)), str(bundle.failed_comments)), (len(value), value))
+                      for compare, value in conditions)))
+            and (not unknown_failures or bundle.failed_comments is None)
             and all(any(term in searchable(value) for value in
                         (bundle.directory.name, bundle.source_language or "",
-                         bundle.target_language or "", bundle.provider or ""))
+                         bundle.target_language or "", bundle.provider or "",
+                         LANGUAGE_NAMES.get(bundle.source_language, ""),
+                         LANGUAGE_NAMES.get(bundle.target_language, ""),
+                         LIBRARY_STATUS_LABELS.get(bundle.status, ""),
+                         (bundle.created_at or "")[:10],
+                         local_date(bundle.created_at),
+                         bundle.original.name if bundle.original is not None else "",
+                         bundle.translated.name if bundle.translated is not None else "",
+                         f"Falhas na geração: {bundle.failed_comments}"
+                         if bundle.failed_comments is not None else ""))
                     for term in terms)]
 
 
@@ -327,12 +426,10 @@ def review_percentage(verified, total):
 
 def bundle_summary(bundle):
     """Resumo local sem caminhos absolutos, conteúdo ou hashes."""
-    statuses = {"ready": "Com manifesto", "legacy": "Sem manifesto",
-                "incomplete": "Incompleto", "invalid": "Manifesto inválido"}
     failure_text = str(bundle.failed_comments) if bundle.failed_comments is not None else "Não informado"
     return "\n".join((
         f"Pacote: {bundle.directory.name}",
-        f"Situação: {statuses.get(bundle.status, 'Desconhecida')}",
+        f"Situação: {LIBRARY_STATUS_LABELS.get(bundle.status, 'Desconhecida')}",
         f"Origem: {bundle.source_language or 'Não informado'}",
         f"Destino: {bundle.target_language or 'Não informado'}",
         f"Motor da execução: {bundle.provider or 'Não informado'}",

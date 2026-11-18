@@ -55,18 +55,26 @@ class TranslationBundleResult:
     bundle_id: str | None = None
 
 
-def source_sha256(path: str) -> str:
+def source_sha256(path: str, is_canceled=None) -> str:
     digest = hashlib.sha256()
+    if is_canceled is not None and is_canceled():
+        raise _PublicationCanceled()
     with open(path, "rb") as source:
         for chunk in iter(lambda: source.read(COPY_CHUNK_SIZE), b""):
+            if is_canceled is not None and is_canceled():
+                raise _PublicationCanceled()
             digest.update(chunk)
+    if is_canceled is not None and is_canceled():
+        raise _PublicationCanceled()
     return digest.hexdigest()
 
 
-def _copy_source_snapshot(source_path: str, destination: Path) -> str:
+def _copy_source_snapshot(source_path: str, destination: Path, is_canceled=None) -> str:
     digest = hashlib.sha256()
     with open(source_path, "rb") as source, open(destination, "wb") as target:
         for chunk in iter(lambda: source.read(COPY_CHUNK_SIZE), b""):
+            if is_canceled is not None and is_canceled():
+                raise _PublicationCanceled()
             digest.update(chunk)
             target.write(chunk)
     shutil.copystat(source_path, destination)
@@ -110,12 +118,12 @@ def publish_translation_bundle(
             return TranslationBundleResult(status=status)
         if is_canceled is not None and is_canceled():
             return TranslationBundleResult(status="canceled")
-        copied_sha256 = _copy_source_snapshot(input_file, staged_original)
+        copied_sha256 = _copy_source_snapshot(input_file, staged_original, is_canceled)
         if expected_source_sha256 and copied_sha256 != expected_source_sha256:
             raise OSError("O arquivo de origem foi alterado durante a tradução")
         if is_canceled is not None and is_canceled():
             return TranslationBundleResult(status="canceled")
-        translated_sha256 = source_sha256(str(staged_translation))
+        translated_sha256 = source_sha256(str(staged_translation), is_canceled)
         bundle_id = str(uuid4())
         manifest = {
             "schema_version": 1,

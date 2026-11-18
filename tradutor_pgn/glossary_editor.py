@@ -11,8 +11,10 @@ from .app_paths import glossary_catalog_path
 from .app_config import LANGUAGES
 from .background_task import TaskCanceled, run_with_progress
 from .glossary_ui_helpers import describe_scope, normalize_search_text, scope_from_codes, scope_to_codes
+from .glossary_rule_inspector import analyze_rule, format_rule_impact
 from .glossary_engine import (
     SimulationCanceled, SimulationItem, explain_substitutions, format_explanation, format_simulation_examples,
+    format_simulation_summary,
     simulate_database_rule_change, simulate_rule_change,
 )
 from .editor_text import diff_spans
@@ -80,7 +82,7 @@ from .editor_widgets import (
     restore_sash,
     save_window_section,
 )
-from .window_utils import restore_or_maximize
+from .window_utils import bring_window_to_front, restore_or_maximize
 
 
 INVALID_PRIORITY_WARNING = "Prioridade precisa ser um número inteiro."
@@ -101,6 +103,8 @@ RULE_TYPE_LABELS = {
 RULE_TYPE_BY_LABEL = {label: value for value, label in RULE_TYPE_LABELS.items()}
 SCOPE_FILTERS = {"Todos os escopos": None, "Somente globais": "global",
                  "Somente específicos": "specific", "Compatíveis com o par atual": "compatible"}
+PRIORITY_FILTERS = {"Todas as prioridades": None, "Prioridade positiva": "positive",
+                    "Prioridade zero": "zero", "Prioridade negativa": "negative"}
 
 
 def rule_type_label(rule_type):
@@ -172,7 +176,9 @@ def glossary_entry_warnings(entries, index, diagnostics=None):
 
 
 def glossary_filter_indices(entries, search_text="", filter_name="Todas", diagnostics=None, *, rule_type=None,
-                            scope_filter=None, source_language=None, target_language=None):
+                            scope_filter=None, source_language=None, target_language=None, priority_filter=None):
+    if priority_filter not in (None, "positive", "zero", "negative"):
+        raise ValueError("Filtro de prioridade inválido")
     if scope_filter not in (None, "global", "specific", "compatible"):
         raise ValueError("Filtro de escopo inválido")
     if scope_filter == "compatible" and not target_language:
@@ -181,6 +187,11 @@ def glossary_filter_indices(entries, search_text="", filter_name="Todas", diagno
     result = []
 
     for index, entry in enumerate(entries):
+        priority = glossary_entry_priority(entry)
+        if ((priority_filter == "positive" and priority <= 0) or
+                (priority_filter == "zero" and priority != 0) or
+                (priority_filter == "negative" and priority >= 0)):
+            continue
         if rule_type is not None and glossary_entry_type(entry) != rule_type:
             continue
         scope = glossary_entry_scope(entry)
@@ -197,7 +208,8 @@ def glossary_filter_indices(entries, search_text="", filter_name="Todas", diagno
         if terms and not all(any(term in value for value in fields) for term in terms):
             continue
 
-        warnings = glossary_entry_warnings(entries, index, diagnostics)
+        warnings = (glossary_entry_warnings(entries, index, diagnostics)
+                    if filter_name in ("Duplicadas", "Conflitos", "Inválidas") else ())
         if filter_name == "Duplicadas" and "Entrada duplicada." not in warnings:
             continue
         if filter_name == "Conflitos" and "Mesmo original com substituição diferente." not in warnings:
@@ -395,6 +407,39 @@ def duplicate_extras_indices(entries, shown_indices):
     return extras
 
 
+class RuleImpactReport:
+    """Relatório rolável, selecionável e copiável da fotografia analisada."""
+
+    def __init__(self, parent, report):
+        self.win = ctk.CTkToplevel(parent)
+        self.win.title("Entender esta regra")
+        self.win.geometry("720x560")
+        self.win.minsize(450, 300)
+        self.win.transient(parent)
+        self.win.columnconfigure(0, weight=1)
+        self.win.rowconfigure(1, weight=1)
+        ctk.CTkLabel(self.win, text="Análise do rascunho e do texto de teste", anchor="w",
+                     font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 6))
+        self.text = ctk.CTkTextbox(self.win, wrap=tk.WORD)
+        self.text.grid(row=1, column=0, sticky="nsew", padx=14)
+        self.text.insert("1.0", report)
+        self.text.configure(state="disabled")
+        actions = ctk.CTkFrame(self.win, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="e", padx=14, pady=12)
+        ctk.CTkButton(actions, text="Copiar análise", width=130, command=self.copy).pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkButton(actions, text="Fechar", width=100, command=self.win.destroy).pack(side=tk.LEFT)
+        self.win.bind("<Escape>", lambda _event: self.win.destroy())
+        bring_window_to_front(self.win, parent, maximize=False)
+
+    def copy(self):
+        self.win.clipboard_clear()
+        self.win.clipboard_append(self.text.get("1.0", "end-1c"))
+
+
+def show_rule_impact_report(parent, report):
+    return RuleImpactReport(parent, report)
+
+
 class GlossaryEditor:
     """A janela de edicao do glossario.
 
@@ -463,6 +508,10 @@ class GlossaryEditor:
         saved_scope_filter = self.editor_settings.get("scope_filter", "Todos os escopos")
         self.scope_filter_text = tk.StringVar(master=self.win, value=(
             saved_scope_filter if saved_scope_filter in SCOPE_FILTERS else "Todos os escopos"
+        ))
+        saved_priority = self.editor_settings.get("priority_filter", "Todas as prioridades")
+        self.priority_filter_text = tk.StringVar(master=self.win, value=(
+            saved_priority if isinstance(saved_priority, str) and saved_priority in PRIORITY_FILTERS else "Todas as prioridades"
         ))
         self.test_text_var = tk.StringVar(master=self.win, value="")
         self.sort_text = tk.StringVar(
@@ -604,6 +653,9 @@ class GlossaryEditor:
         self.scope_filter_menu = ctk.CTkOptionMenu(sort_bar, variable=self.scope_filter_text,
                                                   values=list(SCOPE_FILTERS))
         self.scope_filter_menu.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(6, 0))
+        self.priority_filter_menu = ctk.CTkOptionMenu(sort_bar, variable=self.priority_filter_text,
+                                                     values=list(PRIORITY_FILTERS))
+        self.priority_filter_menu.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(6, 0))
 
         self.counts_label = ctk.CTkLabel(list_frame, text="", anchor="w")
         self.counts_label.grid(row=5, column=0, sticky="ew", padx=10, pady=(0, 6))
@@ -819,6 +871,11 @@ class GlossaryEditor:
         self.preview_text = ctk.CTkTextbox(detail_frame, height=90, wrap=tk.WORD)
         self.preview_text.grid(row=10, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self.preview_text.configure(state="disabled")
+        self.btn_rule_impact = ctk.CTkButton(
+            detail_frame, text="Entender esta regra", width=160, command=self.explain_current_rule,
+        )
+        self.btn_rule_impact.grid(row=11, column=0, sticky="w", padx=10, pady=(0, 8))
+        attach_tooltip(self.btn_rule_impact, "Compara o rascunho com o catálogo carregado e o texto de teste, sem salvar.")
         self.btn_compare_pending = ctk.CTkButton(
             detail_frame, text="Comparar pendentes", width=160,
             command=lambda: self.compare_draft_preview(database=True),
@@ -898,6 +955,7 @@ class GlossaryEditor:
         self.sort_menu.configure(command=self.restart_at_first_page)
         self.type_filter_menu.configure(command=self.restart_at_first_page)
         self.scope_filter_menu.configure(command=self.restart_at_first_page)
+        self.priority_filter_menu.configure(command=self.restart_at_first_page)
         self.filter_segment.configure(command=self.restart_at_first_page)
         self.search_entry.bind("<Return>", lambda _event: self.apply_search())
         self.orig_text.bind(
@@ -967,6 +1025,7 @@ class GlossaryEditor:
                 "sort": self.sort_text.get(),
                 "type_filter": self.type_filter_text.get(),
                 "scope_filter": self.scope_filter_text.get(),
+                "priority_filter": self.priority_filter_text.get(),
                 "font_size": self.font_size,
             },
             window=self.win,
@@ -1240,6 +1299,29 @@ class GlossaryEditor:
                               "Analisar regras", f"Não foi possível analisar: {error}", parent=self.win),
                           message="Analisando regras concorrentes…")
 
+    def explain_current_rule(self):
+        """Analisa uma fotografia do formulário sem alterar o catálogo."""
+        orig, replacement = self.current_pair()
+        draft = (orig, replacement, self.current_rule_type(), self.current_priority(), self.current_scope())
+        entries = list(self.state.entries)
+        selected = self.state.selected_index
+        sample = self.test_text_var.get()
+        source, target = self.preview_languages()
+
+        def work(task):
+            try:
+                return analyze_rule(draft, entries, selected, sample, source, target, should_cancel=task.cancelado)
+            except SimulationCanceled as exc:
+                raise TaskCanceled() from exc
+
+        def done(result):
+            show_rule_impact_report(self.win, format_rule_impact(result))
+
+        run_with_progress(self.win, "Entender esta regra", work, on_success=done,
+                          on_error=lambda _error: messagebox.showerror(
+                              "Entender esta regra", "Não foi possível concluir a análise.", parent=self.win),
+                          message="Analisando a regra e o catálogo carregado…")
+
     def compare_draft_preview(self, *, database=False):
         """Compara a entrada aberta com o catálogo usando apenas o texto de teste."""
         orig, replacement = self.current_pair()
@@ -1274,15 +1356,18 @@ class GlossaryEditor:
 
         def done(result):
             if database:
-                text = (f"{result.changed} de {result.scanned} traduções pendentes teriam resultado diferente "
-                        f"no destino {target}"
-                        + (f" e origem {source}." if source else "; todas as origens foram consideradas."))
+                text = format_simulation_summary(result)
+                text += (f"\nDestino {target}"
+                         + (f" e origem {source}." if source else "; todas as origens foram consideradas."))
                 if result.examples:
                     text += "\n\n" + format_simulation_examples(result)
             elif result.examples:
                 text = format_simulation_examples(result)
             else:
                 text = "A edição não altera o resultado automático deste texto no par escolhido."
+            if entry[2] != GLOSSARY_RULE_AUTOMATIC:
+                text += ("\n\nA regra editada não é automática; a comparação mostra somente "
+                         "seus efeitos sobre o conjunto de regras automáticas, inclusive uma possível remoção.")
             text += "\n\nComparação somente das regras automáticas do catálogo; não inclui regras de semente ou limpeza."
             if database:
                 text += " As regras são reaplicadas aos textos já armazenados; traduções futuras podem ser diferentes."
@@ -1487,6 +1572,7 @@ class GlossaryEditor:
             self.state.diagnostics,
             rule_type=RULE_TYPE_BY_LABEL.get(self.type_filter_text.get()),
             scope_filter=scope_filter, source_language=source, target_language=target,
+            priority_filter=PRIORITY_FILTERS[self.priority_filter_text.get()],
         )
         self.state.filtered_indices = sort_glossary_indices(
             self.state.entries, self.state.filtered_indices, self.sort_text.get()
@@ -1705,6 +1791,7 @@ class GlossaryEditor:
         self.filter_segment.set("Todas")
         self.type_filter_text.set("Todos os tipos")
         self.scope_filter_text.set("Todos os escopos")
+        self.priority_filter_text.set("Todas as prioridades")
         self.state.loading = True
         self.set_text(self.orig_text, (original or "").strip())
         self.set_text(self.new_text, (replacement or "").strip())
@@ -2209,6 +2296,7 @@ class GlossaryEditor:
         self.filter_segment.set("Todas")
         self.type_filter_text.set("Todos os tipos")
         self.scope_filter_text.set("Todos os escopos")
+        self.priority_filter_text.set("Todas as prioridades")
         self.state.page_index = 0
         self.apply_filter()
 

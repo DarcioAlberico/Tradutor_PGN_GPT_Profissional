@@ -12,6 +12,7 @@ from .app_config import (
 # O vermelho das acoes destrutivas vive na paleta central: o editor de traducoes
 # tem uma acao dessas tambem ("Descartar nao revisadas"), e as duas sao a mesma cor.
 from .editor_common import DESTRUCTIVE_COLOR, DESTRUCTIVE_HOVER_COLOR
+from .command_palette import open_command_palette
 
 
 def grid_button_row(parent, button_specs, columns=3):
@@ -127,8 +128,17 @@ def setup_main_ui(app):
         variable=app.process_subdirs,
     ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
 
-    ctk.CTkButton(input_frame, text="Biblioteca", width=125,
-                  command=app.open_translation_library).grid(row=1, column=2, sticky=tk.E, pady=(6, 0))
+    quick_actions = ctk.CTkFrame(input_frame, fg_color="transparent")
+    quick_actions.grid(row=1, column=2, sticky=tk.E, pady=(6, 0))
+    app.command_palette_button = ctk.CTkButton(
+        quick_actions, text="Comandos (Ctrl+K)", width=155,
+        command=lambda: open_command_palette(app),
+    )
+    app.command_palette_button.pack(side=tk.LEFT, padx=(0, 8))
+    ctk.CTkButton(quick_actions, text="Biblioteca", width=125,
+                  command=app.open_translation_library).pack(side=tk.LEFT)
+    app.root.bind("<Control-k>", lambda event: open_command_palette(app, event))
+    app.root.bind("<Control-K>", lambda event: open_command_palette(app, event))
 
     input_frame.columnconfigure(1, weight=1)
 

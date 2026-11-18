@@ -262,3 +262,59 @@ def side_to_move(fen):
     if len(partes) < 2:
         return ""
     return {"w": "Brancas jogam", "b": "Pretas jogam"}.get(partes[1], "")
+
+
+def describe_fen(fen):
+    """Descreve os campos da FEN sem presumir legalidade da posição."""
+    if not isinstance(fen, str) or not fen.strip():
+        return "Posição não disponível."
+    fields = fen.split()
+    placement = fields[0]
+    if any(c not in "12345678prnbqkPRNBQK/" for c in placement):
+        return "Posição não disponível: disposição das peças inválida."
+    rows = fen_board_rows(fen)
+    if rows is None:
+        return "Posição não disponível: disposição das peças inválida."
+    names = {"k": "rei", "q": "dama", "r": "torre", "b": "bispo", "n": "cavalo", "p": "peão"}
+    pieces = {True: [], False: []}
+    for rank, row in enumerate(rows):
+        for file, piece in enumerate(row):
+            if piece:
+                pieces[piece.isupper()].append(f"{names[piece.lower()]} em {'abcdefgh'[file]}{8 - rank}")
+    lines = ["Posição atual (descrição dos dados da FEN):"]
+    for color, label in ((True, "Brancas"), (False, "Pretas")):
+        lines.append(f"{label}: {', '.join(pieces[color]) or 'nenhuma peça'}.")
+    side = side_to_move(fen)
+    lines.append(f"Vez: {side or ('não informado' if len(fields) < 2 else 'inválido')}.")
+    if len(fields) < 3:
+        castles = "não informado"
+    elif fields[2] == "-":
+        castles = "nenhum"
+    elif any(c not in "KQkq" for c in fields[2]) or len(set(fields[2])) != len(fields[2]):
+        castles = "inválido"
+    else:
+        def rights(short, long):
+            values = (["pequeno"] if short in fields[2] else []) + (["grande"] if long in fields[2] else [])
+            return " e ".join(values) or "nenhum"
+        castles = f"brancas: {rights('K', 'Q')}; pretas: {rights('k', 'q')}"
+    lines.append(f"Direitos de roque: {castles}.")
+    if len(fields) < 4:
+        passant = "não informado"
+    elif fields[3] == "-":
+        passant = "nenhuma casa indicada"
+    elif len(fields[3]) == 2 and fields[3][0] in "abcdefgh" and fields[3][1] in "36":
+        passant = fields[3] + " (a captura depende da posição)"
+    else:
+        passant = "inválido"
+    lines.append(f"Casa en passant: {passant}.")
+    for index, label, minimum in ((4, "Meios-lances desde captura ou movimento de peão", 0),
+                                  (5, "Número do lance", 1)):
+        if len(fields) <= index:
+            value = "não informado"
+        elif (not fields[index].isascii() or not fields[index].isdigit()
+              or (minimum == 1 and not fields[index].strip("0"))):
+            value = "inválido"
+        else:
+            value = fields[index]
+        lines.append(f"{label}: {value}.")
+    return "\n".join(lines)

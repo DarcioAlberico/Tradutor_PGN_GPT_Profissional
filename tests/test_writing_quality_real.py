@@ -31,6 +31,27 @@ def visible_issues(adapter, request):
                  and restored.state == "active")
 
 
+@pytest.mark.parametrize("text,original,replacement", [
+    ("Os bispos domina o centro.", "domina", "dominam"),
+    ("O cavalo ocupam o centro.", "ocupam", "ocupa"),
+    ("As pretas tem uma posição ativa.", "tem", "têm"),
+])
+def test_real_verbal_agreement_can_be_applied(local_grammar, text, original, replacement):
+    from tradutor_pgn.editor_common import apply_writing_issue
+    from tradutor_pgn.writing_assistant import PortugueseWritingAssistant
+
+    class NoSpelling:
+        def analyze(self, request, protected):
+            return ()
+
+    assistant = PortugueseWritingAssistant(spelling_adapter=NoSpelling(), grammar_adapter=local_grammar)
+    request = WritingRequest(text, 0, "pt-BR", grammar_enabled=True)
+    result = assistant.analyze(request)
+    issue = next(item for item in result.issues if item.category == "VERBAL_AGREEMENT"
+                 and item.original == original and replacement in item.suggestions)
+    assert apply_writing_issue(request, issue, replacement) == text.replace(original, replacement, 1)
+
+
 @pytest.mark.parametrize("text,original,suggestion", [
     ("A palavra está correto.", "correto", "correta"),
     ("As palavras estão corretos.", "corretos", "corretas"),

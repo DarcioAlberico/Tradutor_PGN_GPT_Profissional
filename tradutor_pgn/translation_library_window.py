@@ -8,6 +8,7 @@ import customtkinter as ctk
 
 from .translation_library import _legacy_bundle, _manifest_bundle, bundle_summary, list_bundles, review_percentage, search_bundles, sort_bundles, verify_bundle
 from .translation_library import StagingInspectionCanceled, format_staging_inspection, inspect_staging_directories
+from .library_integrity_batch import BatchIntegrityCanceled, format_integrity_batch, verify_bundles
 from .background_task import TaskCanceled, run_with_progress
 from .app_config import LANGUAGE_NAMES
 from .library_preferences import parse_preferences, save_preferences
@@ -27,7 +28,8 @@ FAILURE_OPTIONS = {"Falhas: Todas": None, "Falhas: Com falhas": "with",
 
 class TranslationLibraryWindow:
     def __init__(self, parent, root_path, open_path, loader=list_bundles, verifier=verify_bundle,
-                 review_resolver=None, on_review=None, progress_resolver=None):
+                 review_resolver=None, on_review=None, progress_resolver=None, regenerator=None,
+                 progress_resolver_cancellable=False):
         self.root_path = root_path
         self.open_path = open_path
         self.loader = loader
@@ -35,19 +37,26 @@ class TranslationLibraryWindow:
         self.review_resolver = review_resolver
         self.on_review = on_review
         self.progress_resolver = progress_resolver
+        self.progress_resolver_cancellable = progress_resolver_cancellable
+        self.regenerator = regenerator
         self.preferences = parse_preferences(load_settings().get("translation_library"))
         self._preferences_pending = True
         self._loaded_successfully = False
+        self._ever_loaded_successfully = False
+        self._load_error = False
         self.items = []
         self.visible_bundles = []
         self.page_index = 0
         self.page_count = 0
         self.loading = False
+        self._load_cancel = threading.Event()
         self._batching_filters = False
         self.closed = False
         self._poll_id = None
         self._results = queue.Queue()
         self.verifying = False
+        self._batch_verifying = False
+        self._batch_integrity_task = None
         self._integrity_cancel = threading.Event()
         self._verify_results = queue.Queue()
         self._verify_poll_id = None
@@ -55,6 +64,7 @@ class TranslationLibraryWindow:
         self._review_results = queue.Queue()
         self._review_poll_id = None
         self.loading_progress = False
+        self._progress_cancel = threading.Event()
         self._progress_results = queue.Queue()
         self._progress_poll_id = None
         self.win = ctk.CTkToplevel(parent)
@@ -69,13 +79,19 @@ class TranslationLibraryWindow:
 
         title = ctk.CTkLabel(self.win, text="Biblioteca de traduções", font=ctk.CTkFont(size=20, weight="bold"))
         title.grid(row=0, column=0, sticky="w", padx=20, pady=(16, 3))
-        ctk.CTkLabel(self.win, text="Busque por nome, idioma ou motor, em qualquer ordem e sem exigir acentos.",
+        ctk.CTkLabel(self.win, text="Busque sem acentos. Exemplos: origem:en, destino:pt, motor:google ou data:>=2026-01-01.",
                      anchor="w", text_color=("#555555", "#b0b0b0")).grid(row=1, column=0, sticky="ew", padx=20)
         controls = ctk.CTkFrame(self.win, fg_color="transparent")
         controls.grid(row=2, column=0, sticky="ew", padx=20, pady=12)
         controls.grid_columnconfigure(0, weight=1)
         self.query = tk.StringVar(master=self.win)
         self.search_entry = ctk.CTkEntry(controls, textvariable=self.query, placeholder_text="Buscar traduções (Ctrl+F)")
+        attach_tooltip(self.search_entry, "Combine nome:abertura original:ingles traduzido:br idioma:pt; "
+                       "origem:en destino:pt motor:google; "
+                       "situação:com-manifesto, sem-manifesto, incompleto ou inválido; "
+                       "data:2026, data:2026-01, data:2026-01-01, data:>=2026-01-01 ou data:?. "
+                       "Use ? para dados não informados; "
+                       "falhas:3, falhas:>=3 ou falhas:? filtram a contagem.")
         self.search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.refresh_button = ctk.CTkButton(controls, text="Atualizar", width=110, command=self.refresh)
         self.refresh_button.grid(row=0, column=1)
@@ -123,12 +139,18 @@ class TranslationLibraryWindow:
         self.active_filters_label = ctk.CTkLabel(pager, text="Filtros: 0", anchor="e", text_color=("#555555", "#b0b0b0"))
         self.active_filters_label.pack(side="right")
         status = ctk.CTkFrame(self.win, fg_color="transparent")
-        status.grid(row=5, column=0, sticky="ew", padx=20, pady=(6, 14))
+        status.grid(row=5, column=0, sticky="ew", padx=20, pady=(6, 2))
         self.cancel_integrity_button = ctk.CTkButton(status, text="Cancelar verificação", width=150,
                                                     command=self.cancel_integrity, state="disabled")
         self.cancel_integrity_button.pack(side="right", padx=(8, 0))
+        self.batch_integrity_button = ctk.CTkButton(status, text="Verificar filtrados", width=145,
+                                                    command=self.check_filtered_integrity)
+        self.batch_integrity_button.pack(side="right", padx=(8, 0))
+        attach_tooltip(self.batch_integrity_button, "Verifica todos os pacotes dos filtros, inclusive outras páginas.")
         self.status_label = ctk.CTkLabel(status, text="", anchor="w")
         self.status_label.pack(side="left", fill="x", expand=True)
+        self.progress_detail_label = ctk.CTkLabel(self.win, text="", anchor="w", justify=tk.LEFT, wraplength=500)
+        self.progress_detail_label.grid(row=6, column=0, sticky="ew", padx=20, pady=(0, 10))
         self.query.trace_add("write", self._filter)
         self.status_filter.trace_add("write", self._filter)
         self.order_var.trace_add("write", self._filter)
@@ -159,17 +181,28 @@ class TranslationLibraryWindow:
         if self.closed or self.loading:
             return
         self.loading = True
-        self.refresh_button.configure(state="disabled")
+        self._load_cancel.clear()
+        self.refresh_button.configure(text="Cancelar", command=self.cancel_loading, state="normal")
         self.status_label.configure(text="Carregando biblioteca…")
 
         def work():
             try:
-                self._results.put((True, self.loader(self.root_path)))
+                if self.loader is list_bundles:
+                    result = self.loader(self.root_path, should_cancel=self._load_cancel.is_set)
+                else:
+                    result = self.loader(self.root_path)
+                self._results.put((True, result))
             except Exception:
                 self._results.put((False, None))
 
         threading.Thread(target=work, daemon=True).start()
         self._poll_id = self.win.after(30, self._poll)
+
+    def cancel_loading(self):
+        if self.loading and not self.closed:
+            self._load_cancel.set()
+            self.refresh_button.configure(state="disabled")
+            self.status_label.configure(text="Cancelando leitura da biblioteca…")
 
     def inspect_staging(self):
         if self.closed:
@@ -200,18 +233,25 @@ class TranslationLibraryWindow:
         except queue.Empty:
             self._poll_id = self.win.after(30, self._poll)
             return
-        self.refresh_button.configure(state="normal")
-        if not ok:
-            self._loaded_successfully = False
-            self.items = []
-            self._refresh_facets()
+        self.refresh_button.configure(text="Atualizar", command=self.refresh, state="normal")
+        if self._load_cancel.is_set():
             self.loading = False
             self._render()
-            self.status_label.configure(text="Não foi possível ler a biblioteca. Confira o acesso e atualize.")
+            message = ("Leitura da biblioteca cancelada; lista anterior preservada."
+                       if self._ever_loaded_successfully else "Leitura da biblioteca cancelada. Atualize para carregar a lista.")
+            self.status_label.configure(text=message)
+            return
+        if not ok:
+            self._loaded_successfully = False
+            self._load_error = True
+            self.loading = False
+            self._render()
             return
         self.items = result
         self._refresh_facets(restore_preferences=True)
         self._loaded_successfully = True
+        self._ever_loaded_successfully = True
+        self._load_error = False
         self.loading = False
         self._render()
 
@@ -310,13 +350,7 @@ class TranslationLibraryWindow:
             self.page_index += 1
             self._render()
 
-    def _render(self):
-        active = sum((bool(self.query.get().strip()), self.status_filter.get() != "Todos",
-                      self.failure_filter.get() != "Falhas: Todas", self.source_filter.get() != "Origem: Todos",
-                      self.target_filter.get() != "Destino: Todos", self.provider_filter.get() != "Motor: Todos"))
-        self.active_filters_label.configure(text=f"Filtros: {active}")
-        for child in self.cards.winfo_children():
-            child.destroy()
+    def _filtered_bundles(self):
         filtered = search_bundles(
             self.items, self.query.get(), STATUS_OPTIONS.get(self.status_filter.get()),
             source=self._source_options.get(self.source_filter.get()),
@@ -328,6 +362,16 @@ class TranslationLibraryWindow:
         filtered = sort_bundles(filtered, "name" if order == "reverse_name" else order)
         if order == "reverse_name":
             filtered.reverse()
+        return filtered
+
+    def _render(self):
+        active = sum((bool(self.query.get().strip()), self.status_filter.get() != "Todos",
+                      self.failure_filter.get() != "Falhas: Todas", self.source_filter.get() != "Origem: Todos",
+                      self.target_filter.get() != "Destino: Todos", self.provider_filter.get() != "Motor: Todos"))
+        self.active_filters_label.configure(text=f"Filtros: {active}")
+        for child in self.cards.winfo_children():
+            child.destroy()
+        filtered = self._filtered_bundles()
         self.page_count = (len(filtered) + PAGE_SIZE - 1) // PAGE_SIZE
         self.page_index = min(self.page_index, max(0, self.page_count - 1))
         start = self.page_index * PAGE_SIZE
@@ -374,7 +418,17 @@ class TranslationLibraryWindow:
                                   command=lambda item=bundle: self.show_review_progress(item)).pack(side="left", padx=(6, 0))
                 ctk.CTkButton(review_buttons, text="Copiar resumo", width=120,
                               command=lambda item=bundle: self.copy_summary(item)).pack(side="left", padx=(6, 0))
-        if self.visible_bundles:
+            if bundle.status in ("ready", "legacy") and self.regenerator is not None:
+                regenerate_button = ctk.CTkButton(card, text="Regerar PGN", width=145,
+                                                  command=lambda item=bundle: self.regenerate(item))
+                regenerate_button.grid(row=4, column=0, sticky="w", padx=12, pady=(0, 10))
+                attach_tooltip(regenerate_button, "Cria um novo pacote usando apenas correções salvas, sem retraduzir.")
+        if self._load_error:
+            message = "Não foi possível ler a biblioteca. Confira o acesso e atualize."
+            if self._ever_loaded_successfully:
+                message += " A lista anterior pode estar desatualizada."
+            self.status_label.configure(text=message)
+        elif self.visible_bundles:
             self.status_label.configure(text=f"{len(filtered)} pacote(s) encontrado(s).")
         else:
             self.status_label.configure(text="Nenhum pacote encontrado. Traduza um PGN ou ajuste a busca.")
@@ -400,10 +454,118 @@ class TranslationLibraryWindow:
         except tk.TclError:
             self.status_label.configure(text="Não foi possível copiar o resumo.")
 
+    def regenerate(self, bundle, confirmed_link=None):
+        if self.closed or self.regenerator is None:
+            return
+        def work(task):
+            if confirmed_link is None:
+                return self.regenerator(bundle.directory, task)
+            return self.regenerator(bundle.directory, task, confirmed_link)
+        def done(result):
+            if self.closed:
+                return
+            if result.status == "published":
+                message = f"Novo PGN criado:\n{result.translated_path}\n\nA versão anterior foi preservada."
+                if not result.link_saved:
+                    message += "\n\nO vínculo de revisão não pôde ser salvo para o novo pacote."
+                messagebox.showinfo("Regerar PGN", message, parent=self.win)
+                self.refresh()
+            elif result.status == "missing":
+                examples = "\n".join(f"• {item}" for item in result.missing_examples)
+                message = (f"Não foi possível gerar: {result.missing} comentário(s) distinto(s) não têm tradução salva "
+                           "para este par de idiomas. Conclua as traduções e tente novamente.")
+                if examples:
+                    message += f"\n\nExemplos:\n{examples}"
+                    if result.missing > len(result.missing_examples):
+                        message += "\nOutros comentários não foram exibidos."
+                messagebox.showwarning("Regerar PGN", message, parent=self.win)
+            elif result.status == "unsupported":
+                messagebox.showwarning("Regerar PGN", f"Não foi possível gerar: o original contém {result.unsupported} "
+                                       "comentário(s) no formato ';', que ainda não é traduzido pelo programa.", parent=self.win)
+            elif result.status == "compatible" and result.link is not None:
+                link = result.link
+                accepted = messagebox.askyesno("Regerar PGN", "Foi encontrada uma obra com o mesmo original "
+                                               f"e idiomas {link.source_language or 'não declarado'} → {link.target_language}.\n\n"
+                                               f"Arquivo registrado: {link.source_file}\n\n"
+                                               "Ela pode pertencer a outra execução. Usar as traduções dessa obra?",
+                                               parent=self.win)
+                if accepted:
+                    self.regenerate(bundle, confirmed_link=link)
+            elif result.status == "canceled":
+                self.status_label.configure(text="Geração cancelada.")
+            elif result.status == "failed":
+                messagebox.showerror("Regerar PGN", "Não foi possível gravar o novo pacote. "
+                                     "Confira o espaço disponível e as permissões; a versão anterior foi preservada.",
+                                     parent=self.win)
+            else:
+                messagebox.showwarning("Regerar PGN", "Não foi possível confirmar a integridade ou o vínculo "
+                                       "deste pacote com o banco de traduções.", parent=self.win)
+        def canceled(_unused):
+            if not self.closed:
+                self.status_label.configure(text="Cancelamento solicitado. Confira a biblioteca para ver o resultado.")
+                self.refresh()
+        run_with_progress(self.win, "Regerar PGN", work, on_success=done, on_cancel=canceled,
+                          on_error=lambda _error: messagebox.showerror("Regerar PGN", "Não foi possível regerar o PGN.", parent=self.win),
+                          message="Preparando PGN com as traduções salvas…")
+
+    def check_filtered_integrity(self):
+        if self.closed:
+            return
+        if self.loading or self.verifying or self._batch_verifying or self.loading_progress:
+            self.status_label.configure(text="Aguarde a operação em andamento.")
+            return
+        bundles = tuple(self._filtered_bundles())
+        if not bundles:
+            self.status_label.configure(text="Nenhum pacote corresponde aos filtros.")
+            return
+        self._batch_verifying = True
+        self.batch_integrity_button.configure(state="disabled")
+        verifier = self.verifier
+
+        def work(task):
+            def check(path, should_cancel=None):
+                if verifier is verify_bundle:
+                    return verifier(path, should_cancel=should_cancel)
+                return verifier(path)
+            try:
+                return verify_bundles(bundles, verifier=check, should_cancel=task.cancelado, progress=task.report)
+            except BatchIntegrityCanceled as exc:
+                raise TaskCanceled() from exc
+
+        def finish():
+            self._batch_verifying = False
+            self._batch_integrity_task = None
+            if not self.closed:
+                self.batch_integrity_button.configure(state="normal")
+
+        def done(result):
+            finish()
+            if not self.closed:
+                messagebox.showinfo("Integridade dos pacotes", format_integrity_batch(result), parent=self.win)
+
+        def canceled(_result):
+            finish()
+            if not self.closed:
+                self.status_label.configure(text="Verificação em lote cancelada; resultados parciais descartados.")
+
+        def failed(_error):
+            finish()
+            if not self.closed:
+                messagebox.showerror("Integridade dos pacotes", "Não foi possível concluir a verificação.", parent=self.win)
+
+        try:
+            task = run_with_progress(self.win, "Verificar pacotes filtrados", work, on_success=done,
+                                     on_cancel=canceled, on_error=failed, message="Conferindo integridade dos pacotes…")
+            if self._batch_verifying:
+                self._batch_integrity_task = task
+        except Exception:
+            finish()
+            raise
+
     def check_integrity(self, bundle):
         if self.closed:
             return
-        if self.verifying:
+        if self.verifying or self._batch_verifying or self.loading_progress:
             self.status_label.configure(text="Aguarde a verificação em andamento.")
             return
         self.verifying = True
@@ -452,21 +614,33 @@ class TranslationLibraryWindow:
     def show_review_progress(self, bundle):
         if self.closed or self.progress_resolver is None:
             return
-        if self.loading_progress:
-            self.status_label.configure(text="Aguarde a consulta de progresso em andamento.")
+        if self.loading_progress or self.verifying or self._batch_verifying:
+            self.status_label.configure(text="Aguarde a verificação ou consulta em andamento.")
             return
         self.loading_progress = True
+        self._progress_cancel.clear()
+        self.progress_detail_label.configure(text="")
+        self.cancel_integrity_button.configure(text="Cancelar consulta", command=self.cancel_review_progress, state="normal")
         self.status_label.configure(text=f"Consultando progresso de {bundle.directory.name}…")
 
         def work():
             try:
-                result = self.progress_resolver(bundle.directory)
+                if self.progress_resolver_cancellable:
+                    result = self.progress_resolver(bundle.directory, should_cancel=self._progress_cancel.is_set)
+                else:
+                    result = self.progress_resolver(bundle.directory)
             except Exception:
                 result = None
             self._progress_results.put((bundle.directory.name, result))
 
         threading.Thread(target=work, daemon=True).start()
         self._progress_poll_id = self.win.after(30, self._poll_progress)
+
+    def cancel_review_progress(self):
+        if self.loading_progress and not self.closed:
+            self._progress_cancel.set()
+            self.cancel_integrity_button.configure(state="disabled")
+            self.status_label.configure(text="Cancelando consulta de progresso…")
 
     def _poll_progress(self):
         self._progress_poll_id = None
@@ -478,9 +652,17 @@ class TranslationLibraryWindow:
             self._progress_poll_id = self.win.after(30, self._poll_progress)
             return
         self.loading_progress = False
-        if result is not None and result.status == "ready":
+        self.cancel_integrity_button.configure(text="Cancelar verificação", command=self.cancel_integrity, state="disabled")
+        if self._progress_cancel.is_set() or (result is not None and result.status == "canceled"):
+            message = "consulta de progresso cancelada."
+        elif result is not None and result.status == "ready":
             percentage = review_percentage(result.verified, result.total)
             message = f"{result.verified} de {result.total} comentários distintos verificados ({percentage}%); {result.pending} pendentes."
+            if all(getattr(result, key, None) is not None for key in ("doubt", "rejected", "pending_warnings", "pending_without_warnings")):
+                self.progress_detail_label.configure(
+                    text=f"Subconjuntos dos pendentes — dúvida: {result.doubt}; rejeitados: {result.rejected}; "
+                         f"com alerta QA: {result.pending_warnings}; sem alerta QA: {result.pending_without_warnings}. "
+                         "As categorias podem se sobrepor.")
         elif result is not None and result.status in ("compatible", "unlinked", "ambiguous"):
             message = "sem vínculo confiável neste banco para consultar progresso."
         elif result is not None and result.status == "integrity":
@@ -585,7 +767,11 @@ class TranslationLibraryWindow:
                     "As configurações existentes foram preservadas.", parent=self.win,
                 )
         self.closed = True
+        self._load_cancel.set()
         self._integrity_cancel.set()
+        self._progress_cancel.set()
+        if self._batch_integrity_task is not None:
+            self._batch_integrity_task.cancel()
         if self._poll_id is not None:
             self.win.after_cancel(self._poll_id)
         if self._verify_poll_id is not None:
